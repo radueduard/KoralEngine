@@ -13,7 +13,7 @@
 
 #include <kecs/world.h>
 
-#include "json.h"
+#include <kecs/json.h>
 
 namespace kecs
 {

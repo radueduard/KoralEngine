@@ -5,3 +5,4 @@ A graphics-programming engine on the Koral framework: an ECS, Kotlin/C# scripts,
 See [docs/design.md](docs/design.md) and the plan, [docs/plan.md](docs/plan.md).
 
 - `modules/kecs`: the ECS, a library by itself. See [docs/kecs.md](docs/kecs.md).
+- `modules/kgraph`: the pass graph, as data and running. Needs the Koral SDK. See [docs/kgraph.md](docs/kgraph.md).

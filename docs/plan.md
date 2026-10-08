@@ -138,8 +138,8 @@ across the edits, and a world round-trips through JSON unchanged.
 its own small JSON reader and writer, and values are written by codecs looked up by field type name.
 Numbers, `bool`, `string` and `entity` are built in. **Still to do in the engine:** an adapter that
 registers codecs for the framework's types (vectors, matrices, resource references) and declares fields
-for types that use the framework's reflection. It belongs with E3, which is where the engine first links
-the framework.
+for types that use the framework's reflection. It moved to E4, where the generated component is the first
+thing to need it.
 
 ### E3: The graph model
 
@@ -152,6 +152,19 @@ the framework.
 
 **Gate:** a graph loaded from JSON makes an image, runs a compute shader once (everything bound, so no
 component), and clears and blits to a window, without the editor.
+
+**Built** (2026-10-08): `modules/kgraph`, described in [kgraph.md](kgraph.md). The gate is the test
+`AGraphLoadedFromJsonClearsComputesAndShows`, run offscreen: the window is the scene's screen image, read
+back. 10 tests pass, clean under validation and sync validation. What differs from the plan:
+
+- Draw commands are not in E3. They need a pipeline run per entity, so they come with E4. The command
+  nodes here are Clear, Blit and Dispatch. The mesh node exists, as the Mesh builder's node.
+- A pipeline with unwired parameters builds and lists them, but nothing runs it yet (E4).
+- Between two passes that write the same resource, usage alone orders a pure overwrite before a
+  read-and-write. Two that both modify it run in node-list order.
+- The kecs adapter for the framework's types moved to E4.
+- The framework gained `FrameGraph::Remove`, `kor::capi::*Of` for every resource kind, and the SDK now
+  installs kmath's `.inl` headers (without them no SDK consumer could include a vector).
 
 ### E4: Pipelines run per entity
 
@@ -200,5 +213,5 @@ Kotlin.
 
 ## First steps
 
-The framework milestones, **E1** and **E2** are done. Next is **E3**: the graph model, which is where
-the engine first links the framework.
+The framework milestones and **E1** to **E3** are done. Next is **E4**: pipelines run per entity, which
+starts with the kecs adapter for the framework's types.
