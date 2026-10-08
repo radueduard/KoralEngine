@@ -61,6 +61,40 @@ if(Koral_FOUND)
         message(STATUS "C# scripts: not built (no dotnet, or a Koral SDK without its C# assemblies)")
     endif()
 
+    # Scripts in Kotlin: the engine's Kotlin library, published as a Maven artifact for a project's scripts to depend
+    # on. Built where there is a JDK 25 (KORAL_ENGINE_JAVA_HOME, JAVA_HOME, or ~/.local/jdk) and the Koral SDK has
+    # its Kotlin libraries.
+    set(KORAL_ENGINE_JAVA_HOME "" CACHE PATH "The JDK (25 or later) the engine's Kotlin layer is built with")
+    if(NOT KORAL_ENGINE_JAVA_HOME)
+        file(GLOB KORAL_ENGINE_JDKS "$ENV{HOME}/.local/jdk/jdk-2[5-9]*")
+        foreach(home IN ITEMS "$ENV{JAVA_HOME}" LISTS KORAL_ENGINE_JDKS)
+            if(home AND EXISTS "${home}/bin/java")
+                set(KORAL_ENGINE_JAVA_HOME "${home}" CACHE PATH "The JDK (25 or later) the engine's Kotlin layer is built with" FORCE)
+                break()
+            endif()
+        endforeach()
+    endif()
+    if(KORAL_ENGINE_JAVA_HOME AND EXISTS "${KORAL_ENGINE_SDK}/share/Koral/maven/koral/koral")
+        set(KORAL_ENGINE_KOTLIN_DIR "${CMAKE_SOURCE_DIR}/bindings/kotlin")
+        set(KORAL_ENGINE_MAVEN "${CMAKE_BINARY_DIR}/maven")
+        set(KORAL_ENGINE_GRADLE ${CMAKE_COMMAND} -E env "JAVA_HOME=${KORAL_ENGINE_JAVA_HOME}" "${KORAL_ENGINE_KOTLIN_DIR}/gradlew"
+            -p "${KORAL_ENGINE_KOTLIN_DIR}" --console=plain -q "-PkoralSdk=${KORAL_ENGINE_SDK}" "-PengineRepo=${KORAL_ENGINE_MAVEN}"
+            "-PengineLibrary=$<TARGET_FILE:koral-engine>")
+        file(GLOB_RECURSE KORAL_ENGINE_KT CONFIGURE_DEPENDS "${KORAL_ENGINE_KOTLIN_DIR}/koral-engine/*.kt" "${KORAL_ENGINE_KOTLIN_DIR}/*.kts")
+        add_custom_command(OUTPUT "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml"
+            COMMAND ${KORAL_ENGINE_GRADLE} :koral-engine:publishAllPublicationsToEngineRepository
+            DEPENDS ${KORAL_ENGINE_KT}
+            COMMENT "Building the engine's Kotlin layer"
+            VERBATIM)
+        add_custom_target(koral-engine-kotlin ALL DEPENDS "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml")
+        if(KORAL_ENGINE_BUILD_TESTS)
+            add_test(NAME Kotlin.Scripts COMMAND ${KORAL_ENGINE_GRADLE} :tests:test)
+        endif()
+        message(STATUS "Kotlin scripts: building koral-engine's Kotlin library with ${KORAL_ENGINE_JAVA_HOME}")
+    else()
+        message(STATUS "Kotlin scripts: not built (no JDK 25, or a Koral SDK without its Kotlin libraries)")
+    endif()
+
     add_executable(koral-editor apps/editor/main.cpp)
     target_link_libraries(koral-editor PRIVATE keditor)
     add_executable(koral-play apps/player/main.cpp)

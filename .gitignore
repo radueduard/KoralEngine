@@ -12,3 +12,6 @@ CMakePresets.json
 CMakeUserPresets.json
 bin/
 obj/
+.gradle/
+bindings/kotlin/**/build/
+.kotlin/
