@@ -27,6 +27,7 @@
 #include <graphicsPipeline.h>
 #include <computePipeline.h>
 #include <imageView.h>
+#include <buffer.h>
 #include <bufferView.h>
 #include <koral_c.h>
 #include <log.h>
@@ -307,6 +308,31 @@ namespace kgraph
         {
             if (given.screen) return Fail(std::format("'{}': the screen is written by a pass, and cannot be a parameter", what));
             const std::string& kind = given.kind;
+            // What it is used as, it has to have been made for: bound without, it is the driver's to fall over.
+            const auto lacksImage = [&](const kor::Image::Usage usage, const char* name, const char* as) -> Expected<void> {
+                const auto image = ImageRefOf(&given);
+                if (image.Get() && !(image->UsageFlags() & usage))
+                    return Fail(std::format("'{}' is {} by the shader: the image needs {} among its usage", what, as, name));
+                return {};
+            };
+            const auto lacksBuffer = [&](const kor::Buffer::Usage usage, const char* name, const char* as) -> Expected<void> {
+                const auto buffer = BufferRefOf(&given);
+                if (buffer.Get() && !(buffer->UsageFlags() & usage))
+                    return Fail(std::format("'{}' is {} by the shader: the buffer needs {} among its usage", what, as, name));
+                return {};
+            };
+            Expected<void> fits {};
+            switch (type) {
+            case kor::DescriptorType::eSampledImage:
+            case kor::DescriptorType::eCombinedImageSampler: fits = lacksImage(kor::Image::Usage::eSampled, "eSampled", "sampled"); break;
+            case kor::DescriptorType::eStorageImage: fits = lacksImage(kor::Image::Usage::eStorage, "eStorage", "read and written as a storage image"); break;
+            case kor::DescriptorType::eUniformBuffer: fits = lacksBuffer(kor::Buffer::Usage::eUniform, "eUniform", "read as a uniform buffer"); break;
+            case kor::DescriptorType::eStorageBuffer: fits = lacksBuffer(kor::Buffer::Usage::eStorage, "eStorage", "read as a storage buffer"); break;
+            case kor::DescriptorType::eUniformTexelBuffer:
+            case kor::DescriptorType::eStorageTexelBuffer: fits = lacksBuffer(kor::Buffer::Usage::eTexel, "eTexel", "read as a texel buffer"); break;
+            default: break;
+            }
+            if (!fits) return Fail(fits.error());
             const auto wrong = [&](const char* takes) { return Fail(std::format("'{}' takes {}, and was given a {}", what, takes, kind)); };
             switch (type) {
             case kor::DescriptorType::eSampler:
@@ -763,6 +789,16 @@ namespace kgraph
             std::vector<kb::Value> constructor;
             const auto calls = Calls(description, inputs, constructor, [](std::string_view) { return false; });
             if (!calls) return Fail(calls.error());
+            // A framebuffer's images have to have been made to be drawn into.
+            if (description.name == "Framebuffer")
+                for (const auto& [name, input] : inputs) {
+                    const auto image = ImageRefOf(input.resource.get());
+                    if (!image.Get()) continue;
+                    const bool depth = name.starts_with("depthStencil.");
+                    const auto needed = depth ? kor::Image::Usage::eDepthStencilAttachment : kor::Image::Usage::eColorAttachment;
+                    if (!(image->UsageFlags() & needed))
+                        return Fail(std::format("'{}' is drawn into: its image needs {} among its usage", name, depth ? "eDepthStencilAttachment" : "eColorAttachment"));
+                }
             auto resource = BuildWith(description, node.id, constructor, *calls);
             if (!resource) return Fail(resource.error());
             // A view is of something: kept, for a pass that uses the view to say it uses that.
@@ -1490,6 +1526,12 @@ namespace kgraph
                 fresh.signature = std::move(signature);
                 fresh.stamp = ++counter;
                 if (!fresh.migration) fresh.migration = std::move(out.migration);
+                // What it made before is not what it makes now: an entity holding the old one is led to the new.
+                for (const auto& [name, output] : out.outputs) {
+                    if (!output.resource || output.resource->node != node->id) continue;
+                    const auto now = fresh.outputs.find(name);
+                    if (now != fresh.outputs.end() && now->second.resource && now->second.resource != output.resource) output.resource->replacedBy = now->second.resource;
+                }
                 out = std::move(fresh);
             }
             Install(graph);
@@ -1536,6 +1578,10 @@ namespace kgraph
                         if (run.report.why.empty()) run.report.why = std::format("entity {}: {}", entity.index, why);
                     };
                     Item item;
+                    // A resource whose node was built again since the entity was given it: the entity has the new one from here on.
+                    const auto follow = [](Held& held) { while (held && held->replacedBy) held = held->replacedBy; };
+                    if (run.draws) follow(const_cast<Mesh&>(meshes[row]).mesh);
+                    for (std::size_t i = 0; i < slots; ++i) follow(const_cast<Held*>(reinterpret_cast<const Held*>(bytes))[i]);
 
                     if (run.draws) {
                         const Resource* held = meshes[row].mesh.get();

@@ -50,6 +50,8 @@ namespace kgraph
         std::string node;                   ///< The node that made it.
         bool screen = false;                ///< The scene's window, which is the frame graph's to give.
         std::shared_ptr<Resource> source;   ///< For a view: what it is a view of.
+        /// What its node made in its place, when the node was built again: whoever holds this one is after that one.
+        std::shared_ptr<Resource> replacedBy;
 
         Resource() = default;
         Resource(const Resource&) = delete;
