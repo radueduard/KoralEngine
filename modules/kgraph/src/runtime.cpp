@@ -212,6 +212,7 @@ namespace kgraph
             Held resource;                                      // the pipeline itself
             Held framebuffer;                                   // a graphics pipeline's
             kor::ResourceRef<const kor::Shader> vertexShader;
+            kor::u32 numThreads[3] { 0, 0, 0 };                 // a compute pipeline's work group; zeros for the rest
         };
 
         /** One entity a pass runs for, as readied this frame. */
@@ -1081,6 +1082,11 @@ namespace kgraph
             }
             info->resource = *resource;
             out.outputs["out"].resource = std::move(*resource);
+            if (node.type == "ComputePipeline" && !info->shaders.empty()) {
+                const auto& size = info->shaders.front()->BlockLayout().localSize;
+                std::ranges::copy(size, info->numThreads);
+                out.outputs["numThreads"].value = Value(Value::List { size[0], size[1], size[2] });
+            }
             return {};
         }
 
@@ -1153,8 +1159,9 @@ namespace kgraph
                     const Value& given = value(name.c_str());
                     if (given.IsNull()) continue;
                     const double* count = given.Number();
-                    if (!count || *count < 1 || *count > 65535) return Fail(std::format("'{}' is {}, 1 or more", name, what));
-                    into[axis] = static_cast<kor::u32>(std::llround(*count));
+                    // Rounded up: what an image's extent divided by a group's size comes to is how many cover it.
+                    if (!count || !(*count > 0) || *count > 65535) return Fail(std::format("'{}' is {}, more than none", name, what));
+                    into[axis] = static_cast<kor::u32>(std::ceil(*count - 1e-9));
                 }
                 return {};
             };
@@ -1266,7 +1273,9 @@ namespace kgraph
             } else if (node.type == "Dispatch") {
                 const auto info = pipelineOf("ComputePipeline");
                 if (!info) return Fail(info.error());
+                // A group works on what the shader says it does, unless the node says otherwise.
                 kor::u32 groups[3] { 1, 1, 1 }, groupSize[3] { 1, 1, 1 };
+                for (int axis = 0; axis < 3; ++axis) groupSize[axis] = std::max<kor::u32>((*info)->numThreads[axis], 1);
                 if (const auto read = counts("groups", groups, "a number of groups"); !read) return Fail(read.error());
                 if (const auto read = counts("groupSize", groupSize, "how many a group works on"); !read) return Fail(read.error());
 
@@ -1661,6 +1670,35 @@ namespace kgraph
             for (auto& [name, parts] : wholes) add(name, Value(std::move(parts)));
         }
 
+        /**
+         * An input given whole is given in its parts: `groups` of [8, 8, 1] is `groups.x`, `.y` and `.z`, which is how
+         * everything after this reads it. As many parts as the vector has numbers: an image's size, of two, leaves z
+         * as it is when not given.
+         */
+        static Expected<void> InParts(const Node& node, Inputs& inputs)
+        {
+            const NodeType* type = FindType(node.type);
+            if (!type) return {};
+            for (auto it = inputs.begin(); it != inputs.end();) {
+                const auto parts = PartsOf(*type, it->first);
+                if (parts.empty()) { ++it; continue; }
+                for (const auto& part : parts)
+                    if (inputs.contains(part)) return Fail(std::format("'{}' is given whole, and '{}' on its own as well: one or the other", it->first, part));
+                // Left open for a wire, and none in it yet: not given.
+                if (it->second.value.IsNull() && !it->second.resource) { it = inputs.erase(it); continue; }
+                const auto numbers = NumbersOf(it->second.value, it->first.c_str());
+                if (!numbers || it->second.resource) return Fail(std::format("'{}' is a vector: a number for each of x, y and z", it->first));
+                for (std::size_t i = 0; i < parts.size() && i < numbers->size(); ++i) {
+                    Resolved part;
+                    part.value = (*numbers)[i];
+                    part.linked = it->second.linked;
+                    inputs.emplace(parts[i], std::move(part));
+                }
+                it = inputs.erase(it);
+            }
+            return {};
+        }
+
         /** A struct given some of its fields has the rest as the node type says they are, not as nothing. */
         static void FillDefaults(const Node& node, Inputs& inputs)
         {
@@ -1759,6 +1797,7 @@ namespace kgraph
                         if (const auto target = built.find(*it->second.value.String()); target != built.end()) signature += std::format("|#{}", target->second.stamp);
                 if (!blocked.empty()) { fail(std::move(blocked)); continue; }
                 if (out.status.ok && out.signature == signature) continue;   // nothing that goes into it changed
+                if (const auto parts = InParts(*node, inputs); !parts) { fail(parts.error()); continue; }
                 FillDefaults(*node, inputs);
 
                 Unwatch(out);

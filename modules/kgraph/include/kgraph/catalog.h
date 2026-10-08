@@ -71,6 +71,11 @@ namespace kgraph
      *        another choice of its `stages` (a graphics pipeline drawn with mesh shaders has no vertex shader).
      */
     [[nodiscard]] std::vector<Port> PortsFor(const NodeType& type, const Node& node);
+    /**
+     * @brief The inputs @p whole stands for when it is one given in parts (`groups` → `groups.x`, `.y`, `.z`); none
+     *        when it is not such an input. A node gives the whole or its parts, not both.
+     */
+    [[nodiscard]] std::vector<std::string> PartsOf(const NodeType& type, std::string_view whole);
     /** @brief What a graphics pipeline node's `stages` is: "eVertex" unless it says "eMesh". */
     [[nodiscard]] std::string StagesOf(const Node& node);
 

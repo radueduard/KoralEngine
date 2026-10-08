@@ -74,14 +74,23 @@ Besides what it makes (`out`), a node gives everything about itself as outputs t
 
 - **What the object says of itself.** An image or a view: `size` (width and height), `extent`, `width`,
   `height`, `depth`, `mipLevels`, `arrayLayers`. A buffer: `bytes`. A framebuffer: `size`, `width`,
-  `height`. A mesh: `vertexCount`, `indexCount`.
+  `height`. A mesh: `vertexCount`, `indexCount`. A compute pipeline: `numThreads`, its shader's
+  `[numthreads(x, y, z)]`.
 - **Each value it was given**, under the input's name: an image's `format`, a Clear's `color`.
 - **The parts of one thing as one:** `extent` for `extent.x`, `.y`, `.z`; `groups` for a Dispatch's.
 - **What an input is when nobody set it**, where the node type says.
 
-So a second image half the size of the first is `{"$link": ["first", "size"]}` into a Divide, and its parts
-into the second image's extent. When the first is resized, the second follows. These outputs are optional
+So a second image half the size of the first is `{"$link": ["first", "size"]}` into a Divide, and that
+into the second image's `extent`. When the first is resized, the second follows. These outputs are optional
 in the catalog (`Port::optional`): an editor shows one when it is asked for or wired.
+
+## An input in parts, given whole
+
+An input that is three numbers (`extent.x/.y/.z`, `groups.x/.y/.z`, `groupSize.x/.y/.z`) also has an input
+named for the whole, taking a vector: `"groups": {"$link": ["count", "out"]}`. The runtime splits it into
+its parts before the node is built, as many as the vector has numbers, so an image's `size`, of two, leaves
+the third as it was. A node gives the whole or its parts: both is an error. `kgraph::PartsOf(type, name)`
+says which inputs a whole stands for.
 
 ## What an input starts as
 
@@ -153,9 +162,11 @@ Resources are shared and counted: an image lives while a node or a component hol
 
 ### Dispatch and Draw
 
-**Dispatch** runs a compute pipeline, once or per entity. `groups.x/y/z` is the size, or `cover` names one
-of the pipeline's image parameters and the pass uses as many groups of `groupSize.x/y/z` as cover it. With
-a per-entity image, each entity gets its own count.
+**Dispatch** runs a compute pipeline, once or per entity. `groups` (or `groups.x/y/z`) is how many groups
+to run, rounded up: an image's `extent` divided by the pipeline's `numThreads`, wired straight in, covers
+the image. Or `cover` names one of the pipeline's image parameters and the pass works the count out itself,
+from `groupSize`, which is the pipeline's `numThreads` unless the node says otherwise. With a per-entity
+image, each entity gets its own count.
 
 **Draw** draws every entity that has a `kgraph::Mesh` (and the pipeline's component, when it has one) into
 a framebuffer: the pipeline's own, or the one wired to `framebuffer`. `command` is `eAuto` (indexed when

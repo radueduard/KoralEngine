@@ -437,7 +437,15 @@ namespace keditor
                 if (given || always || !port.optional || asked(port.name)) shown.push_back({ std::move(port), given });
                 else if (more) more->push_back(std::move(port));
             };
+            const kgraph::NodeType* type = kgraph::FindType(node.type);
+            // An input given whole — `groups`, wired from a vector — is not also there in its parts.
+            const auto givenWhole = [&](const std::string& name) {
+                if (!type || name.size() < 3 || name[name.size() - 2] != '.') return false;
+                const std::string whole = name.substr(0, name.size() - 2);
+                return node.inputs.contains(whole) && std::ranges::contains(kgraph::PartsOf(*type, whole), name);
+            };
             for (const auto& port : runtime.PortsOf(node.id)) {
+                if (givenWhole(port.name)) { listed.insert(port.name); continue; }
                 const auto at = port.name.find("[]");
                 // What a shader declares is the pipeline's to be given, whatever else is: a parameter is never hidden.
                 if (at == std::string::npos) { consider(port, port.name.starts_with("param.")); continue; }
@@ -852,18 +860,35 @@ namespace keditor
                     std::vector<std::string> names;
                     for (const auto& port : more) names.push_back(port.name);
                     rows.push_back(kui::Separator());
-                    rows.push_back(kgui::Labeled("Add input", kui::Dropdown(names, -1, [this, id, more](const int index) {
+                    rows.push_back(kgui::Labeled("Add input", kui::Dropdown(names, -1, [this, id, more, kind = node.type](const int index) {
                         // Given what it starts as, when its type says what that is: what shows is then what is so.
                         const auto& port = more[static_cast<std::size_t>(index)];
-                        if (port.kind == kgraph::PortKind::eValue && !port.initial.IsNull()) Doc().SetInput(id, port.name, port.initial);
+                        // The whole of what is otherwise given in parts is asked for to be wired: a port, from the start.
+                        if (const auto* type = kgraph::FindType(kind); type && !kgraph::PartsOf(*type, port.name).empty()) Doc().SetInput(id, port.name, Value {});
+                        else if (port.kind == kgraph::PortKind::eValue && !port.initial.IsNull()) Doc().SetInput(id, port.name, port.initial);
                         else _session->Show(id, port.name);
                     }, kui::DropdownOptions {}.SetPlaceholder(std::format("{} more it can be given", names.size()))), LabelWidth));
                 }
                 // What it gives, besides what it makes: its size, its settings. Asked for, it is an output on the node to wire from.
                 if (const kgraph::NodeType* type = kgraph::FindType(node.type)) {
                     std::vector<std::string> outputs;
-                    for (const auto& output : type->outputs)
-                        if (output.optional && !_session->Asked(id, "out:" + output.name)) outputs.push_back(output.name);
+                    bool first = true;
+                    for (const auto& output : type->outputs) {
+                        if (!output.optional) continue;
+                        std::size_t wires = 0;
+                        for (const auto& other : Doc().Graph().nodes)
+                            for (const auto& input : other.inputs | std::views::values)
+                                if (input.link && input.link->node == id && input.link->output == output.name) ++wires;
+                        if (wires == 0 && !_session->Asked(id, "out:" + output.name)) { outputs.push_back(output.name); continue; }
+                        // One the node shows: there until it is taken off again, and what is wired from it with it.
+                        if (std::exchange(first, false)) rows.push_back(kui::Separator());
+                        std::vector<kui::Widget> line { kui::Expanded(kgui::Muted(wires == 0 ? std::string("an output: wire from it")
+                                                                                             : std::format("an output, wired to {} {}", wires, wires == 1 ? "input" : "inputs"))) };
+                        line.push_back(kui::Tooltip(wires == 0 ? "Take the output off the node" : "Take the output off the node, and its wires with it",
+                                                    Small("x", [this, id, name = output.name] { _session->Hide(id, "out:" + name); Doc().DisconnectOutput(id, name); })));
+                        rows.push_back(kui::Tooltip(output.doc.empty() ? output.type : output.doc + " (" + output.type + ")",
+                                                    kgui::Labeled(output.name, kui::Row(std::move(line), kui::FlexOptions {}.SetGap(4.f)), LabelWidth)));
+                    }
                     if (!outputs.empty())
                         rows.push_back(kgui::Labeled("Add output", kui::Dropdown(outputs, -1, [this, id, outputs](const int index) {
                             _session->Show(id, "out:" + outputs[static_cast<std::size_t>(index)]);

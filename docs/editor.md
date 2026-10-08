@@ -51,6 +51,13 @@ from the start and not a row of blanks.
 and `height`, a buffer's `bytes`, and every one of its settings. One picked from it becomes an output on
 the node, to wire from. An output that something is wired to stays on the node.
 
+Each output a node shows this way is listed in the inspector with an **x**, which takes it off the node
+again, and whatever was wired from it with it.
+
+An input that is x, y and z on one line (`extent`, a Dispatch's `groups`) can be wired as one vector: pick
+its name from **Add input** and it becomes a port on the node, in place of the three numbers. Its own **x**
+brings the numbers back.
+
 ### A node in the inspector
 
 A node shows the inputs it cannot do without and the ones it has been given. An Image shows its format,

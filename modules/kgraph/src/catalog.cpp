@@ -120,7 +120,7 @@ namespace kgraph
                 { "Primitive", { { "shape", "eQuad" } } },
                 { "VertexLayout", { { "attributes", L { M { { "semantic", "POSITION" }, { "type", "eFloat" }, { "count", 3 } } } } } },
                 { "Clear", { { "color", L { 0, 0, 0, 1 } } } },
-                { "Dispatch", { { "groups.x", 1 }, { "groups.y", 1 }, { "groups.z", 1 }, { "groupSize.x", 8 }, { "groupSize.y", 8 }, { "groupSize.z", 1 },
+                { "Dispatch", { { "groups.x", 1 }, { "groups.y", 1 }, { "groups.z", 1 },
                                 { "with", L {} }, { "without", L {} } } },
                 { "Draw", { { "command", "eAuto" }, { "instances", 1 }, { "load", false }, { "with", L {} }, { "without", L {} } } },
             };
@@ -296,9 +296,9 @@ namespace kgraph
             const Port with = optional(hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr }, "components"));
             const Port without = optional(hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components"));
             types.push_back({ "Dispatch", "Passes",
-                              { ResourcePort("pipeline", "ComputePipeline"), optional(Number("groups.x")), optional(Number("groups.y")), optional(Number("groups.z")),
+                              { ResourcePort("pipeline", "ComputePipeline"), optional(Number("groups.x", "How many groups to run, each way: rounded up, so an image's extent divided by the pipeline's numThreads covers the image.")), optional(Number("groups.y")), optional(Number("groups.z")),
                                 optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: as many groups as cover it, for each entity's own image when it is per entity. Instead of groups.", nullptr }, "parameter")),
-                                optional(Number("groupSize.x", "How much of the covered image one group works on: the shader's numthreads.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
+                                optional(Number("groupSize.x", "How much of the covered image one group works on: the pipeline's numThreads, when not given.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
                                 with, without }, {},
                               "Runs a compute pipeline: once when everything it needs is wired, and otherwise once for each entity that has its component.", nullptr });
             types.push_back({ "Draw", "Passes",
@@ -345,6 +345,8 @@ namespace kgraph
                     offer("size", "vector", "The width and height of what it draws into.");
                     offer("width", "number", "How many pixels across.");
                     offer("height", "number", "How many pixels down.");
+                } else if (made == "ComputePipeline") {
+                    offer("numThreads", "vector", "Its shader's work group, [numthreads(x, y, z)]: how much one dispatched group works on. An image's extent divided by it is how many groups cover the image.");
                 } else if (made == "Mesh") {
                     offer("vertexCount", "number", "How many vertices it has.");
                     offer("indexCount", "number", "How many indices it has; 0 when it has none.");
@@ -356,6 +358,20 @@ namespace kgraph
                     offer(port.name, port.type, "What its input of this name is.");
                 }
                 type.outputs.insert(type.outputs.end(), more.begin(), more.end());
+                // An input in parts can be given whole: `groups` for `groups.x`, `.y` and `.z`, so a vector worked
+                // out elsewhere goes in on one wire. There to be asked for, like any other that is not needed.
+                for (std::size_t i = 0; i < type.inputs.size(); ++i) {
+                    const Port& part = type.inputs[i];
+                    if (part.kind != PortKind::eValue || part.repeatable || part.type != "number" || !part.name.ends_with(".x")) continue;
+                    const std::string name = part.name.substr(0, part.name.size() - 2);
+                    if (name.find('[') != std::string::npos || std::ranges::find(type.inputs, name, &Port::name) != type.inputs.end()) continue;
+                    Port whole { name, PortKind::eValue, "vector", false, std::format("Its x, y and z as one vector, instead of each on its own.{}{}", part.doc.empty() ? "" : " ", part.doc), nullptr };
+                    whole.optional = true;
+                    whole.mode = part.mode;
+                    whole.editor = "vector";
+                    type.inputs.insert(type.inputs.begin() + static_cast<std::ptrdiff_t>(i), std::move(whole));
+                    ++i;
+                }
             }
             return types;
         }
@@ -379,6 +395,17 @@ namespace kgraph
         const auto it = node.inputs.find("stages");
         const std::string* stages = it == node.inputs.end() ? nullptr : it->second.value.String();
         return stages && *stages == "eMesh" ? "eMesh" : "eVertex";
+    }
+
+    std::vector<std::string> PartsOf(const NodeType& type, const std::string_view whole)
+    {
+        std::vector<std::string> parts;
+        if (const auto port = std::ranges::find(type.inputs, whole, &Port::name); port == type.inputs.end() || port->editor != "vector") return parts;
+        for (const char* axis : { ".x", ".y", ".z", ".w" }) {
+            std::string name = std::string(whole) + axis;
+            if (std::ranges::find(type.inputs, name, &Port::name) != type.inputs.end()) parts.push_back(std::move(name));
+        }
+        return parts;
     }
 
     std::vector<Port> PortsFor(const NodeType& type, const Node& node)

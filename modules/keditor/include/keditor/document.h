@@ -84,6 +84,8 @@ namespace keditor
         bool Connect(std::string_view fromNode, std::string_view output, std::string_view node, std::string_view input);
         /** @brief Takes an input off a node: its wire, or its value. */
         bool ClearInput(std::string_view node, std::string_view input);
+        /** @brief Takes away every wire that leaves @p output of @p node. How many there were. */
+        std::size_t DisconnectOutput(std::string_view node, std::string_view output);
         /** @brief Makes @p graph the whole graph. */
         void SetGraph(kgraph::Graph graph);
 

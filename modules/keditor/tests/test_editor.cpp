@@ -506,6 +506,47 @@ TEST_F(EditorTest, ANewNodeStartsAsSomethingThatWorksAndGivesWhatItIsMadeOf) {
     EXPECT_EQ(Doc().Runtime().ValueOf(half), kgraph::Value(kgraph::Value::List { 256, 256 }));
 }
 
+// What was put on a node comes off it again, and an input in parts is wired whole: the groups of a dispatch are an
+// image's extent over the pipeline's numThreads, one wire each.
+TEST_F(EditorTest, OutputsComeOffAgainAndAnInputInPartsIsWiredWhole) {
+    Open();
+    const std::string image = Doc().AddNode("Image", 40, 40);
+    const std::string run = Doc().AddNode("Dispatch", 600, 40);
+    const std::string over = Doc().AddNode("Divide", 300, 200);
+
+    // An output asked for is in the inspector, to be taken off; one wired from says so, and takes its wires with it.
+    Session().Select(image);
+    EXPECT_FALSE(Shows("an output"));
+    Session().Show(image, "out:extent");
+    EXPECT_TRUE(Shows("an output: wire from it"));
+    Doc().Connect(image, "extent", over, "a");
+    Doc().Connect(image, "extent", run, "groupSize");
+    EXPECT_TRUE(Shows("an output, wired to 2 inputs"));
+    EXPECT_EQ(Doc().DisconnectOutput(image, "extent"), 2u);
+    EXPECT_FALSE(Doc().Graph().Find(over)->inputs.contains("a"));
+    EXPECT_FALSE(Doc().Graph().Find(run)->inputs.contains("groupSize"));
+    EXPECT_TRUE(Shows("an output: wire from it")) << "still asked for";
+    Session().Hide(image, "out:extent");
+    EXPECT_FALSE(Shows("an output"));
+    EXPECT_EQ(Doc().DisconnectOutput(image, "extent"), 0u);
+
+    // The whole of an input in parts is one more it can be given; given, its parts are gone from the node and the panel.
+    Session().Select(run);
+    Doc().SetInput(run, "groups.x", 4);
+    EXPECT_TRUE(Shows("groups"));
+    Doc().Connect(image, "extent", over, "a");
+    Doc().SetInput(over, "b", 8);
+    Doc().Connect(over, "out", run, "groups");
+    EXPECT_FALSE(Doc().Graph().Find(run)->inputs.contains("groups.x")) << "the whole or its parts, not both";
+    EXPECT_TRUE(Shows("from " + over));
+    Sheet("whole");
+    Session().Select(image);
+    Sheet("outputs");
+    // And a part given again takes the whole away.
+    Doc().SetInput(run, "groups.y", 2);
+    EXPECT_FALSE(Doc().Graph().Find(run)->inputs.contains("groups"));
+}
+
 TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {
     const auto first = [](const std::string_view typed) {
         const auto found = keditor::FindNodeTypes(typed);

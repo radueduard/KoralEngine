@@ -203,11 +203,26 @@ namespace keditor
         return true;
     }
 
+    namespace {
+        /** An input is given whole or in its parts, not both: giving one takes the other away. */
+        void OneWayOfGiving(kgraph::Node& node, const std::string_view input)
+        {
+            const kgraph::NodeType* type = kgraph::FindType(node.type);
+            if (!type) return;
+            for (const auto& part : kgraph::PartsOf(*type, input)) node.inputs.erase(part);
+            if (const auto dot = input.rfind('.'); dot != std::string_view::npos && dot + 2 == input.size()) {
+                const std::string whole(input.substr(0, dot));
+                if (std::ranges::contains(kgraph::PartsOf(*type, whole), input)) node.inputs.erase(whole);
+            }
+        }
+    }
+
     bool Document::SetInput(const std::string_view id, const std::string_view input, Value value)
     {
         kgraph::Graph graph = Graph();
         auto* node = graph.Find(id);
         if (!node) return false;
+        OneWayOfGiving(*node, input);
         node->Set(std::string(input), std::move(value));
         Apply(std::move(graph));
         return true;
@@ -218,6 +233,7 @@ namespace keditor
         kgraph::Graph graph = Graph();
         auto* node = graph.Find(id);
         if (!node || !graph.Find(fromNode)) return false;
+        OneWayOfGiving(*node, input);
         node->Wire(std::string(input), std::string(fromNode), std::string(output));
         Apply(std::move(graph));
         return true;
@@ -230,6 +246,16 @@ namespace keditor
         if (!node || node->inputs.erase(std::string(input)) == 0) return false;
         Apply(std::move(graph));
         return true;
+    }
+
+    std::size_t Document::DisconnectOutput(const std::string_view id, const std::string_view output)
+    {
+        kgraph::Graph graph = Graph();
+        std::size_t taken = 0;
+        for (auto& node : graph.nodes)
+            taken += std::erase_if(node.inputs, [&](const auto& input) { return input.second.link && input.second.link->node == id && input.second.link->output == output; });
+        if (taken > 0) Apply(std::move(graph));
+        return taken;
     }
 
     // ---- entities -----------------------------------------------------------------------------------------------

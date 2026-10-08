@@ -509,6 +509,59 @@ TEST_F(RuntimeTest, ANodeGivesWhatItIsMadeOfAsOutputs) {
     EXPECT_FALSE(image->outputs.front().optional);
 }
 
+// How many groups cover an image is its extent over what one group works on, and the pipeline says what that is:
+// so the three are wired, vector to vector, with nothing typed in.
+TEST_F(RuntimeTest, AnImagesExtentOverThePipelinesNumThreadsIsHowManyGroupsCoverIt) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    // 26 across: three groups of 8 and a part of a fourth.
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 26, 26 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "target").Set("constant.level", 0.5);
+    graph.Add("count", "Divide").Wire("a", "target", "extent").Wire("b", "pipeline", "numThreads");
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("run", "Dispatch").Wire("pipeline", "pipeline").Wire("groups", "count");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "target").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    EXPECT_EQ(runtime.ValueOf("pipeline", "numThreads"), Value(Value::List { 8, 8, 1 })) << "what the shader's [numthreads] says";
+    EXPECT_EQ(runtime.ValueOf("target", "extent"), Value(Value::List { 26, 26, 1 })) << "an extent given whole, of two: its depth as it starts";
+    EXPECT_EQ(runtime.ValueOf("count"), Value(Value::List { 3.25, 3.25, 1 }));
+    EXPECT_EQ(runtime.ValueOf("run", "groups"), Value(Value::List { 3.25, 3.25, 1 })) << "given whole, it is given in its parts";
+
+    Frame();
+    Frame();
+    // Every pixel was worked on, the last few of each row too: a part of a group is a group.
+    for (const auto [x, y] : { std::pair { 0u, 0u }, std::pair { 31u, 31u }, std::pair { 31u, 4u }, std::pair { 13u, 31u } }) {
+        const kor::U8Vec4 pixel = scene->Pixel(x, y);
+        EXPECT_NEAR(pixel.x, 128, 1) << "at " << x << ", " << y << ": the clear's red, halved by the shader";
+        EXPECT_NEAR(pixel.y, 128, 1);
+    }
+
+    // The whole or its parts: not both.
+    graph.Find("run")->Set("groups.x", 2);
+    runtime.Set(graph);
+    ASSERT_FALSE(runtime.Status("run")->ok);
+    EXPECT_NE(runtime.Status("run")->error.find("'groups' is given whole, and 'groups.x' on its own as well"), std::string::npos) << runtime.Status("run")->error;
+    // And a port left open for the whole, with nothing wired yet, is nothing given.
+    graph.Find("run")->inputs.erase("groups.x");
+    graph.Find("run")->Set("groups", Value {});
+    runtime.Set(graph);
+    EXPECT_TRUE(runtime.Status("run")->ok) << runtime.Status("run")->error;
+
+    // The catalog offers both, for an editor.
+    const kgraph::NodeType* dispatch = kgraph::FindType("Dispatch");
+    EXPECT_EQ(kgraph::PartsOf(*dispatch, "groups"), (std::vector<std::string> { "groups.x", "groups.y", "groups.z" }));
+    EXPECT_TRUE(kgraph::PartsOf(*dispatch, "cover").empty());
+    EXPECT_EQ(kgraph::PartsOf(*kgraph::FindType("Image"), "extent").size(), 3u);
+    const kgraph::NodeType* compute = kgraph::FindType("ComputePipeline");
+    EXPECT_NE(std::ranges::find(compute->outputs, "numThreads", &kgraph::Port::name), compute->outputs.end());
+}
+
 // A node is made with what it needs set to something that works, and a struct given in part has the rest as it
 // should be, not as nothing.
 TEST_F(RuntimeTest, InputsStartAsSomethingThatWorks) {
@@ -524,7 +577,8 @@ TEST_F(RuntimeTest, InputsStartAsSomethingThatWorks) {
     EXPECT_EQ(initial("Image", "mipLevels"), Value(1));
     EXPECT_EQ(initial("Sampler", "minFilter"), Value("eLinear"));
     EXPECT_EQ(initial("Clear", "color"), Value(Value::List { 0, 0, 0, 1 }));
-    EXPECT_EQ(initial("Dispatch", "groupSize.x"), Value(8));
+    EXPECT_EQ(initial("Dispatch", "groups.x"), Value(1));
+    EXPECT_TRUE(initial("Dispatch", "groupSize.x").IsNull()) << "the pipeline's numThreads, which no node type can say";
     EXPECT_EQ(initial("Draw", "instances"), Value(1));
     EXPECT_EQ(*initial("GraphicsPipeline", "rasterizationState").Find("lineWidth"), Value(1));
     EXPECT_EQ(*initial("GraphicsPipeline", "depthStencilState").Find("depthCompareOp"), Value("eLess"));
