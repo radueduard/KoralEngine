@@ -36,15 +36,37 @@ starts `koral-play` on the project (Control+R). **Graph** and **Entity** add a n
 
 ### A node in the inspector
 
-Every input the node has is listed, with an editor for its type: a number to drag, a box to tick, a list
-of an enumeration's names, a tick for each flag, a row of numbers for a vector, the fields of a struct one
-under another. A pipeline also lists what its shaders declare: `param.<name>` and `constant.<name>`.
+A node shows the inputs it cannot do without and the ones it has been given. An Image shows its format,
+size and usage. **Add input** lists everything else it can take; one picked from it joins the inputs above,
+and nothing is given until it is set. `x` takes an input back to nothing given, and off the node again when
+it was one it can do without.
 
-- An input that takes a resource is a port on the node. Wire it on the graph.
-- An input that takes a value is edited here. The small `o` beside it makes it a port too, so a value node
-  can be wired to it.
-- `x` takes an input back to nothing given.
-- Anything with no editor of its own is typed as JSON.
+Each input has the control for what it is:
+
+| Input | Control |
+|---|---|
+| A number, or the parts of one thing (`extent`, `groups`) | A number to drag, or one line of them under the thing's name. |
+| True or false | A box to tick. |
+| An enumeration, or one of a few names (`stages`, `command`, `shape`) | A list of the names. |
+| Flags | A tick for each. |
+| A colour (a Clear's `color`, an attachment's `clear`) | A swatch that opens a colour picker. |
+| A shader module | The project's `.slang` files, by name. |
+| An entry point | The functions the module beside it declares with `[shader(...)]`. |
+| Components (`with`, `without`) | A tick for each component and tag the scene has. |
+| An image parameter (`cover`) | The image parameters of the pipeline the pass runs. |
+| A node (`Reference`) | The nodes that make a resource. |
+| A vertex layout's attributes | A line an attribute: what it is, its type, how many. |
+| A struct | Its fields, each with its own control. |
+
+A pipeline has no shader nodes. It names its shaders: `compute.module` and `compute.entry`, or, for a
+graphics pipeline, a module and an entry point for each stage. **`stages`** chooses how a graphics pipeline
+is drawn: `eVertex` for a vertex shader with optional tessellation and geometry shaders, or `eMesh` for a
+mesh shader with an optional task shader. The node shows the inputs of the one chosen. What the shaders
+declare appears as `param.<name>` and `constant.<name>`.
+
+An input that takes a resource is a port on the node, and so is one added from **Add input**: wire it on
+the graph. A value a node can work out (a number, a vector, a colour) can be wired too: the small `o`
+beside it makes it a port.
 
 When you add a node, the dialog also takes a name. A pipeline's name is what its entities' component is
 called, so give it one.
@@ -52,7 +74,8 @@ called, so give it one.
 ### An entity in the inspector
 
 Its name, then each component with its fields. A field that holds a resource is a list of the nodes whose
-output fits. The tick beside a component's name switches it off without removing it. **Add** lists the
+output fits. A `vec3` or `vec4` whose name says it is a colour (`color`, `tint`, `albedo`) gets a colour
+picker. The tick beside a component's name switches it off without removing it. **Add** lists the
 components the entity doesn't have yet: one for each pipeline that runs per entity, `Mesh`, and the
 scene's tags. **New tag** makes a tag and gives it to the entity.
 
@@ -87,6 +110,8 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 
 - **The Hub** doesn't know engine projects. They open and run from the editor and from `koral-play`.
 - **No undo**, and no copy and paste of nodes.
+- **What was asked for with Add input and not set is forgotten** when the editor closes: only inputs that
+  were given are in the file.
 - **A node can't be renamed** after it is made. Its title can't be edited from the interface either.
 - **One scene a project** in the interface. `project.json` can list more, and `koral-play` takes a scene
   file, but the editor opens the starting one only.

@@ -52,11 +52,10 @@ namespace scene
         doc.Connect("backdrop", "out", "tint backdrop", "image");
         doc.SetInput("tint backdrop", "color", Value::List { 0, 0, 0.25, 0 });
 
-        doc.AddNode("Shader", 0, 120, "stamp shader");
-        doc.SetInput("stamp shader", "entryPoint.module", "stamp");
-        doc.SetInput("stamp shader", "entryPoint.entry", "computeMain");
+        // A pipeline names its shader: the module, and the entry point in it.
         doc.AddNode("ComputePipeline", 200, 120, "stamp");
-        doc.Connect("stamp shader", "out", "stamp", "computeShader");
+        doc.SetInput("stamp", "compute.module", "stamp");
+        doc.SetInput("stamp", "compute.entry", "computeMain");
         doc.Connect("backdrop", "out", "stamp", "param.backdrop");
         doc.AddNode("Dispatch", 400, 120, "run");
         doc.Connect("stamp", "out", "run", "pipeline");
@@ -73,16 +72,12 @@ namespace scene
         doc.Connect("canvas view", "out", "target", "color[0].view");
         doc.AddNode("Primitive", 0, 460, "square");
         doc.SetInput("square", "shape", "eQuad");
-        doc.AddNode("Shader", 0, 560, "vertex");
-        doc.SetInput("vertex", "entryPoint.module", "show");
-        doc.SetInput("vertex", "entryPoint.entry", "vertexMain");
-        doc.AddNode("Shader", 0, 660, "fragment");
-        doc.SetInput("fragment", "entryPoint.module", "show");
-        doc.SetInput("fragment", "entryPoint.entry", "fragmentMain");
         doc.AddNode("GraphicsPipeline", 400, 460, "show");
-        doc.Connect("vertex", "out", "show", "vertexShader.shader");
-        doc.Connect("square", "layout", "show", "vertexShader.layout");
-        doc.Connect("fragment", "out", "show", "fragmentShader");
+        doc.SetInput("show", "vertex.module", "show");
+        doc.SetInput("show", "vertex.entry", "vertexMain");
+        doc.Connect("square", "layout", "show", "vertex.layout");
+        doc.SetInput("show", "fragment.module", "show");
+        doc.SetInput("show", "fragment.entry", "fragmentMain");
         doc.Connect("target", "out", "show", "framebuffer");
         doc.AddNode("Draw", 600, 460, "draw");
         doc.Connect("show", "out", "draw", "pipeline");

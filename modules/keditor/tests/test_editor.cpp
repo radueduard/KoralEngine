@@ -100,14 +100,40 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     // A node picked: the inspector has its inputs, by name, and what the runtime knows of it.
     Session().Select(std::string("run"));
     EXPECT_TRUE(Shows("Runs for 4 entities."));
-    for (const char* input : { "pipeline", "cover", "groupSize.x", "with" }) EXPECT_TRUE(Shows(input)) << input;
+    for (const char* input : { "pipeline", "cover", "groupSize", "with" }) EXPECT_TRUE(Shows(input)) << input;
+    EXPECT_FALSE(Shows("groupSize.x")) << "the parts of one thing are one line, under its name";
+    EXPECT_FALSE(Shows("without")) << "what it can do without, and was not given, is not in the way";
+    EXPECT_TRUE(Shows("more it can be given")) << "and is there to be asked for";
+    EXPECT_TRUE(Shows("Lit")) << "the components it asks for, to tick";
     EXPECT_TRUE(Shows("from stamp")) << "what an input is wired to";
     Session().Select(std::string("stamp"));
+    EXPECT_TRUE(Shows("compute.module")) << "a pipeline names its shader";
+    EXPECT_TRUE(Shows("computeMain")) << "and the entry point in it";
     EXPECT_TRUE(Shows("param.backdrop")) << "a pipeline's inputs are its shader's";
     EXPECT_TRUE(Shows("Entities run it by having the component 'stamp'."));
     Session().Select(std::string("canvas"));
     EXPECT_TRUE(Shows("eRGBA8_UNORM")) << "an enumeration, by name";
     EXPECT_TRUE(Shows("eColorAttachment")) << "flags, each to tick";
+    EXPECT_TRUE(Shows("extent")) << "its size, on one line";
+    EXPECT_FALSE(Shows("mipLevels")) << "an image is made with its format, size and usage: the rest is asked for";
+    Session().Show("canvas", "mipLevels");
+    EXPECT_TRUE(Shows("mipLevels"));
+    EXPECT_TRUE(Doc().Runtime().Ok()) << "asked for, it is shown: nothing is given until it is set";
+    EXPECT_FALSE(Doc().Graph().Find("canvas")->inputs.contains("mipLevels"));
+    Session().Hide("canvas", "mipLevels");
+    EXPECT_FALSE(Shows("mipLevels"));
+
+    // A graphics pipeline is drawn one of two ways, and shows the inputs of the one it is.
+    Session().Select(std::string("show"));
+    for (const char* input : { "stages", "eVertex", "vertex.module", "vertex.layout", "fragment.entry", "framebuffer", "param.source" }) EXPECT_TRUE(Shows(input)) << input;
+    EXPECT_FALSE(Shows("geometry.module") || Shows("rasterizationState") || Shows("mesh.module"));
+    const std::string drawn = Doc().AddNode("GraphicsPipeline", 900, 40, "drawn");
+    Session().Select(drawn);
+    EXPECT_TRUE(Shows("vertex.module"));
+    Doc().SetInput(drawn, "stages", "eMesh");
+    EXPECT_TRUE(Shows("mesh.module")) << "with mesh shaders, it has a mesh shader";
+    EXPECT_FALSE(Shows("vertex.module") || Shows("geometry.module")) << "and no vertex shader";
+    Doc().RemoveNodes({ drawn });
 
     // An entity picked: its components and their fields.
     Session().Select(entities[2]);
@@ -179,6 +205,12 @@ TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
     Frame();
     EXPECT_FALSE(Doc().Dirty()) << Session().Status();
 
+    // The project's shaders, for a pipeline to name: its modules, and the entry points of each.
+    EXPECT_EQ(Session().ShaderModules(), (std::vector<std::string> { "show", "stamp" }));
+    EXPECT_EQ(Session().EntryPoints("show"), (std::vector<std::string> { "vertexMain", "fragmentMain" }));
+    EXPECT_EQ(Session().EntryPoints("stamp"), std::vector<std::string> { "computeMain" });
+    EXPECT_TRUE(Session().EntryPoints("no such module").empty());
+
     EXPECT_FALSE(Session().OpenProject(directory / "nowhere"));
     EXPECT_TRUE(Shows("no project"));
     EXPECT_EQ(Doc().Entities().size(), 5u) << "what was open is still open";
@@ -235,4 +267,42 @@ TEST_F(EditorTest, TheMenusAndButtonsDoWhatTheySay) {
     EXPECT_TRUE(Shows("Made by hand"));
     EXPECT_TRUE(Shows("Destroy the entity")) << "picked: the inspector is its";
     EXPECT_EQ(Doc().Entities().size(), before + 1);
+}
+
+// For looking at: the inspector of one node of each kind, and a node being dragged.
+TEST_F(EditorTest, DISABLED_Sheets) {
+    const auto project = scene::MakeProject("sheets");
+    Open();
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    std::string error;
+    ASSERT_TRUE(Session().NewProject(std::filesystem::temp_directory_path() / "keditor-tests" / "sheets-project")) << Session().Status();
+    for (const char* shader : { "stamp.slang", "show.slang" })
+        std::filesystem::copy_file(std::filesystem::path(KEDITOR_TEST_SHADERS) / shader, Session().CurrentProject().ShaderDirectory() / shader,
+                                   std::filesystem::copy_options::overwrite_existing);
+    for (const char* node : { "show", "stamp", "canvas", "tint backdrop", "draw", "run", "target", "square" }) {
+        Session().Select(std::string(node));
+        for (int i = 0; i < 4; ++i) Frame();
+        Sheet(std::string("node-") + node);
+    }
+    Session().Show("draw", "with");
+    Session().Show("draw", "command");
+    Session().Show("target", "color[0].clear");
+    Session().Select(std::string("draw"));
+    for (int i = 0; i < 4; ++i) Frame();
+    Sheet("node-draw-more");
+    Session().Select(std::string("target"));
+    for (int i = 0; i < 4; ++i) Frame();
+    Sheet("node-target-more");
+
+    auto& input = editor->SceneInput();
+    input.FeedMousePosition({ 330.f, 77.f });
+    Frame();
+    input.FeedMouseButton(kor::MouseButton::eLeft, true);
+    Frame();
+    for (int i = 1; i <= 10; ++i) { input.FeedMousePosition({ 330.f + i * 12.f, 77.f + i * 14.f }); Frame(); }
+    Sheet("drag-mid");
+    input.FeedMouseButton(kor::MouseButton::eLeft, false);
+    for (int i = 0; i < 3; ++i) Frame();
+    Sheet("drag-after");
 }

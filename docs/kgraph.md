@@ -26,9 +26,8 @@ inputs by name. An input is a value or a link to another node's output.
   { "id": "target", "type": "Image", "inputs": {
       "format": "eRGBA8_UNORM", "extent.x": 64, "extent.y": 64,
       "usage": ["eStorage", "eTransferSrc", "eTransferDst"] } },
-  { "id": "shader", "type": "Shader", "inputs": { "entryPoint.module": "fill", "entryPoint.entry": "computeMain" } },
   { "id": "pipeline", "type": "ComputePipeline", "inputs": {
-      "computeShader": { "$link": ["shader", "out"] },
+      "compute.module": "fill", "compute.entry": "computeMain",
       "param.target": { "$link": ["target", "out"] },
       "constant.level": 0.5 } },
   { "id": "run", "type": "Dispatch", "inputs": { "pipeline": { "$link": ["pipeline", "out"] }, "groups.x": 8, "groups.y": 8 } }
@@ -64,6 +63,26 @@ the editor will build its node list and its nodes from.
 - **Passes:** Clear, Blit, Dispatch and Draw.
 
 ## Pipelines
+
+A pipeline names its shaders itself, a stage at a time: `<stage>.module` is a `.slang` file among the
+project's shaders, and `<stage>.entry` the function in it (`<stage>Main` when not given).
+
+| Pipeline | Stages |
+|---|---|
+| ComputePipeline | `compute` |
+| GraphicsPipeline, `stages` `eVertex` | `vertex` (with `vertex.layout`), `tessellationControl`, `tessellationEvaluation` (with `patchControlPoints`), `geometry`, `fragment` |
+| GraphicsPipeline, `stages` `eMesh` | `task`, `mesh`, `fragment` |
+| RayTracingPipeline | `raygen`, `miss[n]`, `hitGroup[n].closestHit`, `.anyHit`, `.intersection`, `callable[n]` |
+
+A graphics pipeline's `stages` says which way it is drawn, and it has the inputs of that way only: an input
+of the other is an error on the node. A Shader node wired to a pipeline still works, for graphs made before
+this, but an editor doesn't offer one.
+
+Every input says whether a node can do without it (`Port::optional`), what it may be when it is one of a
+few names (`choices`), and what kind of thing it is beyond its type (`editor`: a colour, a shader module,
+an entry point, a node's id, component names, an image parameter). An editor uses these to show a node's
+few necessary inputs, offer the rest, and give each the right control. `PortsFor(type, node)` is a node
+type's inputs for a node as it is set up.
 
 A pipeline node's shaders decide two more groups of inputs, listed by `Runtime::PortsOf(id)` once it has
 built:

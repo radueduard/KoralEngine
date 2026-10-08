@@ -7,8 +7,11 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <kui/widgets.h>
 #include <scene.h>
@@ -45,6 +48,22 @@ namespace keditor
         /** @brief What Run runs: the player, then the project's folder. Empty without a project. */
         [[nodiscard]] std::string RunCommand() const;
 
+        /**
+         * @brief Makes an input a node can do without one the node shows: asked for, and not yet given. What a node
+         *        shows of its own accord is what it cannot do without, and whatever it has been given.
+         */
+        void Show(const std::string& node, const std::string& input) { _asked[node].insert(input); ++_changes; }
+        void Hide(const std::string& node, const std::string& input) { _asked[node].erase(input); ++_changes; }
+        [[nodiscard]] bool Asked(const std::string& node, const std::string& input) const
+        {
+            const auto it = _asked.find(node);
+            return it != _asked.end() && it->second.contains(input);
+        }
+        /** @brief The project's shader modules, by name: the .slang files of its shaders folder. Empty without a project. */
+        [[nodiscard]] std::vector<std::string> ShaderModules() const;
+        /** @brief The entry points a module of the project declares, in the order it does. */
+        [[nodiscard]] std::vector<std::string> EntryPoints(const std::string& module) const;
+
         std::string selectedNode;                       ///< The node the inspector shows, when no entity is picked.
         kecs::Entity selectedEntity = kecs::NullEntity; ///< The entity it shows.
         void Select(std::string node) { selectedNode = std::move(node); selectedEntity = kecs::NullEntity; ++_changes; }
@@ -66,6 +85,7 @@ namespace keditor
         std::string _status = "A scene with nothing in it. Right-click the graph to add a node.";
         bool _failed = false;
         std::uint64_t _changes = 0;
+        std::map<std::string, std::set<std::string>> _asked;
     };
 
     /** @brief The whole interface, over @p session. */

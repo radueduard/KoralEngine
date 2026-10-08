@@ -4,7 +4,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <format>
+#include <fstream>
 #include <map>
+#include <regex>
 #include <set>
 
 #include <app.h>
@@ -87,6 +89,30 @@ namespace keditor
         if (std::system(command.c_str()) != 0) { Say("The player could not be started.", true); return false; }
         Say(std::format("Running {}.", _project.name));
         return true;
+    }
+
+    std::vector<std::string> Session::ShaderModules() const
+    {
+        std::vector<std::string> modules;
+        std::error_code ec;
+        if (!_hasProject) return modules;
+        for (const auto& entry : std::filesystem::directory_iterator(_project.ShaderDirectory(), ec))
+            if (entry.path().extension() == ".slang") modules.push_back(entry.path().stem().string());
+        std::ranges::sort(modules);
+        return modules;
+    }
+
+    std::vector<std::string> Session::EntryPoints(const std::string& module) const
+    {
+        std::vector<std::string> entries;
+        if (!_hasProject) return entries;
+        std::ifstream in(_project.ShaderDirectory() / (module + ".slang"));
+        if (!in) return entries;
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        // [shader("stage")], whatever other attributes follow it, a return type, and the function's name.
+        static const std::regex declared(R"re(\[\s*shader\s*\(\s*"\w+"\s*\)\s*\]\s*(?:\[[^\]]*\]\s*)*[\w:<>,\s]+?\s+(\w+)\s*\()re");
+        for (std::sregex_iterator it(text.begin(), text.end(), declared), end; it != end; ++it) entries.push_back((*it)[1].str());
+        return entries;
     }
 
     namespace {
@@ -191,6 +217,19 @@ namespace keditor
                 return kgui::DragFloats(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); });
             }
             case Kind::eStruct: {
+                // A colour an attachment is cleared to: picked, and given as the four floats it is.
+                if (type.name == "KoralClearColor") {
+                    kui::Color color(0.f, 0.f, 0.f, 1.f);
+                    if (const Value* held = value.Find("value"))
+                        if (const Value* floats = held->Find("f"); floats && floats->Items() && floats->Items()->size() == 4) {
+                            const auto& c = *floats->Items();
+                            color = kui::Color(NumberOf(c[0]), NumberOf(c[1]), NumberOf(c[2]), NumberOf(c[3]));
+                        }
+                    return kui::ColorEdit(color, [set](const kui::Color picked) {
+                        set(Value(Value::Members { { "scalarType", "Float" }, { "components", 4 },
+                                                   { "value", Value::Members { { "f", Value::List { picked.r, picked.g, picked.b, picked.a } } } } }));
+                    });
+                }
                 std::vector<kui::Widget> rows;
                 for (const auto& field : type.fields) {
                     const std::string name(field.name);
@@ -240,13 +279,119 @@ namespace keditor
             return JsonField(value, set, key);
         }
 
-        /** A node's inputs as they stand: one given more than once is there once for each it has, and once more. */
-        std::vector<kgraph::Port> PortsNow(const kgraph::Runtime& runtime, const kgraph::Node& node)
+        /** A dropdown of names, showing the one that is the value: and the value itself when it is none of them. */
+        kui::Widget Choice(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set, std::string placeholder = {})
         {
-            std::vector<kgraph::Port> ports;
+            const std::string now = value.String() ? *value.String() : std::string();
+            if (!now.empty() && std::ranges::find(names, now) == names.end()) names.push_back(now);
+            const auto at = std::ranges::find(names, now);
+            return kui::Dropdown(names, at == names.end() ? -1 : static_cast<int>(at - names.begin()),
+                                 [set, names](const int index) { set(Value(names[static_cast<std::size_t>(index)])); },
+                                 kui::DropdownOptions {}.SetPlaceholder(std::move(placeholder)));
+        }
+
+        kui::Widget TextEdit(const Value& value, const std::function<void(Value)>& set, const std::string& key, std::string placeholder = {})
+        {
+            const std::string text = value.String() ? *value.String() : std::string();
+            return kui::TextField(kui::TextFieldOptions { .text = text, .placeholder = std::move(placeholder),
+                                                          .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } }).Key(key + "=" + text);
+        }
+
+        /** A list of names to tick: the ones there are to choose from, and any the value has besides. */
+        kui::Widget Ticks(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set)
+        {
+            std::vector<std::string> on;
+            if (const auto* items = value.Items())
+                for (const auto& item : *items) if (item.String()) on.push_back(*item.String());
+            for (const auto& name : on) if (std::ranges::find(names, name) == names.end()) names.push_back(name);
+            if (names.empty()) return kgui::Muted("there are none yet");
+            std::vector<kui::Widget> boxes;
+            for (const auto& name : names)
+                boxes.push_back(kui::Checkbox(std::ranges::find(on, name) != on.end(), [set, on, name](const bool checked) {
+                    auto changed = on;
+                    if (checked) changed.push_back(name); else std::erase(changed, name);
+                    set(Value(Value::List(changed.begin(), changed.end())));
+                }, name));
+            return kui::Column(std::move(boxes), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(2.f));
+        }
+
+        /** What a vertex has, a line an attribute: what it is, of what, how many. */
+        kui::Widget Attributes(const Value& value, const std::function<void(Value)>& set, const std::string& key)
+        {
+            static const std::vector<std::string> types { "eFloat", "eInt", "eUInt", "eShort", "eUShort", "eByte", "eUByte", "eDouble" };
+            const Value::List items = value.Items() ? *value.Items() : Value::List {};
+            std::vector<kui::Widget> rows;
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                const auto with = [set, items, i](const std::string& name, Value changed) {
+                    auto list = items;
+                    Value::Members members = list[i].Named() ? *list[i].Named() : Value::Members {};
+                    const auto known = std::ranges::find_if(members, [&](const auto& m) { return m.first == name; });
+                    if (known != members.end()) known->second = std::move(changed); else members.emplace_back(name, std::move(changed));
+                    list[i] = Value(std::move(members));
+                    set(Value(std::move(list)));
+                };
+                const Value* semantic = items[i].Find("semantic");
+                const Value* type = items[i].Find("type");
+                const Value* count = items[i].Find("count");
+                rows.push_back(kui::Row({
+                    kui::Expanded(TextEdit(semantic ? *semantic : Value {}, [with](Value v) { with("semantic", std::move(v)); }, std::format("{}[{}]", key, i), "POSITION")),
+                    Choice(types, type ? *type : Value("eFloat"), [with](Value v) { with("type", std::move(v)); }).Width(110.f),
+                    kui::DragValue(count ? NumberOf(*count) : 3.f, [with](const float v) { with("count", Value(std::round(v))); },
+                                   kui::DragValueOptions {}.SetSpeed(1.f).SetDecimals(0).SetRange(1.f, 4.f).SetWidth(48.f)),
+                    Small("-", [set, items, i] { auto list = items; list.erase(list.begin() + static_cast<std::ptrdiff_t>(i)); set(Value(std::move(list))); }),
+                }, kui::FlexOptions {}.SetGap(4.f)));
+            }
+            rows.push_back(Small("+ attribute", [set, items] {
+                auto list = items;
+                list.emplace_back(Value::Members { { "semantic", list.empty() ? "POSITION" : "" }, { "type", "eFloat" }, { "count", 3 } });
+                set(Value(std::move(list)));
+            }));
+            return Rows(std::move(rows), 4.f);
+        }
+
+        kui::Widget ColorOf(const Value& value, const std::function<void(Value)>& set, const bool alpha = true)
+        {
+            kui::Color color(0.f, 0.f, 0.f, 1.f);
+            if (const auto* c = value.Items(); c && c->size() >= 3) color = kui::Color(NumberOf((*c)[0]), NumberOf((*c)[1]), NumberOf((*c)[2]), c->size() > 3 ? NumberOf((*c)[3]) : 1.f);
+            return kui::ColorEdit(color, [set, alpha](const kui::Color picked) {
+                set(alpha ? Value(Value::List { picked.r, picked.g, picked.b, picked.a }) : Value(Value::List { picked.r, picked.g, picked.b }));
+            }, {}, kui::ColorPickerOptions {}.SetAlpha(alpha));
+        }
+
+        /** Whether a name says a vector is a colour: what an entity's field is called is all there is to go by. */
+        bool NamesAColor(std::string name)
+        {
+            std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos
+                || name.find("albedo") != std::string::npos;
+        }
+
+        /** An input of a node, as it stands. */
+        struct Shown {
+            kgraph::Port port;      // its name is the input's: `color[1].view`, not `color[].view`
+            bool given = false;     // the node has it: a value, a wire, or a port left open for one
+        };
+
+        /**
+         * A node's inputs as they stand. Those it cannot do without, those it has been given, and those asked for
+         * (@p asked): in the order its type lists them. One given more than once is there once for each it has, and
+         * once more when it is one a node needs. The rest are in @p more, for whoever wants one.
+         */
+        std::vector<Shown> InputsOf(const kgraph::Runtime& runtime, const kgraph::Node& node, const std::function<bool(const std::string&)>& asked,
+                                    std::vector<kgraph::Port>* more = nullptr)
+        {
+            std::vector<Shown> shown;
+            std::set<std::string> listed;
+            const auto consider = [&](kgraph::Port port, const bool always) {
+                const bool given = node.inputs.contains(port.name);
+                listed.insert(port.name);
+                if (given || always || !port.optional || asked(port.name)) shown.push_back({ std::move(port), given });
+                else if (more) more->push_back(std::move(port));
+            };
             for (const auto& port : runtime.PortsOf(node.id)) {
                 const auto at = port.name.find("[]");
-                if (at == std::string::npos) { ports.push_back(port); continue; }
+                // What a shader declares is the pipeline's to be given, whatever else is: a parameter is never hidden.
+                if (at == std::string::npos) { consider(port, port.name.starts_with("param.")); continue; }
                 const std::string prefix = port.name.substr(0, at + 1);
                 int count = 0;
                 for (const auto& name : node.inputs | std::views::keys)
@@ -255,17 +400,23 @@ namespace keditor
                     kgraph::Port each = port;
                     each.name = std::format("{}{}]{}", prefix, i, port.name.substr(at + 2));
                     each.repeatable = false;
-                    ports.push_back(std::move(each));
+                    // The next one free is offered like any input that can be done without.
+                    if (i == count) each.optional = port.optional || count > 0;
+                    consider(std::move(each), false);
                 }
             }
-            return ports;
+            // And what the node has that its type does not list: a shader wired in, an input of another way of drawing.
+            for (const auto& [name, input] : node.inputs)
+                if (!listed.contains(name))
+                    shown.push_back({ kgraph::Port { name, input.link ? kgraph::PortKind::eResource : kgraph::PortKind::eValue, "value", false, {}, nullptr }, true });
+            return shown;
         }
 
-        /** Whether an input shows as a port on its node: what takes a resource, and a value that is wired or was asked to. */
-        bool ShowsAsPort(const kgraph::Port& port, const kgraph::Node& node)
+        /** Whether an input shows as a port on its node: what takes a resource, and a value that is wired or left open for a wire. */
+        bool ShowsAsPort(const Shown& shown, const kgraph::Node& node)
         {
-            if (port.kind == kgraph::PortKind::eResource) return true;
-            const auto input = node.inputs.find(port.name);
+            if (shown.port.kind == kgraph::PortKind::eResource) return true;
+            const auto input = node.inputs.find(shown.port.name);
             return input != node.inputs.end() && (input->second.link || input->second.value.IsNull());
         }
 
@@ -369,6 +520,7 @@ namespace keditor
                 std::ranges::transform(lowered, lowered.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 std::map<std::string, std::vector<kui::Widget>> byCategory;
                 for (const auto& type : kgraph::Catalog()) {
+                    if (!type.listed) continue;
                     std::string name = type.name;
                     std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
                     if (!lowered.empty() && name.find(lowered) == std::string::npos) continue;
@@ -410,9 +562,9 @@ namespace keditor
                     card.title = node.title.empty() ? node.id : node.title;
                     card.position = { static_cast<float>(node.x), static_cast<float>(node.y) };
                     card.accent = CategoryColor(type ? type->category : std::string());
-                    for (const auto& port : PortsNow(runtime, node))
-                        if (ShowsAsPort(port, node))
-                            card.inputs.push_back({ port.name, port.name, (port.kind == kgraph::PortKind::eResource ? "r:" : "v:") + port.type });
+                    for (const auto& shown : InputsOf(runtime, node, [&](const std::string& input) { return _session->Asked(node.id, input); }))
+                        if (ShowsAsPort(shown, node))
+                            card.inputs.push_back({ shown.port.name, shown.port.name, (shown.port.kind == kgraph::PortKind::eResource ? "r:" : "v:") + shown.port.type });
                     if (type)
                         for (const auto& output : type->outputs)
                             card.outputs.push_back({ output.name, output.name == "out" ? output.type : output.name,
@@ -432,7 +584,8 @@ namespace keditor
                     })
                     .OnConnect([this](const kui::GraphWire& wire) { Doc().Connect(wire.from.node, wire.from.port, wire.to.node, wire.to.port); })
                     .OnDisconnect([this](const kui::GraphWire& wire) { Doc().ClearInput(wire.to.node, wire.to.port); })
-                    .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { Doc().MoveNodes(nodes, by.x, by.y); })
+                    // Built again at once: a frame with the nodes back where they were is a frame of them jumping.
+                    .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { Doc().MoveNodes(nodes, by.x, by.y); SetState(); })
                     .OnDelete([this](const std::vector<std::string>& nodes, const std::vector<kui::GraphWire>& wires, const std::vector<std::string>&) {
                         for (const auto& wire : wires) Doc().ClearInput(wire.to.node, wire.to.port);
                         if (!nodes.empty()) Doc().RemoveNodes(nodes);
@@ -463,6 +616,42 @@ namespace keditor
                 return Panel({ kgui::Muted("Pick a node or an entity to see what it is made of.") });
             }
 
+            /** The control an input is set with: by what kind of thing it is, then by its type. */
+            kui::Widget EditorFor(const kgraph::Node& node, const kgraph::Port& port, const Value& value, const std::function<void(Value)>& set, const std::string& key)
+            {
+                if (!port.choices.empty()) return Choice(port.choices, value, set, port.choices.front());
+                if (port.editor == "color") return ColorOf(value, set);
+                if (port.editor == "module") {
+                    const auto modules = _session->ShaderModules();
+                    return modules.empty() ? TextEdit(value, set, key, "a module's name") : Choice(modules, value, set, "a module");
+                }
+                if (port.editor == "entry") {
+                    // The entry points of the module named beside it.
+                    const std::string beside = port.name.substr(0, port.name.size() - 5) + "module";
+                    const auto module = node.inputs.find(beside);
+                    const std::string* named = module == node.inputs.end() ? nullptr : module->second.value.String();
+                    const auto entries = named ? _session->EntryPoints(*named) : std::vector<std::string> {};
+                    return entries.empty() ? TextEdit(value, set, key, "the function's name") : Choice(entries, value, set, "an entry point");
+                }
+                if (port.editor == "node") {
+                    std::vector<std::string> ids;
+                    for (const auto& other : Doc().Graph().nodes)
+                        if (other.id != node.id && Doc().Runtime().ResourceOf(other.id)) ids.push_back(other.id);
+                    return Choice(std::move(ids), value, set, "a node");
+                }
+                if (port.editor == "components") return Ticks(Doc().ComponentNames(), value, set);
+                if (port.editor == "parameter") {
+                    // The image parameters of the pipeline this pass runs.
+                    std::vector<std::string> names;
+                    if (const auto pipeline = node.inputs.find("pipeline"); pipeline != node.inputs.end() && pipeline->second.link)
+                        for (const auto& each : Doc().Runtime().PortsOf(pipeline->second.link->node))
+                            if (each.name.starts_with("param.") && each.type == "Image" && !each.name.ends_with(".sampler")) names.push_back(each.name.substr(6));
+                    return Choice(std::move(names), value, set, "an image parameter");
+                }
+                if (port.editor == "attributes") return Attributes(value, set, key);
+                return port.builder ? TypeEditor(*port.builder, value, set, key) : NamedEditor(port.type, value, set, key);
+            }
+
             kui::Widget NodeInspector(const kgraph::Node& node)
             {
                 const kgraph::Runtime& runtime = Doc().Runtime();
@@ -480,32 +669,93 @@ namespace keditor
                     rows.push_back(kgui::Muted(std::format("Entities run it by having the component '{}'.", Doc().World().Describe(component).name)));
                 rows.push_back(kui::Separator());
 
-                for (const auto& port : PortsNow(runtime, node)) {
-                    const auto input = node.inputs.find(port.name);
-                    const bool given = input != node.inputs.end();
+                std::vector<kgraph::Port> more;
+                const auto inputs = InputsOf(runtime, node, [&](const std::string& input) { return _session->Asked(id, input); }, &more);
+                const auto set = [this, id](const std::string& name) {
+                    return [this, id, name](Value changed) {
+                        if (changed.IsNull()) Doc().ClearInput(id, name);
+                        else Doc().SetInput(id, name, std::move(changed));
+                    };
+                };
+                // Back to nothing given; one that can be done without goes from the node with it.
+                const auto remove = [this, id](const std::vector<std::string>& names) {
+                    return [this, id, names] {
+                        for (const auto& name : names) { Doc().ClearInput(id, name); _session->Hide(id, name); }
+                    };
+                };
+                const auto plain = [&](const Shown& shown) {    // set here, with a control: not wired, and not left open for a wire
+                    if (shown.port.kind != kgraph::PortKind::eValue) return false;
+                    const auto input = node.inputs.find(shown.port.name);
+                    return input == node.inputs.end() || (!input->second.link && !input->second.value.IsNull());
+                };
+                const auto whole = [](const kgraph::Port& port) {
+                    return port.builder && (port.builder->kind == kb::Kind::eInt || port.builder->kind == kb::Kind::eUInt);
+                };
+
+                for (std::size_t at = 0; at < inputs.size(); ++at) {
+                    const Shown& shown = inputs[at];
+                    const kgraph::Port& port = shown.port;
                     const std::string name = port.name;
+                    const auto input = node.inputs.find(name);
+
+                    // Numbers that are one thing's parts — extent.x, extent.y, extent.z — on one line, under its name.
+                    if (name.ends_with(".x") && plain(shown) && (port.type == "number")) {
+                        const std::string prefix = name.substr(0, name.size() - 1);
+                        std::vector<std::string> parts { name };
+                        for (const char* axis : { "y", "z", "w" }) {
+                            const std::size_t next = at + parts.size();
+                            if (next < inputs.size() && inputs[next].port.name == prefix + axis && plain(inputs[next])) parts.push_back(prefix + axis);
+                            else break;
+                        }
+                        if (parts.size() > 1) {
+                            std::vector<float> numbers;
+                            bool any = false;
+                            for (const auto& part : parts) {
+                                const auto each = node.inputs.find(part);
+                                any = any || each != node.inputs.end();
+                                numbers.push_back(each == node.inputs.end() ? 0.f : NumberOf(each->second.value));
+                            }
+                            auto editor = kgui::DragFloats(numbers, [this, id, parts, numbers, round = whole(port)](const std::vector<float>& changed) {
+                                for (std::size_t i = 0; i < parts.size(); ++i)
+                                    if (changed[i] != numbers[i]) Doc().SetInput(id, parts[i], Value(round ? std::round(changed[i]) : changed[i]));
+                            }, whole(port) ? 1.f : 0.01f, whole(port) ? 0 : 2);
+                            std::vector<kui::Widget> line { kui::Expanded(std::move(editor)) };
+                            if (any) line.push_back(kui::Tooltip("Back to nothing given", Small("x", remove(parts))));
+                            rows.push_back(kui::Tooltip(port.doc.empty() ? port.type : port.doc,
+                                                        kgui::Labeled(prefix.substr(0, prefix.size() - 1), kui::Row(std::move(line), kui::FlexOptions {}.SetGap(4.f)), LabelWidth)));
+                            at += parts.size() - 1;
+                            continue;
+                        }
+                    }
+
                     kui::Widget editor;
-                    if (given && input->second.link) {
+                    if (shown.given && input->second.link) {
                         editor = kgui::Line(std::format("from {}{}", input->second.link->node, input->second.link->output == "out" ? "" : "." + input->second.link->output));
                     } else if (port.kind == kgraph::PortKind::eResource) {
-                        editor = kgui::Muted("wire one in");
-                    } else if (given && input->second.value.IsNull()) {
+                        editor = kgui::Muted(port.type == "Resource" || port.type == "value" ? std::string("wire one in") : std::format("wire one in: {}", port.type));
+                    } else if (shown.given && input->second.value.IsNull()) {
                         editor = kgui::Muted("a port: wire a value in");
                     } else {
-                        const Value value = given ? input->second.value : Value {};
-                        const auto set = [this, id, name](Value changed) {
-                            if (changed.IsNull()) Doc().ClearInput(id, name);
-                            else Doc().SetInput(id, name, std::move(changed));
-                        };
-                        const std::string key = id + "/" + name;
-                        editor = port.builder ? TypeEditor(*port.builder, value, set, key) : NamedEditor(port.type, value, set, key);
+                        editor = EditorFor(node, port, shown.given ? input->second.value : Value {}, set(name), id + "/" + name);
                     }
                     std::vector<kui::Widget> line { kui::Expanded(std::move(editor)) };
-                    if (given) line.push_back(kui::Tooltip("Back to nothing given", Small("x", [this, id, name] { Doc().ClearInput(id, name); })));
-                    else if (port.kind == kgraph::PortKind::eValue)
-                        line.push_back(kui::Tooltip("Show it as a port, to wire a value to", Small("o", [this, id, name] { Doc().SetInput(id, name, Value {}); })));
+                    // A value a node can work out — a number, a vector, a colour — can be wired instead: a name chosen from a list cannot.
+                    if (plain(shown) && port.choices.empty() && (port.editor.empty() || port.editor == "color"))
+                        line.push_back(kui::Tooltip("Make it a port, to wire a value to", Small("o", [this, id, name] { Doc().SetInput(id, name, Value {}); })));
+                    if (shown.given || port.optional)
+                        line.push_back(kui::Tooltip(shown.given ? "Back to nothing given" : "Not needed after all", Small("x", remove({ name }))));
                     rows.push_back(kui::Tooltip(port.doc.empty() ? port.type : port.doc + " (" + port.type + ")",
                                                 kgui::Labeled(name, kui::Row(std::move(line), kui::FlexOptions {}.SetGap(4.f)), LabelWidth)));
+                }
+
+                // What else it can be given: asked for here, it joins the inputs above — as a port on the node, when it takes a resource.
+                if (!more.empty()) {
+                    std::vector<std::string> names;
+                    for (const auto& port : more) names.push_back(port.name);
+                    rows.push_back(kui::Separator());
+                    rows.push_back(kgui::Labeled("Add input", kui::Dropdown(names, -1, [this, id, names](const int index) {
+                        _session->Show(id, names[static_cast<std::size_t>(index)]);
+                    }, kui::DropdownOptions {}.SetPlaceholder(std::format("{} more it can be given", names.size()))), LabelWidth));
                 }
                 rows.push_back(kui::Separator());
                 rows.push_back(Small("Remove the node", [this, id] { Doc().RemoveNodes({ id }); _session->Select(std::string()); }));
@@ -556,6 +806,8 @@ namespace keditor
                             const std::string text = *value.String();
                             editor = kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } })
                                 .Key(component + "." + fieldName + "=" + text);
+                        } else if ((field.type == "vec4" || field.type == "vec3") && NamesAColor(fieldName)) {
+                            editor = ColorOf(value, set, field.type == "vec4");
                         } else if (const auto* items = value.Items()) {
                             std::vector<float> numbers;
                             for (const auto& item : *items) numbers.push_back(NumberOf(item));

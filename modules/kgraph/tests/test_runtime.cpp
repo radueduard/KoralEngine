@@ -186,7 +186,7 @@ TEST_F(RuntimeTest, WhatIsNotWiredIsForEachEntityToSupply) {
     // Its inputs, with those its shader gives it.
     std::vector<std::string> names;
     for (const auto& port : runtime.PortsOf("pipeline")) names.push_back(port.name);
-    EXPECT_NE(std::ranges::find(names, "computeShader"), names.end());
+    EXPECT_NE(std::ranges::find(names, "compute.module"), names.end());
     EXPECT_NE(std::ranges::find(names, "param.target"), names.end());
     EXPECT_NE(std::ranges::find(names, "constant.level"), names.end());
 }
@@ -299,4 +299,91 @@ TEST_F(RuntimeTest, APrimitiveIsAMeshWithItsLayout) {
     EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("offset")->Number(), 24.0);
     EXPECT_EQ(*(*layout.Find("bindings")->Items())[0].Find("stride")->Number(), 32.0);
     EXPECT_EQ(*layout.Find("positionAttribute")->Number(), 0.0);
+}
+
+// A pipeline names its shaders: no node for each, and no wire to it.
+TEST_F(RuntimeTest, APipelineNamesItsShadersByModuleAndEntryPoint) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Load(FillGraph);
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "shader"; });
+    auto& pipeline = *graph.Find("pipeline");
+    pipeline.inputs.erase("computeShader");
+    pipeline.Set("compute.module", "fill").Set("compute.entry", "computeMain");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_NEAR(scene->Pixel(7, 7).x, 128, 1) << "it runs as it did with a shader node wired in";
+    EXPECT_NEAR(scene->Pixel(7, 7).y, 128, 1);
+    // What the shader declares is the node's to wire and set, as before.
+    std::vector<std::string> names;
+    for (const auto& port : runtime.PortsOf("pipeline")) names.push_back(port.name);
+    EXPECT_NE(std::ranges::find(names, "param.target"), names.end());
+    EXPECT_NE(std::ranges::find(names, "constant.level"), names.end());
+
+    // The entry point not said: the stage's name and Main, as the shader here calls it.
+    graph.Find("pipeline")->inputs.erase("compute.entry");
+    runtime.Set(graph);
+    EXPECT_TRUE(runtime.Status("pipeline")->ok) << runtime.Status("pipeline")->error;
+
+    // What is wrong with it is said on the node, by the input's name.
+    graph.Find("pipeline")->Set("compute.module", "no such module");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("pipeline")->error.find("'compute':"), std::string::npos) << runtime.Status("pipeline")->error;
+    EXPECT_NE(runtime.Status("pipeline")->error.find("no such module"), std::string::npos) << runtime.Status("pipeline")->error;
+    graph.Find("pipeline")->inputs.erase("compute.module");
+    graph.Find("pipeline")->Set("compute.entry", "computeMain");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("pipeline")->error.find("'compute.module' says which"), std::string::npos) << runtime.Status("pipeline")->error;
+    graph.Find("pipeline")->Set("compute.module", "fill").Set("stages", "eMesh");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("pipeline")->error.find("no input 'stages'"), std::string::npos) << runtime.Status("pipeline")->error;
+
+    // A graphics pipeline drawn with mesh shaders has no vertex shader to be given.
+    graph.Find("pipeline")->inputs.erase("stages");
+    graph.Add("drawn", "GraphicsPipeline").Set("stages", "eMesh").Set("vertex.module", "fill");
+    runtime.Set(graph);
+    EXPECT_TRUE(runtime.Status("pipeline")->ok);
+    EXPECT_NE(runtime.Status("drawn")->error.find("'vertex.module' is part of a pipeline whose 'stages' is eVertex"), std::string::npos) << runtime.Status("drawn")->error;
+    graph.Find("drawn")->Set("stages", "eTriangles");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("drawn")->error.find("eVertex or eMesh"), std::string::npos) << runtime.Status("drawn")->error;
+}
+
+TEST_F(RuntimeTest, AShaderAPipelineNamesIsPickedUpWhenEdited) {
+    static int run = 0;
+    const std::string module = std::format("fillNamed{}", run++);
+    const auto directory = std::filesystem::temp_directory_path() / "kgraph-reload-named";
+    std::filesystem::create_directories(directory);
+    std::ifstream in(std::filesystem::path(KGRAPH_TEST_SHADERS) / "fill.slang");
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    { std::ofstream(directory / (module + ".slang")) << text; }
+    kor::Shader::AddSearchPath(directory, true);
+
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Load(FillGraph);
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "shader"; });
+    graph.Find("pipeline")->inputs.erase("computeShader");
+    graph.Find("pipeline")->Set("compute.module", module);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 128, 1);
+    const auto builds = runtime.Status("pipeline")->builds;
+
+    const auto at = text.find("was.r * 0.5");
+    ASSERT_NE(at, std::string::npos);
+    text.replace(at, 11, "was.r * 0.25");
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    { std::ofstream(directory / (module + ".slang")) << text; }
+    bool reloaded = false;
+    for (int i = 0; i < 200 && !reloaded; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        Frame();
+        reloaded = scene->Pixel(4, 4).x < 100;
+    }
+    EXPECT_TRUE(reloaded) << "the edit never showed";
+    EXPECT_GT(runtime.Status("pipeline")->builds, builds) << "the pipeline is built again from its edited shader";
+    std::filesystem::remove_all(directory);
 }

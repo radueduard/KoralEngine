@@ -55,16 +55,13 @@ namespace shadow
         Set(doc, "shadow target", "depthStencil.depth", "1");
 
         Node(doc, "Primitive", "square", 0, 300);
-        Node(doc, "Shader", "cast vertex", 0, 400);
-        Set(doc, "cast vertex", "entryPoint.module", "\"shadow\"");
-        Set(doc, "cast vertex", "entryPoint.entry", "\"castVertex\"");
-        Node(doc, "Shader", "cast fragment", 0, 480);
-        Set(doc, "cast fragment", "entryPoint.module", "\"shadow\"");
-        Set(doc, "cast fragment", "entryPoint.entry", "\"castFragment\"");
+        // A pipeline names its shaders: the module each is in, and the entry point.
         Node(doc, "GraphicsPipeline", "shadow", 400, 300);
-        Wire(doc, "cast vertex", "shadow", "vertexShader.shader");
-        Wire(doc, "square", "shadow", "vertexShader.layout", "layout");
-        Wire(doc, "cast fragment", "shadow", "fragmentShader");
+        Set(doc, "shadow", "vertex.module", "\"shadow\"");
+        Set(doc, "shadow", "vertex.entry", "\"castVertex\"");
+        Wire(doc, "square", "shadow", "vertex.layout", "layout");
+        Set(doc, "shadow", "fragment.module", "\"shadow\"");
+        Set(doc, "shadow", "fragment.entry", "\"castFragment\"");
         Wire(doc, "shadow target", "shadow", "framebuffer");
         Set(doc, "shadow", "depthStencilState", "{\"depthTestEnable\": true, \"depthWriteEnable\": true, \"depthCompareOp\": \"eLess\", \"maxDepth\": 1}");
         Wire(doc, "light camera", "shadow", "param.light");
@@ -83,16 +80,12 @@ namespace shadow
         Node(doc, "Framebuffer", "target", 400, 600);
         Set(doc, "target", "color[0].name", "\"color\"");
         Wire(doc, "canvas view", "target", "color[0].view");
-        Node(doc, "Shader", "lit vertex", 0, 700);
-        Set(doc, "lit vertex", "entryPoint.module", "\"lit\"");
-        Set(doc, "lit vertex", "entryPoint.entry", "\"litVertex\"");
-        Node(doc, "Shader", "lit fragment", 0, 780);
-        Set(doc, "lit fragment", "entryPoint.module", "\"lit\"");
-        Set(doc, "lit fragment", "entryPoint.entry", "\"litFragment\"");
         Node(doc, "GraphicsPipeline", "lit", 400, 700);
-        Wire(doc, "lit vertex", "lit", "vertexShader.shader");
-        Wire(doc, "square", "lit", "vertexShader.layout", "layout");
-        Wire(doc, "lit fragment", "lit", "fragmentShader");
+        Set(doc, "lit", "vertex.module", "\"lit\"");
+        Set(doc, "lit", "vertex.entry", "\"litVertex\"");
+        Wire(doc, "square", "lit", "vertex.layout", "layout");
+        Set(doc, "lit", "fragment.module", "\"lit\"");
+        Set(doc, "lit", "fragment.entry", "\"litFragment\"");
         Wire(doc, "target", "lit", "framebuffer");
         Wire(doc, "light camera", "lit", "param.light");
         Wire(doc, "shadow view", "lit", "param.shadowMap");

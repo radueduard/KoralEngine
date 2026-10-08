@@ -204,6 +204,8 @@ namespace kgraph
 
             std::shared_ptr<const EntityLayout> layout;         // null when nothing is per entity
             kecs::ComponentId component = kecs::NoComponent;    // the component of that layout, in the world
+            std::vector<kor::ResourceRef<const kor::Shader>> shaders;   // every shader it is made of
+            std::vector<Held> named;                            // those it names itself, kept while it is
             Held resource;                                      // the pipeline itself
             Held framebuffer;                                   // a graphics pipeline's
             kor::ResourceRef<const kor::Shader> vertexShader;
@@ -647,8 +649,8 @@ namespace kgraph
             std::shared_ptr<PipelineInfo> pipeline;
             std::shared_ptr<PassPlan> pass;
             std::optional<kecs::Migration> migration;   // a pipeline's: what its component last became
-            kor::ResourceRef<const kor::Shader> watched;  // a shader node's shader, told of when it is edited
-            kor::u64 watch = 0;
+            // The shaders it is made of — a shader node's own, a pipeline's named on it — each told of when it is edited.
+            std::vector<std::pair<kor::ResourceRef<const kor::Shader>, kor::u64>> watches;
         };
 
         kor::FrameGraph& frameGraph;
@@ -670,9 +672,15 @@ namespace kgraph
 
         void Unwatch(Built& node)
         {
-            if (node.watch != 0 && node.watched.Alive()) const_cast<kor::Shader&>(*node.watched).UnregisterReloadCallback(node.watch);
-            node.watch = 0;
-            node.watched = {};
+            for (auto& [shader, watch] : node.watches)
+                if (shader.Alive()) const_cast<kor::Shader&>(*shader).UnregisterReloadCallback(watch);
+            node.watches.clear();
+        }
+
+        void Watch(Built& node, kor::ResourceRef<const kor::Shader> shader)
+        {
+            const kor::u64 watch = const_cast<kor::Shader&>(*shader).RegisterReloadCallback([this] { reloaded = true; });
+            node.watches.emplace_back(std::move(shader), watch);
         }
 
         ~Impl()
@@ -753,8 +761,7 @@ namespace kgraph
             if (description.name == "BufferView") if (const auto it = inputs.find("buffer"); it != inputs.end()) (*resource)->source = it->second.resource;
             if (description.name == "Shader") {
                 // Told when the file is edited: what was built from it is built again (Update).
-                out.watched = kor::capi::ShaderOf((*resource)->handle);
-                out.watch = const_cast<kor::Shader&>(*out.watched).RegisterReloadCallback([this] { reloaded = true; });
+                Watch(out, kor::capi::ShaderOf((*resource)->handle));
             }
             out.outputs["out"].resource = std::move(*resource);
             return {};
@@ -777,10 +784,91 @@ namespace kgraph
          * pipeline keeps a descriptor set for; what is not goes in set 1, for each entity to supply in the component
          * made for it here, along with the shaders' push constants.
          */
-        Expected<void> BuildPipeline(const Node& node, const kb::Description& description, const Inputs& inputs, Built& out)
+        /**
+         * A pipeline node's inputs, as its builder takes them. The node names each shader by the stage it is — a
+         * module and an entry point — and what goes with one by the stage too: here each named shader is made, and
+         * everything is put under the name the builder's setting has.
+         */
+        Expected<Inputs> AsTheBuilderTakesThem(const Node& node, const kb::Description& description, const Inputs& given, PipelineInfo& info, Built& out)
+        {
+            Inputs inputs = given;
+            const std::string stages = description.name == "GraphicsPipeline" ? StagesOf(node) : std::string();
+            if (const auto it = inputs.find("stages"); it != inputs.end()) {
+                const std::string* chosen = it->second.value.String();
+                if (description.name != "GraphicsPipeline") return Fail(std::format("a {} has no input 'stages'", description.name));
+                if (!it->second.value.IsNull() && (!chosen || (*chosen != "eVertex" && *chosen != "eMesh"))) return Fail("'stages' is eVertex or eMesh");
+                inputs.erase(it);
+            }
+            const kb::Description* shaderType = kb::Find("Shader");
+            const kb::Setting* entryPoint = shaderType ? shaderType->FindSetting("entryPoint") : nullptr;
+            for (const auto& setting : description.settings) {
+                if (HiddenPipelineSetting(setting.name)) continue;
+                const std::string_view mode = StageMode(setting.name);
+                // How many times it is given: once, or up to the highest index any of its inputs names.
+                int count = 1;
+                if (setting.repeatable) {
+                    count = 0;
+                    for (const auto& argument : setting.arguments)
+                        for (const std::string& shown : { PipelineInputName(setting, argument), InputName(setting, argument) }) {
+                            const std::string prefix = shown.substr(0, shown.find("[]") + 1);
+                            for (const auto& name : given | std::views::keys)
+                                if (name.starts_with(prefix)) count = std::max(count, std::atoi(name.c_str() + prefix.size()) + 1);
+                        }
+                }
+                for (int index = 0; index < count; ++index) {
+                    for (const auto& argument : setting.arguments) {
+                        const std::string shown = PipelineInputName(setting, argument, setting.repeatable ? index : -1);
+                        const std::string taken = InputName(setting, argument, setting.repeatable ? index : -1);
+                        // One that belongs to the other way of drawing is refused before anything is made of it.
+                        if (!mode.empty() && mode != stages)
+                            for (const std::string& name : { shown + ".module", shown + ".entry", shown, taken })
+                                if (given.contains(name) && (IsShader(argument) || name == shown || name == taken))
+                                    return Fail(std::format("'{}' is part of a pipeline whose 'stages' is {}, and this one's is {}", name, mode, stages));
+                        if (IsShader(argument)) {
+                            const auto module = inputs.find(shown + ".module");
+                            const auto entry = inputs.find(shown + ".entry");
+                            const std::string* file = module == inputs.end() ? nullptr : module->second.value.String();
+                            const std::string* function = entry == inputs.end() ? nullptr : entry->second.value.String();
+                            if (module != inputs.end() && module->second.linked) return Fail(std::format("'{}.module' is the module's name, and cannot be wired", shown));
+                            if (file && !file->empty()) {
+                                if (inputs.contains(taken)) return Fail(std::format("'{}' is named and wired both: one or the other", shown));
+                                if (!entryPoint) return Fail("the framework describes no Shader builder");
+                                // The entry point, when it is not said: the stage's name and Main, as shaders here are written.
+                                std::string main = function && !function->empty() ? *function : shown.substr(0, shown.find_first_of(".[")) + "Main";
+                                auto shader = BuildWith(*shaderType, node.id, {}, { { entryPoint, { kb::Value::Of(*file), kb::Value::Of(main) } } });
+                                if (!shader) return Fail(std::format("'{}': {}", shown, shader.error()));
+                                (*shader)->kind = "Shader";
+                                Watch(out, kor::capi::ShaderOf((*shader)->handle));
+                                info.named.push_back(*shader);
+                                Resolved resolved;
+                                resolved.resource = std::move(*shader);
+                                resolved.linked = true;
+                                inputs[taken] = std::move(resolved);
+                            } else if (function && !function->empty()) {
+                                return Fail(std::format("'{}.entry' is an entry point of a module: '{}.module' says which", shown, shown));
+                            }
+                            inputs.erase(shown + ".module");
+                            inputs.erase(shown + ".entry");
+                        } else if (shown != taken) {
+                            if (const auto it = inputs.find(shown); it != inputs.end()) {
+                                inputs[taken] = it->second;
+                                inputs.erase(shown);
+                            }
+                        }
+                    }
+                }
+            }
+            return inputs;
+        }
+
+        Expected<void> BuildPipeline(const Node& node, const kb::Description& description, const Inputs& given, Built& out)
         {
             auto info = std::make_shared<PipelineInfo>();
-            const Interface interface = Reflect(ShadersOf(inputs, &info->vertexShader));
+            const auto translated = AsTheBuilderTakesThem(node, description, given, *info, out);
+            if (!translated) return Fail(translated.error());
+            const Inputs& inputs = *translated;
+            info->shaders = ShadersOf(inputs, &info->vertexShader);
+            const Interface interface = Reflect(info->shaders);
             info->ports = interface.ports;
             out.pipeline = info;    // its inputs are known from here, built or not
 
@@ -1721,6 +1809,10 @@ namespace kgraph
                 for (const auto& input : node.inputs | std::views::values)
                     if (const Held resource = outputOf(input); resource && resource->kind == "Shader" && resource->handle)
                         shaders.push_back(kor::capi::ShaderOf(resource->handle));
+                // And those it names itself, as they were when it was last built.
+                if (const auto it = built.find(node.id); it != built.end() && it->second.pipeline)
+                    for (const Held& named : it->second.pipeline->named)
+                        if (named && named->handle) shaders.push_back(kor::capi::ShaderOf(named->handle));
                 if (shaders.empty() || !std::ranges::all_of(shaders, [](const auto& shader) { return shader.Valid(); })) continue;   // one that does not compile says nothing yet
                 const Interface interface = Reflect(shaders);
                 for (auto it = node.inputs.begin(); it != node.inputs.end();) {
@@ -1760,8 +1852,12 @@ namespace kgraph
         if (_impl->reloaded.exchange(false)) {
             _impl->ResetStale(_graph);
             // Which shader it was is not said: every shader node counts as built again, and what is wired to one follows.
-            for (auto& node : _impl->built | std::views::values)
-                if (node.watch != 0) node.stamp = ++_impl->counter;
+            // A pipeline that names its shaders is itself one of them: it is built again, whatever its inputs say.
+            for (auto& node : _impl->built | std::views::values) {
+                if (node.watches.empty()) continue;
+                node.stamp = ++_impl->counter;
+                if (node.pipeline) node.signature.clear();
+            }
             _impl->Evaluate(_graph);
             return;
         }
@@ -1813,7 +1909,7 @@ namespace kgraph
         const Node* node = _graph.Find(id);
         if (!node) return {};
         std::vector<Port> ports;
-        if (const NodeType* type = FindType(node->type)) ports = type->inputs;
+        if (const NodeType* type = FindType(node->type)) ports = PortsFor(*type, *node);
         if (const auto it = _impl->built.find(id); it != _impl->built.end() && it->second.pipeline)
             ports.insert(ports.end(), it->second.pipeline->ports.begin(), it->second.pipeline->ports.end());
         return ports;

@@ -36,6 +36,15 @@ namespace kgraph
         bool repeatable = false;    ///< Given any number of times: `color[0].view`, `color[1].view`.
         std::string doc;
         const kor::builders::Type* builder = nullptr;   ///< The builder argument it is, for a builder node's input.
+        /// Not one of the few a node of this type cannot do without: an editor shows it once it is asked for, or given.
+        bool optional = false;
+        std::vector<std::string> choices;   ///< When it is one of a few names: what they are.
+        /// What kind of thing a value is, beyond its type, for an editor to offer the right control: "color",
+        /// "module" (a shader module), "entry" (an entry point of the module beside it), "node" (a node's id),
+        /// "components" (component names), "parameter" (one of a pipeline's image parameters), "attributes".
+        std::string editor;
+        /// The setting of the node's `stages` input it belongs to ("eVertex", "eMesh"); empty when it is there whatever that is.
+        std::string mode;
     };
 
     struct NodeType {
@@ -45,7 +54,18 @@ namespace kgraph
         std::vector<Port> outputs;
         std::string doc;
         const kor::builders::Description* builder = nullptr;    ///< For a builder node.
+        /// Whether an editor offers it. A Shader is not: a pipeline names its shaders itself. One still loads and runs.
+        bool listed = true;
     };
+
+    struct Node;
+    /**
+     * @brief The inputs of @p type that a node set up as @p node is has: all of them, but for those that belong to
+     *        another choice of its `stages` (a graphics pipeline drawn with mesh shaders has no vertex shader).
+     */
+    [[nodiscard]] std::vector<Port> PortsFor(const NodeType& type, const Node& node);
+    /** @brief What a graphics pipeline node's `stages` is: "eVertex" unless it says "eMesh". */
+    [[nodiscard]] std::string StagesOf(const Node& node);
 
     /** @brief Every node type. */
     [[nodiscard]] const std::vector<NodeType>& Catalog();
