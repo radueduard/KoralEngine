@@ -1,16 +1,26 @@
 #include <keditor/play.h>
+#include <keditor/project.h>
 
 #include <log.h>
 
 namespace keditor
 {
     PlayScene::PlayScene(std::filesystem::path file) : _file(std::move(file)) {}
-    PlayScene::PlayScene(const kor::SceneArgs& arguments) : _file(arguments.String("scene")) {}
+    // "scene" is a scene file. "project" is a project's folder: its shaders are used, and the scene it starts with run.
+    PlayScene::PlayScene(const kor::SceneArgs& arguments) : _file(arguments.String("scene"))
+    {
+        if (!arguments.Has("project")) return;
+        Project project;
+        if (!Project::Open(arguments.String("project"), project, _error)) return;
+        project.Use();
+        if (_file.empty()) _file = project.ScenePath(project.start);
+    }
 
     void PlayScene::Initialize()
     {
         New();
-        if (!_file.empty() && !Open(_file, _error)) kor::log::Error("{}", _error);
+        if (!_error.empty()) kor::log::Error("{}", _error);     // the project it was given could not be opened
+        else if (!_file.empty() && !Open(_file, _error)) kor::log::Error("{}", _error);
     }
 
     // A frame, in the order a script counts on: its updates, then what graphics scripts make for the passes, then the

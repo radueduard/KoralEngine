@@ -1,0 +1,16 @@
+<Project>
+  <!-- Shared by every project here. KoralSdk is the Koral SDK the engine was built against: its C# assemblies are
+       referenced from it. Pass -p:KoralSdk=<sdk>, or set KORAL_SDK. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <Version>0.1.0</Version>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <KoralSdk Condition="'$(KoralSdk)' == ''">$(KORAL_SDK)</KoralSdk>
+    <KoralDotnet>$(KoralSdk)/lib/koral-dotnet</KoralDotnet>
+  </PropertyGroup>
+</Project>

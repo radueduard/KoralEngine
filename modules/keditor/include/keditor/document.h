@@ -46,6 +46,11 @@ namespace keditor
         [[nodiscard]] kscript::Scripts& Scripts() { return _scripts; }
         /** @brief The document whose passes run in @p frameGraph, or null: how code handed a scene finds what runs in it. */
         [[nodiscard]] static Document* Of(const kor::FrameGraph* frameGraph);
+        /**
+         * @brief Makes Of(@p other) the document of @p frameGraph too, until @p frameGraph is null: an editor's own
+         *        scene answering for the scene it edits, whichever document that scene has at the time.
+         */
+        static void Alias(const kor::FrameGraph* other, const kor::FrameGraph* frameGraph);
 
         /** @brief Each frame, before the frame graph runs. */
         void Update();

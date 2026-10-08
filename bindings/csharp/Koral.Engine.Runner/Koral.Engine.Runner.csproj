@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- koral-engine-dotnet: a Koral Engine project run with its C# scripts, in its own window or in the editor. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>koral-engine-dotnet</AssemblyName>
+    <RootNamespace>Koral.Engine.Runner</RootNamespace>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Koral.Engine/Koral.Engine.csproj" />
+    <Reference Include="Koral">
+      <HintPath>$(KoralDotnet)/Koral.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

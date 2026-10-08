@@ -32,6 +32,35 @@ if(Koral_FOUND)
     add_subdirectory(modules/keditor)
     add_subdirectory(modules/kengine)
 
+    # Scripts in C#: the engine's C# layer and the program that runs a project with it. Built where there is a .NET
+    # SDK and the Koral SDK has its C# assemblies.
+    find_program(KORAL_ENGINE_DOTNET dotnet)
+    get_filename_component(KORAL_ENGINE_SDK "${Koral_DIR}/../../.." ABSOLUTE)
+    if(KORAL_ENGINE_DOTNET AND EXISTS "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.dll")
+        set(KORAL_ENGINE_DOTNET_OUT "${CMAKE_BINARY_DIR}/dotnet")
+        file(GLOB_RECURSE KORAL_ENGINE_CS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bindings/csharp/*.cs" "${CMAKE_SOURCE_DIR}/bindings/csharp/*.csproj")
+        list(FILTER KORAL_ENGINE_CS EXCLUDE REGEX "/(bin|obj)/")
+        add_custom_command(OUTPUT "${KORAL_ENGINE_DOTNET_OUT}/koral-engine-dotnet.dll" "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll"
+            COMMAND ${KORAL_ENGINE_DOTNET} build "${CMAKE_SOURCE_DIR}/bindings/csharp/Koral.Engine.Runner/Koral.Engine.Runner.csproj"
+                    "-p:KoralSdk=${KORAL_ENGINE_SDK}" -o "${KORAL_ENGINE_DOTNET_OUT}" --nologo -v quiet
+            COMMAND ${KORAL_ENGINE_DOTNET} build "${CMAKE_SOURCE_DIR}/bindings/csharp/Koral.Engine.Tests/Koral.Engine.Tests.csproj"
+                    "-p:KoralSdk=${KORAL_ENGINE_SDK}" -o "${KORAL_ENGINE_DOTNET_OUT}" --nologo -v quiet
+            DEPENDS ${KORAL_ENGINE_CS}
+            COMMENT "Building the engine's C# layer"
+            VERBATIM)
+        add_custom_target(koral-engine-dotnet ALL DEPENDS "${KORAL_ENGINE_DOTNET_OUT}/koral-engine-dotnet.dll" koral-engine)
+        # Beside the assemblies, where they look for it.
+        add_custom_command(TARGET koral-engine-dotnet POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:koral-engine>" "${KORAL_ENGINE_DOTNET_OUT}/")
+        if(KORAL_ENGINE_BUILD_TESTS)
+            add_test(NAME CSharp.Scripts COMMAND ${KORAL_ENGINE_DOTNET} "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll")
+            set_tests_properties(CSharp.Scripts PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}")
+        endif()
+        message(STATUS "C# scripts: building koral-engine-dotnet")
+    else()
+        message(STATUS "C# scripts: not built (no dotnet, or a Koral SDK without its C# assemblies)")
+    endif()
+
     add_executable(koral-editor apps/editor/main.cpp)
     target_link_libraries(koral-editor PRIVATE keditor)
     add_executable(koral-play apps/player/main.cpp)

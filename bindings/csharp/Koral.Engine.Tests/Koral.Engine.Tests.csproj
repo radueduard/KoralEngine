@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The engine from C#, end to end on a real device with no display: a scene opened from the engine's library,
+       scripts compiled from source, run, edited and loaded again. One process, one application. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RollForward>LatestMajor</RollForward>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Koral.Engine/Koral.Engine.csproj" />
+    <Reference Include="Koral">
+      <HintPath>$(KoralDotnet)/Koral.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

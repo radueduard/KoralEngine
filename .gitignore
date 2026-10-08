@@ -10,3 +10,5 @@
 # Machine-local presets the Hub writes
 CMakePresets.json
 CMakeUserPresets.json
+bin/
+obj/

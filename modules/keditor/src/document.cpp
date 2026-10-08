@@ -84,10 +84,25 @@ namespace keditor
         }
     }
 
+    namespace {
+        std::map<const kor::FrameGraph*, const kor::FrameGraph*>& Aliases()
+        {
+            static std::map<const kor::FrameGraph*, const kor::FrameGraph*> aliases;
+            return aliases;
+        }
+    }
+
     Document* Document::Of(const kor::FrameGraph* frameGraph)
     {
+        if (const auto alias = Aliases().find(frameGraph); alias != Aliases().end()) frameGraph = alias->second;
         const auto it = Documents().find(frameGraph);
         return it == Documents().end() ? nullptr : it->second;
+    }
+
+    void Document::Alias(const kor::FrameGraph* other, const kor::FrameGraph* frameGraph)
+    {
+        if (frameGraph) Aliases()[other] = frameGraph;
+        else Aliases().erase(other);
     }
 
     Document::Document(kor::FrameGraph& frameGraph) : _frameGraph(&frameGraph), _runtime(std::make_unique<kgraph::Runtime>(frameGraph, &_world))

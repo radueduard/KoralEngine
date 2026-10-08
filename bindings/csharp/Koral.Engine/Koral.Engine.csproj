@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Koral Engine from C#: entities and components, scripts written as classes, compiled from source and loaded
+       again when they change. Over koral_engine.h; managed code only. -->
+  <PropertyGroup>
+    <RootNamespace>Koral.Engine</RootNamespace>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Koral">
+      <HintPath>$(KoralDotnet)/Koral.dll</HintPath>
+    </Reference>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+  </ItemGroup>
+  <Target Name="RequireKoralSdk" BeforeTargets="ResolveReferences" Condition="!Exists('$(KoralDotnet)/Koral.dll')">
+    <Error Text="Koral's C# assemblies were not found in '$(KoralDotnet)'. Pass -p:KoralSdk=&lt;a Koral SDK&gt;, or set KORAL_SDK." />
+  </Target>
+</Project>

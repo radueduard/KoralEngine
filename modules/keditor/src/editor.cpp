@@ -629,6 +629,7 @@ namespace keditor
         // The scene being worked on runs as it would on its own, into an image a panel shows.
         _play = kor::App::Current().OpenOffscreen<PlayScene>({ .title = "Scene", .extent = { 640, 360 } });
         _session = std::make_shared<Session>(*_play);
+        Document::Alias(&Graph(), &_play->Graph());     // whoever is handed this scene is after the one it edits
         if (!_projectPath.empty()) _session->OpenProject(_projectPath);
         _ui = std::make_unique<kui::Ui>(EditorRoot(_session));
         Graph().Add<kui::UiPass>(*_ui);
@@ -649,6 +650,7 @@ namespace keditor
     {
         _ui.reset();
         _session.reset();
+        Document::Alias(&Graph(), nullptr);
         if (_play) kor::App::Current().Close(*_play);
         _play = nullptr;
     }
