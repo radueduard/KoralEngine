@@ -26,7 +26,11 @@ namespace keditor
     // A frame, in the order a script counts on: its updates, then what graphics scripts make for the passes, then the
     // passes readied with all of it.
     void PlayScene::FixedUpdate() { if (_document) _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime())); }
-    void PlayScene::Update() { if (_document) _document->Scripts().Update(static_cast<float>(Time::FrameTime())); }
+    void PlayScene::Update()
+    {
+        _replaced.reset();      // the frame it may have been drawn in is done
+        if (_document) _document->Scripts().Update(static_cast<float>(Time::FrameTime()));
+    }
     void PlayScene::LateUpdate()
     {
         if (!_document) return;
@@ -34,11 +38,14 @@ namespace keditor
         _document->Scripts().Prepare();
         _document->Update();
     }
-    void PlayScene::Shutdown() { _document.reset(); }
+    void PlayScene::Shutdown() { _replaced.reset(); _document.reset(); }
 
     void PlayScene::New()
     {
-        _document.reset();      // the old one's passes out of the graph before the new one's go in
+        // The old one is kept until this scene's next update: started over from an interface, in the middle of a
+        // frame, this frame has drawn with what it holds and is not finished with it. Its passes come out of the
+        // graph when it goes, which is before anything is recorded again.
+        if (_document) _replaced = std::move(_document);
         _document = std::make_unique<Document>(Graph());
     }
 

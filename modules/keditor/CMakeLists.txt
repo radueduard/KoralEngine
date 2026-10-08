@@ -13,5 +13,7 @@ if(KORAL_ENGINE_BUILD_TESTS)
     target_compile_definitions(keditor_tests PRIVATE
         KGRAPH_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/kgraph/tests/shaders"
         KEDITOR_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders")
-    gtest_discover_tests(keditor_tests DISCOVERY_MODE PRE_TEST)
+    # Freed memory is filled with a pattern, and a test that never ends is stopped: an edit that frees what a frame
+    # is still drawing with reads what it freed, and shows as a crash or a wait that never ends rather than as luck.
+    gtest_discover_tests(keditor_tests DISCOVERY_MODE PRE_TEST PROPERTIES ENVIRONMENT "MALLOC_PERTURB_=165" TIMEOUT 180)
 endif()

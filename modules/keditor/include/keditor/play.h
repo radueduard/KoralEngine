@@ -37,6 +37,7 @@ namespace keditor
     private:
         std::filesystem::path _file;
         std::unique_ptr<Document> _document;
+        std::unique_ptr<Document> _replaced;    // the one before, until the frame it was drawn in is done
         std::string _error;
     };
 }

@@ -708,6 +708,20 @@ namespace kgraph
             node.watches.clear();
         }
 
+        // What an edit replaced: kept until the frame that may be drawing with it is done. An edit made from an
+        // interface comes in the middle of a frame, after the scene has recorded commands with these and before the
+        // frame is finished with them. Let go of at the second Update after: by then that frame is long handed over.
+        std::vector<Built> retired, retiring;
+        std::vector<Held> retiredResources, retiringResources;
+        std::vector<EntityRun::Cached> retiredSets, retiringSets;   // an entity's descriptor set, and what it was made of
+        void Retire(Built&& old) { retired.push_back(std::move(old)); }
+        void LetGo()
+        {
+            retiring = std::exchange(retired, {});
+            retiringResources = std::exchange(retiredResources, {});
+            retiringSets = std::exchange(retiredSets, {});
+        }
+
         void Watch(Built& node, kor::ResourceRef<const kor::Shader> shader)
         {
             const kor::u64 watch = const_cast<kor::Shader&>(*shader).RegisterReloadCallback([this] { reloaded = true; });
@@ -1443,6 +1457,7 @@ namespace kgraph
             for (auto it = built.begin(); it != built.end();) {
                 if (graph.Find(it->first)) { ++it; continue; }
                 Unwatch(it->second);
+                Retire(std::move(it->second));
                 it = built.erase(it);
             }
 
@@ -1473,6 +1488,7 @@ namespace kgraph
                 const auto fail = [&](std::string why) {
                     // Failed for another reason than last time, or for the first: what was built is let go of.
                     Unwatch(out);
+                    Retire(Built { .outputs = std::move(out.outputs), .pipeline = out.pipeline, .pass = std::move(out.pass) });
                     out.outputs.clear();
                     out.pass.reset();
                     out.status.ok = false;
@@ -1532,6 +1548,7 @@ namespace kgraph
                     const auto now = fresh.outputs.find(name);
                     if (now != fresh.outputs.end() && now->second.resource && now->second.resource != output.resource) output.resource->replacedBy = now->second.resource;
                 }
+                Retire(std::move(out));
                 out = std::move(fresh);
             }
             Install(graph);
@@ -1626,6 +1643,8 @@ namespace kgraph
                                 made = set.Build();
                                 if (!made.Valid()) failed = made.Failure() ? made.Failure()->message : std::string("its descriptor set could not be built");
                             }
+                            // The set it had may be in what this frame has recorded: kept until that frame is done.
+                            retiredSets.push_back(std::exchange(cached, EntityRun::Cached {}));
                             if (!failed.empty()) { run.cache.erase(KeyOf(entity)); run.changed = true; skip(failed); continue; }
                             cached.set = std::move(made);
                             cached.key.assign(slots, nullptr);
@@ -1660,7 +1679,12 @@ namespace kgraph
             run.report.ran = run.items.size();
 
             // Entities that are gone, or no longer run, let go of what was made for them.
-            if (std::erase_if(run.cache, [](const auto& entry) { return !entry.second.seen; }) > 0) run.changed = true;
+            for (auto it = run.cache.begin(); it != run.cache.end();) {
+                if (it->second.seen) { ++it; continue; }
+                retiredSets.push_back(std::move(it->second));
+                it = run.cache.erase(it);
+                run.changed = true;
+            }
             if (!run.changed) return;
             // Every entity's resources, a slot at a time and once each: what the frame graph orders this pass by.
             for (std::size_t i = 0; i < slots; ++i) {
@@ -1907,9 +1931,15 @@ namespace kgraph
         _impl->Evaluate(_graph);
     }
 
+    void Runtime::Retire(std::shared_ptr<Resource> resource)
+    {
+        if (resource) _impl->retiredResources.push_back(std::move(resource));
+    }
+
     void Runtime::Update()
     {
         const kor::log::Quiet quiet;
+        _impl->LetGo();
         if (_impl->reloaded.exchange(false)) {
             _impl->ResetStale(_graph);
             // Which shader it was is not said: every shader node counts as built again, and what is wired to one follows.

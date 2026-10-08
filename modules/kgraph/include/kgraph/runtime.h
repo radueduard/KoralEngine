@@ -94,6 +94,13 @@ namespace kgraph
          */
         void Update();
 
+        /**
+         * @brief Keeps @p resource until the frame that may be drawing with it is done: for whoever takes one from
+         *        where a pass could find it — an entity's field — in the middle of a frame. What a graph's own edits
+         *        replace is kept so already.
+         */
+        void Retire(std::shared_ptr<Resource> resource);
+
         /** @brief How node @p id fared, or null when there is none. */
         [[nodiscard]] const NodeStatus* Status(std::string_view id) const;
         /** @brief Whether every node is ok. */

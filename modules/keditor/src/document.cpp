@@ -368,7 +368,8 @@ namespace keditor
                 held = _runtime->ResourceOf(*value.String());
                 if (!held) return fail(std::format("there is no node '{}' that makes a resource", *value.String()));
             }
-            *reinterpret_cast<Held*>(at) = std::move(held);
+            // What it held may be in what this frame has drawn with: let go of once that is done.
+            _runtime->Retire(std::exchange(*reinterpret_cast<Held*>(at), std::move(held)));
         } else if (NumbersOf(found->type, numbers)) {
             if (numbers.count == 1) {
                 if (const bool* flag = value.Bool()) WriteNumber(numbers, at, *flag ? 1.0 : 0.0);

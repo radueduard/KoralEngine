@@ -396,3 +396,49 @@ TEST_F(EditorTest, AnImagesUsageIsChangedUnderARunningSceneWithoutHarm) {
     for (const auto& record : kor::log::HistorySince(logged))
         EXPECT_EQ(record.message.find("VUID"), std::string::npos) << record.message;
 }
+
+namespace {
+    /** A scene opened after the one being edited, so updated after it: what it does, it does once that scene has recorded its frame. */
+    class Late final : public kor::Scene {
+    public:
+        void Update() override { if (auto run = std::exchange(next, {})) run(); }
+        std::function<void()> next;
+    };
+}
+
+// An edit made from the interface is made in the middle of a frame: the editor's window is updated after the scene
+// it shows has recorded what it draws with, and before the frame is finished. What the edit replaces has to outlast
+// that frame. Ticking a usage flag in the inspector once freed the image the frame was still drawing with.
+TEST_F(EditorTest, AnEditMadeMidFrameDoesNotFreeWhatTheFrameIsDrawingWith) {
+    scene::MakeProject("midframe");
+    Open();
+    using kgraph::Value;
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    auto* late = support::App()->OpenOffscreen<Late>({ .title = "late", .extent = { 8, 8 } });
+    const auto frames = [&](int n) { for (int i = 0; i < n; ++i) support::App()->Frame(); };
+    const auto midFrame = [&](std::function<void()> edit) { late->next = std::move(edit); frames(3); };
+    frames(4);
+
+    for (int round = 0; round < 8; ++round) {
+        // The image the scene draws into and shows, built again: with another usage, another size.
+        midFrame([&] { Doc().SetInput("canvas", "usage", round % 2 ? Value::List { "eColorAttachment", "eTransferSrc" } : Value::List { "eColorAttachment", "eTransferSrc", "eSampled" }); });
+        midFrame([&] { Doc().SetInput("canvas", "extent.x", 32 + round); });
+        // An image entities hold and two passes use; a pipeline; a pass.
+        midFrame([&] { Doc().SetInput("image 1", "extent.x", 16 + round); });
+        midFrame([&] { Doc().SetInput("backdrop", "extent.x", 4 + round); });
+        midFrame([&] { Doc().SetInput("show", "rasterizationState", Value(Value::Members { { "lineWidth", 1.0 + round } })); });
+        midFrame([&] { Doc().SetInput("run", "groupSize.x", 8 + round % 2); });
+        // An entity's resource swapped, and an entity gone.
+        midFrame([&] { Doc().SetField(Doc().Entities().front(), "show", "source", round % 2 ? "image 0" : "image 1"); });
+    }
+    EXPECT_TRUE(Doc().Runtime().Ok());
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    midFrame([&] { Doc().DestroyEntity(Doc().Entities().back()); });
+    midFrame([&] { Doc().RemoveNodes({ "draw", "show" }); });
+    // And the whole scene replaced: opened anew, as the File menu does it.
+    midFrame([&] { Session().Play().New(); });
+    frames(3);
+    support::App()->Close(*late);
+    frames(1);
+}
