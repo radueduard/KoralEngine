@@ -1,0 +1,12 @@
+# Build trees
+/build/
+/cmake-build-*/
+
+# IDE
+/.idea/
+/.vs/
+/.vscode/
+
+# Machine-local presets the Hub writes
+CMakePresets.json
+CMakeUserPresets.json

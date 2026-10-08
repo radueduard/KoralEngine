@@ -1,0 +1,189 @@
+# Koral Engine — plan
+
+Status: draft, 2026-10-08. This plan builds what [design.md](design.md) describes, in dependency order.
+Milestones prefixed **F** go in the framework (GFX, branch `v2-development`). Milestones prefixed **E** go
+in this repository. Each milestone ends at a gate: what has to work, and be tested, before it is done.
+
+```
+F1 shader reflection ─┐
+F2 binding assignment ─┼──────────────┐
+F3 builder descriptions ─► E3 graph model ─► E4 pipelines per entity ─► E5 editor ─► E6 scripts ─► E7 batching
+F4 query-driven passes ───────────────────┘                    ▲            ▲
+F5 node editor (koral-ui) ─────────────────────────────────────┘            │
+E1 ECS core ─► E2 shape changes + JSON ─────────────────────────────────────┘
+```
+
+E1 and E2 depend on nothing in the framework and can start at once. The F milestones can be built
+alongside them.
+
+## Framework
+
+**All five are done** (2026-10-08), on GFX `v2-development`, commits `3978bd9`, `fa211b6`, `8892a65` and
+`7a1aefd`. Each section below says what was planned. Where what was built differs, a **Built** note says how.
+
+### F1: Shader reflection for the editor
+
+- Reflect **specialization constants**: id, name, type and default value.
+- Reflect every parameter the editor puts on one side of the split, with its name and type: resources,
+  the push-constant block and its members, and the constants above. Keep it independent of the set and
+  binding numbers, which no longer come from the source.
+
+**Gate:** a Slang shader with no bindings, two specialization constants and a push-constant block
+reflects all of them, by name, from C++ and through the C API.
+
+**Built:** as planned. `Shader::BlockLayout().specializationConstants`, `koral_shader_parameter` and its
+siblings in C, `Shader.Parameters` in C# and Kotlin. `SetEntryPoint(module, entry)` now means Slang without
+`SetLang`, and GLSL without `layout(binding)` compiles.
+
+### F2: Bindings assigned from outside the shader
+
+- `Shader::Builder` takes an assignment of parameters to sets and bindings, keyed by parameter name.
+  The framework writes it into the SPIR-V (`OpDecorate DescriptorSet/Binding`) before the module is made,
+  and any bindings in the source are overwritten.
+- Descriptor set layouts are built from the assignment, so a pipeline gets exactly the two layouts of
+  the split.
+- Changing the assignment rebuilds the pipeline without recompiling the source.
+
+**Gate:** one compute shader, run with every resource on the pipeline's set, then with some moved to the
+per-entity set, gives the same result both ways with no validation errors, and isn't recompiled in
+between.
+
+**Built:** the assignment is on the **pipeline** builder, not the shader: `SetBinding(name, set, binding)`
+on all three pipeline builders. One compiled shader then serves any number of pipelines that split it
+differently, which is what one shader node feeding several pipeline nodes needs. Specialization constants
+are set by name too (`SetSpecializationConstant("radius", 4)`). Sets a pipeline skips are empty layouts.
+
+### F3: Builder descriptions, generated
+
+- A generator reads the C API (`koral_c.h`, which already has a builder for every node type, and is what
+  the C# and Kotlin generators already parse). It writes a description of each builder: its settings,
+  their types and defaults, enum values, and which ones are required.
+- It ships with the SDK (a JSON file, plus a C++ table), with a `--check` ctest like the other generators.
+- The engine makes a node per builder from it, and calls the builder through it.
+
+**Gate:** the description covers every builder in `koral_c.h`, and a test builds an image, a sampler and
+a compute pipeline purely from descriptions plus values.
+
+**Built:** `kor::builders` in `builderDescriptions.h` (`All()`, `Find("Image")`, `Build(description,
+constructor values, calls)`), and `share/Koral/builders.json`. Two differences from the plan. Defaults are
+not listed: a setting never given leaves the builder's own default, so nothing is restated. And "required"
+is not listed: a build that lacks something comes back poisoned with the builder's own error, which is what
+a node shows. Descriptor sets and frame-graph pass builders are left out on purpose.
+
+### F4: Frame-graph passes whose resources come from a query
+
+- A pass can declare a **set of resources supplied at run time** (by the engine, from an ECS query)
+  instead of naming each one. The graph orders passes by them and synchronises them, as it does named
+  resources.
+- The graph is reordered only when the set's membership changes, not every frame.
+
+**Gate:** two passes, one writing per-entity images and one sampling them, order themselves correctly
+as entities are added and removed, with synchronisation validation clean.
+
+**Built:** `kor::ResourceSet` and `FrameGraph::ImportSet(name, set)`. Passes `Read` and `Write` the set's
+name and look its members up as they record (`PassResources::SetNamed`). Because the order depends only on
+the name, a membership change rebuilds nothing at all. Sets change between frames; a change while passes
+record is refused. On a device whose async compute queue is a separate family, a pass using a set runs on
+the graphics queue. In C, C# and Kotlin too.
+
+### F5: A node editor in koral-ui
+
+- Nodes with typed input and output ports, wires, pan and zoom, selecting and moving several nodes (with
+  a selection rectangle), deleting, copying and pasting, and comments or groups.
+- Ports refuse wires of the wrong type, and the editor can show a node as invalid and say why.
+- In C++ first, since the editor is C++. C, C# and Kotlin follow koral-ui's usual layers.
+
+**Gate:** a graph of a few hundred nodes edits smoothly, and every interaction above is covered by
+tests that drive the pointer.
+
+**Built:** `kui::NodeEditor(graph, options)` in `kui/nodes.h`: the graph is the caller's and every change
+comes back as a callback. Dragging in a 300-node graph costs under a millisecond of the view's work a frame
+in Release. Copy, paste and duplicate are callbacks (the engine serialises). Still to do: the C, C# and
+Kotlin layers, and popups opened from controls inside a zoomed node are placed as if it were not zoomed.
+
+## Engine
+
+### E1: ECS core
+
+kecs, from the earlier plan, adapted:
+
+- Component types defined at run time: size, alignment, and copy, move and destroy operations, so
+  components holding GPU resources keep their reference counts right. Types are named by reflection.
+- Archetypes, entities (index plus generation), tags (components without data), and a per-entity enable
+  bit on every component that doesn't move the entity to another archetype.
+- Queries with required, excluded and optional components, tags, and enabled-only matching. Change
+  ticks, deferred commands, and a parent/child hierarchy.
+
+**Gate:** unit tests for all of the above, clean under ASan and UBSan, plus a million entities created,
+churned and iterated, with timings recorded.
+
+### E2: Component types that change shape, and JSON
+
+- A component type can be replaced by a new version. Entities are migrated: fields keeping their name
+  and type keep their values, and the others reset.
+- Worlds save to and load from JSON through reflection, with run-time component types included.
+
+**Gate:** a component edited three times (a field added, retyped, removed) keeps the values it should
+across the edits, and a world round-trips through JSON unchanged.
+
+### E3: The graph model
+
+- Engine-owned resources: named, shared and refcounted.
+- The scene's pass graph as data. Nodes come from F3's descriptions: object nodes, shader nodes (module
+  plus entry point), mesh nodes, value nodes with their operations, command nodes, dependency nodes,
+  and clear-only and blit-only passes.
+- Evaluating it builds the objects from their nodes' inputs, and rebuilds only what changed. It saves
+  to and loads from JSON.
+
+**Gate:** a graph loaded from JSON makes an image, runs a compute shader once (everything bound, so no
+component), and clears and blits to a window, without the editor.
+
+### E4: Pipelines run per entity
+
+- The split: parameters left unset on the pipeline become a generated component (E1 type, E2 migration).
+  Pipeline-wide constants are specialization constants, and per-entity constants are push constants.
+- Command nodes run per entity over a query on that component, narrowed by tags, skipping disabled
+  components. Compute first, then graphics (mesh node plus the user's choice of draw, into a framebuffer),
+  then ray tracing.
+- Pass order from resource usage, per-entity resources included (F4). A cycle is an error unless one
+  side reads the previous frame.
+- When a shader changes, wires and components keep what keeps its name and type.
+
+**Gate:** a scene where many entities each own an image that one compute node processes and a graphics
+node draws; tags and disabling narrow both; editing the shader keeps what it should.
+
+### E5: The editor
+
+- The node editor (F5) over the scene's graph, an inspector for nodes and entities, an outliner, and the
+  scene's view (an offscreen scene in a panel), all on koral-ui.
+- Editing is live: a change to the graph, a node, an entity or a shader shows in the next frame.
+- Projects open, save (JSON) and run from the editor and from the Hub.
+
+**Gate:** E4's scene is built from nothing in the editor, saved, reopened, and runs the same outside it.
+
+### E6: Scripts
+
+- A C API for the ECS, and C# and Kotlin layers over it.
+- `Script`: a class whose fields are a component type (data in the ECS) and whose lifecycle methods are
+  called on each component (created, started, update, late and fixed update, enabled, disabled,
+  destroyed).
+- `GraphicsScript`: makes input resources that nodes take, such as turning lights into cameras.
+- Hot reload in both languages, migrating changed component types by the E2 rule.
+
+**Gate:** shadow mapping where a `GraphicsScript` turns light entities into cameras and the graph draws
+their shadow maps, and a `Script` moves the lights, all edited and reloaded while it runs, in C# and in
+Kotlin.
+
+### E7: Batching (opt in)
+
+- Rewriting per-entity resources into arrays indexed by an entity number from the GPU. Compute uses an
+  extra dispatch dimension. Graphics uses multi-draw-indirect over shared mesh buffers, and per-entity
+  push constants become a buffer.
+- The editor says when a node can't be batched and why, and runs it per entity instead.
+
+**Gate:** a batched node gives the same picture as unbatched, and 10,000 entities are measurably faster.
+
+## First steps
+
+The framework milestones are done. Next is **E1** in this repository: the ECS core, which unblocks
+everything on the engine side. E3 can start as soon as E1's component types exist, since F3 is there.
