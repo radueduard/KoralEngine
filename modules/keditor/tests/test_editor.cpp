@@ -547,6 +547,49 @@ TEST_F(EditorTest, OutputsComeOffAgainAndAnInputInPartsIsWiredWhole) {
     EXPECT_FALSE(Doc().Graph().Find(run)->inputs.contains("groups"));
 }
 
+// A triangle from nothing but nodes: a picture, a framebuffer of it, a pipeline whose vertex shader makes its own
+// vertices, and a draw. No mesh, no vertex layout, no entity.
+TEST_F(EditorTest, ATriangleIsDrawnWithNodesAndNoMesh) {
+    const auto project = scene::MakeProject("triangle");
+    std::filesystem::copy_file(std::filesystem::path(KGRAPH_TEST_SHADERS) / "triangle.slang", project.ShaderDirectory() / "triangle.slang");
+    Open();
+    const std::string image = Doc().AddNode("Image", 40, 40);
+    Doc().SetInput(image, "usage", kgraph::Value::List { "eColorAttachment", "eTransferSrc", "eSampled" });
+    const std::string view = Doc().AddNode("ImageView", 240, 40);
+    Doc().Connect(image, "out", view, "image");
+    const std::string target = Doc().AddNode("Framebuffer", 440, 40);
+    Doc().Connect(view, "out", target, "color[0].view");
+    const std::string pipeline = Doc().AddNode("GraphicsPipeline", 440, 240);
+    EXPECT_FALSE(Doc().Graph().Find(pipeline)->inputs.contains("vertex.layout")) << "a layout is for a shader that reads vertices: not something every pipeline is given";
+    Doc().SetInput(pipeline, "vertex.module", "triangle");
+    Doc().SetInput(pipeline, "vertex.entry", "vertexMain");
+    Doc().SetInput(pipeline, "fragment.module", "triangle");
+    Doc().SetInput(pipeline, "fragment.entry", "fragmentMain");
+    Doc().Connect(target, "out", pipeline, "framebuffer");
+    const std::string draw = Doc().AddNode("Draw", 640, 240);
+    Doc().Connect(pipeline, "out", draw, "pipeline");
+    const std::string screen = Doc().AddNode("Screen", 840, 40);
+    const std::string show = Doc().AddNode("Blit", 840, 240);
+    Doc().Connect(image, "out", show, "source");
+    Doc().Connect(screen, "out", show, "destination");
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_EQ(Doc().Runtime().ReportOf(draw), nullptr) << "it draws once: no entity has anything to give it";
+
+    // The draw says the rest when asked: how many vertices, where, over what.
+    Session().Select(draw);
+    EXPECT_TRUE(Shows("more it can be given"));
+    EXPECT_FALSE(Shows("vertexCount"));
+    Session().Show(draw, "vertexCount");
+    EXPECT_TRUE(Shows("vertexCount"));
+    Doc().SetInput(draw, "scissor", kgraph::Value::List { 0, 0, 256, 512 });
+    EXPECT_TRUE(Shows("scissor"));
+    Sheet("triangle");
+    Doc().SetInput(draw, "cullMode", "eBack");
+    EXPECT_TRUE(Doc().Runtime().Status(draw)->ok) << Doc().Runtime().Status(draw)->error;
+    EXPECT_TRUE(Shows("eBack"));
+}
+
 TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {
     const auto first = [](const std::string_view typed) {
         const auto found = keditor::FindNodeTypes(typed);

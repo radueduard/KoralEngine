@@ -6,7 +6,7 @@ target_link_libraries(kgraph PUBLIC kecs Koral::Koral)
 target_compile_options(kgraph PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>)
 
 if(KORAL_ENGINE_BUILD_TESTS)
-    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/support.cpp)
+    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/test_draw.cpp tests/support.cpp)
     target_link_libraries(kgraph_tests PRIVATE kgraph GTest::gtest GTest::gtest_main)
     target_compile_definitions(kgraph_tests PRIVATE KGRAPH_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders")
     # Freed memory is filled with a pattern, and a test that never ends is stopped: an edit that frees what a frame

@@ -58,6 +58,15 @@ An input that is x, y and z on one line (`extent`, a Dispatch's `groups`) can be
 its name from **Add input** and it becomes a port on the node, in place of the three numbers. Its own **x**
 brings the numbers back.
 
+### Drawing
+
+A new Draw needs only its pipeline. With a vertex shader that makes its own vertices (`SV_VertexID`), that
+is a whole picture: Image → ImageView → Framebuffer → GraphicsPipeline → Draw, and a Blit of the image to a
+Screen. No mesh, no vertex layout, no entity. Everything else a draw can say is under **Add input**: a mesh
+to draw instead of the entities', how many vertices and instances, an indirect buffer, the viewport and
+scissor, what the framebuffer is cleared to, and the state the pipeline leaves open (culling, depth,
+stencil, line width).
+
 ### A node in the inspector
 
 A node shows the inputs it cannot do without and the ones it has been given. An Image shows its format,

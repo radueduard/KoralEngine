@@ -213,6 +213,8 @@ namespace kgraph
             Held framebuffer;                                   // a graphics pipeline's
             kor::ResourceRef<const kor::Shader> vertexShader;
             kor::u32 numThreads[3] { 0, 0, 0 };                 // a compute pipeline's work group; zeros for the rest
+            bool meshShaders = false;                           // a graphics pipeline drawn with mesh shaders
+            bool vertexInputs = false;                          // its vertex shader reads vertices: it needs a mesh
         };
 
         /** One entity a pass runs for, as readied this frame. */
@@ -968,6 +970,8 @@ namespace kgraph
             info->shaders = ShadersOf(inputs, &info->vertexShader);
             const Interface interface = Reflect(info->shaders);
             info->ports = interface.ports;
+            info->meshShaders = node.type == "GraphicsPipeline" && StagesOf(node) == "eMesh";
+            info->vertexInputs = info->vertexShader.Get() && !info->vertexShader->BlockLayout().inputs.empty();
             out.pipeline = info;    // its inputs are known from here, built or not
 
             const auto ours = [&](const std::string_view name) { return interface.Find(name) != nullptr; };
@@ -1165,6 +1169,72 @@ namespace kgraph
                 }
                 return {};
             };
+            // What a pass is set up with, read one at a time: the first that is wrong is why the node fails.
+            std::string wrong;
+            const auto mistaken = [&](std::string why) { if (wrong.empty()) wrong = std::move(why); };
+            const auto has = [&](const char* name) { return !value(name).IsNull(); };
+            const auto num = [&](const char* name, const double otherwise, const double least = 0, const double most = 4294967295.0) -> double {
+                const Value& given = value(name);
+                if (given.IsNull()) return otherwise;
+                const double* number = given.Number();
+                if (!number || *number < least || *number > most) { mistaken(std::format("'{}' is a number from {} to {}", name, least, most)); return otherwise; }
+                return *number;
+            };
+            const auto flag = [&](const char* name) -> std::optional<bool> {
+                const Value& given = value(name);
+                if (given.IsNull()) return std::nullopt;
+                if (!given.Bool()) { mistaken(std::format("'{}' is true or false", name)); return std::nullopt; }
+                return *given.Bool();
+            };
+            const auto pick = [&](const char* name, const std::vector<std::string>& of) -> int {   // which of them; -1 when not given
+                const Value& given = value(name);
+                if (given.IsNull()) return -1;
+                const std::string* chosen = given.String();
+                const auto at = chosen ? std::ranges::find(of, *chosen) : of.end();
+                if (at == of.end()) {
+                    std::string all;
+                    for (const auto& each : of) all += std::format("{}{}", all.empty() ? "" : ", ", each);
+                    mistaken(std::format("'{}' is one of {}", name, all));
+                    return -1;
+                }
+                return static_cast<int>(at - of.begin());
+            };
+            const auto several = [&](const char* name, const std::size_t count, const char* what) -> std::optional<std::vector<float>> {
+                const Value& given = value(name);
+                if (given.IsNull()) return std::nullopt;
+                const auto* items = given.Items();
+                if (!items || items->size() != count || !std::ranges::all_of(*items, [](const Value& v) { return v.Number() != nullptr; })) {
+                    mistaken(std::format("'{}' is {} numbers: {}", name, count, what));
+                    return std::nullopt;
+                }
+                std::vector<float> out;
+                for (const auto& item : *items) out.push_back(static_cast<float>(*item.Number()));
+                return out;
+            };
+            const auto each3 = [&](const std::string& prefix, const int otherwise) {
+                kor::IVec3 out(otherwise);
+                const char* axes[3] { ".x", ".y", ".z" };
+                for (int axis = 0; axis < 3; ++axis) out[axis] = static_cast<int>(std::llround(num((prefix + axes[axis]).c_str(), otherwise, 0, 65536)));
+                return out;
+            };
+            const auto whole = [&](const char* name, const double otherwise = 0) { return static_cast<kor::u32>(std::llround(num(name, otherwise))); };
+            // A buffer wired in; empty when nothing is, and wrong when it has to be there or lacks what it is used as.
+            const auto bufferIn = [&](const char* name, const bool needed, const kor::Buffer::Usage usage, const char* usageName, const char* as) -> kor::ResourceRef<const kor::Buffer> {
+                const auto it = inputs.find(name);
+                const auto ref = it == inputs.end() ? kor::ResourceRef<const kor::Buffer>() : BufferRefOf(it->second.resource.get());
+                if (!ref.Get()) {
+                    if (needed || (it != inputs.end() && it->second.resource)) mistaken(std::format("'{}' needs a buffer wired in", name));
+                    return {};
+                }
+                if (!(ref->UsageFlags() & usage)) mistaken(std::format("the buffer wired to '{}' needs {} among its usage, {}", name, usageName, as));
+                return ref;
+            };
+            const auto bufferUse = [](const kor::ResourceRef<const kor::Buffer>& buffer) {
+                Member member;
+                member.id = buffer.Get();
+                member.buffer = buffer;
+                return member;
+            };
             // The pipeline a pass runs, and what its node worked out.
             const auto pipelineOf = [&](const char* kind) -> Expected<std::shared_ptr<const PipelineInfo>> {
                 const auto it = inputs.find("pipeline");
@@ -1215,15 +1285,63 @@ namespace kgraph
                 if ((*source)->screen) return Fail("'source' cannot be the screen");
                 if (lacks(**source, kor::Image::Usage::eTransferSrc)) return Fail("the source needs eTransferSrc among its usage, to be copied from");
                 const auto from = ImageRefOf(source->get());
+                kor::Blit how;
+                if (pick("filter", { "eNearest", "eLinear" }) == 1) how.filtering = kor::Filter::eLinear;
+                how.srcOffset = each3("sourceOffset", 0);
+                how.srcExtent = each3("sourceExtent", -1);
+                how.dstOffset = each3("destinationOffset", 0);
+                how.dstExtent = each3("destinationExtent", -1);
+                how.srcMipLevel = whole("sourceMip");
+                how.dstMipLevel = whole("destinationMip");
+                how.srcBaseArrayLayer = whole("sourceLayer");
+                how.dstBaseArrayLayer = whole("destinationLayer");
+                how.layerCount = whole("layers", 1);
+                if (!wrong.empty()) return Fail(wrong);
+                if (how.srcMipLevel >= from->MipLevels()) return Fail(std::format("'sourceMip' is {}, and the source has {} mip levels", how.srcMipLevel, from->MipLevels()));
                 plan->uses.push_back({ MemberOf(from), true, false });
                 if ((*destination)->screen) {
                     plan->writesScreen = true;
-                    plan->record = [from](kor::CommandBuffer& cb, const PassContext& context) { cb.Blit(from, context.screen); };
+                    plan->record = [from, how](kor::CommandBuffer& cb, const PassContext& context) { cb.Blit(from, context.screen, how); };
                 } else {
                     if (lacks(**destination, kor::Image::Usage::eTransferDst)) return Fail("the destination needs eTransferDst among its usage, to be copied to");
                     const auto to = ImageRefOf(destination->get());
+                    if (how.dstMipLevel >= to->MipLevels()) return Fail(std::format("'destinationMip' is {}, and the destination has {} mip levels", how.dstMipLevel, to->MipLevels()));
+                    // A part of it written leaves the rest as it was: it is read as well.
+                    const bool part = has("destinationOffset.x") || has("destinationOffset.y") || has("destinationExtent.x") || has("destinationExtent.y") || how.dstMipLevel > 0;
+                    plan->uses.push_back({ MemberOf(to), part, true });
+                    plan->record = [from, to, how](kor::CommandBuffer& cb, const PassContext&) { cb.Blit(from, to, how); };
+                }
+            } else if (node.type == "Resolve") {
+                const auto source = image("source");
+                if (!source) return Fail(source.error());
+                const auto destination = image("destination");
+                if (!destination) return Fail(destination.error());
+                if ((*source)->screen) return Fail("'source' cannot be the screen");
+                if (lacks(**source, kor::Image::Usage::eTransferSrc)) return Fail("the source needs eTransferSrc among its usage, to be resolved from");
+                const auto from = ImageRefOf(source->get());
+                if (from->Samples() == kor::SampleCount::e1)
+                    return Fail("the source has one sample a pixel, and there is nothing to resolve: give it more (sampleCount), or use a Blit");
+                kor::Resolve how;
+                how.srcOffset = each3("sourceOffset", 0);
+                how.srcExtent = each3("sourceExtent", -1);
+                how.dstOffset = each3("destinationOffset", 0);
+                how.dstExtent = each3("destinationExtent", -1);
+                how.srcMipLevel = whole("sourceMip");
+                how.dstMipLevel = whole("destinationMip");
+                how.srcBaseArrayLayer = whole("sourceLayer");
+                how.dstBaseArrayLayer = whole("destinationLayer");
+                how.layerCount = whole("layers", 1);
+                if (!wrong.empty()) return Fail(wrong);
+                plan->uses.push_back({ MemberOf(from), true, false });
+                if ((*destination)->screen) {
+                    plan->writesScreen = true;
+                    plan->record = [from, how](kor::CommandBuffer& cb, const PassContext& context) { cb.Resolve(from, context.screen, how); };
+                } else {
+                    if (lacks(**destination, kor::Image::Usage::eTransferDst)) return Fail("the destination needs eTransferDst among its usage, to be resolved to");
+                    const auto to = ImageRefOf(destination->get());
+                    if (to->Samples() != kor::SampleCount::e1) return Fail("the destination is multisampled too: a resolve is onto an image of one sample a pixel");
                     plan->uses.push_back({ MemberOf(to), false, true });
-                    plan->record = [from, to](kor::CommandBuffer& cb, const PassContext&) { cb.Blit(from, to); };
+                    plan->record = [from, to, how](kor::CommandBuffer& cb, const PassContext&) { cb.Resolve(from, to, how); };
                 }
             } else if (node.type == "Copy") {
                 const auto source = image("source");
@@ -1251,33 +1369,71 @@ namespace kgraph
                 plan->uses.push_back({ MemberOf(ref), true, true });
                 plan->record = [ref](kor::CommandBuffer& cb, const PassContext&) { cb.GenerateMipmaps(ref); };
             } else if (node.type == "CopyBuffer") {
-                const auto buffer = [&](const char* name) -> Expected<kor::ResourceRef<const kor::Buffer>> {
-                    const auto it = inputs.find(name);
-                    const auto ref = it == inputs.end() ? kor::ResourceRef<const kor::Buffer>() : BufferRefOf(it->second.resource.get());
-                    if (!ref.Get()) return Fail(std::format("'{}' needs a buffer wired in", name));
-                    return ref;
+                const auto from = bufferIn("source", true, kor::Buffer::Usage::eTransferSrc, "eTransferSrc", "to be copied from");
+                const auto to = bufferIn("destination", true, kor::Buffer::Usage::eTransferDst, "eTransferDst", "to be copied to");
+                const auto sourceOffset = static_cast<kor::u64>(num("sourceOffset", 0, 0, 1e15));
+                const auto destinationOffset = static_cast<kor::u64>(num("destinationOffset", 0, 0, 1e15));
+                if (!wrong.empty()) return Fail(wrong);
+                if (sourceOffset >= from->size() || destinationOffset >= to->size()) return Fail("an offset is past the end of its buffer");
+                const kor::u64 most = std::min(from->size() - sourceOffset, to->size() - destinationOffset);
+                const auto bytes = static_cast<kor::u64>(num("bytes", static_cast<double>(most), 1, static_cast<double>(most)));
+                if (!wrong.empty()) return Fail(wrong);
+                plan->uses.push_back({ bufferUse(from), true, false });
+                plan->uses.push_back({ bufferUse(to), bytes < to->size(), true });
+                plan->record = [from, to, bytes, sourceOffset, destinationOffset](kor::CommandBuffer& cb, const PassContext&) {
+                    cb.CopyBuffer(from, to, bytes, sourceOffset, destinationOffset);
                 };
-                const auto from = buffer("source");
-                if (!from) return Fail(from.error());
-                const auto to = buffer("destination");
-                if (!to) return Fail(to.error());
-                if (!((*from)->UsageFlags() & kor::Buffer::Usage::eTransferSrc)) return Fail("the source needs eTransferSrc among its usage, to be copied from");
-                if (!((*to)->UsageFlags() & kor::Buffer::Usage::eTransferDst)) return Fail("the destination needs eTransferDst among its usage, to be copied to");
-                Member read, written;
-                read.id = from->Get(); read.buffer = *from;
-                written.id = to->Get(); written.buffer = *to;
-                plan->uses.push_back({ std::move(read), true, false });
-                plan->uses.push_back({ std::move(written), false, true });
-                const kor::u64 bytes = std::min((*from)->size(), (*to)->size());
-                plan->record = [source = *from, destination = *to, bytes](kor::CommandBuffer& cb, const PassContext&) { cb.CopyBuffer(source, destination, bytes); };
-            } else if (node.type == "Dispatch") {
-                const auto info = pipelineOf("ComputePipeline");
+            } else if (node.type == "ClearBuffer") {
+                const auto buffer = bufferIn("buffer", true, kor::Buffer::Usage::eTransferDst, "eTransferDst", "to be cleared");
+                const auto offset = static_cast<kor::u64>(num("offset", 0, 0, 1e15));
+                if (!wrong.empty()) return Fail(wrong);
+                if (offset >= buffer->size()) return Fail("'offset' is past the end of the buffer");
+                const auto bytes = static_cast<kor::u64>(num("bytes", static_cast<double>(buffer->size() - offset), 1, static_cast<double>(buffer->size() - offset)));
+                if (!wrong.empty()) return Fail(wrong);
+                plan->uses.push_back({ bufferUse(buffer), bytes < buffer->size(), true });
+                plan->record = [buffer, offset, bytes](kor::CommandBuffer& cb, const PassContext&) { cb.ClearBuffer(buffer, offset, bytes); };
+            } else if (node.type == "CopyBufferToImage" || node.type == "CopyImageToBuffer") {
+                const bool toImage = node.type == "CopyBufferToImage";
+                const auto picture = image("image");
+                if (!picture) return Fail(picture.error());
+                if ((*picture)->screen) return Fail("the screen is not copied to or from a buffer: an image is, and a Blit shows it");
+                const auto buffer = toImage ? bufferIn("buffer", true, kor::Buffer::Usage::eTransferSrc, "eTransferSrc", "to be copied from")
+                                            : bufferIn("buffer", true, kor::Buffer::Usage::eTransferDst, "eTransferDst", "to be copied to");
+                if (lacks(**picture, toImage ? kor::Image::Usage::eTransferDst : kor::Image::Usage::eTransferSrc))
+                    return Fail(toImage ? "the image needs eTransferDst among its usage, to be copied to" : "the image needs eTransferSrc among its usage, to be copied from");
+                const auto ref = ImageRefOf(picture->get());
+                kor::Copy how;
+                how.bufferOffset = static_cast<kor::u64>(num("bufferOffset", 0, 0, 1e15));
+                how.bufferRowLength = whole("bufferRowLength");
+                how.bufferImageHeight = whole("bufferImageHeight");
+                how.imageOffset = each3("imageOffset", 0);
+                how.imageExtent = each3("imageExtent", -1);
+                how.imageMipLevel = whole("mip");
+                how.imageBaseArrayLayer = whole("layer");
+                how.imageLayerCount = whole("layers", 1);
+                if (!wrong.empty()) return Fail(wrong);
+                if (how.imageMipLevel >= ref->MipLevels()) return Fail(std::format("'mip' is {}, and the image has {} mip levels", how.imageMipLevel, ref->MipLevels()));
+                if (how.bufferOffset >= buffer->size()) return Fail("'bufferOffset' is past the end of the buffer");
+                const bool part = has("imageOffset.x") || has("imageOffset.y") || has("imageExtent.x") || has("imageExtent.y") || how.imageMipLevel > 0;
+                plan->uses.push_back({ bufferUse(buffer), toImage, !toImage });
+                plan->uses.push_back({ MemberOf(ref), !toImage || part, toImage });
+                if (toImage) plan->record = [buffer, ref, how](kor::CommandBuffer& cb, const PassContext&) { cb.CopyBufferToImage(buffer, ref, how); };
+                else plan->record = [buffer, ref, how](kor::CommandBuffer& cb, const PassContext&) { cb.CopyImageToBuffer(ref, buffer, how); };
+            } else if (node.type == "Dispatch" || node.type == "TraceRays") {
+                const bool rays = node.type == "TraceRays";
+                const auto info = pipelineOf(rays ? "RayTracingPipeline" : "ComputePipeline");
                 if (!info) return Fail(info.error());
                 // A group works on what the shader says it does, unless the node says otherwise.
                 kor::u32 groups[3] { 1, 1, 1 }, groupSize[3] { 1, 1, 1 };
                 for (int axis = 0; axis < 3; ++axis) groupSize[axis] = std::max<kor::u32>((*info)->numThreads[axis], 1);
-                if (const auto read = counts("groups", groups, "a number of groups"); !read) return Fail(read.error());
-                if (const auto read = counts("groupSize", groupSize, "how many a group works on"); !read) return Fail(read.error());
+                if (rays) std::ranges::fill(groupSize, 1u);   // a ray a pixel
+                if (const auto read = counts(rays ? "size" : "groups", groups, rays ? "a number of rays" : "a number of groups"); !read) return Fail(read.error());
+                if (const auto read = counts("groupSize", groupSize, "how many a group works on"); !rays && !read) return Fail(read.error());
+                // How many groups, read from a buffer a pass before this one wrote.
+                const auto indirectBuffer = rays ? kor::ResourceRef<const kor::Buffer>() : bufferIn("indirect", false, kor::Buffer::Usage::eIndirect, "eIndirect", "to be dispatched from");
+                const auto indirectOffset = rays ? 0 : static_cast<kor::u64>(num("indirectOffset", 0, 0, 1e15));
+                if (!wrong.empty()) return Fail(wrong);
+                if (indirectBuffer.Get() && has("cover")) return Fail("'indirect' and 'cover' both say how many groups: one or the other");
 
                 std::shared_ptr<EntityRun> run;
                 if ((*info)->layout) {
@@ -1311,18 +1467,28 @@ namespace kgraph
                     std::ranges::copy(groupSize, run->groupSize);
                 }
                 plan->uses = (*info)->uses;
+                if (indirectBuffer.Get()) plan->uses.push_back({ bufferUse(indirectBuffer), true, false });
                 plan->entities = run;
-                plan->record = [pipeline = kor::ResourceRef<const kor::ComputePipeline>(kor::capi::ComputePipelineOf(inputs.at("pipeline").resource->handle)),
+                KoralResource* const handle = inputs.at("pipeline").resource->handle;
+                const auto compute = rays ? kor::ResourceRef<const kor::ComputePipeline>() : kor::ResourceRef<const kor::ComputePipeline>(kor::capi::ComputePipelineOf(handle));
+                const auto tracing = rays ? kor::ResourceRef<const kor::RayTracingPipeline>(kor::capi::RayTracingPipelineOf(handle)) : kor::ResourceRef<const kor::RayTracingPipeline>();
+                plan->record = [compute, tracing, rays, indirectBuffer, indirectOffset,
                                 info = *info, run, x = groups[0], y = groups[1], z = groups[2]](kor::CommandBuffer& cb, const PassContext&) {
                     if (run && run->items.empty()) return;
-                    cb.BindComputePipeline(pipeline);
+                    if (rays) cb.BindRayTracingPipeline(tracing);
+                    else cb.BindComputePipeline(compute);
                     if (info->hasSet) cb.BindDescriptorSet(0, info->set);
-                    if (!run) { cb.Dispatch(x, y, z); return; }
+                    const auto go = [&](const kor::u32 a, const kor::u32 b, const kor::u32 c) {
+                        if (rays) cb.TraceRays(a, b, c);
+                        else if (indirectBuffer.Get()) cb.DispatchIndirect(indirectBuffer, indirectOffset);
+                        else cb.Dispatch(a, b, c);
+                    };
+                    if (!run) { go(x, y, z); return; }
                     const EntityLayout& layout = *info->layout;
                     for (const Item& item : run->items) {
                         if (item.set.Get()) cb.BindDescriptorSet(1, item.set);
                         if (layout.pushSize) cb.PushConstantBytes({ run->pushed.data() + item.push, layout.pushSize }, layout.pushFirst);
-                        cb.Dispatch(item.groups[0], item.groups[1], item.groups[2]);
+                        go(item.groups[0], item.groups[1], item.groups[2]);
                     }
                 };
             } else {   // Draw
@@ -1333,56 +1499,174 @@ namespace kgraph
                 if (!target || !target->handle || target->kind != "Framebuffer")
                     return Fail("it draws into a framebuffer: the pipeline's, or one wired to 'framebuffer'. To show it, Blit one of the framebuffer's images to the screen");
                 const auto framebuffer = kor::capi::FramebufferOf(target->handle);
+                const auto pipeline = kor::capi::GraphicsPipelineOf(inputs.at("pipeline").resource->handle);
 
-                DrawWith command = DrawWith::eAuto;
-                if (const Value& given = value("command"); !given.IsNull()) {
-                    const std::string* name = given.String();
-                    if (name && *name == "eAuto") command = DrawWith::eAuto;
-                    else if (name && *name == "eDraw") command = DrawWith::eDraw;
-                    else if (name && *name == "eDrawIndexed") command = DrawWith::eDrawIndexed;
-                    else return Fail("'command' is eAuto (indexed when the mesh has indices), eDraw or eDrawIndexed");
+                // Which draw.
+                enum : int { eAuto, ePlain, eIndexed, eTasks, eIndirect, eIndexedIndirect, eIndirectCount, eIndexedIndirectCount, eTasksIndirect };
+                int command = std::max(pick("command", { "eAuto", "eDraw", "eDrawIndexed", "eDrawMeshTasks", "eDrawIndirect", "eDrawIndexedIndirect", "eDrawIndirectCount",
+                                                         "eDrawIndexedIndirectCount", "eDrawMeshTasksIndirect" }), 0);
+                if (!wrong.empty()) return Fail(wrong);
+                if (command == eAuto && (*info)->meshShaders) command = eTasks;
+                const bool tasks = command == eTasks || command == eTasksIndirect;
+                if (tasks && !(*info)->meshShaders) return Fail("it draws mesh tasks, and the pipeline has no mesh shader: its 'stages' is eVertex");
+                if (!tasks && (*info)->meshShaders) return Fail("the pipeline is drawn with mesh shaders: 'command' is eDrawMeshTasks or eDrawMeshTasksIndirect, or left as eAuto");
+                const bool indirect = command >= eIndirect;
+                const bool counted = command == eIndirectCount || command == eIndexedIndirectCount;
+                const bool mustIndex = command == eIndexed || command == eIndexedIndirect || command == eIndexedIndirectCount;
+
+                // What is drawn: one mesh wired in, each entity's, or none where the vertex shader reads none.
+                kor::ResourceRef<const kor::Mesh> mesh;
+                if (const auto it = inputs.find("mesh"); it != inputs.end() && it->second.resource) {
+                    if (it->second.resource->kind != "Mesh" || !it->second.resource->handle) return Fail("'mesh' needs a mesh wired in");
+                    if (tasks) return Fail("mesh shaders make their own vertices: there is no 'mesh' to give them");
+                    mesh = kor::capi::MeshOf(it->second.resource->handle);
+                    if (const std::string why = Fits(*mesh, *pipeline, (*info)->vertexShader); !why.empty()) return Fail(why);
+                    if (mustIndex && !mesh->IndexCount().has_value()) return Fail("the mesh has no indices, and the node draws indexed");
                 }
-                kor::u32 instances = 1;
-                if (const Value& given = value("instances"); !given.IsNull()) {
-                    if (!given.Number() || *given.Number() < 1) return Fail("'instances' is how many of each mesh, 1 or more");
-                    instances = static_cast<kor::u32>(std::llround(*given.Number()));
-                }
-                bool load = false;
-                if (const Value& given = value("load"); !given.IsNull()) {
-                    if (!given.Bool()) return Fail("'load' is true to draw over what the framebuffer holds, false to clear it first");
-                    load = *given.Bool();
+                const bool wiredIndexed = mesh.Get() && (mustIndex || (command == eAuto && mesh->IndexCount().has_value()));
+                const bool entityMesh = !tasks && !mesh.Get() && (mustIndex || (*info)->vertexInputs);
+
+                const std::optional<kor::u64> vertexCount = has("vertexCount") ? std::optional<kor::u64>(whole("vertexCount", 3)) : std::nullopt;
+                const kor::u32 firstVertex = whole("firstVertex");
+                const auto vertexOffset = static_cast<kor::i32>(std::llround(num("vertexOffset", 0, -2147483648.0, 2147483647.0)));
+                const kor::u32 instances = static_cast<kor::u32>(std::llround(num("instances", 1, 1)));
+                const kor::u32 firstInstance = whole("firstInstance");
+                kor::u32 taskGroups[3] { 1, 1, 1 };
+                if (const auto read = counts("tasks", taskGroups, "a number of groups"); !read) return Fail(read.error());
+
+                const auto indirectBuffer = bufferIn("indirect", indirect, kor::Buffer::Usage::eIndirect, "eIndirect", "to be drawn from");
+                const auto countBuffer = bufferIn("count", counted, kor::Buffer::Usage::eIndirect, "eIndirect", "to be counted from");
+                const auto indirectOffset = static_cast<kor::u64>(num("indirectOffset", 0, 0, 1e15));
+                const auto countOffset = static_cast<kor::u64>(num("countOffset", 0, 0, 1e15));
+                const kor::u32 drawCount = static_cast<kor::u32>(std::llround(num("drawCount", 1, 1)));
+                const kor::u32 stride = whole("stride");
+                if (!wrong.empty()) return Fail(wrong);
+                if (!indirect && indirectBuffer.Get()) return Fail("'indirect' is read by an Indirect command: choose one for 'command'");
+                if (!counted && countBuffer.Get()) return Fail("'count' is read by an IndirectCount command: choose one for 'command'");
+
+                // What the framebuffer starts as, and what is kept of it.
+                kor::RenderInfo render(framebuffer);
+                const std::optional<bool> loadAll = flag("load");
+                const std::vector<std::string> loads { "eClear", "eLoad", "eDontCare" }, stores { "eStore", "eDontCare" };
+                const auto loadOf = [&](const char* name) {
+                    const int chosen = pick(name, loads);
+                    if (chosen < 0) return loadAll.value_or(false) ? kor::LoadOperation::eLoad : kor::LoadOperation::eClear;
+                    return chosen == 0 ? kor::LoadOperation::eClear : chosen == 1 ? kor::LoadOperation::eLoad : kor::LoadOperation::eDontCare;
+                };
+                const auto storeOf = [&](const char* name) { return pick(name, stores) == 1 ? kor::StoreOperation::eDontCare : kor::StoreOperation::eStore; };
+                render.SetColorLoadOperation(loadOf("colorLoad")).SetDepthLoadOperation(loadOf("depthLoad")).SetStencilLoadOperation(loadOf("stencilLoad"));
+                render.SetColorStoreOperation(storeOf("colorStore")).SetDepthStoreOperation(storeOf("depthStore")).SetStencilStoreOperation(storeOf("stencilStore"));
+                if (const auto color = several("clearColor", 4, "red, green, blue, alpha"))
+                    for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i) render.SetClearColor(i, kor::Vec4((*color)[0], (*color)[1], (*color)[2], (*color)[3]));
+                if (has("clearDepth")) render.SetClearDepth(static_cast<float>(num("clearDepth", 1, 0, 1)));
+                if (has("clearStencil")) render.SetClearStencil(static_cast<kor::i32>(whole("clearStencil")));
+
+                // What the pipeline leaves to the draw.
+                struct State {
+                    std::optional<std::vector<float>> viewport, scissor, depthBias, blendConstants;
+                    int cullMode = -1, frontFace = -1, depthCompare = -1;
+                    std::optional<bool> depthTest, depthWrite, stencilTest, rasterizerDiscard, primitiveRestart;
+                    std::optional<float> lineWidth;
+                    std::optional<kor::u32> stencilReference, stencilCompareMask, stencilWriteMask;
+                } state;
+                state.viewport = several("viewport", 4, "x, y, width, height");
+                state.scissor = several("scissor", 4, "x, y, width, height");
+                state.depthBias = several("depthBias", 3, "a constant, a clamp, and a factor of the slope");
+                state.blendConstants = several("blendConstants", 4, "red, green, blue, alpha");
+                state.cullMode = pick("cullMode", { "eNone", "eFront", "eBack", "eFrontAndBack" });
+                state.frontFace = pick("frontFace", { "eCounterClockwise", "eClockwise" });
+                state.depthCompare = pick("depthCompare", { "eNever", "eLess", "eEqual", "eLessOrEqual", "eGreater", "eNotEqual", "eGreaterOrEqual", "eAlways" });
+                state.depthTest = flag("depthTest");
+                state.depthWrite = flag("depthWrite");
+                state.stencilTest = flag("stencilTest");
+                state.rasterizerDiscard = flag("rasterizerDiscard");
+                state.primitiveRestart = flag("primitiveRestart");
+                if (has("lineWidth")) state.lineWidth = static_cast<float>(num("lineWidth", 1, 0, 64));
+                if (has("stencilReference")) state.stencilReference = whole("stencilReference");
+                if (has("stencilCompareMask")) state.stencilCompareMask = whole("stencilCompareMask");
+                if (has("stencilWriteMask")) state.stencilWriteMask = whole("stencilWriteMask");
+                for (const auto* box : { &state.viewport, &state.scissor })
+                    if (*box && (std::ranges::any_of(**box, [](const float v) { return v < 0.f; }) || (**box)[2] < 1.f || (**box)[3] < 1.f))
+                        mistaken("'viewport' and 'scissor' are x, y, width, height, in pixels: none below zero, and a width and a height of 1 or more");
+                if (!wrong.empty()) return Fail(wrong);
+
+                // For each entity, when there is anything an entity gives: its mesh, or what the pipeline leaves it to supply.
+                std::shared_ptr<EntityRun> run;
+                if ((*info)->layout || entityMesh) {
+                    auto entities = entitiesOf(*info);
+                    if (!entities) return Fail(entities.error());
+                    run = std::move(*entities);
+                    run->draws = entityMesh;
+                    run->command = mustIndex ? DrawWith::eDrawIndexed : command == eAuto ? DrawWith::eAuto : DrawWith::eDraw;
+                } else if (has("with") || has("without")) {
+                    return Fail("it draws once, with nothing an entity gives it: there are no entities for 'with' and 'without' to narrow");
                 }
 
-                auto entities = entitiesOf(*info);
-                if (!entities) return Fail(entities.error());
-                const std::shared_ptr<EntityRun> run = std::move(*entities);
-                run->draws = true;
-                run->command = command;
-
+                const bool colorLoaded = render.ColorLoadOperation() == kor::LoadOperation::eLoad;
                 for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i)
-                    if (const auto view = framebuffer->ColorAttachment(i); view.Get()) plan->uses.push_back({ MemberOf(view->SourceImage()), load, true });
+                    if (const auto view = framebuffer->ColorAttachment(i); view.Get()) plan->uses.push_back({ MemberOf(view->SourceImage()), colorLoaded, true });
                 if (framebuffer->HasDepthAttachment())
                     if (const auto view = framebuffer->DepthAttachment(); view.Get()) plan->uses.push_back({ MemberOf(view->SourceImage()), true, true });
                 plan->uses.insert(plan->uses.end(), (*info)->uses.begin(), (*info)->uses.end());
+                if (indirectBuffer.Get()) plan->uses.push_back({ bufferUse(indirectBuffer), true, false });
+                if (countBuffer.Get()) plan->uses.push_back({ bufferUse(countBuffer), true, false });
                 plan->entities = run;
-                plan->record = [pipeline = kor::capi::GraphicsPipelineOf(inputs.at("pipeline").resource->handle), framebuffer, info = *info, run, instances, load, target](
-                                   kor::CommandBuffer& cb, const PassContext&) {
-                    kor::RenderInfo render(framebuffer);
-                    if (load) render.SetColorLoadOperation(kor::LoadOperation::eLoad).SetDepthLoadOperation(kor::LoadOperation::eLoad).SetStencilLoadOperation(kor::LoadOperation::eLoad);
+                plan->record = [=, info = *info, t0 = taskGroups[0], t1 = taskGroups[1], t2 = taskGroups[2]](kor::CommandBuffer& cb, const PassContext&) {
                     const auto extent = framebuffer->Extent();
                     cb.BeginRendering(render);   // with nothing to draw, it still clears
-                    if (!run->items.empty()) {
+                    if (!run || !run->items.empty()) {
                         cb.BindGraphicsPipeline(pipeline);
-                        cb.SetViewport(0, 0, extent.x, extent.y).SetScissor(0, 0, extent.x, extent.y);
+                        const auto box = [&](const std::optional<std::vector<float>>& given, const int at, const kor::u32 otherwise) {
+                            return given ? static_cast<kor::u32>((*given)[static_cast<std::size_t>(at)]) : otherwise;
+                        };
+                        cb.SetViewport(box(state.viewport, 0, 0), box(state.viewport, 1, 0), box(state.viewport, 2, extent.x), box(state.viewport, 3, extent.y));
+                        cb.SetScissor(box(state.scissor, 0, 0), box(state.scissor, 1, 0), box(state.scissor, 2, extent.x), box(state.scissor, 3, extent.y));
+                        if (state.cullMode >= 0) {
+                            kor::Flags<kor::CullMode> cull {};
+                            if (state.cullMode == 1 || state.cullMode == 3) cull |= kor::CullMode::eFront;
+                            if (state.cullMode == 2 || state.cullMode == 3) cull |= kor::CullMode::eBack;
+                            cb.SetCullMode(cull);
+                        }
+                        if (state.frontFace >= 0) cb.SetFrontFace(state.frontFace == 0 ? kor::FrontFace::eCounterClockwise : kor::FrontFace::eClockwise);
+                        if (state.depthTest) cb.SetDepthTestEnable(*state.depthTest);
+                        if (state.depthWrite) cb.SetDepthWriteEnable(*state.depthWrite);
+                        if (state.depthCompare >= 0) cb.SetDepthCompareOp(static_cast<kor::CompareOp>(state.depthCompare));
+                        if (state.depthBias) cb.SetDepthBiasEnable(true).SetDepthBias((*state.depthBias)[0], (*state.depthBias)[1], (*state.depthBias)[2]);
+                        if (state.lineWidth) cb.SetLineWidth(*state.lineWidth);
+                        if (state.blendConstants) cb.SetBlendConstants({ (*state.blendConstants)[0], (*state.blendConstants)[1], (*state.blendConstants)[2], (*state.blendConstants)[3] });
+                        if (state.stencilTest) cb.SetStencilTestEnable(*state.stencilTest);
+                        if (state.stencilReference) cb.SetStencilReference(kor::StencilFace::eFrontAndBack, *state.stencilReference);
+                        if (state.stencilCompareMask) cb.SetStencilCompareMask(kor::StencilFace::eFrontAndBack, *state.stencilCompareMask);
+                        if (state.stencilWriteMask) cb.SetStencilWriteMask(kor::StencilFace::eFrontAndBack, *state.stencilWriteMask);
+                        if (state.rasterizerDiscard) cb.SetRasterizerDiscardEnable(*state.rasterizerDiscard);
+                        if (state.primitiveRestart) cb.SetPrimitiveRestartEnable(*state.primitiveRestart);
                         if (info->hasSet) cb.BindDescriptorSet(0, info->set);
                     }
-                    const EntityLayout* layout = info->layout.get();
-                    for (const Item& item : run->items) {
-                        if (item.set.Get()) cb.BindDescriptorSet(1, item.set);
-                        if (layout && layout->pushSize) cb.PushConstantBytes({ run->pushed.data() + item.push, layout->pushSize }, layout->pushFirst);
-                        cb.BindMesh(item.mesh);
-                        if (item.indexed) cb.DrawIndexed(kor::WholeSize, instances);
-                        else cb.Draw(kor::WholeSize, instances);
+                    const auto draw = [&](const Item* item) {
+                        const bool own = item && item->mesh.Get();
+                        const kor::ResourceRef<const kor::Mesh>& bound = own ? item->mesh : mesh;
+                        if (bound.Get()) cb.BindMesh(bound);
+                        switch (command) {
+                        case eTasks: cb.DrawMeshTasks(t0, t1, t2); break;
+                        case eIndirect: cb.DrawIndirect(indirectBuffer, indirectOffset, drawCount, stride); break;
+                        case eIndexedIndirect: cb.DrawIndexedIndirect(indirectBuffer, indirectOffset, drawCount, stride); break;
+                        case eIndirectCount: cb.DrawIndirectCount(indirectBuffer, indirectOffset, countBuffer, countOffset, drawCount, stride); break;
+                        case eIndexedIndirectCount: cb.DrawIndexedIndirectCount(indirectBuffer, indirectOffset, countBuffer, countOffset, drawCount, stride); break;
+                        case eTasksIndirect: cb.DrawMeshTasksIndirect(indirectBuffer, indirectOffset, drawCount, stride); break;
+                        default:
+                            if (own ? item->indexed : wiredIndexed) cb.DrawIndexed(vertexCount.value_or(kor::WholeSize), instances, firstVertex, vertexOffset, firstInstance);
+                            // With no mesh there is nothing to say how many: a triangle, unless the node says.
+                            else cb.Draw(vertexCount.value_or(bound.Get() ? kor::WholeSize : 3), instances, firstVertex, firstInstance);
+                        }
+                    };
+                    if (!run) draw(nullptr);
+                    else {
+                        const EntityLayout* layout = info->layout.get();
+                        for (const Item& item : run->items) {
+                            if (item.set.Get()) cb.BindDescriptorSet(1, item.set);
+                            if (layout && layout->pushSize) cb.PushConstantBytes({ run->pushed.data() + item.push, layout->pushSize }, layout->pushFirst);
+                            draw(&item);
+                        }
                     }
                     cb.EndRendering();
                 };

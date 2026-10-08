@@ -70,7 +70,7 @@ namespace kgraph
                 { "Mesh", { "vertexBuffer.buffer", "vertexLayout" } },
                 { "AccelerationStructure", { "mesh[]" } },
                 { "ComputePipeline", { "compute.module", "compute.entry" } },
-                { "GraphicsPipeline", { "stages", "vertex.module", "vertex.entry", "vertex.layout", "mesh.module", "mesh.entry",
+                { "GraphicsPipeline", { "stages", "vertex.module", "vertex.entry", "mesh.module", "mesh.entry",
                                         "fragment.module", "fragment.entry", "framebuffer" } },
                 { "RayTracingPipeline", { "raygen.module", "raygen.entry" } },
             };
@@ -122,7 +122,11 @@ namespace kgraph
                 { "Clear", { { "color", L { 0, 0, 0, 1 } } } },
                 { "Dispatch", { { "groups.x", 1 }, { "groups.y", 1 }, { "groups.z", 1 },
                                 { "with", L {} }, { "without", L {} } } },
-                { "Draw", { { "command", "eAuto" }, { "instances", 1 }, { "load", false }, { "with", L {} }, { "without", L {} } } },
+                { "Draw", { { "command", "eAuto" }, { "instances", 1 }, { "load", false }, { "with", L {} }, { "without", L {} }, { "vertexCount", 3 }, { "firstVertex", 0 },
+                            { "tasks.x", 1 }, { "tasks.y", 1 }, { "tasks.z", 1 }, { "drawCount", 1 }, { "clearColor", L { 0, 0, 0, 1 } }, { "clearDepth", 1 },
+                            { "depthTest", true }, { "depthWrite", true }, { "lineWidth", 1 }, { "depthBias", L { 0, 0, 0 } }, { "blendConstants", L { 0, 0, 0, 0 } } } },
+                { "TraceRays", { { "size.x", 1 }, { "size.y", 1 }, { "size.z", 1 }, { "with", L {} }, { "without", L {} } } },
+                { "Blit", { { "filter", "eNearest" } } }, { "Resolve", {} },
             };
             const auto of = initial.find(type);
             if (of == initial.end()) return {};
@@ -145,7 +149,11 @@ namespace kgraph
                 { "Clear", "fill colour color wipe erase" }, { "Blit", "copy scale show present stretch resize" },
                 { "Copy", "duplicate image transfer" }, { "CopyBuffer", "duplicate buffer transfer" },
                 { "GenerateMipmaps", "mip mipmap levels downsample" },
-                { "Dispatch", "run compute execute kernel" }, { "Draw", "render rasterize mesh entities" },
+                { "Dispatch", "run compute execute kernel indirect" },
+                { "Draw", "render rasterize mesh entities triangle fullscreen indirect instanced viewport scissor mesh tasks" },
+                { "TraceRays", "ray tracing raygen rtx path trace" }, { "Resolve", "multisample msaa antialias samples" },
+                { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
+                { "CopyImageToBuffer", "download read back texels image buffer transfer" },
                 { "Number", "float scalar constant value" }, { "Bool", "boolean flag true false constant" }, { "String", "text name constant" },
                 { "Vector", "vec2 vec3 vec4 combine compose make" }, { "Color", "colour rgba picker constant" },
                 { "Component", "element index get swizzle" }, { "Split", "break separate components xyz swizzle" },
@@ -283,32 +291,127 @@ namespace kgraph
                               "Another node's output, by the node's id: a resource made elsewhere in the graph, without a wire across it.", nullptr });
 
             // ---- passes -------------------------------------------------------------------------------------------
+            const auto Bool = [](std::string name, std::string doc) { return Port { std::move(name), PortKind::eValue, "bool", false, std::move(doc), nullptr }; };
+            const auto Choice = [&](std::string name, std::vector<std::string> choices, std::string doc) {
+                return chosen({ std::move(name), PortKind::eValue, "string", false, std::move(doc), nullptr }, std::move(choices));
+            };
+            const auto Vector = [&](std::string name, std::string doc) { return hinted({ std::move(name), PortKind::eValue, "vector", false, std::move(doc), nullptr }, "numbers"); };
+            // A box of an image, a number each way: given whole as well, like anything in parts.
+            const auto box = [&](std::vector<Port>& ports, const std::string& name, const std::string& doc) {
+                ports.push_back(optional(Number(name + ".x", doc)));
+                ports.push_back(optional(Number(name + ".y")));
+                ports.push_back(optional(Number(name + ".z")));
+            };
             types.push_back({ "Clear", "Passes", { ResourcePort("image", "Image"), hinted({ "color", PortKind::eValue, "vector", false, "Red, green, blue, alpha.", nullptr }, "color") }, {},
                               "Fills an image with one colour.", nullptr });
-            types.push_back({ "Blit", "Passes", { ResourcePort("source", "Image"), ResourcePort("destination", "Image") }, {},
-                              "Copies an image onto another, scaled to fit: onto the screen, to show it.", nullptr });
+            {
+                std::vector<Port> ports { ResourcePort("source", "Image"), ResourcePort("destination", "Image"),
+                                          optional(Choice("filter", { "eNearest", "eLinear" }, "How it is scaled: eNearest takes the one nearest texel, eLinear blends its neighbours.")) };
+                box(ports, "sourceOffset", "Where in the source the box copied from starts: its corner, when not given.");
+                box(ports, "sourceExtent", "How big the box copied from is: the whole source, when not given.");
+                box(ports, "destinationOffset", "Where in the destination the box copied to starts.");
+                box(ports, "destinationExtent", "How big the box copied to is: the whole destination, when not given. Not the source's size, it scales.");
+                for (const char* name : { "sourceMip", "destinationMip", "sourceLayer", "destinationLayer" }) ports.push_back(optional(Number(name, "Which mip level, or array layer, of the image: the first, when not given.")));
+                ports.push_back(optional(Number("layers", "How many array layers: 1 when not given.")));
+                types.push_back({ "Blit", "Passes", ports, {}, "Copies an image onto another, scaled to fit: onto the screen, to show it.", nullptr });
+                ports.erase(ports.begin() + 2);   // a resolve does not scale
+                types.push_back({ "Resolve", "Passes", std::move(ports), {},
+                                  "Makes an ordinary image of a multisampled one: each pixel the average of its samples. Onto the screen as well.", nullptr });
+            }
             types.push_back({ "Copy", "Passes", { ResourcePort("source", "Image"), ResourcePort("destination", "Image") }, {},
                               "Copies an image onto another of the same size, as it is.", nullptr });
-            types.push_back({ "CopyBuffer", "Passes", { ResourcePort("source", "Buffer"), ResourcePort("destination", "Buffer") }, {},
+            types.push_back({ "CopyBuffer", "Passes",
+                              { ResourcePort("source", "Buffer"), ResourcePort("destination", "Buffer"),
+                                optional(Number("bytes", "How many bytes: as many as the smaller of the two holds, when not given.")),
+                                optional(Number("sourceOffset", "The byte of the source it starts at.")), optional(Number("destinationOffset", "The byte of the destination it starts at.")) }, {},
                               "Copies a buffer's bytes into another: as many as the smaller of the two holds.", nullptr });
+            types.push_back({ "ClearBuffer", "Passes",
+                              { ResourcePort("buffer", "Buffer"), optional(Number("offset", "The byte it starts at.")), optional(Number("bytes", "How many bytes: to the buffer's end, when not given.")) }, {},
+                              "Fills a buffer, or a part of it, with zeroes.", nullptr });
+            for (const bool toImage : { true, false }) {
+                std::vector<Port> ports { ResourcePort(toImage ? "buffer" : "image", toImage ? "Buffer" : "Image"), ResourcePort(toImage ? "image" : "buffer", toImage ? "Image" : "Buffer"),
+                                          optional(Number("bufferOffset", "The byte of the buffer the texels start at.")),
+                                          optional(Number("bufferRowLength", "How many texels a row takes in the buffer, when rows have padding between them: the box's width, when not given.")),
+                                          optional(Number("bufferImageHeight", "How many rows a slice takes in the buffer: the box's height, when not given.")) };
+                box(ports, "imageOffset", "Where in the image the box starts.");
+                box(ports, "imageExtent", "How big the box is: the whole image, when not given.");
+                ports.push_back(optional(Number("mip", "Which mip level of the image.")));
+                ports.push_back(optional(Number("layer", "Which array layer it starts at.")));
+                ports.push_back(optional(Number("layers", "How many array layers: 1 when not given.")));
+                types.push_back({ toImage ? "CopyBufferToImage" : "CopyImageToBuffer", "Passes", std::move(ports), {},
+                                  toImage ? "Copies a buffer's bytes into an image, as its texels." : "Copies an image's texels into a buffer, as bytes.", nullptr });
+            }
             types.push_back({ "GenerateMipmaps", "Passes", { ResourcePort("image", "Image") }, {},
                               "Fills an image's smaller mip levels from its largest.", nullptr });
             const Port with = optional(hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr }, "components"));
             const Port without = optional(hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components"));
             types.push_back({ "Dispatch", "Passes",
-                              { ResourcePort("pipeline", "ComputePipeline"), optional(Number("groups.x", "How many groups to run, each way: rounded up, so an image's extent divided by the pipeline's numThreads covers the image.")), optional(Number("groups.y")), optional(Number("groups.z")),
+                              { ResourcePort("pipeline", "ComputePipeline"),
+                                optional(Number("groups.x", "How many groups to run, each way: rounded up, so an image's extent divided by the pipeline's numThreads covers the image.")), optional(Number("groups.y")), optional(Number("groups.z")),
                                 optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: as many groups as cover it, for each entity's own image when it is per entity. Instead of groups.", nullptr }, "parameter")),
                                 optional(Number("groupSize.x", "How much of the covered image one group works on: the pipeline's numThreads, when not given.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
+                                optional(ResourcePort("indirect", "Buffer", "A buffer that says how many groups, three numbers of 32 bits, written by a pass before this one: instead of groups. It needs eIndirect among its usage.")),
+                                optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")),
                                 with, without }, {},
                               "Runs a compute pipeline: once when everything it needs is wired, and otherwise once for each entity that has its component.", nullptr });
-            types.push_back({ "Draw", "Passes",
-                              { ResourcePort("pipeline", "GraphicsPipeline"),
-                                optional(ResourcePort("framebuffer", "Framebuffer", "What it draws into: the pipeline's own, when not wired.")),
-                                optional(chosen({ "command", PortKind::eValue, "string", false, "eAuto (indexed when the mesh has indices), eDraw or eDrawIndexed.", nullptr }, { "eAuto", "eDraw", "eDrawIndexed" })),
-                                optional(Number("instances", "How many of each mesh: 1 when not given.")),
-                                optional({ "load", PortKind::eValue, "bool", false, "True to draw over what the framebuffer holds; false, or not given, clears it first.", nullptr }),
+            types.push_back({ "TraceRays", "Passes",
+                              { ResourcePort("pipeline", "RayTracingPipeline"),
+                                optional(Number("size.x", "How many rays, each way: one for each pixel of the image they are for.")), optional(Number("size.y")), optional(Number("size.z")),
+                                optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: a ray for each of its pixels. Instead of size.", nullptr }, "parameter")),
                                 with, without }, {},
-                              "Draws every entity that has a Mesh, and the pipeline's component when it has one, into a framebuffer.", nullptr });
+                              "Runs a ray tracing pipeline: once when everything it needs is wired, and otherwise once for each entity that has its component.", nullptr });
+            {
+                const std::vector<std::string> loads { "eClear", "eLoad", "eDontCare" }, stores { "eStore", "eDontCare" };
+                const std::vector<std::string> compares { "eNever", "eLess", "eEqual", "eLessOrEqual", "eGreater", "eNotEqual", "eGreaterOrEqual", "eAlways" };
+                std::vector<Port> ports {
+                    ResourcePort("pipeline", "GraphicsPipeline"),
+                    optional(ResourcePort("framebuffer", "Framebuffer", "What it draws into: the pipeline's own, when not wired.")),
+                    optional(ResourcePort("mesh", "Mesh", "One mesh to draw, instead of each entity's own.")),
+                    optional(Choice("command", { "eAuto", "eDraw", "eDrawIndexed", "eDrawMeshTasks", "eDrawIndirect", "eDrawIndexedIndirect", "eDrawIndirectCount",
+                                                 "eDrawIndexedIndirectCount", "eDrawMeshTasksIndirect" },
+                                    "Which draw. eAuto: indexed when the mesh has indices, mesh tasks when the pipeline's stages is eMesh, and plain vertices otherwise. The Indirect ones read what to draw from the buffer wired to 'indirect'.")),
+                    optional(Number("vertexCount", "How many vertices to draw, or indices when it is drawn indexed: all the mesh has, when not given. A pipeline whose vertex shader takes no vertex inputs needs no mesh, and then this is all there is to draw: 3 when not given, a triangle the shader makes from its SV_VertexID.")),
+                    optional(Number("firstVertex", "The first vertex drawn, or the first index when it is drawn indexed.")),
+                    optional(Number("vertexOffset", "Drawn indexed: what is added to each index before its vertex is read.")),
+                    optional(Number("instances", "How many of each: 1 when not given.")),
+                    optional(Number("firstInstance", "The number of the first instance, as the shader sees it.")),
+                    optional(Number("tasks.x", "With mesh shaders: how many groups of the task (or mesh) shader to run, each way.")), optional(Number("tasks.y")), optional(Number("tasks.z")),
+                    optional(ResourcePort("indirect", "Buffer", "An Indirect command's buffer of draws, written by a pass before this one. It needs eIndirect among its usage.")),
+                    optional(Number("indirectOffset", "The byte of the indirect buffer the first draw is at.")),
+                    optional(Number("drawCount", "How many draws the indirect buffer holds: 1 when not given. With a count buffer, the most it runs.")),
+                    optional(Number("stride", "Bytes from one draw in the indirect buffer to the next: packed one after another, when not given.")),
+                    optional(ResourcePort("count", "Buffer", "For the IndirectCount commands: a buffer holding how many draws to run, a number of 32 bits.")),
+                    optional(Number("countOffset", "The byte of the count buffer the number is at.")),
+                    optional(Bool("load", "True to draw over what the framebuffer holds; false, or not given, clears it first.")),
+                    optional(Choice("colorLoad", loads, "What the colour attachments start as: cleared, as they were (eLoad), or anything at all (eDontCare, when every pixel is drawn).")),
+                    optional(Choice("depthLoad", loads, "What the depth attachment starts as.")),
+                    optional(Choice("stencilLoad", loads, "What the stencil attachment starts as.")),
+                    optional(Choice("colorStore", stores, "Whether what was drawn is kept: eDontCare when nothing reads it after.")),
+                    optional(Choice("depthStore", stores, "Whether the depth drawn is kept.")),
+                    optional(Choice("stencilStore", stores, "Whether the stencil drawn is kept.")),
+                    optional(hinted({ "clearColor", PortKind::eValue, "vector", false, "What the colour attachments are cleared to, in place of what the framebuffer says: red, green, blue, alpha.", nullptr }, "color")),
+                    optional(Number("clearDepth", "What the depth attachment is cleared to, in place of what the framebuffer says.")),
+                    optional(Number("clearStencil", "What the stencil attachment is cleared to.")),
+                    optional(Vector("viewport", "The part of the framebuffer drawn into: x, y, width, height. All of it, when not given.")),
+                    optional(Vector("scissor", "Nothing is drawn outside this box: x, y, width, height. The whole framebuffer, when not given.")),
+                    optional(Choice("cullMode", { "eNone", "eFront", "eBack", "eFrontAndBack" }, "Which faces are not drawn, in place of what the pipeline says.")),
+                    optional(Choice("frontFace", { "eCounterClockwise", "eClockwise" }, "Which way round a face's vertices go when it faces the viewer, in place of what the pipeline says.")),
+                    optional(Bool("depthTest", "Whether what is behind what was drawn is left out, in place of what the pipeline says.")),
+                    optional(Bool("depthWrite", "Whether it writes depth, in place of what the pipeline says.")),
+                    optional(Choice("depthCompare", compares, "How a pixel's depth is compared with what is there, in place of what the pipeline says.")),
+                    optional(Vector("depthBias", "Pushes what is drawn away or nearer: a constant, a clamp, and a factor of its slope. For shadow maps.")),
+                    optional(Number("lineWidth", "How wide lines are drawn.")),
+                    optional(hinted({ "blendConstants", PortKind::eValue, "vector", false, "The constant colour blending is done with, where the pipeline's blending uses one.", nullptr }, "color")),
+                    optional(Bool("stencilTest", "Whether the stencil test is on, in place of what the pipeline says.")),
+                    optional(Number("stencilReference", "What the stencil test compares with, and writes.")),
+                    optional(Number("stencilCompareMask", "Which bits of the stencil are compared.")),
+                    optional(Number("stencilWriteMask", "Which bits of the stencil are written.")),
+                    optional(Bool("rasterizerDiscard", "True to draw nothing: only the vertex stages run.")),
+                    optional(Bool("primitiveRestart", "Whether an index of all ones starts a new strip.")),
+                    with, without };
+                types.push_back({ "Draw", "Passes", std::move(ports), {},
+                                  "Draws with a graphics pipeline into a framebuffer. Each entity that has a Mesh, and the pipeline's component when it has one; or one mesh wired in; or no mesh at all, when the vertex shader makes its own vertices.", nullptr });
+            }
             // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
             static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance" };
             static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };

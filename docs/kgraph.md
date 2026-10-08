@@ -65,8 +65,10 @@ the editor will build its node list and its nodes from.
   it takes as `vertexShader.layout`.
 - **Screen** is the scene's window. **Reference** stands for another node by id, for a resource used far
   from where it is made.
-- **Passes:** Clear, Blit (scaled, and how a picture reaches the screen), Copy (image to image of one
-  size), CopyBuffer, GenerateMipmaps, Dispatch and Draw.
+- **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
+  multisampled image made an ordinary one), Copy (image to image of one size), CopyBuffer, ClearBuffer,
+  CopyBufferToImage, CopyImageToBuffer, GenerateMipmaps, Dispatch, TraceRays and Draw. Every command the
+  framework's command buffer records has a node, and each of its arguments is an input.
 
 ## What a node gives
 
@@ -108,7 +110,7 @@ project's shaders, and `<stage>.entry` the function in it (`<stage>Main` when no
 | Pipeline | Stages |
 |---|---|
 | ComputePipeline | `compute` |
-| GraphicsPipeline, `stages` `eVertex` | `vertex` (with `vertex.layout`), `tessellationControl`, `tessellationEvaluation` (with `patchControlPoints`), `geometry`, `fragment` |
+| GraphicsPipeline, `stages` `eVertex` | `vertex` (with `vertex.layout`, when the shader reads vertices), `tessellationControl`, `tessellationEvaluation` (with `patchControlPoints`), `geometry`, `fragment` |
 | GraphicsPipeline, `stages` `eMesh` | `task`, `mesh`, `fragment` |
 | RayTracingPipeline | `raygen`, `miss[n]`, `hitGroup[n].closestHit`, `.anyHit`, `.intersection`, `callable[n]` |
 
@@ -168,12 +170,50 @@ the image. Or `cover` names one of the pipeline's image parameters and the pass 
 from `groupSize`, which is the pipeline's `numThreads` unless the node says otherwise. With a per-entity
 image, each entity gets its own count.
 
-**Draw** draws every entity that has a `kgraph::Mesh` (and the pipeline's component, when it has one) into
-a framebuffer: the pipeline's own, or the one wired to `framebuffer`. `command` is `eAuto` (indexed when
-the mesh has indices), `eDraw` or `eDrawIndexed`. `instances` is how many of each, and `load` draws over
-what the framebuffer holds, where the default clears it first.
+A Dispatch can also read its group counts from a buffer a pass before it wrote: wire it to `indirect`
+(the buffer needs `eIndirect`), with `indirectOffset` for where in it.
 
-Both take `with` and `without`: lists of component names, usually tags, that narrow which entities run. A
+**TraceRays** runs a ray tracing pipeline the same way: `size` (or `size.x/y/z`) rays, or as many as
+`cover` an image parameter.
+
+**Draw** draws with a graphics pipeline into a framebuffer: the pipeline's own, or the one wired to
+`framebuffer`. What it draws is one of three things.
+
+- **Each entity's mesh.** Every entity that has a `kgraph::Mesh` (and the pipeline's component, when it has
+  one). This is what happens when the vertex shader reads vertices and no mesh is wired.
+- **One mesh,** wired to `mesh`. With nothing left for an entity to supply, it draws once.
+- **No mesh.** A vertex shader that takes no vertex inputs makes its own vertices from `SV_VertexID`, and
+  the pipeline needs no `vertex.layout`. `vertexCount` says how many, 3 when not given: a triangle. This
+  too draws once, with no entities and no world.
+
+`command` picks the draw:
+
+| `command` | What it records | Inputs it reads |
+|---|---|---|
+| `eAuto` | Indexed when the mesh has indices, mesh tasks when the pipeline's `stages` is `eMesh`, plain vertices otherwise | as below |
+| `eDraw` | `Draw` | `vertexCount`, `firstVertex`, `instances`, `firstInstance` |
+| `eDrawIndexed` | `DrawIndexed` | the same (counting indices), and `vertexOffset` |
+| `eDrawMeshTasks` | `DrawMeshTasks` | `tasks` (or `tasks.x/y/z`) |
+| `eDrawIndirect`, `eDrawIndexedIndirect`, `eDrawMeshTasksIndirect` | the draws a buffer holds | `indirect`, `indirectOffset`, `drawCount`, `stride` |
+| `eDrawIndirectCount`, `eDrawIndexedIndirectCount` | as many of them as another buffer says | those, and `count`, `countOffset` (`drawCount` is the most it runs) |
+
+An indirect or count buffer needs `eIndirect` among its usage, and is a use of the pass: the pass that
+writes it runs first.
+
+The rest of a draw is the node's as well:
+
+- **What the framebuffer starts as and keeps:** `load` (true draws over what is there), or each of
+  `colorLoad`, `depthLoad`, `stencilLoad` (`eClear`, `eLoad`, `eDontCare`) and `colorStore`, `depthStore`,
+  `stencilStore` (`eStore`, `eDontCare`). `clearColor`, `clearDepth` and `clearStencil` replace what the
+  framebuffer says it clears to.
+- **Where:** `viewport` and `scissor`, each x, y, width, height in pixels. The whole framebuffer when not
+  given.
+- **State the pipeline leaves to the draw:** `cullMode`, `frontFace`, `depthTest`, `depthWrite`,
+  `depthCompare`, `depthBias`, `lineWidth`, `blendConstants`, `stencilTest`, `stencilReference`,
+  `stencilCompareMask`, `stencilWriteMask`, `rasterizerDiscard`, `primitiveRestart`. One not given is what
+  the pipeline says.
+
+All three take `with` and `without`: lists of component names, usually tags, that narrow which entities run. A
 component switched off on an entity (`world.SetEnabled`) doesn't match, so the entity is passed by without
 being moved or losing its values.
 
@@ -234,8 +274,11 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 
 ## Limits
 
-- No ray tracing pass yet, and no indirect draws. Draw goes into a framebuffer, not straight to the
-  screen: Blit one of the framebuffer's images to show it.
+- Draw goes into a framebuffer, not straight to the screen: Blit one of the framebuffer's images to show it.
+- A draw's stencil operations (what happens on fail and pass) are the pipeline's `depthStencilState`
+  only; the reference and masks can be set on the draw. One `clearColor` is for every colour attachment.
+- A buffer holds no data of its own in a graph: an indirect buffer is written by a compute pass.
+- A debug label or a GPU timer round a pass can't be asked for yet.
 - A cycle between passes is left to the frame graph. Reading a resource as it was last frame
   (`ReadPrevious`) can't be asked for in a graph yet.
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

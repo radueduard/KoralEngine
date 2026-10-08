@@ -1,0 +1,302 @@
+// What a pass can be asked to do: every way the framework draws, dispatches and copies has a node that says it.
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <string>
+#include <vector>
+
+#include <kgraph/catalog.h>
+#include <kgraph/graph.h>
+#include <kgraph/runtime.h>
+
+#include "support.h"
+
+namespace {
+    using support::Frame;
+    using support::GraphScene;
+    using support::Size;
+    using kgraph::Value;
+
+    class DrawTest : public ::testing::Test {
+    protected:
+        void SetUp() override {
+            if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+            GraphScene::withWorld = false;   // nothing here is an entity's: every pass runs once
+            scene = support::App()->OpenOffscreen<GraphScene>({ .title = "draw", .extent = { Size, Size } });
+            ASSERT_NE(scene, nullptr);
+        }
+        void TearDown() override {
+            if (scene) { support::App()->Close(*scene); Frame(); }
+        }
+        /** A picture to draw into, a framebuffer of it, and the picture shown. */
+        static kgraph::Graph Canvas(const char* samples = "e1")
+        {
+            kgraph::Graph graph;
+            graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size }).Set("sampleCount", samples)
+                .Set("usage", Value::List { "eColorAttachment", "eTransferSrc", "eTransferDst", "eSampled" });
+            graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+            graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+            graph.Add("screen", "Screen");
+            return graph;
+        }
+        static kgraph::Node& Triangles(kgraph::Graph& graph)
+        {
+            return graph.Add("triangles", "GraphicsPipeline").Set("vertex.module", "triangle").Set("vertex.entry", "vertexMain")
+                .Set("fragment.module", "triangle").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+        }
+        void Run(const kgraph::Graph& graph)
+        {
+            scene->runtime->Set(graph);
+            for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+            Frame();
+            Frame();
+        }
+        [[nodiscard]] bool Green(const kor::u32 x, const kor::u32 y) const { const auto p = scene->Pixel(x, y); return p.x < 8 && p.y > 247 && p.z < 8; }
+        [[nodiscard]] bool Black(const kor::u32 x, const kor::u32 y) const { const auto p = scene->Pixel(x, y); return p.x < 8 && p.y < 8 && p.z < 8; }
+        GraphScene* scene = nullptr;
+    };
+}
+
+// A triangle, from a vertex shader that makes its own vertices: no mesh, no vertex layout, no entity.
+TEST_F(DrawTest, ATriangleIsDrawnWithoutAMesh) {
+    kgraph::Graph graph = Canvas();
+    Triangles(graph);
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_EQ(scene->runtime->ReportOf("draw"), nullptr) << "it runs once: there are no entities to it";
+    EXPECT_TRUE(Green(3, 3)) << "above the diagonal, the triangle";
+    EXPECT_TRUE(Black(28, 28)) << "below it, what the framebuffer was cleared to";
+
+    // As many vertices as it is told: six are both triangles.
+    graph.Find("draw")->Set("vertexCount", 6);
+    Run(graph);
+    EXPECT_TRUE(Green(3, 3));
+    EXPECT_TRUE(Green(28, 28));
+    // From the fourth on: the second triangle alone.
+    graph.Find("draw")->Set("vertexCount", 3).Set("firstVertex", 3);
+    Run(graph);
+    EXPECT_TRUE(Black(3, 3));
+    EXPECT_TRUE(Green(28, 28));
+
+    // There are no entities for it to be narrowed to.
+    graph.Find("draw")->Set("with", Value::List { "Lit" });
+    scene->runtime->Set(graph);
+    ASSERT_FALSE(scene->runtime->Status("draw")->ok);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("draws once"), std::string::npos) << scene->runtime->Status("draw")->error;
+}
+
+// What the pipeline leaves to the draw is the draw's to say: where it draws, and what it clears to.
+TEST_F(DrawTest, ADrawSaysWhereItDrawsAndWhatItClearsTo) {
+    kgraph::Graph graph = Canvas();
+    Triangles(graph);
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles").Set("vertexCount", 6)
+        .Set("scissor", Value::List { 0, 0, 16, 32 }).Set("clearColor", Value::List { 0, 0, 1, 1 });
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 28)) << "inside the scissor";
+    const auto outside = scene->Pixel(28, 3);
+    EXPECT_GT(outside.z, 247) << "outside it, the colour this draw clears to";
+    EXPECT_LT(outside.y, 8);
+
+    // A second draw over the first, which it loads: the rest is filled in.
+    graph.Add("more", "Draw").Wire("pipeline", "triangles").Set("vertexCount", 6).Set("colorLoad", "eLoad").Set("viewport", Value::List { 16, 0, 16, 32 });
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 28));
+    EXPECT_TRUE(Green(28, 3)) << "the second draw, squeezed into the right half";
+
+    // Nothing drawn: only what it clears to.
+    graph.nodes.erase(std::ranges::find(graph.nodes, "more", &kgraph::Node::id));
+    graph.Find("draw")->Set("rasterizerDiscard", true);
+    Run(graph);
+    EXPECT_GT(scene->Pixel(3, 28).z, 247) << "with the rasterizer discarding, nothing is drawn over the clear";
+    EXPECT_LT(scene->Pixel(3, 28).y, 8);
+
+    graph.Find("draw")->Set("cullMode", "eSideways");
+    scene->runtime->Set(graph);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("'cullMode' is one of eNone, eFront, eBack, eFrontAndBack"), std::string::npos) << scene->runtime->Status("draw")->error;
+}
+
+// One mesh wired to the draw, rather than each entity's.
+TEST_F(DrawTest, AMeshWiredInIsDrawnOnce) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("square", "Primitive").Set("shape", "eQuad");
+    graph.Add("flat", "GraphicsPipeline").Set("vertex.module", "flat").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "square", "layout")
+        .Set("fragment.module", "flat").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "flat").Wire("mesh", "square");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    const auto middle = scene->Pixel(16, 16);
+    EXPECT_GT(middle.x, 247) << "the square, in the middle";
+    EXPECT_GT(middle.y, 247);
+    EXPECT_TRUE(Black(1, 1));
+
+    // Without the mesh it is each entity's, and here there is no world of them.
+    graph.Find("draw")->inputs.erase("mesh");
+    scene->runtime->Set(graph);
+    ASSERT_FALSE(scene->runtime->Status("draw")->ok);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("each entity"), std::string::npos) << scene->runtime->Status("draw")->error;
+}
+
+// What to draw, and how many groups to run, read from a buffer a compute shader wrote.
+TEST_F(DrawTest, DrawsAndDispatchesAreReadFromABuffer) {
+    kgraph::Graph graph = Canvas();
+    Triangles(graph);
+    graph.Add("arguments", "Buffer").Set("instanceCount", 32).Set("usage", Value::List { "eStorage", "eIndirect" });
+    graph.Add("writer", "ComputePipeline").Set("compute.module", "args").Set("compute.entry", "computeMain").Wire("param.draws", "arguments");
+    graph.Add("write", "Dispatch").Wire("pipeline", "writer");
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles").Set("command", "eDrawIndirect").Wire("indirect", "arguments");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    const auto schedule = scene->Schedule();
+    EXPECT_LT(std::ranges::find(schedule, "write") - schedule.begin(), std::ranges::find(schedule, "draw") - schedule.begin()) << "what is read is written first";
+    EXPECT_TRUE(Black(3, 3));
+    EXPECT_TRUE(Green(28, 28)) << "three vertices from the fourth on, as the buffer says";
+
+    // As many as another number in the buffer says, where the device counts draws itself.
+    graph.Find("draw")->Set("command", "eDrawIndirectCount").Wire("count", "arguments").Set("countOffset", 28).Set("drawCount", 4);
+    scene->runtime->Set(graph);
+    ASSERT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
+
+    // An indirect command with no buffer says so, and a buffer that cannot be drawn from too.
+    graph.Find("draw")->Set("command", "eDrawIndirect");
+    graph.Find("draw")->inputs.erase("count");
+    graph.Find("draw")->inputs.erase("indirect");
+    scene->runtime->Set(graph);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("'indirect' needs a buffer wired in"), std::string::npos) << scene->runtime->Status("draw")->error;
+    graph.Add("plain", "Buffer").Set("instanceCount", 32).Set("usage", Value::List { "eStorage" });
+    graph.Find("draw")->Wire("indirect", "plain");
+    scene->runtime->Set(graph);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("eIndirect"), std::string::npos) << scene->runtime->Status("draw")->error;
+
+    // A dispatch whose groups are in the buffer: 4 by 4 of 8 by 8 cover the picture.
+    kgraph::Graph fill = Canvas();
+    fill.Find("canvas")->Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    fill.nodes.erase(std::ranges::find(fill.nodes, "target", &kgraph::Node::id));
+    fill.Add("arguments", "Buffer").Set("instanceCount", 32).Set("usage", Value::List { "eStorage", "eIndirect" });
+    fill.Add("writer", "ComputePipeline").Set("compute.module", "args").Set("compute.entry", "computeMain").Wire("param.draws", "arguments");
+    fill.Add("write", "Dispatch").Wire("pipeline", "writer");
+    fill.Add("clear", "Clear").Wire("image", "canvas").Set("color", Value::List { 1, 0, 0, 1 });
+    fill.Add("filler", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "canvas").Set("constant.level", 1);
+    fill.Add("run", "Dispatch").Wire("pipeline", "filler").Wire("indirect", "arguments").Set("indirectOffset", 16);
+    fill.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(fill);
+    ASSERT_TRUE(scene->runtime->Ok());
+    for (const auto [x, y] : { std::pair { 1u, 1u }, std::pair { 30u, 30u } }) {
+        EXPECT_NEAR(scene->Pixel(x, y).x, 128, 1) << "the clear's red, halved by the shader";
+        EXPECT_GT(scene->Pixel(x, y).y, 247);
+    }
+}
+
+// An image to a buffer and back, a buffer cleared, a part of an image copied and scaled, and many samples made one.
+TEST_F(DrawTest, ImagesAndBuffersAreCopiedInPartsAndResolved) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("fill", "Clear").Wire("image", "canvas").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("bytes", "Buffer").Set("instanceCount", Size * Size * 4).Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+    graph.Add("out", "CopyImageToBuffer").Wire("image", "canvas").Wire("buffer", "bytes");
+    // The second half of the buffer zeroed: the lower half of the picture, when it is read back.
+    graph.Add("zero", "ClearBuffer").Wire("buffer", "bytes").Set("offset", Size * Size * 2);
+    graph.Add("copy", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size }).Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+    graph.Add("back", "CopyBufferToImage").Wire("buffer", "bytes").Wire("image", "copy");
+    graph.Add("show", "Blit").Wire("source", "copy").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_EQ(scene->Schedule(), (std::vector<std::string> { "fill", "out", "zero", "back", "show", "Read screen" }));
+    EXPECT_GT(scene->Pixel(5, 5).x, 247) << "the red, through the buffer";
+    EXPECT_EQ(scene->Pixel(5, 28).x, 0) << "and the half that was cleared";
+
+    // A quarter of one picture over the whole of another.
+    kgraph::Graph part = Canvas();
+    Triangles(part);
+    part.Add("draw", "Draw").Wire("pipeline", "triangles");
+    part.Add("copy", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size }).Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+    part.Add("corner", "Blit").Wire("source", "canvas").Wire("destination", "copy").Set("sourceOffset", Value::List { 16, 16 }).Set("sourceExtent", Value::List { 16, 16, 1 });
+    part.Add("show", "Blit").Wire("source", "copy").Wire("destination", "screen");
+    Run(part);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Black(3, 3)) << "the corner of the picture the triangle is not in, over all of it";
+    EXPECT_TRUE(Black(28, 28));
+
+    // A picture of four samples a pixel, drawn into and made one of one sample.
+    kgraph::Graph many = Canvas("e4");
+    Triangles(many).Set("multisampleState", Value::Members { { "sampleCount", "e4" } });
+    many.Add("draw", "Draw").Wire("pipeline", "triangles");
+    many.Add("plain", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size }).Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+    many.Add("resolve", "Resolve").Wire("source", "canvas").Wire("destination", "plain");
+    many.Add("show", "Blit").Wire("source", "plain").Wire("destination", "screen");
+    Run(many);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 3));
+    EXPECT_TRUE(Black(28, 28));
+    many.Find("resolve")->Wire("source", "plain").Wire("destination", "canvas");
+    scene->runtime->Set(many);
+    EXPECT_NE(scene->runtime->Status("resolve")->error.find("one sample a pixel"), std::string::npos) << scene->runtime->Status("resolve")->error;
+}
+
+// Rays, one for each pixel of the image they are for.
+TEST_F(DrawTest, RaysAreTracedForEachPixel) {
+    kgraph::Graph graph = Canvas();
+    graph.Find("canvas")->Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.nodes.erase(std::ranges::find(graph.nodes, "target", &kgraph::Node::id));
+    graph.Add("tracer", "RayTracingPipeline").Set("raygen.module", "rays").Set("raygen.entry", "raygenMain").Wire("param.target", "canvas");
+    graph.Add("trace", "TraceRays").Wire("pipeline", "tracer").Wire("size", "canvas", "extent");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    scene->runtime->Set(graph);
+    if (const auto* status = scene->runtime->Status("tracer"); !status->ok) GTEST_SKIP() << "no ray tracing here: " << status->error;
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_GT(scene->Pixel(0, 0).z, 247);
+    EXPECT_LT(scene->Pixel(0, 0).y, 8);
+    EXPECT_GT(scene->Pixel(31, 31).y, 247) << "the far corner had a ray too";
+
+    // As many as cover a parameter's image, named.
+    graph.Find("trace")->inputs.erase("size");
+    graph.Find("trace")->Set("cover", "target");
+    scene->runtime->Set(graph);
+    EXPECT_TRUE(scene->runtime->Status("trace")->ok) << scene->runtime->Status("trace")->error;
+}
+
+// A pipeline of mesh shaders is drawn as groups of them: nothing else to say, and no mesh to give.
+TEST_F(DrawTest, MeshShadersAreDrawnAsTasks) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("meshlets", "GraphicsPipeline").Set("stages", "eMesh").Set("mesh.module", "meshlet").Set("mesh.entry", "meshMain")
+        .Set("fragment.module", "meshlet").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "meshlets");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    scene->runtime->Set(graph);
+    if (const auto* status = scene->runtime->Status("meshlets"); !status->ok) GTEST_SKIP() << "no mesh shaders here: " << status->error;
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_TRUE(Green(3, 3));
+    EXPECT_TRUE(Black(28, 28));
+
+    graph.Find("draw")->Set("command", "eDrawIndexed");
+    scene->runtime->Set(graph);
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("mesh shaders"), std::string::npos) << scene->runtime->Status("draw")->error;
+    graph.Find("draw")->Set("command", "eDrawMeshTasks").Set("tasks", Value::List { 1, 1, 1 });
+    scene->runtime->Set(graph);
+    EXPECT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
+}
+
+// The catalog says all of it, for an editor to offer.
+TEST_F(DrawTest, TheCatalogOffersEveryWayOfDrawing) {
+    const kgraph::NodeType* draw = kgraph::FindType("Draw");
+    for (const char* name : { "mesh", "vertexCount", "firstVertex", "instances", "firstInstance", "tasks", "indirect", "count", "colorLoad", "depthStore",
+                              "clearColor", "viewport", "scissor", "cullMode", "depthCompare", "depthBias", "stencilReference", "primitiveRestart" }) {
+        const auto port = std::ranges::find(draw->inputs, name, &kgraph::Port::name);
+        ASSERT_NE(port, draw->inputs.end()) << name;
+        EXPECT_TRUE(port->optional) << name;
+        EXPECT_FALSE(port->doc.empty()) << name;
+    }
+    for (const char* type : { "TraceRays", "Resolve", "ClearBuffer", "CopyBufferToImage", "CopyImageToBuffer" }) EXPECT_NE(kgraph::FindType(type), nullptr) << type;
+    const kgraph::NodeType* pipeline = kgraph::FindType("GraphicsPipeline");
+    EXPECT_TRUE(std::ranges::find(pipeline->inputs, "vertex.layout", &kgraph::Port::name)->optional) << "a vertex shader that reads no vertices has no layout to give";
+}

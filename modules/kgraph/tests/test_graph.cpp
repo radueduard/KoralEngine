@@ -120,7 +120,7 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_EQ(port("Draw", "without").editor, "components");
     EXPECT_EQ(port("Dispatch", "cover").editor, "parameter");
     EXPECT_EQ(port("VertexLayout", "attributes").editor, "attributes");
-    EXPECT_EQ(port("Draw", "command").choices, (std::vector<std::string> { "eAuto", "eDraw", "eDrawIndexed" }));
+    EXPECT_EQ(port("Draw", "command").choices.size(), 9u);
     EXPECT_EQ(port("Primitive", "shape").choices.size(), 3u);
 
     // A graphics pipeline is drawn one of two ways, and has the inputs of the one it is.

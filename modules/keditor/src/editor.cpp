@@ -754,6 +754,14 @@ namespace keditor
                     return Choice(std::move(names), value, set, "an image parameter");
                 }
                 if (port.editor == "attributes") return Attributes(value, set, key);
+                if (port.editor == "numbers") {
+                    // A few numbers that are one thing: a box (x, y, width, height), a depth bias's three.
+                    std::vector<float> numbers(port.name == "depthBias" ? 3 : 4, 0.f);
+                    if (const auto* items = value.Items())
+                        for (std::size_t i = 0; i < numbers.size() && i < items->size(); ++i) numbers[i] = NumberOf((*items)[i]);
+                    return kgui::DragFloats(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); },
+                                            port.name == "depthBias" ? 0.01f : 1.f, port.name == "depthBias" ? 2 : 0);
+                }
                 return port.builder ? TypeEditor(*port.builder, value, set, key) : NamedEditor(port.type, value, set, key);
             }
 
@@ -847,7 +855,7 @@ namespace keditor
                     }
                     std::vector<kui::Widget> line { kui::Expanded(std::move(editor)) };
                     // A value a node can work out — a number, a vector, a colour — can be wired instead: a name chosen from a list cannot.
-                    if (plain(shown) && port.choices.empty() && (port.editor.empty() || port.editor == "color"))
+                    if (plain(shown) && port.choices.empty() && (port.editor.empty() || port.editor == "color" || port.editor == "numbers"))
                         line.push_back(kui::Tooltip("Make it a port, to wire a value to", Small("o", [this, id, name] { Doc().SetInput(id, name, Value {}); })));
                     if (shown.given || port.optional)
                         line.push_back(kui::Tooltip(shown.given ? "Back to nothing given" : "Not needed after all", Small("x", remove({ name }))));
