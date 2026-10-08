@@ -22,7 +22,9 @@ namespace keditor
         explicit PlayScene(const kor::SceneArgs& arguments);    ///< "scene": the file.
 
         void Initialize() override;
+        void FixedUpdate() override;
         void Update() override;
+        void LateUpdate() override;
         void Shutdown() override;
 
         [[nodiscard]] Document& Doc() { return *_document; }

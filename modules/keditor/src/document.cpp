@@ -5,6 +5,7 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <map>
 #include <sstream>
 
 #include <kecs/json.h>
@@ -75,13 +76,32 @@ namespace keditor
         return type == "string" || HoldsResource(type) || NumbersOf(type, numbers);
     }
 
-    Document::Document(kor::FrameGraph& frameGraph) : _runtime(std::make_unique<kgraph::Runtime>(frameGraph, &_world))
+    namespace {
+        std::map<const kor::FrameGraph*, Document*>& Documents()
+        {
+            static std::map<const kor::FrameGraph*, Document*> documents;
+            return documents;
+        }
+    }
+
+    Document* Document::Of(const kor::FrameGraph* frameGraph)
     {
+        const auto it = Documents().find(frameGraph);
+        return it == Documents().end() ? nullptr : it->second;
+    }
+
+    Document::Document(kor::FrameGraph& frameGraph) : _frameGraph(&frameGraph), _runtime(std::make_unique<kgraph::Runtime>(frameGraph, &_world))
+    {
+        Documents()[_frameGraph] = this;
         kgraph::RegisterCodecs(_codecs, _runtime.get());
         _world.Id<Label>();
         _world.Id<kgraph::Mesh>();
     }
-    Document::~Document() = default;
+    Document::~Document()
+    {
+        _scripts.Shutdown();    // while the world they are told of is whole
+        if (const auto it = Documents().find(_frameGraph); it != Documents().end() && it->second == this) Documents().erase(it);
+    }
 
     void Document::Update()
     {

@@ -21,6 +21,7 @@ if(KORAL_ENGINE_BUILD_TESTS)
 endif()
 
 add_subdirectory(modules/kecs)
+add_subdirectory(modules/kscript)
 
 # What runs on the GPU needs the Koral framework: point CMAKE_PREFIX_PATH at an SDK (a Koral checkout's
 # stage/debug, say). Without one, only what stands alone is built.
@@ -29,6 +30,7 @@ if(Koral_FOUND)
     message(STATUS "Koral ${Koral_VERSION} found: building what needs it")
     add_subdirectory(modules/kgraph)
     add_subdirectory(modules/keditor)
+    add_subdirectory(modules/kengine)
 
     add_executable(koral-editor apps/editor/main.cpp)
     target_link_libraries(koral-editor PRIVATE keditor)

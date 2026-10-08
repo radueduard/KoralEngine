@@ -13,7 +13,17 @@ namespace keditor
         if (!_file.empty() && !Open(_file, _error)) kor::log::Error("{}", _error);
     }
 
-    void PlayScene::Update() { if (_document) _document->Update(); }
+    // A frame, in the order a script counts on: its updates, then what graphics scripts make for the passes, then the
+    // passes readied with all of it.
+    void PlayScene::FixedUpdate() { if (_document) _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime())); }
+    void PlayScene::Update() { if (_document) _document->Scripts().Update(static_cast<float>(Time::FrameTime())); }
+    void PlayScene::LateUpdate()
+    {
+        if (!_document) return;
+        _document->Scripts().LateUpdate(static_cast<float>(Time::FrameTime()));
+        _document->Scripts().Prepare();
+        _document->Update();
+    }
     void PlayScene::Shutdown() { _document.reset(); }
 
     void PlayScene::New()

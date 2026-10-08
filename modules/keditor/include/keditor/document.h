@@ -18,6 +18,7 @@
 #include <kecs/serialize.h>
 #include <kgraph/graph.h>
 #include <kgraph/runtime.h>
+#include <kscript/scripts.h>
 
 namespace kor { class FrameGraph; }
 
@@ -41,6 +42,10 @@ namespace keditor
         [[nodiscard]] kgraph::Runtime& Runtime() { return *_runtime; }
         [[nodiscard]] const kgraph::Runtime& Runtime() const { return *_runtime; }
         [[nodiscard]] const kgraph::Graph& Graph() const { return _runtime->Current(); }
+        /** @brief The scripts run on its entities. Whoever runs the scene calls their updates (PlayScene does). */
+        [[nodiscard]] kscript::Scripts& Scripts() { return _scripts; }
+        /** @brief The document whose passes run in @p frameGraph, or null: how code handed a scene finds what runs in it. */
+        [[nodiscard]] static Document* Of(const kor::FrameGraph* frameGraph);
 
         /** @brief Each frame, before the frame graph runs. */
         void Update();
@@ -123,6 +128,8 @@ namespace keditor
         void Apply(kgraph::Graph graph);
 
         kecs::World _world;                         // before the runtime, which is gone first
+        kscript::Scripts _scripts { _world };
+        const kor::FrameGraph* _frameGraph = nullptr;
         std::unique_ptr<kgraph::Runtime> _runtime;
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;

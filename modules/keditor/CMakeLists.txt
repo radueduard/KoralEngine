@@ -3,7 +3,7 @@
 add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp)
 add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
-target_link_libraries(keditor PUBLIC kgraph kecs Koral::Koral Koral::koral-ui Koral::koral-gui-extras)
+target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras)
 target_compile_options(keditor PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-missing-field-initializers>)
 
 if(KORAL_ENGINE_BUILD_TESTS)
