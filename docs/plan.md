@@ -206,6 +206,18 @@ the plan:
 
 **Gate:** E4's scene is built from nothing in the editor, saved, reopened, and runs the same outside it.
 
+**Built** (2026-10-08): `modules/keditor` and the programs `koral-editor` and `koral-play`, described in
+[editor.md](editor.md). The gate is `DocumentTest.ASceneBuiltFromNothingIsSavedAndRunsTheSameFromItsFile`:
+E4's scene made one edit at a time through the same calls the panels make, saved, and run again from the
+file by the scene `koral-play` runs, with the same picture to the pixel. The interface is tested offscreen
+(what it shows, and clicks on the outliner, a node and the add-node dialog) and was looked at as rendered.
+8 tests, clean under validation and sync validation. What differs from the plan:
+
+- **The Hub is not done.** Projects open, save and run from the editor and from `koral-play` only.
+- No undo, no copy and paste, no renaming a node, a flat outliner, one scene a project in the interface.
+- kgraph gained a Primitive node, since a graph could not make a mesh with vertices in it.
+- The framework gained `kor::log::Quiet`, so a half-made node failing after each edit isn't logged.
+
 ### E6: Scripts
 
 - A C API for the ECS, and C# and Kotlin layers over it.
@@ -230,4 +242,5 @@ Kotlin.
 
 ## First steps
 
-The framework milestones and **E1** to **E4** are done. Next is **E5**: the editor.
+The framework milestones and **E1** to **E5** are done, but for the Hub's part of E5. Next is **E6**:
+scripts.

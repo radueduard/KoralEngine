@@ -56,6 +56,9 @@ the editor will build its node list and its nodes from.
 - **VertexLayout** describes a mesh's vertices: a list of `{ "semantic": "POSITION", "type": "eFloat",
   "count": 3 }`, packed in the order given. Its output goes to a pipeline's `vertexShader.layout` and to a
   Mesh node's `vertexLayout`.
+- **Primitive** is a mesh of a simple shape (`eQuad`, `eCube` or `eTriangle`, centred on the origin) with
+  positions, normals and texture coordinates. Its second output, `layout`, is what a pipeline that draws
+  it takes as `vertexShader.layout`.
 - **Screen** is the scene's window. **Reference** stands for another node by id, for a resource used far
   from where it is made.
 - **Passes:** Clear, Blit, Dispatch and Draw.
@@ -147,7 +150,8 @@ signature changes, so editing one constant rebuilds the pipeline and the pass th
 the image, the shader and every other pass alone. Moving a node rebuilds nothing.
 `Status(id)->builds` counts builds.
 
-A node that fails keeps the error (`Status(id)->error`). Nodes wired to it fail with "wired to 'x', which
+A node that fails keeps the error (`Status(id)->error`), and the framework's own report of the failure
+is kept out of the log, which a graph being edited would otherwise fill. Nodes wired to it fail with "wired to 'x', which
 failed", and everything else keeps running. A cycle is reported on the nodes in it.
 
 A resource is shared by the nodes and passes that use it and freed when the last one lets go, so taking

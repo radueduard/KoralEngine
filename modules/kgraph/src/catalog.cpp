@@ -98,6 +98,10 @@ namespace kgraph
 
             // ---- the screen, and a node by name -------------------------------------------------------------------
             types.push_back({ "Screen", "Resources", {}, { ResourcePort("out", "Image") }, "The scene's window: what a pass writes to show something.", nullptr });
+            types.push_back({ "Primitive", "Resources",
+                              { { "shape", PortKind::eValue, "string", false, "eQuad (a unit square facing +z), eCube (a unit cube) or eTriangle. Each is centred on the origin.", nullptr } },
+                              { ResourcePort("out", "Mesh"), { "layout", PortKind::eValue, "struct KoralVertexLayout", false, "Its vertices: POSITION, NORMAL and UV. What a pipeline that draws it takes as vertexShader.layout.", nullptr } },
+                              "A mesh of a simple shape, with positions, normals and texture coordinates.", nullptr });
             types.push_back({ "Reference", "Resources", { { "node", PortKind::eValue, "string", false, "The id of the node it stands for.", nullptr } },
                               { ResourcePort("out", "Resource") },
                               "Another node's output, by the node's id: a resource made elsewhere in the graph, without a wire across it.", nullptr });

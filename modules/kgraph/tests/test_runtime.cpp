@@ -18,6 +18,8 @@
 #include <scheduler.h>
 #include <shader.h>
 
+#include <koral_c.h>
+
 #include <kgraph/runtime.h>
 
 #include "support.h"
@@ -265,4 +267,36 @@ TEST_F(RuntimeTest, AShaderEditedIsPickedUp) {
     EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 1);
     EXPECT_GE(runtime.Status("pipeline")->builds, 2u) << "the pipeline was built again from the edited shader";
     std::filesystem::remove_all(directory);
+}
+
+TEST_F(RuntimeTest, APrimitiveIsAMeshWithItsLayout) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("quad", "Primitive").Set("shape", "eQuad");
+    graph.Add("cube", "Primitive").Set("shape", "eCube");
+    graph.Add("triangle", "Primitive").Set("shape", "eTriangle");
+    graph.Add("plain", "Primitive");
+    graph.Add("blob", "Primitive").Set("shape", "eBlob");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("blob")->error.find("eQuad, eCube or eTriangle"), std::string::npos) << runtime.Status("blob")->error;
+
+    const auto vertices = [&](const char* id) { return koral_mesh_vertex_count(runtime.ResourceOf(id)->handle); };
+    const auto indices = [&](const char* id) { uint32_t count = 0; koral_mesh_index_count(runtime.ResourceOf(id)->handle, &count); return count; };
+    ASSERT_TRUE(runtime.Status("cube")->ok) << runtime.Status("cube")->error;
+    EXPECT_EQ(runtime.ResourceOf("quad")->kind, "Mesh");
+    EXPECT_EQ(vertices("quad"), 4u);
+    EXPECT_EQ(indices("quad"), 6u);
+    EXPECT_EQ(vertices("cube"), 24u) << "a face has corners of its own: its normal is its own";
+    EXPECT_EQ(indices("cube"), 36u);
+    EXPECT_EQ(vertices("triangle"), 3u);
+    EXPECT_EQ(vertices("plain"), 4u) << "a quad, when it is not said";
+
+    // What a pipeline that draws it is built against: position, normal and texture coordinate, 32 bytes a vertex.
+    const kgraph::Value layout = runtime.ValueOf("cube", "layout");
+    ASSERT_NE(layout.Find("attributes"), nullptr);
+    ASSERT_EQ(layout.Find("attributes")->Items()->size(), 3u);
+    EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("semantic")->String(), "UV");
+    EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("offset")->Number(), 24.0);
+    EXPECT_EQ(*(*layout.Find("bindings")->Items())[0].Find("stride")->Number(), 32.0);
+    EXPECT_EQ(*layout.Find("positionAttribute")->Number(), 0.0);
 }

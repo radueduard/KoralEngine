@@ -1,0 +1,32 @@
+//
+// keditor: a project on disk. A folder with `project.json`, its scenes under `scenes/` and its shaders under
+// `shaders/`.
+//
+
+#pragma once
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace keditor
+{
+    struct Project {
+        std::filesystem::path directory;
+        std::string name;
+        std::vector<std::string> scenes;    ///< By name: `scenes/<name>.scene.json`.
+        std::string start;                  ///< The scene a run opens.
+
+        /** @brief Makes a project in @p directory, which is made too: one empty scene, "main", and a `shaders` folder. */
+        static bool Create(const std::filesystem::path& directory, std::string name, Project& out, std::string& error);
+        /** @brief Opens the project in @p directory, or the one a `project.json` given directly is of. */
+        static bool Open(const std::filesystem::path& directory, Project& out, std::string& error);
+        /** @brief Writes `project.json`. */
+        bool Save(std::string& error) const;
+
+        [[nodiscard]] std::filesystem::path ScenePath(std::string_view scene) const;
+        [[nodiscard]] std::filesystem::path ShaderDirectory() const { return directory / "shaders"; }
+        /** @brief Makes its shaders the ones found first: before a scene of it is loaded. */
+        void Use() const;
+    };
+}

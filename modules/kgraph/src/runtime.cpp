@@ -28,6 +28,7 @@
 #include <imageView.h>
 #include <bufferView.h>
 #include <koral_c.h>
+#include <log.h>
 #include <mesh.h>
 #include <pipeline.h>
 #include <shader.h>
@@ -1207,6 +1208,61 @@ namespace kgraph
             return {};
         }
 
+        /** A mesh of a simple shape, and the layout of its vertices for a pipeline to be built against. */
+        Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
+        {
+            struct Vertex { kor::Vec3 position; kor::Vec3 normal; kor::Vec2 uv; };
+            std::string shape = "eQuad";
+            if (const auto it = inputs.find("shape"); it != inputs.end() && !it->second.value.IsNull()) {
+                if (!it->second.value.String()) return Fail("'shape' is eQuad, eCube or eTriangle");
+                shape = *it->second.value.String();
+            }
+            std::vector<Vertex> vertices;
+            std::vector<kor::u32> indices;
+            // One face: a unit square across `right` and `up`, half a unit out along where they face.
+            const auto face = [&](const kor::Vec3 right, const kor::Vec3 up, const float out) {
+                const kor::Vec3 normal = kor::Cross(right, up);
+                const auto first = static_cast<kor::u32>(vertices.size());
+                for (const auto [x, y] : { std::pair { -0.5f, -0.5f }, std::pair { 0.5f, -0.5f }, std::pair { -0.5f, 0.5f }, std::pair { 0.5f, 0.5f } })
+                    vertices.push_back({ right * x + up * y + normal * out, normal, { x + 0.5f, y + 0.5f } });
+                for (const kor::u32 corner : { 0u, 1u, 2u, 2u, 1u, 3u }) indices.push_back(first + corner);
+            };
+            if (shape == "eQuad") {
+                face({ 1, 0, 0 }, { 0, 1, 0 }, 0.f);
+            } else if (shape == "eCube") {
+                face({ 1, 0, 0 }, { 0, 1, 0 }, 0.5f);
+                face({ -1, 0, 0 }, { 0, 1, 0 }, 0.5f);
+                face({ 0, 0, -1 }, { 0, 1, 0 }, 0.5f);
+                face({ 0, 0, 1 }, { 0, 1, 0 }, 0.5f);
+                face({ 1, 0, 0 }, { 0, 0, -1 }, 0.5f);
+                face({ 1, 0, 0 }, { 0, 0, 1 }, 0.5f);
+            } else if (shape == "eTriangle") {
+                vertices = { { { -0.5f, -0.5f, 0 }, { 0, 0, 1 }, { 0, 0 } }, { { 0.5f, -0.5f, 0 }, { 0, 0, 1 }, { 1, 0 } }, { { 0, 0.5f, 0 }, { 0, 0, 1 }, { 0.5f, 1 } } };
+                indices = { 0, 1, 2 };
+            } else {
+                return Fail(std::format("'{}' is no shape: eQuad, eCube or eTriangle", shape));
+            }
+            auto mesh = kor::Mesh::Builder()
+                .SetVertexBuffer(0, kor::Mesh::MakeBuffer(vertices, kor::Buffer::Usage::eVertex))
+                .SetIndexBuffer(kor::Mesh::MakeBuffer(indices, kor::Buffer::Usage::eIndex))
+                .SetVertexLayout(kor::VertexLayout {
+                    .bindings = { kor::VertexInputBindingDescription(0, sizeof(Vertex)) },
+                    .attributes = { kor::VertexLayout::Attribute("POSITION", "", 0, offsetof(Vertex, position), kor::ChannelType::eFloat, 3),
+                                    kor::VertexLayout::Attribute("NORMAL", "", 0, offsetof(Vertex, normal), kor::ChannelType::eFloat, 3),
+                                    kor::VertexLayout::Attribute("UV", "", 0, offsetof(Vertex, uv), kor::ChannelType::eFloat, 2) } })
+                .Build();
+            if (!mesh.Valid()) return Fail(mesh.Failure() ? mesh.Failure()->message : std::string("the mesh could not be built"));
+            Held resource = MakeResource(std::move(mesh));
+            resource->node = node.id;
+            out.outputs["out"].resource = std::move(resource);
+            auto layout = LayoutValue(Value(Value::List {
+                Value::Members { { "semantic", "POSITION" }, { "count", 3 } }, Value::Members { { "semantic", "NORMAL" }, { "count", 3 } },
+                Value::Members { { "semantic", "UV" }, { "count", 2 } } }));
+            if (!layout) return Fail(layout.error());
+            out.outputs["layout"].value = std::move(*layout);
+            return {};
+        }
+
         Expected<void> Build(const Node& node, const Inputs& inputs, Built& out)
         {
             const NodeType* type = FindType(node.type);
@@ -1226,6 +1282,7 @@ namespace kgraph
                 out.outputs["out"].resource = std::move(screen);
                 return {};
             }
+            if (node.type == "Primitive") return BuildPrimitive(node, inputs, out);
             if (node.type == "Reference") {
                 const auto it = inputs.find("node");
                 const std::string* target = it == inputs.end() ? nullptr : it->second.value.String();
@@ -1687,14 +1744,19 @@ namespace kgraph
     Runtime::Runtime(kor::FrameGraph& frameGraph, kecs::World* world) : _impl(std::make_unique<Impl>(frameGraph, world)) {}
     Runtime::~Runtime() = default;
 
+    // A node that cannot be built keeps why (Status), and an entity that cannot be run is reported (ReportOf): the
+    // framework's own account of each failure is kept out of the log, which a graph being edited would fill with it.
+
     void Runtime::Set(Graph graph)
     {
+        const kor::log::Quiet quiet;
         _graph = std::move(graph);
         _impl->Evaluate(_graph);
     }
 
     void Runtime::Update()
     {
+        const kor::log::Quiet quiet;
         if (_impl->reloaded.exchange(false)) {
             _impl->ResetStale(_graph);
             // Which shader it was is not said: every shader node counts as built again, and what is wired to one follows.
