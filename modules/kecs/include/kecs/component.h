@@ -52,9 +52,19 @@ namespace kecs
     /** @brief One field of a component: what a tool shows, what is saved, and what a changed type keeps by name and type. */
     struct FieldDescription {
         std::string name;
-        std::string type;           ///< By name: "float", "kor::Vec3", "Image".
+        std::string type;           ///< By name: "f32", "kor::Vec3", "Image". What it is saved and matched by.
         std::size_t offset = 0;
         std::size_t size = 0;
+        /**
+         * @brief Copies one field's value over another's, both alive: how a field is carried from a component to
+         *        the one that replaces it when its type changes shape. Null is a byte copy, which is right for
+         *        plain data and wrong for anything that owns something.
+         */
+        void (*assign)(void* to, const void* from, const FieldDescription& field) = nullptr;
+
+        /** @brief Whether @p other is this field for the purposes of keeping a value: the same name, type and size. */
+        [[nodiscard]] bool SameAs(const FieldDescription& other) const { return name == other.name && type == other.type && size == other.size; }
+        void Assign(void* to, const void* from) const { if (assign) assign(to, from, *this); else std::memcpy(to, from, size); }
     };
 
     /**
@@ -86,9 +96,19 @@ namespace kecs
 
         [[nodiscard]] bool IsTag() const { return size == 0; }
 
-        /** @brief Describes the C++ type @p T, named @p name: its own constructors and destructor. */
+        /**
+         * @brief Describes the C++ type @p T, named @p name: its own constructors and destructor, and the fields
+         *        it declares (KECS_FIELDS), if it declares any.
+         */
         template <typename T>
         static ComponentDescription Of(std::string name);
+
+        /** @brief The field so named, or null. */
+        [[nodiscard]] const FieldDescription* FindField(const std::string_view field) const
+        {
+            for (const auto& f : fields) if (f.name == field) return &f;
+            return nullptr;
+        }
 
         // The operations, with what a null one stands for.
         void Construct(void* at) const { if (construct) construct(at, *this); else std::memset(at, 0, size); }
@@ -142,6 +162,67 @@ namespace kecs
         static constexpr std::string_view value = detail::RawTypeName<T>();
     };
 
+    /**
+     * @brief Numbers are named by what they are, not by how a compiler spells them: "f32", "i64", "u8", "bool" —
+     *        the same on every platform, which a saved file needs.
+     */
+    template <typename T> requires std::is_arithmetic_v<T>
+    struct Name<T> {
+        static constexpr std::string_view value =
+            std::is_same_v<T, bool> ? std::string_view("bool")
+            : std::is_floating_point_v<T> ? (sizeof(T) == 4 ? std::string_view("f32") : std::string_view("f64"))
+            : std::is_signed_v<T> ? (sizeof(T) == 1 ? std::string_view("i8") : sizeof(T) == 2 ? std::string_view("i16")
+                                     : sizeof(T) == 4 ? std::string_view("i32") : std::string_view("i64"))
+            : (sizeof(T) == 1 ? std::string_view("u8") : sizeof(T) == 2 ? std::string_view("u16")
+               : sizeof(T) == 4 ? std::string_view("u32") : std::string_view("u64"));
+    };
+    template <> struct Name<std::string> { static constexpr std::string_view value = "string"; };
+    template <> struct Name<Entity> { static constexpr std::string_view value = "entity"; };
+
+    /** @brief Collects a C++ type's fields: what Fields<T>::Describe is handed. */
+    template <typename T>
+    class FieldList {
+    public:
+        explicit FieldList(std::vector<FieldDescription>& fields) : _fields(fields) {}
+
+        /** @brief Declares the member @p member as a field called @p name. */
+        template <typename F>
+        FieldList& Field(std::string name, F T::* member)
+        {
+            FieldDescription field;
+            field.name = std::move(name);
+            field.type = std::string(Name<F>::value);
+            // Where the member is in a T, without making one.
+            alignas(T) static const std::byte storage[sizeof(T)] {};
+            const T* object = reinterpret_cast<const T*>(storage);
+            field.offset = static_cast<std::size_t>(reinterpret_cast<const std::byte*>(&(object->*member)) - storage);
+            field.size = sizeof(F);
+            if constexpr (!std::is_trivially_copyable_v<F>) {
+                static_assert(std::is_copy_assignable_v<F>, "a field that is not plain data has to be assignable, to be carried to a new shape");
+                field.assign = [](void* to, const void* from, const FieldDescription&) { *static_cast<F*>(to) = *static_cast<const F*>(from); };
+            }
+            _fields.push_back(std::move(field));
+            return *this;
+        }
+
+    private:
+        std::vector<FieldDescription>& _fields;
+    };
+
+    /**
+     * @brief What fields a C++ component type has: specialise it, or use KECS_FIELDS, for a type that is saved,
+     *        shown in a tool, or reshaped. A type that declares none is stored and queried all the same.
+     *
+     * @code
+     * struct Position { float x = 0, y = 0; };
+     * KECS_FIELDS(Position, x, y)
+     * @endcode
+     */
+    template <typename T>
+    struct Fields {
+        static void Describe(FieldList<T>&) {}
+    };
+
     template <typename T>
     ComponentDescription ComponentDescription::Of(std::string name)
     {
@@ -149,6 +230,8 @@ namespace kecs
         ComponentDescription d;
         d.name = std::move(name);
         if (std::is_empty_v<T>) return d;   // a tag
+        FieldList<T> fields(d.fields);
+        Fields<T>::Describe(fields);
         d.size = sizeof(T);
         d.alignment = alignof(T);
         if constexpr (std::is_default_constructible_v<T>) {
@@ -169,3 +252,31 @@ namespace kecs
         return d;
     }
 }
+
+#define KECS_DETAIL_FIELD(Type, member) list.Field(#member, &Type::member);
+#define KECS_DETAIL_EACH_1(Type, a) KECS_DETAIL_FIELD(Type, a)
+#define KECS_DETAIL_EACH_2(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_1(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_3(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_2(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_4(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_3(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_5(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_4(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_6(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_5(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_7(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_6(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_8(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_7(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_9(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_8(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_10(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_9(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_11(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_10(Type, __VA_ARGS__)
+#define KECS_DETAIL_EACH_12(Type, a, ...) KECS_DETAIL_FIELD(Type, a) KECS_DETAIL_EACH_11(Type, __VA_ARGS__)
+#define KECS_DETAIL_COUNT(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, N, ...) N
+#define KECS_DETAIL_EACH(Type, ...) \
+    KECS_DETAIL_COUNT(__VA_ARGS__, KECS_DETAIL_EACH_12, KECS_DETAIL_EACH_11, KECS_DETAIL_EACH_10, KECS_DETAIL_EACH_9, KECS_DETAIL_EACH_8, \
+                      KECS_DETAIL_EACH_7, KECS_DETAIL_EACH_6, KECS_DETAIL_EACH_5, KECS_DETAIL_EACH_4, KECS_DETAIL_EACH_3, KECS_DETAIL_EACH_2, \
+                      KECS_DETAIL_EACH_1)(Type, __VA_ARGS__)
+
+/**
+ * Declares up to twelve members of @p Type as its fields, each named as the member is. At namespace scope, outside
+ * any namespace. More than twelve, or other names, are declared by specialising kecs::Fields<Type> by hand.
+ */
+#define KECS_FIELDS(Type, ...) \
+    template <> struct kecs::Fields<Type> { \
+        static void Describe(kecs::FieldList<Type>& list) { KECS_DETAIL_EACH(Type, __VA_ARGS__) } \
+    };

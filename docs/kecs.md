@@ -88,6 +88,62 @@ commands.Apply();
 - `OnAdd(id, f)` runs after an entity is given a component (not when one is replaced). `OnRemove(id, f)`
   runs before it loses one, including when the entity is destroyed.
 
+## Fields
+
+A type that is saved, shown in a tool or reshaped says what fields it has. A C++ type declares them
+beside itself; a type made at run time lists them in its description.
+
+```cpp
+struct Position { float x = 0, y = 0; };
+KECS_FIELDS(Position, x, y)            // at namespace scope, up to twelve members
+```
+
+Field types go by name. Numbers are `"f32"`, `"i64"`, `"u8"` and so on, the same on every platform;
+`std::string` is `"string"` and `kecs::Entity` is `"entity"`. Any other type is named after itself, or
+by `kecs::Name<T>`.
+
+## A type that changes shape
+
+`world.Reshape(id, newDescription)` gives a component type a new shape, which is what an edited shader
+or a reloaded script does to the component generated from it.
+
+- The id stays the same, so queries and observers of it go on working.
+- Each entity's value starts as a default one. A field both shapes have, with the same name, type and
+  size, is carried over wherever it has moved to. Anything else is left at its default.
+- Whether the component is switched off for an entity is kept, and every one counts as changed.
+- It returns a `Migration`: which fields were kept, reset and removed, and how many entities had it.
+
+## Saving and loading
+
+```cpp
+const kecs::Saved saved = kecs::Save(world);         // saved.json, saved.problems
+const kecs::Loaded loaded = kecs::Load(other, saved.json);   // loaded.entities, loaded.problems
+```
+
+A component is saved a field at a time, by name, each by the codec registered for its type's name
+(`kecs::Codecs`). Numbers, `bool`, `string` and `entity` have codecs to begin with; register others for
+your own types. The file also holds each component type's description, entities' children in order, and
+which components are switched off.
+
+| | Saved as |
+|---|---|
+| A field with a codec | What the codec writes: `"x": 1.5`. |
+| A plain-data field with none | Its bytes: `{ "$bytes": "…" }`. |
+| A field that owns something, with none | Not saved, and reported. |
+| A plain-data component with no fields | Its bytes. |
+| A component with no fields that owns something | Not saved, and reported. |
+
+Loading adds to the world and reads by name, with the same rule as `Reshape`: a field the file and the
+world's type both have, of the same type, is read, and any other is left at its default and reported.
+
+- A plain-data type the world doesn't have is registered from the file, so run-time types load without
+  whoever made them.
+- A type that owns something has to be registered already (`world.Id<T>()`); otherwise it is left out
+  and reported.
+- An `entity` field is saved as the entity's number in the file and points at the entity that number
+  became.
+- A file saved, loaded into an empty world and saved again is the same file.
+
 ## Building and testing
 
 ```sh

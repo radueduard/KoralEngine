@@ -140,6 +140,63 @@ namespace kecs
         return *_types[id];
     }
 
+    Migration World::Reshape(const ComponentId id, ComponentDescription newer)
+    {
+        RequireStill("Reshape");
+        if (id >= _types.size()) throw std::logic_error("kecs: no component type has that id");
+        ComponentDescription& current = *_types[id];
+        if (newer.name.empty()) newer.name = current.name;
+        if (newer.alignment == 0) newer.alignment = 1;
+        if (newer.name != current.name && _byName.contains(newer.name))
+            throw std::logic_error("kecs: '" + newer.name + "' is another component type's name");
+
+        // Which fields are carried over: those both shapes have, alike.
+        Migration migration;
+        struct Carried { std::size_t from, to; const FieldDescription* field; };
+        std::vector<Carried> carried;
+        for (const auto& field : newer.fields) {
+            const FieldDescription* old = current.FindField(field.name);
+            if (old && old->SameAs(field)) {
+                carried.push_back({ old->offset, field.offset, &field });
+                migration.kept.push_back(field.name);
+            } else {
+                migration.reset.push_back(field.name);
+            }
+        }
+        for (const auto& field : current.fields)
+            if (!newer.FindField(field.name)) migration.removed.push_back(field.name);
+
+        for (const auto& archetype : _archetypes) {
+            const int index = archetype->ColumnOf(id);
+            if (index < 0) continue;
+            Column& column = archetype->columns[static_cast<std::size_t>(index)];
+            const std::size_t count = archetype->entities.size();
+            migration.entities += count;
+            std::byte* data = AllocateColumn(newer, archetype->capacity);
+            for (std::size_t row = 0; row < count; ++row) {
+                void* old = current.IsTag() ? nullptr : column.data + row * current.size;
+                if (data) {
+                    void* fresh = data + row * newer.size;
+                    newer.Construct(fresh);
+                    if (old)
+                        for (const auto& c : carried) c.field->Assign(static_cast<std::byte*>(fresh) + c.to, static_cast<const std::byte*>(old) + c.from);
+                }
+                if (old) current.Destroy(old);
+                column.changed[row] = _tick;
+            }
+            FreeColumn(current, column.data);
+            column.data = data;
+        }
+
+        // The description is replaced where it is: columns point at it, and go on doing so.
+        if (newer.name != current.name) {
+            _byName.erase(current.name);
+            _byName.emplace(newer.name, id);
+        }
+        current = std::move(newer);
+        return migration;
+    }
+
     // ---- archetypes ---------------------------------------------------------------------------------------------
 
     Archetype& World::ArchetypeOf(std::vector<ComponentId> sortedIds)

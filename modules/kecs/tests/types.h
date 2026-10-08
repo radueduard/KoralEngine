@@ -30,3 +30,15 @@ struct Owned {      // can only be moved
 };
 
 template <> struct kecs::Name<Health> { static constexpr std::string_view value = "Health"; };
+
+KECS_FIELDS(Position, x, y)
+KECS_FIELDS(Velocity, x, y)
+KECS_FIELDS(Health, value)
+
+/** One with a field that owns something, and one that names another entity. */
+struct Named {
+    std::string name;
+    kecs::Entity target;
+    double weight = 1.5;
+};
+KECS_FIELDS(Named, name, target, weight)

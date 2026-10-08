@@ -133,6 +133,14 @@ list archetypes for a tool, and a C API (E6).
 **Gate:** a component edited three times (a field added, retyped, removed) keeps the values it should
 across the edits, and a world round-trips through JSON unchanged.
 
+**Built** (2026-10-08): `World::Reshape` and `kecs::Save`/`kecs::Load`, described in [kecs.md](kecs.md).
+35 tests pass in Debug, in Release and under ASan and UBSan. kecs stays free of the framework: it has
+its own small JSON reader and writer, and values are written by codecs looked up by field type name.
+Numbers, `bool`, `string` and `entity` are built in. **Still to do in the engine:** an adapter that
+registers codecs for the framework's types (vectors, matrices, resource references) and declares fields
+for types that use the framework's reflection. It belongs with E3, which is where the engine first links
+the framework.
+
 ### E3: The graph model
 
 - Engine-owned resources: named, shared and refcounted.
@@ -192,5 +200,5 @@ Kotlin.
 
 ## First steps
 
-The framework milestones and **E1** are done. Next is **E2**: component types that change shape, and
-JSON. E3 (the graph model) can run alongside it.
+The framework milestones, **E1** and **E2** are done. Next is **E3**: the graph model, which is where
+the engine first links the framework.

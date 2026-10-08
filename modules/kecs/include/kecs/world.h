@@ -128,6 +128,14 @@ namespace kecs
         template <typename T> using ArgumentType = decltype(Argument<T>(std::declval<Column*>(), 0, 0));
     }
 
+    /** @brief What became of a component type's fields when it changed shape. @see World::Reshape */
+    struct Migration {
+        std::vector<std::string> kept;      ///< In both shapes, with the same name, type and size: every entity kept its value.
+        std::vector<std::string> reset;     ///< New, or changed in type or size: every entity has the default.
+        std::vector<std::string> removed;   ///< In the old shape only: gone.
+        std::size_t entities = 0;           ///< How many entities had the component.
+    };
+
     /** @brief What a query asks for, by id: for queries made at run time — a node's, a tool's. */
     struct QueryDescription {
         std::vector<ComponentId> all;       ///< Has every one of these, switched on.
@@ -223,6 +231,19 @@ namespace kecs
         [[nodiscard]] ComponentId Find(std::string_view name) const;
         [[nodiscard]] const ComponentDescription& Describe(ComponentId id) const;
         [[nodiscard]] std::size_t ComponentCount() const { return _types.size(); }
+        /**
+         * @brief Gives component type @p id a new shape, and every entity that has it a value of that shape.
+         *
+         * What a shader edited, or a script reloaded, does to the component generated from it. The id stays, so
+         * queries and observers of it go on working. Each entity's new value starts as a default one; a field
+         * the two shapes share — the same name, type and size — is then carried over (FieldDescription::assign),
+         * and the old value is destroyed. A field that is new, or whose type or size changed, is left at its
+         * default. Whether the component is switched off for an entity is kept; every one counts as changed.
+         *
+         * @p newer may carry another name (the type is renamed) or none (it keeps its name). Throws while a query
+         * runs, for an unknown id, or for a name another type has.
+         */
+        Migration Reshape(ComponentId id, ComponentDescription newer);
 
         // ---- entities -------------------------------------------------------------------------------------
 
