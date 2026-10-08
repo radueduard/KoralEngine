@@ -17,6 +17,8 @@
 #include <string_view>
 #include <vector>
 
+#include "value.h"
+
 namespace kor::builders { struct Description; struct Type; }
 
 namespace kgraph
@@ -45,6 +47,9 @@ namespace kgraph
         std::string editor;
         /// The setting of the node's `stages` input it belongs to ("eVertex", "eMesh"); empty when it is there whatever that is.
         std::string mode;
+        /// What a node starts with for it, when it is one a node cannot do without; what it is when it is not given
+        /// otherwise; and, for a struct, what the fields that are not given are. Null when there is nothing to say.
+        Value initial;
     };
 
     struct NodeType {
@@ -56,6 +61,8 @@ namespace kgraph
         const kor::builders::Description* builder = nullptr;    ///< For a builder node.
         /// Whether an editor offers it. A Shader is not: a pipeline names its shaders itself. One still loads and runs.
         bool listed = true;
+        /// Other words someone looking for it might type: "texture" for an Image, "mix" for a Lerp.
+        std::string keywords;
     };
 
     struct Node;

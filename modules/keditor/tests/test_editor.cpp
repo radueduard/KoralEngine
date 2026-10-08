@@ -248,12 +248,25 @@ TEST_F(EditorTest, ThePointerPicksMakesAndAdds) {
     // A right click on the graph where nothing is: every kind of node, to add one there.
     RightClick({ 880.f, 300.f });
     EXPECT_TRUE(Shows("Add a node"));
-    for (const char* kind : { "ComputePipeline", "Framebuffer", "Dispatch", "Draw", "Multiply", "Primitive" }) EXPECT_TRUE(Shows(kind)) << kind;
+    for (const char* kind : { "ComputePipeline", "Framebuffer", "Dispatch", "Draw", "Multiply", "Primitive", "Smoothstep", "Select", "GenerateMipmaps" }) EXPECT_TRUE(Shows(kind)) << kind;
+    for (const char* category : { "Resources", "Pipelines", "Values", "Math", "Vectors", "Logic", "Passes" }) EXPECT_TRUE(Shows(category)) << category;
     Sheet("add");
 
-    // One of them picked: it is on the graph where the click was, and the inspector is its.
+    // Looked for by what it does, not what it is called: typed, the list is the kinds that fit, best first.
+    const auto type = [&](const std::string& text) {
+        for (const char c : text) { editor->SceneInput().FeedText(std::u32string(1, static_cast<char32_t>(c))); Frame(); }
+        for (int i = 0; i < 3; ++i) Frame();
+    };
+    type("run compute");
+    EXPECT_TRUE(Shows("Dispatch   ·   Passes")) << "found by other words for it";
+    EXPECT_FALSE(Shows("GenerateMipmaps") || Shows("Smoothstep")) << "and what does not fit is gone";
+    Sheet("find");
+    // Enter adds the first: it is on the graph where the click was, and the inspector is its.
     const auto nodes = Doc().Graph().nodes.size();
-    Click({ 393.f, 291.f });
+    editor->SceneInput().FeedKey(kor::Key::eEnter, true);
+    Frame();
+    editor->SceneInput().FeedKey(kor::Key::eEnter, false);
+    for (int i = 0; i < 3; ++i) Frame();
     ASSERT_EQ(Doc().Graph().nodes.size(), nodes + 1);
     EXPECT_EQ(Doc().Graph().nodes.back().type, "Dispatch");
     EXPECT_EQ(Session().selectedNode, "dispatch");
@@ -280,6 +293,7 @@ TEST_F(EditorTest, DISABLED_Sheets) {
     scene::BuildGraph(Doc());
     scene::BuildEntities(Doc());
     std::string error;
+    std::filesystem::remove_all(std::filesystem::temp_directory_path() / "keditor-tests" / "sheets-project");
     ASSERT_TRUE(Session().NewProject(std::filesystem::temp_directory_path() / "keditor-tests" / "sheets-project")) << Session().Status();
     for (const char* shader : { "stamp.slang", "show.slang" })
         std::filesystem::copy_file(std::filesystem::path(KEDITOR_TEST_SHADERS) / shader, Session().CurrentProject().ShaderDirectory() / shader,
@@ -299,6 +313,15 @@ TEST_F(EditorTest, DISABLED_Sheets) {
     for (int i = 0; i < 4; ++i) Frame();
     Sheet("node-target-more");
 
+    {
+        const std::string image = Doc().AddNode("Image", 660, 40, "fresh image");
+        const std::string half = Doc().AddNode("Divide", 860, 60, "half");
+        Doc().Connect(image, "size", half, "a");
+        Session().Show(image, "out:mipLevels");
+        Session().Select(image);
+        for (int i = 0; i < 4; ++i) Frame();
+        Sheet("node-fresh-image");
+    }
     auto& input = editor->SceneInput();
     input.FeedMousePosition({ 330.f, 77.f });
     Frame();
@@ -441,4 +464,85 @@ TEST_F(EditorTest, AnEditMadeMidFrameDoesNotFreeWhatTheFrameIsDrawingWith) {
     frames(3);
     support::App()->Close(*late);
     frames(1);
+}
+
+// A node added is one that works, with what it needs already set to something sensible; what else it has shows as
+// what it is, not as nothing; and what it gives besides what it makes can be put on it, to wire from.
+TEST_F(EditorTest, ANewNodeStartsAsSomethingThatWorksAndGivesWhatItIsMadeOf) {
+    Open();
+    const std::string image = Doc().AddNode("Image", 40, 40);
+    Session().Select(image);
+    const auto* status = Doc().Runtime().Status(image);
+    EXPECT_TRUE(status->ok) << "an image from the first, not a list of things to fill in: " << status->error;
+    const auto& inputs = Doc().Graph().Find(image)->inputs;
+    EXPECT_EQ(inputs.at("format").value, kgraph::Value("eRGBA8_UNORM"));
+    EXPECT_EQ(inputs.at("extent.x").value, kgraph::Value(512));
+    EXPECT_EQ(inputs.at("usage").value, kgraph::Value(kgraph::Value::List { "eSampled", "eTransferSrc", "eTransferDst" }));
+    EXPECT_FALSE(inputs.contains("mipLevels")) << "what it can do without is not set for it";
+    EXPECT_TRUE(Shows("512"));
+    EXPECT_TRUE(Shows("eRGBA8_UNORM"));
+
+    // Other kinds likewise: each is right as it comes.
+    for (const char* type : { "Sampler", "Buffer", "Primitive", "Number", "Vector", "Color" }) {
+        const std::string id = Doc().AddNode(type, 0, 0);
+        EXPECT_TRUE(Doc().Runtime().Status(id)->ok) << type << ": " << Doc().Runtime().Status(id)->error;
+    }
+    const std::string clear = Doc().AddNode("Clear", 300, 40);
+    EXPECT_EQ(Doc().Graph().Find(clear)->inputs.at("color").value, kgraph::Value(kgraph::Value::List { 0, 0, 0, 1 }));
+    Doc().Connect(image, "out", clear, "image");
+    EXPECT_TRUE(Doc().Runtime().Status(clear)->ok) << Doc().Runtime().Status(clear)->error;
+
+    // What it gives besides the image: asked for, it is on the node, and the inspector no longer offers it.
+    Session().Select(image);
+    EXPECT_TRUE(Shows("Add output"));
+    EXPECT_FALSE(Shows("width")) << "none of it is in the way until it is wanted";
+    Session().Show(image, "out:width");
+    EXPECT_TRUE(Shows("width"));
+    // Wired from, it stays on the node without being asked for: the wire is in the file.
+    const std::string half = Doc().AddNode("Divide", 300, 200);
+    Doc().Connect(image, "size", half, "a");
+    Doc().SetInput(half, "b", 2);
+    EXPECT_TRUE(Shows("size"));
+    EXPECT_EQ(Doc().Runtime().ValueOf(half), kgraph::Value(kgraph::Value::List { 256, 256 }));
+}
+
+TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {
+    const auto first = [](const std::string_view typed) {
+        const auto found = keditor::FindNodeTypes(typed);
+        return found.empty() ? std::string("(nothing)") : found.front()->name;
+    };
+    const auto finds = [](const std::string_view typed, const std::string_view name) {
+        return std::ranges::any_of(keditor::FindNodeTypes(typed), [&](const kgraph::NodeType* type) { return type->name == name; });
+    };
+    EXPECT_EQ(first("image"), "Image") << "its own name, before ImageView and ImageExtent";
+    EXPECT_EQ(first("texture"), "Image") << "another word for it";
+    EXPECT_EQ(first("mix"), "Lerp");
+    EXPECT_EQ(first("pipe"), "GraphicsPipeline") << "the start of a word inside its name";
+    EXPECT_EQ(first("compute pipe"), "ComputePipeline") << "every word typed has to fit";
+    EXPECT_EQ(first("run compute"), "Dispatch");
+    EXPECT_EQ(first("if"), "Select");
+    EXPECT_EQ(first("mip"), "GenerateMipmaps");
+    EXPECT_EQ(first("quad"), "Primitive");
+    EXPECT_EQ(first("<"), "Less");
+    EXPECT_TRUE(finds("size", "ImageExtent"));
+    EXPECT_TRUE(finds("compare", "Equal") && finds("compare", "Greater"));
+    EXPECT_TRUE(finds("radians", "Sin")) << "found by what it says it does";
+    EXPECT_TRUE(keditor::FindNodeTypes("no such thing at all").empty());
+    EXPECT_FALSE(finds("shader", "Shader")) << "what an editor does not offer is not found";
+
+    // Nothing typed: every kind there is to add, in the catalog's order.
+    const auto all = keditor::FindNodeTypes("");
+    EXPECT_GT(all.size(), 60u);
+    EXPECT_EQ(all.front()->name, "Buffer");
+
+    // And in the editor: Control+Space opens the list, wherever the pointer is.
+    Open();
+    auto& input = editor->SceneInput();
+    input.FeedKey(kor::Key::eLeftControl, true);
+    Frame();
+    input.FeedKey(kor::Key::eSpace, true);
+    Frame();
+    input.FeedKey(kor::Key::eSpace, false);
+    input.FeedKey(kor::Key::eLeftControl, false);
+    EXPECT_TRUE(Shows("Add a node"));
 }

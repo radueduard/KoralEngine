@@ -115,6 +115,55 @@ namespace keditor
         return entries;
     }
 
+    std::vector<const kgraph::NodeType*> FindNodeTypes(const std::string_view typed)
+    {
+        const auto lower = [](std::string text) {
+            std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return text;
+        };
+        std::vector<std::string> words;
+        for (std::size_t at = 0; at < typed.size();) {
+            const auto end = typed.find(' ', at);
+            const auto word = typed.substr(at, end == std::string_view::npos ? std::string_view::npos : end - at);
+            if (!word.empty()) words.push_back(lower(std::string(word)));
+            if (end == std::string_view::npos) break;
+            at = end + 1;
+        }
+        // Whether a word starts one of the words of a text: of "vertex fragment", of "GraphicsPipeline" at its capitals.
+        const auto startsAWord = [&](const std::string& text, const std::string& word) {
+            for (std::size_t at = 0; at < text.size(); ++at) {
+                const bool start = at == 0 || text[at - 1] == ' ' || (std::isupper(static_cast<unsigned char>(text[at])) && !std::isupper(static_cast<unsigned char>(text[at - 1])));
+                if (start && lower(text.substr(at, word.size())) == word) return true;
+            }
+            return false;
+        };
+        std::vector<std::pair<int, const kgraph::NodeType*>> found;
+        for (const auto& type : kgraph::Catalog()) {
+            if (!type.listed) continue;
+            const std::string name = lower(type.name), doc = lower(type.doc), category = lower(type.category);
+            int score = 0;
+            bool all = true;
+            for (const auto& word : words) {
+                int best = 0;
+                if (name == word) best = 100;
+                else if (name.starts_with(word)) best = 60;
+                else if (startsAWord(type.name, word)) best = 45;
+                else if (name.find(word) != std::string::npos) best = 30;
+                else if (startsAWord(type.keywords, word)) best = 25;
+                else if (category.starts_with(word)) best = 10;
+                else if (doc.find(word) != std::string::npos) best = 5;
+                if (best == 0) { all = false; break; }
+                score += best;
+            }
+            if (all) found.emplace_back(score, &type);
+        }
+        // Best first; among equals, as the catalog has them — which with nothing typed is all of them, in its order.
+        std::ranges::stable_sort(found, [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::vector<const kgraph::NodeType*> types;
+        for (const auto& [score, type] : found) types.push_back(type);
+        return types;
+    }
+
     namespace {
         constexpr float LabelWidth = 132.f;
 
@@ -446,6 +495,7 @@ namespace keditor
             {
                 // The document changes under the panels — an edit here, a shader saved elsewhere: built again when it has.
                 Animate([this](float) {
+                    if (_session->TakeAskForNodes()) SetState([&] { _dialog = Dialog::eAddNode; _addAt = { 80.f + 30.f * static_cast<float>(Doc().Graph().nodes.size() % 8), 80.f }; _filter.clear(); _newId.clear(); });
                     if (const auto version = _session->Version(); version != _shown) SetState([&] { _shown = version; });
                     return true;
                 });
@@ -488,7 +538,7 @@ namespace keditor
                         { "Run", [this] { if (!_session->HasProject()) SetState([&] { _dialog = Dialog::eNewProject; }); else _session->Run(); } },
                     } },
                     { "Graph", {
-                        { "Add node...", [this] { SetState([&] { _dialog = Dialog::eAddNode; _addAt = { 80.f, 80.f }; _filter.clear(); _newId.clear(); }); } },
+                        { "Add node...   Ctrl+Space", [this] { SetState([&] { _dialog = Dialog::eAddNode; _addAt = { 80.f, 80.f }; _filter.clear(); _newId.clear(); }); } },
                     } },
                     { "Entity", {
                         { "New entity", [this] { _session->Select(Doc().CreateEntity()); } },
@@ -513,38 +563,79 @@ namespace keditor
                 }
             }
 
-            /** Every kind of node, under its category, narrowed by what is typed. */
+            void AddOf(const std::string& type)
+            {
+                const std::string id = Doc().AddNode(type, _addAt.x, _addAt.y, _newId);
+                _session->Select(id);
+                _session->Say(std::format("Added {}.", id));
+                SetState([&] { _dialog = Dialog::eNone; });
+            }
+
+            /**
+             * The nodes there are to add. With nothing typed, every kind, under its category. As something is typed,
+             * the kinds it finds, best first, each with what it does — and the nodes of this graph it names, to go to.
+             * Enter adds the first.
+             */
             kui::Widget AddNodeDialog()
             {
-                std::string lowered = _filter;
-                std::ranges::transform(lowered, lowered.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                std::map<std::string, std::vector<kui::Widget>> byCategory;
-                for (const auto& type : kgraph::Catalog()) {
-                    if (!type.listed) continue;
-                    std::string name = type.name;
-                    std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                    if (!lowered.empty() && name.find(lowered) == std::string::npos) continue;
-                    byCategory[type.category].push_back(kui::Tooltip(type.doc, kui::Selectable(type.name, false, [this, name = type.name] {
-                        const std::string id = Doc().AddNode(name, _addAt.x, _addAt.y, _newId);
-                        _session->Select(id);
-                        _session->Say(std::format("Added {}.", id));
-                        SetState([&] { _dialog = Dialog::eNone; });
-                    })));
-                }
-                std::vector<kui::Widget> columns;
-                for (auto& [category, items] : byCategory) {
-                    items.insert(items.begin(), kgui::Muted(category));
-                    columns.push_back(kui::Column(std::move(items), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(2.f)).Width(190.f));
+                const auto found = FindNodeTypes(_filter);
+                kui::Widget results;
+                if (_filter.empty()) {
+                    std::vector<std::pair<std::string, std::vector<kui::Widget>>> byCategory;
+                    for (const auto* type : found) {
+                        auto column = std::ranges::find_if(byCategory, [&](const auto& c) { return c.first == type->category; });
+                        if (column == byCategory.end()) column = byCategory.insert(byCategory.end(), { type->category, {} });
+                        column->second.push_back(kui::Tooltip(type->doc, kui::Selectable(type->name, false, [this, name = type->name] { AddOf(name); })));
+                    }
+                    std::vector<kui::Widget> columns;
+                    for (auto& [category, items] : byCategory) {
+                        items.insert(items.begin(), kgui::Muted(category));
+                        // A long category in two columns, so the list is not taller than the window.
+                        const std::size_t per = items.size() > 26 ? (items.size() + 1) / 2 : items.size();
+                        for (std::size_t at = 0; at < items.size(); at += per)
+                            columns.push_back(kui::Column(std::vector<kui::Widget>(items.begin() + static_cast<std::ptrdiff_t>(at),
+                                                                                    items.begin() + static_cast<std::ptrdiff_t>(std::min(at + per, items.size()))),
+                                                          kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(0.f)).Width(170.f));
+                    }
+                    results = kui::Row(std::move(columns), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(10.f));
+                } else {
+                    std::vector<kui::Widget> rows;
+                    constexpr std::size_t Most = 12;
+                    for (std::size_t i = 0; i < found.size() && i < Most; ++i) {
+                        const auto* type = found[i];
+                        rows.push_back(kui::Selectable(std::format("{}   ·   {}", type->name, type->category), i == 0, [this, name = type->name] { AddOf(name); }));
+                        rows.push_back(kui::Padding(kui::EdgeInsets { 14.f, 0.f, 0.f, 4.f }, kgui::Line(type->doc, kui::TextStyle {}.SetColor(kui::Theme::Current().textMuted).SetSize(12.f))));
+                    }
+                    if (found.size() > Most) rows.push_back(kgui::Muted(std::format("and {} more: type more of it", found.size() - Most)));
+                    // The nodes this graph has, by name: picked, to go on working with.
+                    std::string lowered = _filter;
+                    std::ranges::transform(lowered, lowered.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    std::size_t here = 0;
+                    for (const auto& node : Doc().Graph().nodes) {
+                        std::string id = node.id;
+                        std::ranges::transform(id, id.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        if (id.find(lowered) == std::string::npos || ++here > 6) continue;
+                        if (here == 1) rows.push_back(kgui::Muted("In this graph"));
+                        rows.push_back(kui::Selectable(std::format("{}   ·   {}", node.id, node.type), false, [this, picked = node.id] {
+                            _session->Select(picked);
+                            SetState([&] { _dialog = Dialog::eNone; });
+                        }));
+                    }
+                    if (rows.empty()) rows.push_back(kgui::Muted(std::format("Nothing is called, or does, '{}'.", _filter)));
+                    results = kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(0.f)).Width(700.f);
                 }
                 return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column({
                     Heading("Add a node"),
                     kui::Row({
-                        kui::TextField(kui::TextFieldOptions { .text = _filter, .placeholder = "Find a kind of node",
-                                                               .onChanged = [this](const std::string& typed) { SetState([&] { _filter = typed; }); }, .focus = 1 }),
+                        kui::TextField(kui::TextFieldOptions { .text = _filter, .placeholder = "Type what you are after: image, blur, clamp, compare...",
+                                                               .onChanged = [this](const std::string& typed) { SetState([&] { _filter = typed; }); },
+                                                               .onSubmitted = [this](const std::string& typed) {
+                                                                   if (const auto first = FindNodeTypes(typed); !typed.empty() && !first.empty()) AddOf(first.front()->name);
+                                                               }, .width = 360.f, .focus = 1 }),
                         kui::TextField(kui::TextFieldOptions { .text = _newId, .placeholder = "Its name (a pipeline's names its component)",
                                                                .onChanged = [this](const std::string& typed) { _newId = typed; }, .width = 320.f }),
                     }, kui::FlexOptions {}.SetGap(8.f)),
-                    kui::Row(std::move(columns), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(12.f)),
+                    std::move(results),
                 }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(12.f)));
             }
 
@@ -555,6 +646,10 @@ namespace keditor
                 const kgraph::Graph& graph = Doc().Graph();
                 const kgraph::Runtime& runtime = Doc().Runtime();
                 kui::NodeGraph shown;
+                std::set<std::pair<std::string, std::string>> wiredFrom;
+                for (const auto& node : graph.nodes)
+                    for (const auto& input : node.inputs | std::views::values)
+                        if (input.link) wiredFrom.insert({ input.link->node, input.link->output });
                 for (const auto& node : graph.nodes) {
                     const kgraph::NodeType* type = kgraph::FindType(node.type);
                     kui::GraphNode card;
@@ -565,10 +660,12 @@ namespace keditor
                     for (const auto& shown : InputsOf(runtime, node, [&](const std::string& input) { return _session->Asked(node.id, input); }))
                         if (ShowsAsPort(shown, node))
                             card.inputs.push_back({ shown.port.name, shown.port.name, (shown.port.kind == kgraph::PortKind::eResource ? "r:" : "v:") + shown.port.type });
+                    // What it gives: what it makes, and whatever else of it something is wired to or was asked for.
                     if (type)
                         for (const auto& output : type->outputs)
-                            card.outputs.push_back({ output.name, output.name == "out" ? output.type : output.name,
-                                                     (output.kind == kgraph::PortKind::eResource ? "r:" : "v:") + output.type });
+                            if (!output.optional || wiredFrom.contains({ node.id, output.name }) || _session->Asked(node.id, "out:" + output.name))
+                                card.outputs.push_back({ output.name, output.name == "out" ? output.type : output.name,
+                                                         (output.kind == kgraph::PortKind::eResource ? "r:" : "v:") + output.type });
                     if (const auto* status = runtime.Status(node.id); status && !status->ok) card.error = status->error;
                     card.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 2.f), kgui::Muted(node.type, 11.f));
                     shown.nodes.push_back(std::move(card));
@@ -713,7 +810,8 @@ namespace keditor
                             for (const auto& part : parts) {
                                 const auto each = node.inputs.find(part);
                                 any = any || each != node.inputs.end();
-                                numbers.push_back(each == node.inputs.end() ? 0.f : NumberOf(each->second.value));
+                                const auto listed = std::ranges::find_if(inputs, [&](const Shown& other) { return other.port.name == part; });
+                                numbers.push_back(each != node.inputs.end() ? NumberOf(each->second.value) : listed != inputs.end() ? NumberOf(listed->port.initial) : 0.f);
                             }
                             auto editor = kgui::DragFloats(numbers, [this, id, parts, numbers, round = whole(port)](const std::vector<float>& changed) {
                                 for (std::size_t i = 0; i < parts.size(); ++i)
@@ -736,7 +834,8 @@ namespace keditor
                     } else if (shown.given && input->second.value.IsNull()) {
                         editor = kgui::Muted("a port: wire a value in");
                     } else {
-                        editor = EditorFor(node, port, shown.given ? input->second.value : Value {}, set(name), id + "/" + name);
+                        // Not given, it shows what it is all the same: what the node type says it starts as.
+                        editor = EditorFor(node, port, shown.given ? input->second.value : port.initial, set(name), id + "/" + name);
                     }
                     std::vector<kui::Widget> line { kui::Expanded(std::move(editor)) };
                     // A value a node can work out — a number, a vector, a colour — can be wired instead: a name chosen from a list cannot.
@@ -753,9 +852,22 @@ namespace keditor
                     std::vector<std::string> names;
                     for (const auto& port : more) names.push_back(port.name);
                     rows.push_back(kui::Separator());
-                    rows.push_back(kgui::Labeled("Add input", kui::Dropdown(names, -1, [this, id, names](const int index) {
-                        _session->Show(id, names[static_cast<std::size_t>(index)]);
+                    rows.push_back(kgui::Labeled("Add input", kui::Dropdown(names, -1, [this, id, more](const int index) {
+                        // Given what it starts as, when its type says what that is: what shows is then what is so.
+                        const auto& port = more[static_cast<std::size_t>(index)];
+                        if (port.kind == kgraph::PortKind::eValue && !port.initial.IsNull()) Doc().SetInput(id, port.name, port.initial);
+                        else _session->Show(id, port.name);
                     }, kui::DropdownOptions {}.SetPlaceholder(std::format("{} more it can be given", names.size()))), LabelWidth));
+                }
+                // What it gives, besides what it makes: its size, its settings. Asked for, it is an output on the node to wire from.
+                if (const kgraph::NodeType* type = kgraph::FindType(node.type)) {
+                    std::vector<std::string> outputs;
+                    for (const auto& output : type->outputs)
+                        if (output.optional && !_session->Asked(id, "out:" + output.name)) outputs.push_back(output.name);
+                    if (!outputs.empty())
+                        rows.push_back(kgui::Labeled("Add output", kui::Dropdown(outputs, -1, [this, id, outputs](const int index) {
+                            _session->Show(id, "out:" + outputs[static_cast<std::size_t>(index)]);
+                        }, kui::DropdownOptions {}.SetPlaceholder(std::format("{} things of it to wire from", outputs.size()))), LabelWidth));
                 }
                 rows.push_back(kui::Separator());
                 rows.push_back(Small("Remove the node", [this, id] { Doc().RemoveNodes({ id }); _session->Select(std::string()); }));
@@ -894,6 +1006,7 @@ namespace keditor
         const kor::Input& input = SceneInput();
         if (!input.InterfaceWantsKeyboard() && (input.IsKeyHeld(kor::Key::eLeftControl) || input.IsKeyHeld(kor::Key::eRightControl))) {
             if (input.IsKeyPressed(kor::Key::eS)) _session->Save();
+            if (input.IsKeyPressed(kor::Key::eSpace)) _session->AskForNodes();     // Control+Space: the nodes there are to add
             if (input.IsKeyPressed(kor::Key::eR)) _session->Run();
         }
     }

@@ -167,6 +167,10 @@ namespace keditor
         auto& node = graph.Add(name, std::string(type));
         node.x = x;
         node.y = y;
+        // It starts with what a node of its kind needs, set to something that works: an image has a size, a format
+        // and a usage from the first, and is an image, not a list of things to fill in before it is one.
+        for (const auto& port : kgraph::PortsFor(*kgraph::FindType(type), node))
+            if (!port.optional && port.kind == kgraph::PortKind::eValue && !port.initial.IsNull()) node.Set(port.name, port.initial);
         Apply(std::move(graph));
         return name;
     }

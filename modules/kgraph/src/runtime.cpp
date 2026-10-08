@@ -7,6 +7,7 @@
 #include <kgraph/runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -421,55 +422,86 @@ namespace kgraph
 
         // ---- values -------------------------------------------------------------------------------------------
 
-        Expected<Value> Combine(const std::string& op, const Value& a, const Value& b)
+        /** Numbers, or vectors a component at a time: a number goes with every component of a vector. */
+        Expected<Value> Each(const std::vector<const Value*>& values, const std::function<double(const double*)>& apply)
         {
-            const auto apply = [&](const double x, const double y) -> double {
-                if (op == "Add") return x + y;
-                if (op == "Subtract") return x - y;
-                if (op == "Multiply") return x * y;
-                if (op == "Divide") return x / y;
-                if (op == "Min") return std::min(x, y);
-                return std::max(x, y);
-            };
-            const double* x = a.Number();
-            const double* y = b.Number();
-            const Value::List* xs = a.Items();
-            const Value::List* ys = b.Items();
-            if (x && y) return Value(apply(*x, *y));
-            if ((xs || x) && (ys || y)) {
-                const std::size_t count = xs ? xs->size() : ys->size();
-                if (xs && ys && xs->size() != ys->size()) return Fail(std::format("a vector of {} and one of {} do not go together", xs->size(), ys->size()));
-                Value::List out;
-                for (std::size_t i = 0; i < count; ++i) {
-                    const double* l = xs ? (*xs)[i].Number() : x;
-                    const double* r = ys ? (*ys)[i].Number() : y;
-                    if (!l || !r) return Fail("a vector's components are numbers");
-                    out.emplace_back(apply(*l, *r));
-                }
-                return Value(std::move(out));
+            std::size_t count = 0;
+            for (const Value* value : values) {
+                if (value->Number() || value->Bool()) continue;
+                const auto* items = value->Items();
+                if (!items || !std::ranges::all_of(*items, [](const Value& v) { return v.Number() != nullptr; })) return Fail("its inputs are numbers, or vectors of them");
+                if (count != 0 && items->size() != count) return Fail(std::format("a vector of {} and one of {} do not go together", count, items->size()));
+                count = items->size();
             }
-            return Fail("'a' and 'b' are numbers, or vectors of them");
+            const auto at = [&](const Value* value, const std::size_t i) {
+                if (const double* number = value->Number()) return *number;
+                if (const bool* flag = value->Bool()) return *flag ? 1.0 : 0.0;
+                return *(*value->Items())[i].Number();
+            };
+            std::vector<double> arguments(values.size());
+            if (count == 0) {
+                for (std::size_t v = 0; v < values.size(); ++v) arguments[v] = at(values[v], 0);
+                return Value(apply(arguments.data()));
+            }
+            Value::List out;
+            for (std::size_t i = 0; i < count; ++i) {
+                for (std::size_t v = 0; v < values.size(); ++v) arguments[v] = at(values[v], i);
+                out.emplace_back(apply(arguments.data()));
+            }
+            return Value(std::move(out));
         }
 
-        Expected<Value> Map(const std::string& op, const Value& a)
+        using Operation = double (*)(const double*);
+        /** What is worked out of one, two or three numbers, by the node type's name. */
+        const std::map<std::string, std::pair<int, Operation>, std::less<>>& Operations()
         {
-            const auto apply = [&](const double x) -> double {
-                if (op == "Negate") return -x;
-                if (op == "Abs") return std::abs(x);
-                if (op == "Floor") return std::floor(x);
-                if (op == "Ceil") return std::ceil(x);
-                return std::round(x);
+            static const std::map<std::string, std::pair<int, Operation>, std::less<>> operations {
+                { "Negate", { 1, [](const double* v) { return -v[0]; } } },
+                { "Abs", { 1, [](const double* v) { return std::abs(v[0]); } } },
+                { "Floor", { 1, [](const double* v) { return std::floor(v[0]); } } },
+                { "Ceil", { 1, [](const double* v) { return std::ceil(v[0]); } } },
+                { "Round", { 1, [](const double* v) { return std::round(v[0]); } } },
+                { "Fract", { 1, [](const double* v) { return v[0] - std::floor(v[0]); } } },
+                { "Sign", { 1, [](const double* v) { return v[0] > 0 ? 1.0 : v[0] < 0 ? -1.0 : 0.0; } } },
+                { "Saturate", { 1, [](const double* v) { return std::clamp(v[0], 0.0, 1.0); } } },
+                { "Sqrt", { 1, [](const double* v) { return std::sqrt(v[0]); } } },
+                { "Exp", { 1, [](const double* v) { return std::exp(v[0]); } } },
+                { "Log", { 1, [](const double* v) { return std::log(v[0]); } } },
+                { "Sin", { 1, [](const double* v) { return std::sin(v[0]); } } },
+                { "Cos", { 1, [](const double* v) { return std::cos(v[0]); } } },
+                { "Tan", { 1, [](const double* v) { return std::tan(v[0]); } } },
+                { "Radians", { 1, [](const double* v) { return v[0] * 3.14159265358979323846 / 180.0; } } },
+                { "Degrees", { 1, [](const double* v) { return v[0] * 180.0 / 3.14159265358979323846; } } },
+                { "Add", { 2, [](const double* v) { return v[0] + v[1]; } } },
+                { "Subtract", { 2, [](const double* v) { return v[0] - v[1]; } } },
+                { "Multiply", { 2, [](const double* v) { return v[0] * v[1]; } } },
+                { "Divide", { 2, [](const double* v) { return v[0] / v[1]; } } },
+                { "Min", { 2, [](const double* v) { return std::min(v[0], v[1]); } } },
+                { "Max", { 2, [](const double* v) { return std::max(v[0], v[1]); } } },
+                { "Pow", { 2, [](const double* v) { return std::pow(v[0], v[1]); } } },
+                { "Mod", { 2, [](const double* v) { return v[0] - v[1] * std::floor(v[0] / v[1]); } } },
+                { "Step", { 2, [](const double* v) { return v[1] < v[0] ? 0.0 : 1.0; } } },
+                { "Atan2", { 2, [](const double* v) { return std::atan2(v[0], v[1]); } } },
+                { "Clamp", { 3, [](const double* v) { return std::clamp(v[0], std::min(v[1], v[2]), std::max(v[1], v[2])); } } },
+                { "Lerp", { 3, [](const double* v) { return v[0] + (v[1] - v[0]) * v[2]; } } },
+                { "Smoothstep", { 3, [](const double* v) {
+                    const double t = std::clamp((v[2] - v[0]) / (v[1] - v[0]), 0.0, 1.0);
+                    return t * t * (3.0 - 2.0 * t);
+                } } },
             };
-            if (const double* x = a.Number()) return Value(apply(*x));
-            if (const auto* xs = a.Items()) {
-                Value::List out;
-                for (const auto& item : *xs) {
-                    if (!item.Number()) return Fail("a vector's components are numbers");
-                    out.emplace_back(apply(*item.Number()));
-                }
-                return Value(std::move(out));
-            }
-            return Fail("'a' is a number, or a vector of them");
+            return operations;
+        }
+
+        /** The numbers of a vector, or of a number as a vector of one. */
+        Expected<std::vector<double>> NumbersOf(const Value& value, const char* name)
+        {
+            if (const double* number = value.Number()) return std::vector<double> { *number };
+            const auto* items = value.Items();
+            if (!items || items->empty() || !std::ranges::all_of(*items, [](const Value& v) { return v.Number() != nullptr; }))
+                return Fail(std::format("'{}' is a vector", name));
+            std::vector<double> out;
+            for (const auto& item : *items) out.push_back(*item.Number());
+            return out;
         }
 
         // ---- a node's values, as a builder takes them -------------------------------------------------------------
@@ -1186,6 +1218,51 @@ namespace kgraph
                     plan->uses.push_back({ MemberOf(to), false, true });
                     plan->record = [from, to](kor::CommandBuffer& cb, const PassContext&) { cb.Blit(from, to); };
                 }
+            } else if (node.type == "Copy") {
+                const auto source = image("source");
+                if (!source) return Fail(source.error());
+                const auto destination = image("destination");
+                if (!destination) return Fail(destination.error());
+                if ((*source)->screen || (*destination)->screen) return Fail("the screen is shown with a Blit: a Copy is between two images of one size");
+                if (lacks(**source, kor::Image::Usage::eTransferSrc)) return Fail("the source needs eTransferSrc among its usage, to be copied from");
+                if (lacks(**destination, kor::Image::Usage::eTransferDst)) return Fail("the destination needs eTransferDst among its usage, to be copied to");
+                const auto from = ImageRefOf(source->get());
+                const auto to = ImageRefOf(destination->get());
+                if (from->Extent() != to->Extent())
+                    return Fail(std::format("a Copy is between images of one size, and these are {}x{} and {}x{}: a Blit scales", from->Extent().x, from->Extent().y, to->Extent().x, to->Extent().y));
+                plan->uses.push_back({ MemberOf(from), true, false });
+                plan->uses.push_back({ MemberOf(to), false, true });
+                plan->record = [from, to](kor::CommandBuffer& cb, const PassContext&) { cb.CopyImage(from, to); };
+            } else if (node.type == "GenerateMipmaps") {
+                const auto target = image("image");
+                if (!target) return Fail(target.error());
+                if ((*target)->screen) return Fail("the screen has no mip levels");
+                if (lacks(**target, kor::Image::Usage::eTransferSrc) || lacks(**target, kor::Image::Usage::eTransferDst))
+                    return Fail("the image needs eTransferSrc and eTransferDst among its usage: each level is made by copying the one above");
+                const auto ref = ImageRefOf(target->get());
+                if (ref->MipLevels() < 2) return Fail("the image has one mip level: give it more (mipLevels) for there to be any to fill");
+                plan->uses.push_back({ MemberOf(ref), true, true });
+                plan->record = [ref](kor::CommandBuffer& cb, const PassContext&) { cb.GenerateMipmaps(ref); };
+            } else if (node.type == "CopyBuffer") {
+                const auto buffer = [&](const char* name) -> Expected<kor::ResourceRef<const kor::Buffer>> {
+                    const auto it = inputs.find(name);
+                    const auto ref = it == inputs.end() ? kor::ResourceRef<const kor::Buffer>() : BufferRefOf(it->second.resource.get());
+                    if (!ref.Get()) return Fail(std::format("'{}' needs a buffer wired in", name));
+                    return ref;
+                };
+                const auto from = buffer("source");
+                if (!from) return Fail(from.error());
+                const auto to = buffer("destination");
+                if (!to) return Fail(to.error());
+                if (!((*from)->UsageFlags() & kor::Buffer::Usage::eTransferSrc)) return Fail("the source needs eTransferSrc among its usage, to be copied from");
+                if (!((*to)->UsageFlags() & kor::Buffer::Usage::eTransferDst)) return Fail("the destination needs eTransferDst among its usage, to be copied to");
+                Member read, written;
+                read.id = from->Get(); read.buffer = *from;
+                written.id = to->Get(); written.buffer = *to;
+                plan->uses.push_back({ std::move(read), true, false });
+                plan->uses.push_back({ std::move(written), false, true });
+                const kor::u64 bytes = std::min((*from)->size(), (*to)->size());
+                plan->record = [source = *from, destination = *to, bytes](kor::CommandBuffer& cb, const PassContext&) { cb.CopyBuffer(source, destination, bytes); };
             } else if (node.type == "Dispatch") {
                 const auto info = pipelineOf("ComputePipeline");
                 if (!info) return Fail(info.error());
@@ -1312,17 +1389,28 @@ namespace kgraph
                 const auto it = inputs.find(name);
                 return it == inputs.end() ? none : it->second.value;
             };
+            const auto given = [&](const char* name) -> Expected<const Value*> {
+                const Value& v = value(name);
+                if (v.IsNull()) return Fail(std::format("'{}' is not given", name));
+                return &v;
+            };
             Value& result = out.outputs["out"].value;
-            if (node.type == "Number") {
+            const std::string& type = node.type;
+
+            if (type == "Number") {
                 if (!value("value").Number()) return Fail("'value' is a number");
                 result = value("value");
-            } else if (node.type == "Bool") {
+            } else if (type == "Bool") {
                 if (!value("value").Bool()) return Fail("'value' is true or false");
                 result = value("value");
-            } else if (node.type == "String") {
+            } else if (type == "String") {
                 if (!value("value").String()) return Fail("'value' is text");
                 result = value("value");
-            } else if (node.type == "Vector") {
+            } else if (type == "Color") {
+                const auto* items = value("color").Items();
+                if (!items || items->size() < 3) return Fail("'color' is red, green, blue and alpha");
+                result = value("color");
+            } else if (type == "Vector") {
                 Value::List components;
                 for (const char* name : { "x", "y", "z", "w" }) {
                     if (value(name).IsNull()) break;
@@ -1331,32 +1419,102 @@ namespace kgraph
                 }
                 if (components.empty()) return Fail("it needs 'x' at least");
                 result = Value(std::move(components));
-            } else if (node.type == "Component") {
+            } else if (type == "Component") {
                 const auto* items = value("vector").Items();
                 const double* index = value("index").Number();
                 if (!items) return Fail("'vector' is a vector");
                 const std::size_t at = index ? static_cast<std::size_t>(std::max(*index, 0.0)) : 0;
                 if (at >= items->size()) return Fail(std::format("the vector has {} components, and component {} was asked for", items->size(), at));
                 result = (*items)[at];
-            } else if (node.type == "ImageExtent") {
+            } else if (type == "Split") {
+                // Each component by its letter; one the vector does not have is 0.
+                const auto numbers = NumbersOf(value("vector"), "vector");
+                if (!numbers) return Fail(numbers.error());
+                const char* letters[] { "x", "y", "z", "w" };
+                for (std::size_t i = 0; i < 4; ++i) out.outputs[letters[i]].value = Value(i < numbers->size() ? (*numbers)[i] : 0.0);
+                result = value("vector");
+            } else if (type == "ImageExtent") {
                 const auto it = inputs.find("image");
                 const auto image = it == inputs.end() ? kor::ResourceRef<const kor::Image>() : ImageRefOf(it->second.resource.get());
                 if (!image.Get()) return Fail("'image' needs an image wired in");
                 const auto extent = image->Extent();
                 result = Value(Value::List { extent.x, extent.y, extent.z });
-            } else if (node.type == "VertexLayout") {
+            } else if (type == "VertexLayout") {
                 auto layout = LayoutValue(value("attributes"));
                 if (!layout) return Fail(layout.error());
                 result = std::move(*layout);
-            } else if (inputs.contains("b") || node.type == "Add" || node.type == "Subtract" || node.type == "Multiply" || node.type == "Divide"
-                       || node.type == "Min" || node.type == "Max") {
-                auto combined = Combine(node.type, value("a"), value("b"));
-                if (!combined) return Fail(combined.error());
-                result = std::move(*combined);
+            } else if (type == "Length" || type == "Normalize") {
+                const auto a = NumbersOf(value("a"), "a");
+                if (!a) return Fail(a.error());
+                double squared = 0.0;
+                for (const double n : *a) squared += n * n;
+                const double length = std::sqrt(squared);
+                if (type == "Length") { result = Value(length); return {}; }
+                Value::List unit;
+                for (const double n : *a) unit.emplace_back(length > 0.0 ? n / length : 0.0);
+                result = Value(std::move(unit));
+            } else if (type == "Dot" || type == "Distance" || type == "Cross") {
+                const auto a = NumbersOf(value("a"), "a");
+                if (!a) return Fail(a.error());
+                const auto b = NumbersOf(value("b"), "b");
+                if (!b) return Fail(b.error());
+                if (a->size() != b->size()) return Fail(std::format("a vector of {} and one of {} do not go together", a->size(), b->size()));
+                if (type == "Cross") {
+                    if (a->size() != 3) return Fail("a cross product is of two vectors of 3");
+                    const auto& u = *a;
+                    const auto& v = *b;
+                    result = Value(Value::List { u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0] });
+                    return {};
+                }
+                double sum = 0.0;
+                for (std::size_t i = 0; i < a->size(); ++i) sum += type == "Dot" ? (*a)[i] * (*b)[i] : ((*a)[i] - (*b)[i]) * ((*a)[i] - (*b)[i]);
+                result = Value(type == "Dot" ? sum : std::sqrt(sum));
+            } else if (type == "Equal" || type == "NotEqual") {
+                const auto a = given("a");
+                if (!a) return Fail(a.error());
+                const auto b = given("b");
+                if (!b) return Fail(b.error());
+                result = Value((**a == **b) == (type == "Equal"));
+            } else if (type == "Less" || type == "LessOrEqual" || type == "Greater" || type == "GreaterOrEqual") {
+                const double* a = value("a").Number();
+                const double* b = value("b").Number();
+                if (!a || !b) return Fail("'a' and 'b' are numbers");
+                result = Value(type == "Less" ? *a < *b : type == "LessOrEqual" ? *a <= *b : type == "Greater" ? *a > *b : *a >= *b);
+            } else if (type == "Not") {
+                const bool* a = value("a").Bool();
+                if (!a) return Fail("'a' is true or false");
+                result = Value(!*a);
+            } else if (type == "And" || type == "Or" || type == "Xor") {
+                const bool* a = value("a").Bool();
+                const bool* b = value("b").Bool();
+                if (!a || !b) return Fail("'a' and 'b' are each true or false");
+                result = Value(type == "And" ? *a && *b : type == "Or" ? *a || *b : *a != *b);
+            } else if (type == "Select") {
+                const bool* condition = value("condition").Bool();
+                if (!condition) return Fail("'condition' is true or false");
+                const auto chosen = given(*condition ? "a" : "b");
+                if (!chosen) return Fail(chosen.error());
+                result = **chosen;
+            } else if (const auto operation = Operations().find(type); operation != Operations().end()) {
+                // Each is named for what it is: a clamp's are x, min and max; a smoothstep's two edges and x.
+                static const std::map<std::string, std::array<const char*, 3>, std::less<>> named {
+                    { "Clamp", { "x", "min", "max" } }, { "Smoothstep", { "edge0", "edge1", "x" } }, { "Step", { "edge", "x", "" } },
+                    { "Atan2", { "y", "x", "" } }, { "Lerp", { "a", "b", "t" } } };
+                static const std::array<const char*, 3> plain { "a", "b", "c" };
+                const auto own = named.find(type);
+                const int count = operation->second.first;
+                std::vector<const Value*> arguments;
+                for (int i = 0; i < count; ++i) {
+                    const char* name = (own == named.end() ? plain : own->second)[static_cast<std::size_t>(i)];
+                    const auto argument = given(name);
+                    if (!argument) return Fail(argument.error());
+                    arguments.push_back(*argument);
+                }
+                auto worked = Each(arguments, operation->second.second);
+                if (!worked) return Fail(worked.error());
+                result = std::move(*worked);
             } else {
-                auto mapped = Map(node.type, value("a"));
-                if (!mapped) return Fail(mapped.error());
-                result = std::move(*mapped);
+                return Fail(std::format("there is no way to work out a {}", type));
             }
             return {};
         }
@@ -1449,6 +1607,82 @@ namespace kgraph
             return BuildValue(node, inputs, out);
         }
 
+        /**
+         * What a node gives besides what it makes: everything about it that another node might want. Each value it
+         * was given, under the input's name; the parts of one thing as one (`extent` of `extent.x`, `.y`, `.z`); what
+         * an input is when it is not given; and what the object it made says of itself — an image's size, a buffer's.
+         */
+        static void AddOutputs(const Node& node, const Inputs& inputs, Built& out)
+        {
+            const auto add = [&](const std::string& name, Value value) {
+                if (!out.outputs.contains(name)) out.outputs[name].value = std::move(value);
+            };
+            // What the object says of itself comes first: it is what is so, whatever was asked for.
+            if (const auto made = out.outputs.find("out"); made != out.outputs.end() && made->second.resource && made->second.resource->handle) {
+                const Resource& resource = *made->second.resource;
+                if (const auto image = ImageRefOf(&resource); image.Get()) {
+                    const auto extent = image->Extent();
+                    add("extent", Value(Value::List { extent.x, extent.y, extent.z }));
+                    add("size", Value(Value::List { extent.x, extent.y }));
+                    add("width", extent.x);
+                    add("height", extent.y);
+                    add("depth", extent.z);
+                    add("mipLevels", image->MipLevels());
+                    add("arrayLayers", image->ArrayLayers());
+                } else if (const auto buffer = BufferRefOf(&resource); buffer.Get()) {
+                    add("bytes", static_cast<double>(buffer->size()));
+                } else if (resource.kind == "Framebuffer") {
+                    const auto extent = kor::capi::FramebufferOf(resource.handle)->Extent();
+                    add("size", Value(Value::List { extent.x, extent.y }));
+                    add("width", extent.x);
+                    add("height", extent.y);
+                } else if (resource.kind == "Mesh") {
+                    const auto mesh = kor::capi::MeshOf(resource.handle);
+                    add("vertexCount", static_cast<double>(mesh->VertexCount()));
+                    add("indexCount", static_cast<double>(mesh->IndexCount().value_or(0)));
+                }
+            }
+            const NodeType* type = FindType(node.type);
+            const auto ports = type ? PortsFor(*type, node) : std::vector<Port> {};
+            for (const auto& [name, input] : inputs)
+                if (!input.resource && !input.value.IsNull()) add(name, input.value);
+            for (const auto& port : ports)
+                if (port.kind == PortKind::eValue && !port.initial.IsNull()) add(port.name, port.initial);
+            // Parts as a whole.
+            std::map<std::string, Value::List> wholes;
+            for (const auto& port : ports) {
+                if (port.name.size() < 3 || port.name[port.name.size() - 2] != '.') continue;
+                const char part = port.name.back();
+                if (part != 'x' && part != 'y' && part != 'z' && part != 'w') continue;
+                const auto value = out.outputs.find(port.name);
+                if (value == out.outputs.end() || !value->second.value.Number()) continue;
+                wholes[port.name.substr(0, port.name.size() - 2)].push_back(value->second.value);
+            }
+            for (auto& [name, parts] : wholes) add(name, Value(std::move(parts)));
+        }
+
+        /** A struct given some of its fields has the rest as the node type says they are, not as nothing. */
+        static void FillDefaults(const Node& node, Inputs& inputs)
+        {
+            const NodeType* type = FindType(node.type);
+            if (!type) return;
+            for (auto& [name, input] : inputs) {
+                const Value::Members* given = input.value.Named();
+                if (!given || input.resource) continue;
+                // One given more than once is listed once: `color[1].clear` is `color[].clear`.
+                std::string listed = name;
+                if (const auto open = listed.find('['); open != std::string::npos)
+                    if (const auto close = listed.find(']', open); close != std::string::npos) listed.erase(open + 1, close - open - 1);
+                const auto port = std::ranges::find(type->inputs, listed, &Port::name);
+                const Value::Members* defaults = port == type->inputs.end() ? nullptr : port->initial.Named();
+                if (!defaults) continue;
+                Value::Members merged = *given;
+                for (const auto& [field, value] : *defaults)
+                    if (std::ranges::find_if(merged, [&](const auto& m) { return m.first == field; }) == merged.end()) merged.emplace_back(field, value);
+                input.value = Value(std::move(merged));
+            }
+        }
+
         // ---- the whole graph ----------------------------------------------------------------------------------
 
         void Evaluate(const Graph& graph)
@@ -1525,6 +1759,7 @@ namespace kgraph
                         if (const auto target = built.find(*it->second.value.String()); target != built.end()) signature += std::format("|#{}", target->second.stamp);
                 if (!blocked.empty()) { fail(std::move(blocked)); continue; }
                 if (out.status.ok && out.signature == signature) continue;   // nothing that goes into it changed
+                FillDefaults(*node, inputs);
 
                 Unwatch(out);
                 Built fresh;
@@ -1538,6 +1773,7 @@ namespace kgraph
                     out.pipeline = pipeline;
                     continue;
                 }
+                AddOutputs(*node, inputs, fresh);
                 fresh.status.ok = true;
                 fresh.signature = std::move(signature);
                 fresh.stamp = ++counter;

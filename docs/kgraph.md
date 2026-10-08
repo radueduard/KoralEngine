@@ -49,9 +49,14 @@ the editor will build its node list and its nodes from.
   `extent.x`, `entryPoint.module`. A setting that can be given more than once is `color[].view`, written
   in a graph as `color[0].view`, `color[1].view`. Nothing is written by hand: a builder that gains a
   setting gains the input.
-- **Values:** Number, Bool, String, Vector, and Add, Subtract, Multiply, Divide, Min, Max, Negate, Abs,
-  Floor, Ceil, Round, Component and ImageExtent. The operations work on numbers and, a component at a
-  time, on vectors.
+- **Values:** Number, Bool, String, Vector, Color, Component, and Split (a vector's `x`, `y`, `z`, `w` as
+  outputs of their own).
+- **Math:** Add, Subtract, Multiply, Divide, Min, Max, Pow, Mod, Negate, Abs, Floor, Ceil, Round, Fract,
+  Sign, Saturate, Sqrt, Exp, Log, Sin, Cos, Tan, Radians, Degrees, Clamp, Lerp, Smoothstep, Step, Atan2.
+  They work on numbers and, a component at a time, on vectors; a number goes with every component.
+- **Vectors:** Length, Normalize, Dot, Cross, Distance.
+- **Logic:** Less, LessOrEqual, Greater, GreaterOrEqual, Equal, NotEqual, Not, And, Or, Xor, and Select
+  (`a` when its condition is true, `b` when not).
 - **VertexLayout** describes a mesh's vertices: a list of `{ "semantic": "POSITION", "type": "eFloat",
   "count": 3 }`, packed in the order given. Its output goes to a pipeline's `vertexShader.layout` and to a
   Mesh node's `vertexLayout`.
@@ -60,7 +65,31 @@ the editor will build its node list and its nodes from.
   it takes as `vertexShader.layout`.
 - **Screen** is the scene's window. **Reference** stands for another node by id, for a resource used far
   from where it is made.
-- **Passes:** Clear, Blit, Dispatch and Draw.
+- **Passes:** Clear, Blit (scaled, and how a picture reaches the screen), Copy (image to image of one
+  size), CopyBuffer, GenerateMipmaps, Dispatch and Draw.
+
+## What a node gives
+
+Besides what it makes (`out`), a node gives everything about itself as outputs to wire from:
+
+- **What the object says of itself.** An image or a view: `size` (width and height), `extent`, `width`,
+  `height`, `depth`, `mipLevels`, `arrayLayers`. A buffer: `bytes`. A framebuffer: `size`, `width`,
+  `height`. A mesh: `vertexCount`, `indexCount`.
+- **Each value it was given**, under the input's name: an image's `format`, a Clear's `color`.
+- **The parts of one thing as one:** `extent` for `extent.x`, `.y`, `.z`; `groups` for a Dispatch's.
+- **What an input is when nobody set it**, where the node type says.
+
+So a second image half the size of the first is `{"$link": ["first", "size"]}` into a Divide, and its parts
+into the second image's extent. When the first is resized, the second follows. These outputs are optional
+in the catalog (`Port::optional`): an editor shows one when it is asked for or wired.
+
+## What an input starts as
+
+`Port::initial` is what each input is to begin with. A node an editor adds gets the ones it needs set to
+it: an Image is 512 by 512, `eRGBA8_UNORM`, sampled and copyable; a Clear's colour is opaque black; a
+Dispatch covers in groups of 8. For an input a node can do without, it is what shows before it is set. A
+struct given some of its fields has the rest from it: a `rasterizationState` given only its cull mode
+keeps a line width of 1 and fills its polygons, where it used to get zeros.
 
 ## Pipelines
 
@@ -202,7 +231,6 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   specialised.
 - When a shader edit removes a parameter the node wires, the framework logs one error for the old
   pipeline before the runtime replaces it.
-- A struct input given some of its fields has the rest zeroed, not defaulted.
 - The framework keeps every shader it compiled, by module and entry point, for the life of the app.
 - Initial data (an image's pixels, a buffer's bytes) can't be given in a graph.
 - Fields for C++ components are still declared with `KECS_FIELDS`. Nothing reads the framework's

@@ -11,10 +11,14 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include <kui/widgets.h>
 #include <scene.h>
+
+#include <kgraph/catalog.h>
 
 #include "document.h"
 #include "play.h"
@@ -74,6 +78,10 @@ namespace keditor
         [[nodiscard]] bool Failed() const { return _failed; }
         void Say(std::string status, bool failed = false) { _status = std::move(status); _failed = failed; ++_changes; }
 
+        /** @brief Asks for the list of nodes to add, as a right click on the graph does: the interface opens it. */
+        void AskForNodes() { _wantsNodes = true; ++_changes; }
+        [[nodiscard]] bool TakeAskForNodes() { return std::exchange(_wantsNodes, false); }
+
         /** @brief Goes up when anything the panels show changed: the document, what is picked, the status. */
         [[nodiscard]] std::uint64_t Version() { return Doc().Version() + _changes; }
 
@@ -86,7 +94,15 @@ namespace keditor
         bool _failed = false;
         std::uint64_t _changes = 0;
         std::map<std::string, std::set<std::string>> _asked;
+        bool _wantsNodes = false;
     };
+
+    /**
+     * @brief The kinds of node there are to add, for what someone typed looking for one: best match first. Each word
+     *        typed has to be found — in the name, in another word for it ("texture" finds Image), in its category or
+     *        in what it says it does — and a name that starts with it counts for most. Everything, when nothing is typed.
+     */
+    [[nodiscard]] std::vector<const kgraph::NodeType*> FindNodeTypes(std::string_view typed);
 
     /** @brief The whole interface, over @p session. */
     [[nodiscard]] kui::Widget EditorRoot(std::shared_ptr<Session> session);

@@ -25,7 +25,7 @@ A resource an entity holds is saved as the id of the node that makes it.
 
 | Panel | |
 |---|---|
-| **Graph** | The scene's pass graph. Right-click where nothing is to add a node there. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
+| **Graph** | The scene's pass graph. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
 | **Scene** | The scene as it runs, sized to the panel. |
 | **Outliner** | The entities, and a button that makes one. |
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
@@ -34,11 +34,28 @@ A resource an entity holds is saved as the id of the node that makes it.
 The menus: **File** makes a project, opens one and saves the scene (Control+S). **Project, Run** saves and
 starts `koral-play` on the project (Control+R). **Graph** and **Entity** add a node and an entity.
 
+### Adding a node
+
+The list of nodes opens on every kind there is, under its category: Resources, Pipelines, Values, Math,
+Vectors, Logic, Passes. Type what you are after and it becomes the kinds that fit, best first, each with
+what it does. Words other than the name find a node too: `texture` finds Image, `mix` finds Lerp, `run
+compute` finds Dispatch, `if` finds Select, `<` finds Less. Enter adds the first. The nodes this graph
+already has are listed under the kinds, by name, to go to one.
+
+A node is added working: what it needs is set to something sensible, so an Image is a 512 by 512 image
+from the start and not a row of blanks.
+
+### What a node gives
+
+**Add output** in the inspector lists what a node gives besides what it makes: an image's `size`, `width`
+and `height`, a buffer's `bytes`, and every one of its settings. One picked from it becomes an output on
+the node, to wire from. An output that something is wired to stays on the node.
+
 ### A node in the inspector
 
 A node shows the inputs it cannot do without and the ones it has been given. An Image shows its format,
 size and usage. **Add input** lists everything else it can take; one picked from it joins the inputs above,
-and nothing is given until it is set. `x` takes an input back to nothing given, and off the node again when
+set to what it starts as. `x` takes an input back to nothing given, and off the node again when
 it was one it can do without.
 
 Each input has the control for what it is:

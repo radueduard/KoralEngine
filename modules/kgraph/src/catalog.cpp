@@ -78,6 +78,92 @@ namespace kgraph
             return it != essential.end() && it->second.contains(input);
         }
 
+        /** What an input is to begin with: what a new node has for the ones it needs, and what the rest are until they are set. */
+        Value Initial(const std::string_view type, const std::string_view input)
+        {
+            using L = Value::List;
+            using M = Value::Members;
+            static const std::map<std::string_view, std::map<std::string_view, Value>> initial {
+                { "Image", {
+                    { "format", "eRGBA8_UNORM" }, { "extent.x", 512 }, { "extent.y", 512 }, { "extent.z", 1 }, { "type", "e2D" },
+                    { "usage", L { "eSampled", "eTransferSrc", "eTransferDst" } }, { "mipLevels", 1 }, { "arrayLayers", 1 }, { "sampleCount", "e1" },
+                    { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
+                { "Buffer", {
+                    { "instanceCount", 256 }, { "usage", L { "eStorage" } }, { "type", "eDeviceLocal" }, { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
+                { "ImageView", {
+                    { "viewType", "e2D" }, { "baseMipLevel", 0 }, { "mipLevelCount", 1 }, { "baseArrayLayer", 0 }, { "arrayLayerCount", 1 },
+                    { "componentMapping", L { "eIdentity", "eIdentity", "eIdentity", "eIdentity" } } } },
+                { "Sampler", {
+                    { "minFilter", "eLinear" }, { "magFilter", "eLinear" }, { "mipmapMode", "eLinear" }, { "addressModeU", "eRepeat" },
+                    { "addressModeV", "eRepeat" }, { "addressModeW", "eRepeat" }, { "mipLodBias", 0 }, { "anisotropyEnable", false }, { "maxAnisotropy", 1 },
+                    { "compareEnable", false }, { "compareOp", "eLess" }, { "minLod", 0 }, { "maxLod", 16 }, { "unnormalizedCoordinates", false } } },
+                { "BufferView", { { "format", "eRGBA8_UNORM" }, { "offset", 0 } } },
+                { "Framebuffer", {
+                    { "color[].name", "color" }, { "depthStencil.which", "Depth" }, { "depthStencil.name", "depth" }, { "depthStencil.depth", 1 },
+                    { "depthStencil.stencil", 0 }, { "resolveMode", "eNone" },
+                    { "color[].clear", M { { "scalarType", "Float" }, { "components", 4 }, { "value", M { { "f", L { 0, 0, 0, 1 } } } } } } } },
+                { "Mesh", { { "vertexBuffer.binding", 0 }, { "indexBuffer.indexType", "eUInt" } } },
+                { "GraphicsPipeline", {
+                    { "stages", "eVertex" }, { "patchControlPoints", 3 },
+                    { "inputAssemblyState", M { { "topology", "eTriangleList" }, { "primitiveRestartEnable", false } } },
+                    { "rasterizationState", M { { "polygonMode", "eFill" }, { "cullMode", L {} }, { "frontFace", "eCounterClockwise" }, { "lineWidth", 1 } } },
+                    { "multisampleState", M { { "sampleCount", "e1" }, { "sampleShadingEnable", false }, { "minSampleShading", 1 } } },
+                    { "depthStencilState", M { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLess" }, { "minDepth", 0 }, { "maxDepth", 1 } } },
+                    { "colorBlendState", M { { "enableLogicOp", false }, { "logicOp", "eCopy" }, { "attachments", L {} }, { "blendConstants", L { 0, 0, 0, 0 } } } } } },
+                { "RayTracingPipeline", { { "maxRecursionDepth", 1 } } },
+                { "Number", { { "value", 0 } } }, { "Bool", { { "value", false } } }, { "String", { { "value", "" } } },
+                { "Vector", { { "x", 0 }, { "y", 0 }, { "z", 0 }, { "w", 1 } } },
+                { "Color", { { "color", L { 1, 1, 1, 1 } } } },
+                { "Component", { { "index", 0 } } },
+                { "Clamp", { { "min", 0 }, { "max", 1 } } }, { "Lerp", { { "t", 0.5 } } }, { "Smoothstep", { { "edge0", 0 }, { "edge1", 1 } } },
+                { "Step", { { "edge", 0.5 } } }, { "Pow", { { "b", 2 } } },
+                { "Primitive", { { "shape", "eQuad" } } },
+                { "VertexLayout", { { "attributes", L { M { { "semantic", "POSITION" }, { "type", "eFloat" }, { "count", 3 } } } } } },
+                { "Clear", { { "color", L { 0, 0, 0, 1 } } } },
+                { "Dispatch", { { "groups.x", 1 }, { "groups.y", 1 }, { "groups.z", 1 }, { "groupSize.x", 8 }, { "groupSize.y", 8 }, { "groupSize.z", 1 },
+                                { "with", L {} }, { "without", L {} } } },
+                { "Draw", { { "command", "eAuto" }, { "instances", 1 }, { "load", false }, { "with", L {} }, { "without", L {} } } },
+            };
+            const auto of = initial.find(type);
+            if (of == initial.end()) return {};
+            const auto it = of->second.find(input);
+            return it == of->second.end() ? Value {} : it->second;
+        }
+
+        /** Other words for a node type: what someone who does not know its name types to find it. */
+        std::string Keywords(const std::string_view type)
+        {
+            static const std::map<std::string_view, std::string_view> keywords {
+                { "Image", "texture render target picture attachment" }, { "ImageView", "texture view mip layer slice" },
+                { "Buffer", "data uniform storage array memory" }, { "BufferView", "texel buffer view" },
+                { "Sampler", "filter texture sampling wrap" }, { "Framebuffer", "render target attachments output" },
+                { "Mesh", "geometry vertices indices model" }, { "Primitive", "quad cube triangle square box mesh geometry shape" },
+                { "AccelerationStructure", "ray tracing bvh blas tlas" },
+                { "ComputePipeline", "compute shader kernel gpu program" }, { "GraphicsPipeline", "vertex fragment mesh shader material render program" },
+                { "RayTracingPipeline", "ray tracing shader raygen hit miss" },
+                { "Screen", "window swapchain present output backbuffer" }, { "Reference", "alias link portal reroute" },
+                { "Clear", "fill colour color wipe erase" }, { "Blit", "copy scale show present stretch resize" },
+                { "Copy", "duplicate image transfer" }, { "CopyBuffer", "duplicate buffer transfer" },
+                { "GenerateMipmaps", "mip mipmap levels downsample" },
+                { "Dispatch", "run compute execute kernel" }, { "Draw", "render rasterize mesh entities" },
+                { "Number", "float scalar constant value" }, { "Bool", "boolean flag true false constant" }, { "String", "text name constant" },
+                { "Vector", "vec2 vec3 vec4 combine compose make" }, { "Color", "colour rgba picker constant" },
+                { "Component", "element index get swizzle" }, { "Split", "break separate components xyz swizzle" },
+                { "ImageExtent", "size width height resolution dimensions get" }, { "VertexLayout", "vertex format attributes input" },
+                { "Add", "plus sum +" }, { "Subtract", "minus difference -" }, { "Multiply", "times product scale *" }, { "Divide", "over quotient /" },
+                { "Mod", "modulo remainder wrap %" }, { "Pow", "power exponent" }, { "Sqrt", "square root" }, { "Lerp", "mix interpolate blend" },
+                { "Clamp", "limit range" }, { "Saturate", "clamp 0 1" }, { "Smoothstep", "ease interpolate" }, { "Fract", "fractional part" },
+                { "Length", "magnitude norm" }, { "Normalize", "unit direction" }, { "Dot", "inner product" }, { "Cross", "outer product perpendicular" },
+                { "Select", "if choose branch ternary switch" }, { "Equal", "compare same ==" }, { "NotEqual", "compare different !=" },
+                { "Less", "compare smaller <" }, { "Greater", "compare larger >" }, { "LessOrEqual", "compare <=" }, { "GreaterOrEqual", "compare >=" },
+                { "And", "both logic &&" }, { "Or", "either logic ||" }, { "Not", "invert negate logic !" }, { "Xor", "either not both logic" },
+                { "Radians", "degrees to radians angle convert" }, { "Degrees", "radians to degrees angle convert" },
+                { "Atan2", "angle arctangent" }, { "Negate", "minus opposite" }, { "Abs", "absolute magnitude" },
+            };
+            const auto it = keywords.find(type);
+            return it == keywords.end() ? std::string() : std::string(it->second);
+        }
+
         std::vector<NodeType> Build()
         {
             std::vector<NodeType> types;
@@ -95,6 +181,7 @@ namespace kgraph
                 const auto add = [&](Port port, const std::string_view mode = {}) {
                     port.optional = !Essential(description.name, port.name);
                     port.mode = std::string(mode);
+                    port.initial = Initial(description.name, port.name);
                     type.inputs.push_back(std::move(port));
                 };
                 if (description.name == "GraphicsPipeline") {
@@ -140,10 +227,44 @@ namespace kgraph
             value("Bool", { { "value", PortKind::eValue, "bool", false, {}, nullptr } }, "bool", "True or false.");
             value("String", { { "value", PortKind::eValue, "string", false, {}, nullptr } }, "string", "Text.");
             value("Vector", { Number("x"), Number("y"), optional(Number("z")), optional(Number("w")) }, "vector", "As many numbers as are given, x first.");
-            for (const char* name : { "Add", "Subtract", "Multiply", "Divide", "Min", "Max" })
-                value(name, { Any("a"), Any("b") }, "value", "Of two numbers, or of two vectors a component at a time; a number goes with every component of a vector.");
-            for (const char* name : { "Negate", "Abs", "Floor", "Ceil", "Round" })
-                value(name, { Any("a") }, "value", "Of a number, or of each component of a vector.");
+            value("Color", { hinted({ "color", PortKind::eValue, "vector", false, "Red, green, blue, alpha.", nullptr }, "color") }, "vector",
+                  "A colour, picked: four numbers, for a Clear or anything else that takes a vector.");
+            const std::pair<const char*, const char*> two[] {
+                { "Add", "a + b." }, { "Subtract", "a - b." }, { "Multiply", "a * b." }, { "Divide", "a / b." }, { "Min", "The lesser of a and b." },
+                { "Max", "The greater of a and b." }, { "Pow", "a to the power b." }, { "Mod", "What is left of a after taking b from it as often as it goes: it wraps." } };
+            for (const auto& [name, doc] : two)
+                value(name, { Any("a"), Any("b") }, "value", std::string(doc) + " Of two numbers, or of two vectors a component at a time; a number goes with every component of a vector.");
+            const std::pair<const char*, const char*> one[] {
+                { "Negate", "-a." }, { "Abs", "a without its sign." }, { "Floor", "The whole number at or below a." }, { "Ceil", "The whole number at or above a." },
+                { "Round", "The nearest whole number." }, { "Fract", "What is left of a after its whole part." }, { "Sign", "-1, 0 or 1, as a is below, at or above zero." },
+                { "Saturate", "a, kept between 0 and 1." }, { "Sqrt", "The square root of a." }, { "Exp", "e to the power a." }, { "Log", "The natural logarithm of a." },
+                { "Sin", "The sine of a, in radians." }, { "Cos", "The cosine of a, in radians." }, { "Tan", "The tangent of a, in radians." },
+                { "Radians", "a, in degrees, as radians." }, { "Degrees", "a, in radians, as degrees." } };
+            for (const auto& [name, doc] : one) value(name, { Any("a") }, "value", std::string(doc) + " Of a number, or of each component of a vector.");
+            value("Clamp", { Any("x"), Any("min"), Any("max") }, "value", "x, kept between min and max.");
+            value("Lerp", { Any("a"), Any("b"), Any("t") }, "value", "From a to b: a at t 0, b at t 1, and between in between.");
+            value("Smoothstep", { Any("edge0"), Any("edge1"), Any("x") }, "value", "0 below edge0, 1 above edge1, and eased between.");
+            value("Step", { Any("edge"), Any("x") }, "value", "0 where x is below edge, 1 where it is not.");
+            value("Atan2", { Any("y"), Any("x") }, "value", "The angle, in radians, of the point (x, y).");
+            value("Length", { Any("a") }, "number", "How long a vector is.");
+            value("Normalize", { Any("a") }, "vector", "A vector, made one long.");
+            value("Dot", { Any("a"), Any("b") }, "number", "The dot product of two vectors.");
+            value("Cross", { Any("a"), Any("b") }, "vector", "The cross product of two vectors of 3.");
+            value("Distance", { Any("a"), Any("b") }, "number", "How far apart two points are.");
+            for (const char* name : { "Less", "LessOrEqual", "Greater", "GreaterOrEqual" })
+                value(name, { Number("a"), Number("b") }, "bool", "True or false: how the number a stands to the number b.");
+            value("Equal", { Any("a"), Any("b") }, "bool", "Whether a and b are the same.");
+            value("NotEqual", { Any("a"), Any("b") }, "bool", "Whether a and b differ.");
+            const Port flag { "a", PortKind::eValue, "bool", false, {}, nullptr };
+            Port other = flag;
+            other.name = "b";
+            value("Not", { flag }, "bool", "True when a is false.");
+            value("And", { flag, other }, "bool", "True when both are.");
+            value("Or", { flag, other }, "bool", "True when either is.");
+            value("Xor", { flag, other }, "bool", "True when one is and the other is not.");
+            value("Select", { { "condition", PortKind::eValue, "bool", false, {}, nullptr }, Any("a"), Any("b") }, "value", "a when the condition is true, b when it is not.");
+            value("Split", { { "vector", PortKind::eValue, "vector", false, {}, nullptr } }, "vector", "A vector's components, each an output of its own: x, y, z, w.");
+            for (const char* part : { "x", "y", "z", "w" }) types.back().outputs.push_back({ part, PortKind::eValue, "number", false, {}, nullptr });
             value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
             value("VertexLayout", { hinted({ "attributes", PortKind::eValue, "list", false,
@@ -166,6 +287,12 @@ namespace kgraph
                               "Fills an image with one colour.", nullptr });
             types.push_back({ "Blit", "Passes", { ResourcePort("source", "Image"), ResourcePort("destination", "Image") }, {},
                               "Copies an image onto another, scaled to fit: onto the screen, to show it.", nullptr });
+            types.push_back({ "Copy", "Passes", { ResourcePort("source", "Image"), ResourcePort("destination", "Image") }, {},
+                              "Copies an image onto another of the same size, as it is.", nullptr });
+            types.push_back({ "CopyBuffer", "Passes", { ResourcePort("source", "Buffer"), ResourcePort("destination", "Buffer") }, {},
+                              "Copies a buffer's bytes into another: as many as the smaller of the two holds.", nullptr });
+            types.push_back({ "GenerateMipmaps", "Passes", { ResourcePort("image", "Image") }, {},
+                              "Fills an image's smaller mip levels from its largest.", nullptr });
             const Port with = optional(hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr }, "components"));
             const Port without = optional(hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components"));
             types.push_back({ "Dispatch", "Passes",
@@ -182,6 +309,54 @@ namespace kgraph
                                 optional({ "load", PortKind::eValue, "bool", false, "True to draw over what the framebuffer holds; false, or not given, clears it first.", nullptr }),
                                 with, without }, {},
                               "Draws every entity that has a Mesh, and the pipeline's component when it has one, into a framebuffer.", nullptr });
+            // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
+            static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance" };
+            static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };
+            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Component", "Split", "ImageExtent", "VertexLayout" };
+            for (auto& type : types) {
+                if (type.category == "Values" && !plain.contains(type.name))
+                    type.category = vectors.contains(type.name) ? "Vectors" : logic.contains(type.name) ? "Logic" : "Math";
+                type.keywords = Keywords(type.name);
+                if (!type.builder)
+                    for (auto& port : type.inputs)
+                        if (port.initial.IsNull()) port.initial = Initial(type.name, port.name);
+                // What a node gives besides what it makes: each of its values, the parts of one thing as one, and what
+                // the object it made says of itself. There to be asked for: none is shown until it is.
+                std::vector<Port> more;
+                const auto offer = [&](std::string name, std::string kind, std::string doc) {
+                    const auto taken = [&](const std::vector<Port>& ports) { return std::ranges::find(ports, name, &Port::name) != ports.end(); };
+                    if (taken(type.outputs) || taken(more)) return;
+                    Port port { std::move(name), PortKind::eValue, std::move(kind), false, std::move(doc), nullptr };
+                    port.optional = true;
+                    more.push_back(std::move(port));
+                };
+                const std::string made = type.outputs.empty() ? std::string() : type.outputs.front().type;
+                if (made == "Image" || made == "ImageView") {
+                    offer("size", "vector", "Its width and height.");
+                    offer("extent", "vector", "Its width, height and depth.");
+                    offer("width", "number", "How many pixels across.");
+                    offer("height", "number", "How many pixels down.");
+                    offer("depth", "number", "How many pixels deep.");
+                    offer("mipLevels", "number", "How many mip levels it has.");
+                    offer("arrayLayers", "number", "How many layers it has.");
+                } else if (made == "Buffer") {
+                    offer("bytes", "number", "Its size, in bytes.");
+                } else if (made == "Framebuffer") {
+                    offer("size", "vector", "The width and height of what it draws into.");
+                    offer("width", "number", "How many pixels across.");
+                    offer("height", "number", "How many pixels down.");
+                } else if (made == "Mesh") {
+                    offer("vertexCount", "number", "How many vertices it has.");
+                    offer("indexCount", "number", "How many indices it has; 0 when it has none.");
+                }
+                for (const auto& port : type.inputs) {
+                    if (port.kind != PortKind::eValue || port.repeatable) continue;
+                    if (port.name.size() > 2 && port.name[port.name.size() - 2] == '.' && std::string_view("xyzw").find(port.name.back()) != std::string_view::npos)
+                        offer(port.name.substr(0, port.name.size() - 2), "vector", "Its parts, as one vector.");
+                    offer(port.name, port.type, "What its input of this name is.");
+                }
+                type.outputs.insert(type.outputs.end(), more.begin(), more.end());
+            }
             return types;
         }
     }
