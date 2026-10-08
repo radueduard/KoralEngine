@@ -117,6 +117,13 @@ kecs, from the earlier plan, adapted:
 **Gate:** unit tests for all of the above, clean under ASan and UBSan, plus a million entities created,
 churned and iterated, with timings recorded.
 
+**Built** (2026-10-08): `modules/kecs`, described in [kecs.md](kecs.md). 25 tests pass in Debug, in
+Release and under ASan and UBSan. A million entities: created with two components in 36 ms, a third
+component added to half in 21 ms, one removed from a quarter in 10 ms, a third destroyed in 21 ms, and
+half a million walked with two components in 0.3 ms (Release). kecs depends on nothing in the framework,
+so it is tested without a GPU. Observers are in. Two things are left for when they are needed: a way to
+list archetypes for a tool, and a C API (E6).
+
 ### E2: Component types that change shape, and JSON
 
 - A component type can be replaced by a new version. Entities are migrated: fields keeping their name
@@ -185,5 +192,5 @@ Kotlin.
 
 ## First steps
 
-The framework milestones are done. Next is **E1** in this repository: the ECS core, which unblocks
-everything on the engine side. E3 can start as soon as E1's component types exist, since F3 is there.
+The framework milestones and **E1** are done. Next is **E2**: component types that change shape, and
+JSON. E3 (the graph model) can run alongside it.
