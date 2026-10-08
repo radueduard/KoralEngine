@@ -129,12 +129,18 @@ namespace keditor
         // What the passes say of the entities: it changes with the world, a frame after whatever changed it.
         std::size_t digest = 0;
         const auto mix = [&](const std::size_t value) { digest ^= value + 0x9e3779b97f4a7c15ull + (digest << 6) + (digest >> 2); };
-        for (const auto& node : Graph().nodes)
+        for (const auto& node : Graph().nodes) {
+            // Whether each node is built can change with nothing edited: a shader's file turning up, or being mended.
+            if (const auto* status = _runtime->Status(node.id)) {
+                mix(status->ok ? 1 : 2);
+                mix(std::hash<std::string>{}(status->error));
+            }
             if (const auto* report = _runtime->ReportOf(node.id)) {
                 mix(report->ran);
                 mix(report->skipped);
                 mix(std::hash<std::string>{}(report->why));
             }
+        }
         if (digest != _reports) { _reports = digest; ++_reported; }
     }
 

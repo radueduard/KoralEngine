@@ -5,7 +5,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <chrono>
+#include <format>
 #include <fstream>
+#include <thread>
 
 #include <keditor/editor.h>
 #include <koralUI.h>
@@ -305,4 +308,33 @@ TEST_F(EditorTest, DISABLED_Sheets) {
     input.FeedMouseButton(kor::MouseButton::eLeft, false);
     for (int i = 0; i < 3; ++i) Frame();
     Sheet("drag-after");
+}
+
+// A pipeline can name a shader before the file is written: it says what is missing, and builds once it is there.
+TEST_F(EditorTest, AShaderNamedBeforeItsFileIsWrittenIsPickedUpWhenItIs) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "late-shader";
+    std::filesystem::remove_all(directory);
+    static int run = 0;
+    const std::string module = std::format("late{}", run++);   // the framework keeps a shader by name, for the life of the program
+    Open();
+    const auto pipeline = Doc().AddNode("ComputePipeline", 0, 0, "p");
+    Doc().SetInput(pipeline, "compute.module", module);
+    const auto* status = Doc().Runtime().Status(pipeline);
+    ASSERT_FALSE(status->ok);
+    EXPECT_NE(status->error.find("there is no " + module + ".slang"), std::string::npos) << status->error;
+    EXPECT_NE(status->error.find("shaders folder"), std::string::npos) << "and where it goes: " << status->error;
+
+    ASSERT_TRUE(Session().NewProject(directory)) << Session().Status();
+    EXPECT_FALSE(Doc().Runtime().Status(pipeline)->ok) << "a project, and still no file";
+    { std::ofstream(directory / "shaders" / (module + ".slang")) << "[shader(\"compute\")] [numthreads(1, 1, 1)] void computeMain() {}\n"; }
+    // Nothing is touched in the graph: the file turning up is enough.
+    bool built = false;
+    for (int i = 0; i < 200 && !built; ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        Frame();
+        built = Doc().Runtime().Status(pipeline)->ok;
+    }
+    EXPECT_TRUE(built) << Doc().Runtime().Status(pipeline)->error;
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_EQ(Session().EntryPoints(module), std::vector<std::string> { "computeMain" });
 }

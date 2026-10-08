@@ -7,6 +7,7 @@
 #include <kgraph/runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <expected>
@@ -667,6 +668,10 @@ namespace kgraph
         std::vector<std::string> reset;
         std::uint64_t counter = 0;
         std::atomic<bool> reloaded = false;
+        // A shader could not be made — its file is not there yet, or does not compile and nothing is watching it:
+        // the nodes that failed are tried again every so often, for the file to turn up.
+        bool shaderFailed = false;
+        std::chrono::steady_clock::time_point lastRetry = std::chrono::steady_clock::now();
 
         Impl(kor::FrameGraph& graph, kecs::World* entities) : frameGraph(graph), world(entities) {}
 
@@ -742,7 +747,11 @@ namespace kgraph
             resource->handle = *made;
             resource->kind = std::string(description.result);
             resource->node = nodeId;
+            // The framework keeps a shader by its module and entry point, one that failed included: asked for again
+            // it hands back the same failure, though the file may be there now, or mended. It is tried afresh.
+            if (!koral_resource_valid(*made) && description.name == "Shader") koral_resource_retry(*made);
             if (!koral_resource_valid(*made)) {
+                if (description.name == "Shader") shaderFailed = true;
                 const char* why = koral_resource_error_message(*made);
                 return Fail(why && *why ? std::string(why) : std::format("the {} could not be built", description.name));
             }
@@ -836,7 +845,13 @@ namespace kgraph
                                 // The entry point, when it is not said: the stage's name and Main, as shaders here are written.
                                 std::string main = function && !function->empty() ? *function : shown.substr(0, shown.find_first_of(".[")) + "Main";
                                 auto shader = BuildWith(*shaderType, node.id, {}, { { entryPoint, { kb::Value::Of(*file), kb::Value::Of(main) } } });
-                                if (!shader) return Fail(std::format("'{}': {}", shown, shader.error()));
+                                if (!shader) {
+                                    // The commonest of them, said as what to do about it.
+                                    if (shader.error().find("cannot open file") != std::string::npos)
+                                        return Fail(std::format("'{}': there is no {}.slang among the shaders. Put it in the project's shaders folder (the project has to be "
+                                                                "saved for it to have one); it is picked up when it is there.", shown, *file));
+                                    return Fail(std::format("'{}': {}", shown, shader.error()));
+                                }
                                 (*shader)->kind = "Shader";
                                 Watch(out, kor::capi::ShaderOf((*shader)->handle));
                                 info.named.push_back(*shader);
@@ -1858,6 +1873,14 @@ namespace kgraph
                 node.stamp = ++_impl->counter;
                 if (node.pipeline) node.signature.clear();
             }
+            _impl->Evaluate(_graph);
+            return;
+        }
+        if (_impl->shaderFailed && std::chrono::steady_clock::now() - _impl->lastRetry > std::chrono::milliseconds(500)) {
+            _impl->lastRetry = std::chrono::steady_clock::now();
+            _impl->shaderFailed = false;    // set again by whichever still fails
+            for (auto& node : _impl->built | std::views::values)
+                if (!node.status.ok) node.signature.clear();
             _impl->Evaluate(_graph);
             return;
         }
