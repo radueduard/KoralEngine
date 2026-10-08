@@ -231,6 +231,26 @@ file by the scene `koral-play` runs, with the same picture to the pixel. The int
 their shadow maps, and a `Script` moves the lights, all edited and reloaded while it runs, in C# and in
 Kotlin.
 
+**Built** (2026-10-08): described in [scripts.md](scripts.md).
+
+- `modules/kscript`: a script type as the engine sees it, a component with functions called on each one.
+- `modules/kengine`: the engine as one shared library with its scenes and its C interface, `koral_engine.h`.
+- `bindings/csharp`: `Koral.Engine` and the runner `koral-engine-dotnet`.
+- `bindings/kotlin`: the Gradle library `koral:koral-engine`.
+
+The gate runs three times on one scene: with the scripts as C functions (which also saves the project),
+in C# and in Kotlin. Each checks the picture: the shadow under the occluder, following the light as a
+script moves it, and following four edits made while the scene runs. 75 tests in ctest, clean under
+validation and sync validation. What differs from the plan:
+
+- **One light.** The graphics script writes one light's camera into a buffer node. Shadow maps for many
+  lights need a pass that runs per light and per mesh, which a graph can't yet say.
+- **No play and stop.** Scripts run whenever the scene does.
+- **Kotlin has no runner or project template**, and was not run in a window.
+- Script fields are numbers, `bool`, vectors, `Mat4`, `Quat` and `Entity`. No text, lists or resources.
+- The framework gained public handles in its Kotlin binding, a `NativeScene` there, and `Koral.Engine` in
+  the C# binding's friends.
+
 ### E7: Batching (opt in)
 
 - Rewriting per-entity resources into arrays indexed by an entity number from the GPU. Compute uses an
@@ -242,5 +262,5 @@ Kotlin.
 
 ## First steps
 
-The framework milestones and **E1** to **E5** are done, but for the Hub's part of E5. Next is **E6**:
-scripts.
+The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. Next is **E7**:
+batching.

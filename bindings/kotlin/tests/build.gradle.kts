@@ -9,6 +9,9 @@ val scriptsA = sourceSets.create("scriptsA")
 val scriptsB = sourceSets.create("scriptsB")
 val scriptsBad = sourceSets.create("scriptsBad")
 
+// E6's gate: the light's scripts as first written, and as edited four times while the scene runs.
+val shadowBuilds = listOf("A", "B", "C", "D", "E").map { sourceSets.create("shadow$it") }
+
 dependencies {
     testImplementation(project(":koral-engine"))
     testImplementation(kotlin("test"))
@@ -17,6 +20,7 @@ dependencies {
     "scriptsAImplementation"(project(":koral-engine"))
     "scriptsBImplementation"(project(":koral-engine"))
     "scriptsBadImplementation"(project(":koral-engine"))
+    shadowBuilds.forEach { "${it.name}Implementation"(project(":koral-engine")) }
 }
 
 tasks.test {
@@ -26,6 +30,8 @@ tasks.test {
     systemProperty("koral.engine.test.a", scriptsA.output.classesDirs.asPath)
     systemProperty("koral.engine.test.b", scriptsB.output.classesDirs.asPath)
     systemProperty("koral.engine.test.bad", scriptsBad.output.classesDirs.asPath)
+    shadowBuilds.forEach { dependsOn(it.classesTaskName); systemProperty("koral.engine.test.${it.name}", it.output.classesDirs.asPath) }
+    (findProperty("shadowProject") as String?)?.let { systemProperty("koral.engine.test.shadowProject", it) }
     (findProperty("engineLibrary") as String?)?.let { systemProperty("koral.engine.library", it) }
     // Koral's own library is found from its SDK, the one the build was pointed at.
     ((findProperty("koralSdk") as String?) ?: System.getenv("KORAL_SDK"))?.let { environment("KORAL_SDK", it) }

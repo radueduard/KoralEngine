@@ -3,6 +3,9 @@
 using Koral;
 using Koral.Engine;
 
+// `shadow <project>`: E6's gate instead, in a process of its own (an application is one per process).
+if (args.Length == 2 && args[0] == "shadow") return ShadowGate.Run(args[1]);
+
 var failures = 0;
 void Check(bool ok, string what)
 {

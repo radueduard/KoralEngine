@@ -96,6 +96,8 @@ class ScriptsTest {
             assertEquals(before + 1, number(wheel, "Spin", "updates"), "what was running still runs")
 
             // ---- edited while it runs: the code is new, the data is the entity's -------------------------------
+            // The watcher is set to do its work again: its class is not in the edited build, and it must not.
+            world.set(watcher, "Watcher", "done", false)
             val angleBefore = number(wheel, "Spin", "angle")
             val updatesBefore = number(wheel, "Spin", "updates")
             install("b")
@@ -110,7 +112,8 @@ class ScriptsTest {
             frames(2)
             assertEquals(2f, number(wheel, "Spin", "laps"), "the new code runs, on the same entity")
             assertEquals(updatesBefore + 2, number(wheel, "Spin", "updates"), "counting on from where it was")
-            assertEquals(angleBefore - 2, number(wheel, "Spin", "angle"), "the new update, not the old")
+            assertEquals(angleBefore - 2, number(wheel, "Spin", "angle"), "the new update, not the old — and no script that is gone set it")
+            assertEquals("false", world.fieldJson(watcher, "Watcher", "done"), "a script whose class is gone is not called")
             assertEquals(21f, world.buffer("numbers")!!.readFloats(1)[0], "a script that was not edited carries on")
             val seen = number(watcher, "Watcher", "seen")
             frames(1)

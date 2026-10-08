@@ -38,6 +38,14 @@ namespace {
         s_app->Frame();
         kor::Context::Scheduler().WaitIdle();
     }
+}
+
+// For the other tests of this program: the one application there is.
+kor::App* TestApp() { return s_app.get(); }
+const std::string& TestAppReason() { return s_reason; }
+void TestFrame() { Frame(); }
+
+namespace {
 
     class CApiTest : public ::testing::Test {
     protected:

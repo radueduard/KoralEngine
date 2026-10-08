@@ -9,10 +9,12 @@ target_compile_options(koral-engine PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wa
 
 if(KORAL_ENGINE_BUILD_TESTS)
     # Only what a program in another language has: the framework, and this library through its C interface.
-    add_executable(kengine_tests tests/test_capi.cpp)
+    add_executable(kengine_tests tests/test_capi.cpp tests/test_shadow.cpp)
     target_link_libraries(kengine_tests PRIVATE koral-engine Koral::Koral GTest::gtest GTest::gtest_main)
     target_compile_definitions(kengine_tests PRIVATE
         KENGINE_LIBRARY="$<TARGET_FILE:koral-engine>"
-        KEDITOR_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/keditor/tests/shaders")
+        KEDITOR_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/keditor/tests/shaders"
+        KENGINE_SHADOW_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shadow/shaders"
+        KENGINE_SHADOW_PROJECT="${CMAKE_BINARY_DIR}/shadow-project")
     gtest_discover_tests(kengine_tests DISCOVERY_MODE PRE_TEST)
 endif()
