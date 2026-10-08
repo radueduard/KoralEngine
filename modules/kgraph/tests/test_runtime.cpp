@@ -20,73 +20,23 @@
 
 #include <kgraph/runtime.h>
 
+#include "support.h"
+
 namespace {
-    constexpr kor::u32 Size = 32;
-
-    std::unique_ptr<kor::App> s_app;
-    std::string s_reason = "no device";
-
-    class Environment final : public ::testing::Environment {
-    public:
-        void SetUp() override {
-            try {
-                s_app = std::make_unique<kor::App>(kor::AppSettings { .platform = kor::WindowPlatform::eNone });
-                kor::Shader::AddSearchPath(KGRAPH_TEST_SHADERS);
-            } catch (const std::exception& e) {
-                s_reason = e.what();
-                s_app.reset();
-            }
-        }
-        void TearDown() override { s_app.reset(); }
-    };
-    const auto* const s_environment = ::testing::AddGlobalTestEnvironment(new Environment);
-
-    void Frame() {
-        s_app->Frame();
-        kor::Context::Scheduler().WaitIdle();
-    }
-
-    /** Copies the screen where the test can read it: after whatever wrote it. */
-    class ReadScreen final : public kor::RenderPass {
-    public:
-        explicit ReadScreen(kor::ResourceRef<const kor::Buffer> out) : RenderPass("Read screen"), _out(std::move(out)) {}
-        void Setup(kor::PassBuilder& b) override { b.Read(kor::FrameGraph::Screen, kor::Image::Usage::eTransferSrc).SideEffect(); }
-        void Initialize(const kor::PassResources& r) override { _screen = r.ImageNamed(kor::FrameGraph::Screen); }
-        void Record(kor::CommandBuffer& cb) const override { cb.CopyImageToBuffer(_screen, _out); }
-    private:
-        kor::ResourceRef<const kor::Buffer> _out;
-        kor::ResourceRef<const kor::Image> _screen;
-    };
-
-    class GraphScene final : public kor::Scene {
-    public:
-        void Initialize() override {
-            readback = kor::Buffer::RawBuilder{}.SetRawSize(Size * Size * 4).SetUsage(kor::Buffer::Usage::eTransferDst)
-                .SetType(kor::Buffer::Type::eReadback).Build();
-            runtime = std::make_unique<kgraph::Runtime>(Graph());
-            Graph().Add<ReadScreen>(kor::ResourceRef<const kor::Buffer>(readback));
-        }
-        void Update() override { runtime->Update(); }
-        void Shutdown() override { runtime.reset(); }
-        [[nodiscard]] kor::U8Vec4 Pixel(const kor::u32 x, const kor::u32 y) const { return readback->Read<kor::U8Vec4>(Size * Size)[y * Size + x]; }
-        std::vector<std::string> Schedule() {
-            std::vector<std::string> names;
-            for (const auto& pass : Graph().Schedule()) names.push_back(pass.name);
-            return names;
-        }
-        std::unique_ptr<kgraph::Runtime> runtime;
-        kor::Resource<kor::Buffer> readback;
-    };
+    using support::Frame;
+    using support::GraphScene;
+    using support::Size;
 
     class RuntimeTest : public ::testing::Test {
     protected:
         void SetUp() override {
-            if (!s_app) GTEST_SKIP() << "no Vulkan device: " << s_reason;
-            scene = s_app->OpenOffscreen<GraphScene>({ .title = "graph", .extent = { Size, Size } });
+            if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+            GraphScene::withWorld = false;
+            scene = support::App()->OpenOffscreen<GraphScene>({ .title = "graph", .extent = { Size, Size } });
             ASSERT_NE(scene, nullptr);
         }
         void TearDown() override {
-            if (scene) { s_app->Close(*scene); Frame(); }
+            if (scene) { support::App()->Close(*scene); Frame(); }
         }
         kgraph::Graph Load(const std::string& json) {
             kgraph::Graph graph;
@@ -226,8 +176,10 @@ TEST_F(RuntimeTest, WhatIsNotWiredIsForEachEntityToSupply) {
     runtime.Set(graph);
     EXPECT_TRUE(runtime.Status("pipeline")->ok) << runtime.Status("pipeline")->error;
     EXPECT_EQ(runtime.PerEntityParameters("pipeline"), std::vector<std::string> { "target" });
+    // It would run for each entity that supplies it, and this runtime was given no world of them.
     EXPECT_FALSE(runtime.Status("run")->ok);
-    EXPECT_NE(runtime.Status("run")->error.find("target"), std::string::npos) << runtime.Status("run")->error;
+    EXPECT_NE(runtime.Status("run")->error.find("no world"), std::string::npos) << runtime.Status("run")->error;
+    EXPECT_EQ(runtime.ComponentOf("pipeline"), kecs::NoComponent);
 
     // Its inputs, with those its shader gives it.
     std::vector<std::string> names;

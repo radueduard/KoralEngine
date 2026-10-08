@@ -30,6 +30,8 @@
 #include <image.h>
 #include <resource.h>
 
+#include <kecs/kecs.h>
+
 #include "catalog.h"
 #include "graph.h"
 
@@ -62,10 +64,21 @@ namespace kgraph
         std::uint64_t builds = 0;   ///< How many times it has been built: unchanged by a Set that changed nothing of it.
     };
 
+    /** @brief What a pass that runs for each entity did, the last frame it was readied for. */
+    struct PassReport {
+        std::size_t ran = 0;        ///< Entities it runs for.
+        std::size_t skipped = 0;    ///< Entities that have what it asks for, and that it cannot run for.
+        std::string why;            ///< Why the first of those: a parameter with nothing in it, a mesh that does not fit.
+    };
+
     class Runtime {
     public:
-        /** @brief Runs its passes in @p frameGraph, which must outlive it. */
-        explicit Runtime(kor::FrameGraph& frameGraph);
+        /**
+         * @brief Runs its passes in @p frameGraph, which must outlive it.
+         * @param world Where the entities are that pipelines run for, and where each pipeline's component is
+         *              registered. It must outlive the runtime too. With none, a pass that runs per entity is an error.
+         */
+        explicit Runtime(kor::FrameGraph& frameGraph, kecs::World* world = nullptr);
         ~Runtime();
         Runtime(const Runtime&) = delete;
         Runtime& operator=(const Runtime&) = delete;
@@ -73,7 +86,10 @@ namespace kgraph
         /** @brief Makes @p graph what runs. On the frame graph's thread, between frames. */
         void Set(Graph graph);
         [[nodiscard]] const Graph& Current() const { return _graph; }
-        /** @brief Each frame, before the frame graph runs: builds again what depends on a shader that was edited. */
+        /**
+         * @brief Each frame, before the frame graph runs. Builds again what depends on a shader that was edited,
+         *        and readies the passes that run per entity: which entities, and each one's descriptor set.
+         */
         void Update();
 
         /** @brief How node @p id fared, or null when there is none. */
@@ -100,6 +116,22 @@ namespace kgraph
          *        Empty when everything is set, and the pipeline runs once.
          */
         [[nodiscard]] std::vector<std::string> PerEntityParameters(std::string_view id) const;
+
+        /**
+         * @brief The component generated for pipeline node @p id: what an entity has, to be run by it. It is named
+         *        after the node, with a field for each parameter left unwired and each push constant. NoComponent
+         *        when the pipeline has neither, and so runs once.
+         */
+        [[nodiscard]] kecs::ComponentId ComponentOf(std::string_view id) const;
+        /** @brief What became of that component's fields when the pipeline last changed its shape; null when it never did. */
+        [[nodiscard]] const kecs::Migration* MigrationOf(std::string_view id) const;
+        /** @brief How pass node @p id, which runs per entity, fared this frame; null for another kind of node. */
+        [[nodiscard]] const PassReport* ReportOf(std::string_view id) const;
+        /**
+         * @brief The inputs taken off pipeline nodes because an edited shader no longer has them, or has them as
+         *        another kind: "node.input", in the order it happened. Current() no longer has them. Emptied by the call.
+         */
+        [[nodiscard]] std::vector<std::string> TakeReset();
 
     private:
         struct Impl;

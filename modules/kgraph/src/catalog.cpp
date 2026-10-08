@@ -92,6 +92,9 @@ namespace kgraph
                 value(name, { Any("a") }, "value", "Of a number, or of each component of a vector.");
             value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
+            value("VertexLayout", { { "attributes", PortKind::eValue, "list", false,
+                                      "What a vertex has, in order: { \"semantic\": \"POSITION\", \"type\": \"eFloat\", \"count\": 3 }, and optionally \"binding\", \"instanced\", \"namespace\".", nullptr } },
+                  "struct KoralVertexLayout", "How a mesh's vertices are laid out, packed in the order given: what a pipeline's vertexShader.layout and a Mesh's vertexLayout take.");
 
             // ---- the screen, and a node by name -------------------------------------------------------------------
             types.push_back({ "Screen", "Resources", {}, { ResourcePort("out", "Image") }, "The scene's window: what a pass writes to show something.", nullptr });
@@ -104,9 +107,22 @@ namespace kgraph
                               "Fills an image with one colour.", nullptr });
             types.push_back({ "Blit", "Passes", { ResourcePort("source", "Image"), ResourcePort("destination", "Image") }, {},
                               "Copies an image onto another, scaled to fit: onto the screen, to show it.", nullptr });
+            const Port with { "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr };
+            const Port without { "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr };
             types.push_back({ "Dispatch", "Passes",
-                              { ResourcePort("pipeline", "ComputePipeline"), Number("groups.x"), Number("groups.y"), Number("groups.z") }, {},
-                              "Runs a compute pipeline: so many groups each way, 1 where not given.", nullptr });
+                              { ResourcePort("pipeline", "ComputePipeline"), Number("groups.x"), Number("groups.y"), Number("groups.z"),
+                                { "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: as many groups as cover it, for each entity's own image when it is per entity. Instead of groups.", nullptr },
+                                Number("groupSize.x", "How much of the covered image one group works on: the shader's numthreads."), Number("groupSize.y"), Number("groupSize.z"),
+                                with, without }, {},
+                              "Runs a compute pipeline: once when everything it needs is wired, and otherwise once for each entity that has its component.", nullptr });
+            types.push_back({ "Draw", "Passes",
+                              { ResourcePort("pipeline", "GraphicsPipeline"),
+                                ResourcePort("framebuffer", "Framebuffer", "What it draws into: the pipeline's own, when not wired."),
+                                { "command", PortKind::eValue, "string", false, "eAuto (indexed when the mesh has indices), eDraw or eDrawIndexed.", nullptr },
+                                Number("instances", "How many of each mesh: 1 when not given."),
+                                { "load", PortKind::eValue, "bool", false, "True to draw over what the framebuffer holds; false, or not given, clears it first.", nullptr },
+                                with, without }, {},
+                              "Draws every entity that has a Mesh, and the pipeline's component when it has one, into a framebuffer.", nullptr });
             return types;
         }
     }

@@ -27,3 +27,13 @@ namespace kgraph
         return name;
     }
 }
+
+namespace kgraph
+{
+    /** Whether a component field of this type holds a resource: a shared reference to one, whatever its kind. */
+    inline bool IsResourceType(const std::string_view type)
+    {
+        return type == "resource" || type == "Image" || type == "Buffer" || type == "Sampler" || type == "BufferView" || type == "AccelerationStructure"
+            || type == "Mesh";
+    }
+}

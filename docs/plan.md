@@ -180,6 +180,23 @@ back. 10 tests pass, clean under validation and sync validation. What differs fr
 **Gate:** a scene where many entities each own an image that one compute node processes and a graphics
 node draws; tags and disabling narrow both; editing the shader keeps what it should.
 
+**Built** (2026-10-08): in `modules/kgraph`, described in [kgraph.md](kgraph.md) under Entities. The gate
+is the tests in `test_entities.cpp`: entities each with an image, stamped by a compute node and drawn by
+a graphics node; tags and switched-off components narrowing both; a wire added and a shader edited under
+them; 500 entities. 18 tests pass in all, clean under validation and sync validation. What differs from
+the plan:
+
+- Compute and graphics are built. Ray tracing passes and indirect draws are not.
+- The mesh is a component of its own, `kgraph::Mesh`, not a field of the generated one: an entity has one
+  mesh however many pipelines draw it.
+- Per-entity ordering goes further than F4's one set per name: uses that share a resource are merged into
+  one set, so no wire has to say that two passes touch the same entity images.
+- A cycle is left to the frame graph, and a graph can't yet ask to read last frame's value.
+- The kecs adapter is the codecs (`kgraph::RegisterCodecs`). Declaring a C++ component's fields from
+  `KORAL_REFLECT` is not done.
+- The framework gained a descriptor pool that grows (it was fixed at 1,000 sets, which per-entity sets
+  exhaust), `CommandBuffer::PushConstantBytes`, and `kor::capi::Adopt`.
+
 ### E5: The editor
 
 - The node editor (F5) over the scene's graph, an inspector for nodes and entities, an outliner, and the
@@ -213,5 +230,4 @@ Kotlin.
 
 ## First steps
 
-The framework milestones and **E1** to **E3** are done. Next is **E4**: pipelines run per entity, which
-starts with the kecs adapter for the framework's types.
+The framework milestones and **E1** to **E4** are done. Next is **E5**: the editor.
