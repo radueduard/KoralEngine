@@ -152,7 +152,10 @@ namespace kgraph
                 { "Dispatch", "run compute execute kernel indirect" },
                 { "Draw", "render rasterize mesh entities triangle fullscreen indirect instanced viewport scissor mesh tasks" },
                 { "TraceRays", "ray tracing raygen rtx path trace" },
-                { "SceneView", "camera view projection lights sky sun frame uniform scene" }, { "Pick", "select click id entity mouse read back" },
+                { "Camera", "view projection matrix eye scene" }, { "Sky", "ambient zenith horizon scene" }, { "Sun", "directional light direction scene" },
+                { "Lights", "point spot directional light list scene" }, { "ComponentValue", "field script entity read get value" },
+                { "EntityTransform", "position rotation scale matrix world entity" }, { "DataBuffer", "uniform block struct pack values constant buffer frame" },
+                { "Append", "join concatenate vec4 combine" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
                 { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
                 { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
                 { "CopyImageToBuffer", "download read back texels image buffer transfer" },
@@ -277,6 +280,9 @@ namespace kgraph
             for (const char* part : { "x", "y", "z", "w" }) types.back().outputs.push_back({ part, PortKind::eValue, "number", false, {}, nullptr });
             value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
+            value("Append", { Any("a"), Any("b") }, "vector", "The numbers of a, then those of b: a colour and its alpha as one vector of four.");
+            value("MatrixMultiply", { Any("a"), Any("b") }, "matrix", "a times b, as matrices of four by four: what b does, then what a does.");
+            value("MatrixInverse", { Any("a") }, "matrix", "What undoes a matrix of four by four.");
             value("VertexLayout", { hinted({ "attributes", PortKind::eValue, "list", false,
                                       "What a vertex has, in order: { \"semantic\": \"POSITION\", \"type\": \"eFloat\", \"count\": 3 }, and optionally \"binding\", \"instanced\", \"namespace\".", nullptr }, "attributes") },
                   "struct KoralVertexLayout", "How a mesh's vertices are laid out, packed in the order given: what a pipeline's vertex.layout and a Mesh's vertexLayout take.");
@@ -293,13 +299,68 @@ namespace kgraph
                                     given("size", "vector", "The window's width and height."), given("width", "number", "How many pixels across the window is."),
                                     given("height", "number", "How many pixels down.") },
                                   "The scene's window: what a pass writes to show something.", nullptr });
-                Port extent { "extent", PortKind::eValue, "vector", false, "How big the picture it is for is, its width and height: what the camera's aspect is worked out from. Square, when not given.", nullptr };
-                extent.optional = true;
-                types.push_back({ "SceneView", "Resources", { std::move(extent) },
-                                  { ResourcePort("frame", "Buffer", "What the frame is seen from and lit by: a uniform block, laid out as the scene shaders' FrameData."),
-                                    ResourcePort("lights", "Buffer", "Every light in the scene, up to 64: an array, laid out as the scene shaders' Light.") },
-                                  "The scene as shaders see it, written each frame from the world: the camera (the first entity with a Camera, or the editor's view), the sky and its sun, and every light.", nullptr });
-            }
+// What a scene's own components hold, as values: read from the world every frame, to be worked on by
+                // other nodes and packed into the buffers shaders read.
+                const auto out = [&](std::string name, std::string type, std::string doc, const bool shown = false) {
+                    Port port { std::move(name), PortKind::eValue, std::move(type), false, std::move(doc), nullptr };
+                    port.optional = !shown;
+                    return port;
+                };
+                const auto in = [&](std::string name, std::string type, std::string doc, std::string editor = {}) {
+                    Port port { std::move(name), PortKind::eValue, std::move(type), false, std::move(doc), nullptr };
+                    port.optional = true;
+                    port.editor = std::move(editor);
+                    return port;
+                };
+                const Port entity = in("entity", "string", "Which entity, by name: the first that has the component, when not given.", "entity");
+                types.push_back({ "Camera", "Scene",
+                                  { in("extent", "vector", "How big the picture it is for is, its width and height: what the aspect is worked out from. Square, when not given."), entity },
+                                  { out("viewProjection", "matrix", "The view and the projection as one: what a position in the world is multiplied by.", true),
+                                    out("inverseViewProjection", "matrix", "What undoes it: from the picture back into the world."),
+                                    out("view", "matrix", "The view: the world, as seen from the camera."), out("projection", "matrix", "The projection, Y pointing down as the device has it."),
+                                    out("position", "vector", "Where the camera is, in the world."), out("forward", "vector", "The way it looks."),
+                                    out("fieldOfView", "number", "Top to bottom, in degrees."), out("near", "number", {}), out("far", "number", {}) },
+                                  "The camera the scene is seen through, as values: the first entity with a Camera — or, in an editor, the editor's own view.", nullptr });
+                types.push_back({ "Sky", "Scene", { entity },
+                                  { out("zenith", "vector", "The colour straight up, in linear terms.", true), out("horizon", "vector", "The colour at the horizon."),
+                                    out("ground", "vector", "The colour below it."), out("ambient", "number", "How much light the sky gives all round."),
+                                    out("sunSize", "number", "How wide the sun's disc is, in degrees."), out("sunCosine", "number", "The cosine of half of that: what a shader compares with.") },
+                                  "The scene's Sky, as values: the first entity with one, or a sky's defaults.", nullptr });
+                types.push_back({ "Sun", "Scene", { entity },
+                                  { out("direction", "vector", "Towards the sun: the other way from the one the light shines.", true), out("color", "vector", "Its colour, in linear terms, times its intensity."),
+                                    out("present", "number", "1 when there is one, 0 when there is not.") },
+                                  "The scene's sun, as values: the first entity with a DirectionalLight.", nullptr });
+                types.push_back({ "Lights", "Scene", {},
+                                  { out("data", "vector", "Every light, sixteen numbers each, room for 64: its position and range; the way it shines and its kind (0 directional, 1 point, 2 spot); its colour times its intensity; the cosines of its cone's inner and outer angles, and two unused.", true),
+                                    out("count", "number", "How many there are.") },
+                                  "Every light in the scene, as one long list of numbers: what a DataBuffer makes an array of.", nullptr });
+                types.push_back({ "ComponentValue", "Scene",
+                                  { hinted({ "component", PortKind::eValue, "string", false, "The component's name: a script's, a pipeline's, one of the scene's own.", nullptr }, "component"),
+                                    { "field", PortKind::eValue, "string", false, "The name of one of its fields.", nullptr }, entity },
+                                  { out("out", "value", "The field: a number, or a vector.", true), out("present", "number", "1 when there is such an entity, 0 when not.") },
+                                  "One field of a component, read from an entity every frame: what a script counts, or a camera's far plane, as a value to wire.", nullptr });
+                Port named = entity;
+                named.optional = false;
+                named.doc = "Which entity, by name.";
+                types.push_back({ "EntityTransform", "Scene", { named },
+                                  { out("matrix", "matrix", "Where it is in the world: its own transform under those of everything above it.", true),
+                                    out("worldPosition", "vector", "Where it is in the world."), out("forward", "vector", "The way it faces."),
+                                    out("position", "vector", "Where it is, relative to what it is under."), out("rotation", "vector", "How it is turned, in degrees."),
+                                    out("scale", "vector", {}), out("present", "number", "1 when there is such an entity.") },
+                                  "An entity's place in the world, as values.", nullptr });
+
+                Port usage { "usage", PortKind::eValue, "string", false, "eUniform: a block of values a shader declares as a ConstantBuffer. eStorage: an array it declares as a StructuredBuffer.", nullptr };
+                usage.optional = true;
+                usage.choices = { "eUniform", "eStorage" };
+                usage.initial = Value("eUniform");
+                Port fieldValue { "field[].value", PortKind::eValue, "value", true, "A value of the block, in the order the shader declares them: a number, a vector, a matrix, or a long list of numbers.", nullptr };
+                Port fieldType { "field[].type", PortKind::eValue, "string", true, "What it is in the shader, when its size does not say: an int or a uint, a uint4 of which only the first is given. eAuto goes by how many numbers there are.", nullptr };
+                fieldType.optional = true;
+                fieldType.choices = { "eAuto", "eFloat", "eInt", "eUInt", "eVec2", "eVec3", "eVec4", "eIVec4", "eUVec4", "eMat4", "eFloats" };
+                types.push_back({ "DataBuffer", "Resources", { std::move(usage), std::move(fieldValue), std::move(fieldType) },
+                                  { ResourcePort("out", "Buffer") },
+                                  "A buffer made of values: each field after the last, laid out as a shader's block is, and written again every frame a value wired to it changes.", nullptr });
+                        }
             types.push_back({ "Primitive", "Resources",
                               { chosen({ "shape", PortKind::eValue, "string", false,
                                          "eCube, eSphere, ePlane (facing up), eCylinder, eCone, eCapsule and eTorus, each about a unit across; eQuad (a unit square facing +z) and eTriangle. All are centred on the origin.", nullptr },
@@ -368,7 +429,7 @@ namespace kgraph
             types.push_back({ "DebugDraw", "Passes",
                               { ResourcePort("image", "Image", "The picture they are drawn over."),
                                 optional(ResourcePort("depth", "Image", "A depth image to test them against: on top of everything, when not wired.")) }, {},
-                              "Draws the scene's debug shapes over a picture, seen as a SceneView sees it: an editor's gizmo, a camera's reach, a light's.", nullptr });
+                              "Draws the scene's debug shapes over a picture, seen as the Camera node sees it: an editor's gizmo, a camera's reach, a light's.", nullptr });
             const Port with = optional(hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr }, "components"));
             const Port without = optional(hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components"));
             types.push_back({ "Dispatch", "Passes",
@@ -441,10 +502,11 @@ namespace kgraph
             // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
             static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance" };
             static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };
-            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Component", "Split", "ImageExtent", "VertexLayout" };
+            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Component", "Split", "ImageExtent", "VertexLayout", "Append" };
+            static const std::set<std::string_view> matrices { "MatrixMultiply", "MatrixInverse" };
             for (auto& type : types) {
                 if (type.category == "Values" && !plain.contains(type.name))
-                    type.category = vectors.contains(type.name) ? "Vectors" : logic.contains(type.name) ? "Logic" : "Math";
+                    type.category = vectors.contains(type.name) || matrices.contains(type.name) ? "Vectors" : logic.contains(type.name) ? "Logic" : "Math";
                 type.keywords = Keywords(type.name);
                 if (!type.builder)
                     for (auto& port : type.inputs)

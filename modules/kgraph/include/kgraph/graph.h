@@ -44,6 +44,8 @@ namespace kgraph
         std::string title;                      ///< What a person calls it; its id when empty.
         std::map<std::string, Input> inputs;
         double x = 0, y = 0;                    ///< Where it is in the editor.
+        /// The pass it is part of: a page of the graph, by name. Empty for one that is in none. @see Graph::passes
+        std::string pass;
         bool operator==(const Node&) const = default;
 
         Node& Set(std::string input, Value value) { inputs[std::move(input)] = Input { std::move(value), std::nullopt }; return *this; }
@@ -56,6 +58,13 @@ namespace kgraph
 
     struct Graph {
         std::vector<Node> nodes;
+        /**
+         * The passes a frame is made in, in the order they are drawn: each a page of the graph, with the nodes whose
+         * `pass` names it — what the pass makes for itself, what it runs, and References to what earlier passes made.
+         * A pass is a way of laying a graph out and of ordering what it does where what is used does not say: a wire
+         * goes from any node to any other, whichever passes they are in.
+         */
+        std::vector<std::string> passes;
         bool operator==(const Graph&) const = default;
 
         [[nodiscard]] const Node* Find(std::string_view id) const;

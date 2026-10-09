@@ -1,6 +1,6 @@
 #pragma once
 
-/** @file view.h  Where a scene is seen from: what a SceneView node works its camera out of. */
+/** @file view.h  Where a scene is seen from: what a Camera node works its matrices out of. */
 
 #include <kmath/matrix.h>
 

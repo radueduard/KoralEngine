@@ -205,89 +205,124 @@ namespace keditor
     bool AddStandardGraph(Document& doc, std::string& error)
     {
         bool ok = true;
+        std::string pass;       // the pass whose page the nodes being made go on
         const auto node = [&](const char* type, const char* id, const double x, const double y) {
-            if (doc.AddNode(type, x, y, id) != id) { ok = false; error = std::format("there is a node '{}' already", id); }
+            if (doc.AddNode(type, x, y, id, pass) != id) { ok = false; error = std::format("there is a node '{}' already", id); }
         };
-        const auto set = [&](const char* id, const char* input, Value value) { ok = doc.SetInput(id, input, std::move(value)) && ok; };
-        const auto wire = [&](const char* from, const char* id, const char* input, const char* output = "out") { ok = doc.Connect(from, output, id, input) && ok; };
+        const auto set = [&](const std::string& id, const char* input, Value value) { ok = doc.SetInput(id, input, std::move(value)) && ok; };
+        const auto wire = [&](const std::string& from, const std::string& id, const char* input, const char* output = "out") { ok = doc.Connect(from, output, id, input) && ok; };
+        // What an earlier pass made, brought into this one: a node here that stands for it.
+        const auto bring = [&](const char* id, const double x, const double y) {
+            const std::string made = doc.Import(id, pass, x, y);
+            if (made.empty()) { ok = false; error = std::format("there is no node '{}' to bring in", id); }
+            return made;
+        };
+        const auto shaders = [&](const char* id, const char* module) {
+            set(id, "vertex.module", module);
+            set(id, "vertex.entry", "vertex");
+            set(id, "fragment.module", module);
+            set(id, "fragment.entry", "fragment");
+        };
+        const auto target = [&](const char* id, const std::string& colorView, const std::string& depthView, const double x, const double y) {
+            node("Framebuffer", id, x, y);
+            wire(colorView, id, "color[0].view");
+            set(id, "color[0].name", "color");
+            if (depthView.empty()) return;
+            wire(depthView, id, "depthStencil.view");
+            set(id, "depthStencil.which", "Depth");
+            set(id, "depthStencil.name", "depth");
+            set(id, "depthStencil.depth", 1);
+        };
 
-        // The window, and three pictures its size: what is seen, how far each pixel of it is, and which entity it is.
-        node("Screen", "screen", 1500, 60);
+        // ---- frame: what every pass after it sees of the frame ------------------------------------------------
+        // The scene's camera, sky, sun and lights as values, and the two buffers of them the shaders read. A value
+        // is wired into its place in a buffer, in the order the shader's block declares it.
+        pass = "frame";
+        doc.AddPass(pass);
+        node("Screen", "screen", 40, 40);
+        node("Camera", "camera", 40, 180);
+        wire("screen", "camera", "extent", "size");
+        node("Sky", "sky values", 40, 460);
+        node("Sun", "sun", 40, 700);
+        node("Lights", "lights", 40, 860);
+        node("DataBuffer", "frame data", 420, 180);     // FrameData, in engineCommon.slang
+        const auto field = [&](const int index, const char* from, const char* output, const char* type = nullptr) {
+            wire(from, "frame data", std::format("field[{}].value", index).c_str(), output);
+            if (type) set("frame data", std::format("field[{}].type", index).c_str(), type);
+        };
+        field(0, "camera", "viewProjection");
+        field(1, "camera", "inverseViewProjection");
+        field(2, "camera", "position", "eVec4");
+        field(3, "sky values", "zenith");               // rgb, and in its fourth place:
+        field(4, "sky values", "ambient");              //   how much light the sky gives all round
+        field(5, "sky values", "horizon");
+        field(6, "sky values", "sunCosine");            //   the cosine of the sun disc's radius
+        field(7, "sky values", "ground", "eVec4");
+        field(8, "sun", "direction");
+        field(9, "sun", "present");                     //   1 when there is a sun
+        field(10, "sun", "color", "eVec4");
+        field(11, "lights", "count", "eUVec4");
+        node("DataBuffer", "light data", 420, 860);     // Light[], in engineCommon.slang
+        set("light data", "usage", "eStorage");
+        wire("lights", "light data", "field[0].value", "data");
+        node("Primitive", "shape", 420, 40);            // for how a default mesh's vertices are laid out
+
+        // ---- scene: every entity with a Mesh and the lit shader's component -------------------------------------
+        // Three pictures the size of the window: what is seen, how far each pixel of it is, and which entity it is.
+        pass = "scene";
+        doc.AddPass(pass);
+        const std::string screen = bring("screen", 40, 40);
         const auto picture = [&](const char* id, const char* format, Value::List usage, const double y) {
-            node("Image", id, 40, y);
+            node("Image", id, 300, y);
             set(id, "format", format);
             set(id, "usage", Value(std::move(usage)));
             doc.ClearInput(id, "extent.x");
             doc.ClearInput(id, "extent.y");
-            wire("screen", id, "extent", "extent");
+            wire(screen, id, "extent", "extent");
+            const std::string view = std::string(id) + " view";
+            node("ImageView", view.c_str(), 520, y);
+            wire(id, view, "image");
         };
-        picture("color", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc", "eTransferDst" }, 60);
-        picture("ids", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" }, 240);
-        picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" }, 420);
-        for (const auto& [view, of, y] : { std::tuple { "color view", "color", 60.0 }, std::tuple { "ids view", "ids", 240.0 }, std::tuple { "depth view", "depth", 420.0 } }) {
-            node("ImageView", view, 280, y);
-            wire(of, view, "image");
-        }
-
-        // What the scene is drawn into: the picture and the ids, cleared, with depth. And the picture alone, with
-        // depth and without, for what is drawn after over what is there.
-        node("Framebuffer", "scene target", 520, 60);
-        wire("color view", "scene target", "color[0].view");
-        set("scene target", "color[0].name", "color");
+        picture("color", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc", "eTransferDst" }, 40);
+        picture("ids", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" }, 200);
+        picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" }, 360);
+        target("scene target", "color view", "depth view", 760, 40);
         set("scene target", "color[0].clear", Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 1 } } } } });
         wire("ids view", "scene target", "color[1].view");
         set("scene target", "color[1].name", "ids");
         set("scene target", "color[1].clear", Value::Members { { "scalarType", "UInt" }, { "components", 4 }, { "value", Value::Members { { "u", Value::List { 0, 0, 0, 0 } } } } });
-        wire("depth view", "scene target", "depthStencil.view");
-        set("scene target", "depthStencil.which", "Depth");
-        set("scene target", "depthStencil.name", "depth");
-        set("scene target", "depthStencil.depth", 1);
-        node("Framebuffer", "sky target", 520, 300);
-        wire("color view", "sky target", "color[0].view");
-        set("sky target", "color[0].name", "color");
-        wire("depth view", "sky target", "depthStencil.view");
-        set("sky target", "depthStencil.which", "Depth");
-        set("sky target", "depthStencil.name", "depth");
-        set("sky target", "depthStencil.depth", 1);
-        node("Framebuffer", "overlay target", 520, 500);
-        wire("color view", "overlay target", "color[0].view");
-        set("overlay target", "color[0].name", "color");
-
-        // The frame as the shaders see it: the camera, the sky, the lights.
-        node("SceneView", "view", 280, 640);
-        wire("screen", "view", "extent", "size");
-        node("Primitive", "shape", 520, 700);   // for how a default mesh's vertices are laid out
-
-        // Every entity with a Mesh and this pipeline's component, lit. The component is the shader's: what its push
-        // constants ask of each entity — an albedo, how metallic and how rough it is, what light it gives off.
-        node("GraphicsPipeline", "lit", 800, 60);
-        set("lit", "vertex.module", "lit");
-        set("lit", "vertex.entry", "vertex");
-        wire("shape", "lit", "vertex.layout", "layout");
-        set("lit", "fragment.module", "lit");
-        set("lit", "fragment.entry", "fragment");
+        // The pipeline's component is the shader's: what its push constants ask of each entity — an albedo, how
+        // metallic and how rough it is, what light it gives off.
+        node("GraphicsPipeline", "lit", 1020, 40);
+        shaders("lit", "lit");
+        wire(bring("shape", 760, 420), "lit", "vertex.layout", "layout");
         wire("scene target", "lit", "framebuffer");
-        wire("view", "lit", "param.frame", "frame");
-        wire("view", "lit", "param.lights", "lights");
+        wire(bring("frame data", 760, 540), "lit", "param.frame");
+        wire(bring("light data", 760, 660), "lit", "param.lights");
+        node("Draw", "draw scene", 1300, 40);
+        wire("lit", "draw scene", "pipeline");
 
-        // The sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn.
-        node("GraphicsPipeline", "sky", 800, 300);
-        set("sky", "vertex.module", "sky");
-        set("sky", "vertex.entry", "vertex");
-        set("sky", "fragment.module", "sky");
-        set("sky", "fragment.entry", "fragment");
+        // ---- sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn -----------
+        pass = "sky";
+        doc.AddPass(pass);
+        target("sky target", bring("color view", 40, 40), bring("depth view", 40, 160), 320, 40);
+        node("GraphicsPipeline", "sky", 600, 40);
+        shaders("sky", "sky");
         wire("sky target", "sky", "framebuffer");
-        wire("view", "sky", "param.frame", "frame");
+        wire(bring("frame data", 320, 300), "sky", "param.frame");
         set("sky", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", false }, { "depthCompareOp", "eLessOrEqual" } });
+        node("Draw", "draw sky", 880, 40);
+        wire("sky", "draw sky", "pipeline");
+        set("draw sky", "load", true);
 
-        // A line round what is picked, from the image of which entity is where.
-        node("GraphicsPipeline", "outline", 800, 500);
-        set("outline", "vertex.module", "outline");
-        set("outline", "vertex.entry", "vertex");
-        set("outline", "fragment.module", "outline");
-        set("outline", "fragment.entry", "fragment");
+        // ---- outline: a line round what is picked, from the image of which entity is where -----------------------
+        pass = "outline";
+        doc.AddPass(pass);
+        target("overlay target", bring("color view", 40, 40), {}, 320, 40);
+        node("GraphicsPipeline", "outline", 600, 40);
+        shaders("outline", "outline");
         wire("overlay target", "outline", "framebuffer");
-        wire("ids", "outline", "param.ids");
+        wire(bring("ids", 320, 240), "outline", "param.ids");
         set("outline", "push.outlineColor", Value::List { 1, 0.55, 0.15, 1 });
         set("outline", "push.thickness", 2);
         set("outline", "depthStencilState", Value::Members { { "depthTestEnable", false }, { "depthWriteEnable", false } });
@@ -295,23 +330,24 @@ namespace keditor
             { "blendEnable", true }, { "srcColorBlendFactor", "eSrcAlpha" }, { "dstColorBlendFactor", "eOneMinusSrcAlpha" }, { "colorBlendOp", "eAdd" },
             { "srcAlphaBlendFactor", "eOne" }, { "dstAlphaBlendFactor", "eOneMinusSrcAlpha" }, { "alphaBlendOp", "eAdd" },
             { "colorWriteMask", Value::List { "eR", "eG", "eB", "eA" } } } } } });
-
-        // The passes, in the order they are drawn where what they use does not say.
-        node("Draw", "draw scene", 1100, 60);
-        wire("lit", "draw scene", "pipeline");
-        node("Draw", "draw sky", 1100, 300);
-        wire("sky", "draw sky", "pipeline");
-        set("draw sky", "load", true);
-        node("Draw", "draw outline", 1100, 500);
+        node("Draw", "draw outline", 880, 40);
         wire("outline", "draw outline", "pipeline");
         set("draw outline", "load", true);
-        node("DebugDraw", "helpers", 1100, 660);
-        wire("color", "helpers", "image");
-        node("Pick", "pick", 1100, 780);
-        wire("ids", "pick", "ids");
-        node("Blit", "show", 1500, 240);
-        wire("color", "show", "source");
-        wire("screen", "show", "destination");
+
+        // ---- editor: what an editor draws over the picture, and reads back of it ----------------------------------
+        pass = "editor";
+        doc.AddPass(pass);
+        node("DebugDraw", "helpers", 320, 40);
+        wire(bring("color", 40, 40), "helpers", "image");
+        node("Pick", "pick", 320, 200);
+        wire(bring("ids", 40, 200), "pick", "ids");
+
+        // ---- show: the picture, in the window ----------------------------------------------------------------------
+        pass = "show";
+        doc.AddPass(pass);
+        node("Blit", "show", 320, 40);
+        wire(bring("color", 40, 40), "show", "source");
+        wire(bring("screen", 40, 180), "show", "destination");
 
         if (!ok && error.empty()) error = "a node of the standard graph could not be set up";
         return ok;

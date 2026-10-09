@@ -150,6 +150,16 @@ namespace keditor
         /** @brief Reads the scene again from its file. */
         bool Revert();
 
+        // ---- the graph's pages ------------------------------------------------------------------------------
+
+        /** @brief The pass whose page the graph panel shows; none while it shows every node at once. */
+        [[nodiscard]] const std::string& Pass() const { return _pass; }
+        [[nodiscard]] bool ShowsEveryPass() const { return _everyPass; }
+        void ShowPass(std::string pass) { _pass = std::move(pass); _everyPass = false; ++_changes; }
+        void ShowEveryPass() { _everyPass = true; ++_changes; }
+        /** @brief Picks node @p id, and turns to the page it is on. */
+        void GoTo(const std::string& id);
+
         std::string selectedNode;                       ///< The node the inspector shows, when no entity is picked.
         kecs::Entity selectedEntity = kecs::NullEntity; ///< The entity it shows.
         void Select(std::string node) { selectedNode = std::move(node); selectedEntity = kecs::NullEntity; ++_changes; }
@@ -180,6 +190,8 @@ namespace keditor
         std::uint64_t _changes = 0;
         std::map<std::string, std::set<std::string>> _asked;
         std::set<kecs::Entity> _folded;
+        std::string _pass;
+        bool _everyPass = false;
         std::string _snapshot;              // the entities as they were when play began
         std::vector<ObjectTemplate> _objects;
         int _fps = 0, _framesCounted = 0;

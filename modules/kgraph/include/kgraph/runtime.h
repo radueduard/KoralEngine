@@ -107,7 +107,7 @@ namespace kgraph
         // ---- the frame, as whoever runs the graph has it ------------------------------------------------------
 
         /**
-         * @brief What a SceneView node sees from, in place of the scene's own camera: an editor's view. With none
+         * @brief What a Camera node sees from, in place of the scene's own camera: an editor's view. With none
          *        (the default) it is the first entity with a Camera.
          */
         void SetView(std::optional<View> view);
@@ -117,7 +117,7 @@ namespace kgraph
         void SetScreenExtent(kor::UVec2 extent);
         /** @brief Where a DebugDraw node's shapes come from: the scene's. Null, the default, draws none. */
         void SetDebugDraw(kor::DebugDraw* debug);
-        /** @brief What the last SceneView written saw: its view, its view and projection as one, and its picture's aspect. */
+        /** @brief What the Camera node last saw: its view, its view and projection as one, and its picture's aspect. */
         [[nodiscard]] View CurrentView() const;
         [[nodiscard]] kor::Mat4 ViewProjection() const;
         [[nodiscard]] float Aspect() const;

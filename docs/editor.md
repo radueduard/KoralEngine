@@ -26,7 +26,7 @@ A resource an entity holds is saved as the id of the node that makes it.
 
 | Panel | |
 |---|---|
-| **Graph** | The scene's pass graph. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
+| **Graph** | The scene's pass graph, a page a pass: the passes are listed down its side. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
 | **Scene** | The scene as it runs, sized to the panel. |
 | **Outliner** | The entities, as a tree, and a button that makes one. |
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
@@ -43,20 +43,40 @@ The menus:
 - **Project, Run** saves and starts `koral-play` on the project (Control+R).
 - **Graph** and **Entity** add a node and an entity.
 
+### Passes
+
+The graph is split into passes, listed down the side of the Graph panel in the order they are drawn. Press
+one to see its page: the nodes it makes and runs, and nothing of any other pass. **Every node at once**
+shows the whole graph.
+
+- **A new pass** is made by typing its name under the list. Right-click a pass to move it earlier or later,
+  or to delete it (with its nodes, or keeping them in no pass). Its name is edited under the list.
+- **Create...** makes a node in the pass shown: an image, a framebuffer, a pipeline, a pass node. So does
+  right-clicking its page, or Control+Space, for every kind of node.
+- **Import...** lists what the passes before this one made. Picking one puts a node on this page that
+  stands for it, greyed and labelled with where it is from, to wire from as if it were the thing itself.
+- A node's inspector has a **Pass** line to move it to another page. Clicking a problem, or finding a node
+  by name, turns to the page it is on.
+
+A node wired straight to one on another page, with nothing imported, shows that node greyed beside it.
+
 ### The standard scene
 
 **File, New scene** replaces the scene with one that draws meshes lit under a sky. It writes four shaders
 into the project's `shaders` (`engineCommon`, `lit`, `sky`, `outline`; one already there is left alone) and
 builds the graph that uses them out of ordinary nodes, to be changed like any other:
 
-- `color`, `ids` and `depth` images the size of the window (their `extent` is the Screen's).
-- `view`, a SceneView, whose `frame` and `lights` feed the pipelines.
-- `lit`, the pipeline that draws meshes. What makes an entity drawn is a `Mesh` and this pipeline's
-  component, which the shader makes: a field for each push constant it asks of an entity — `albedo`,
-  `metallic`, `roughness` and `emission`. Add a push constant to `lit.slang` and the component has the
-  field. It also draws each entity's number into `ids`.
-- `sky`, drawn after it where nothing nearer was; `outline`, a line round what is picked, read from `ids`.
-- `helpers` (DebugDraw) for the gizmo and the light and camera shapes, `pick`, and `show`, the Blit.
+| Pass | What is on its page |
+|---|---|
+| `frame` | The Screen; Camera, Sky, Sun and Lights nodes, reading the scene; `frame data` and `light data`, the two buffers their values are packed into, in the order `engineCommon.slang` declares them. |
+| `scene` | `color`, `ids` and `depth` images the size of the window, and `lit`, the pipeline that draws meshes. What makes an entity drawn is a `Mesh` and this pipeline's component, which the shader makes: `albedo`, `metallic`, `roughness`, `emission`. It also draws each entity's number into `ids`. |
+| `sky` | The sky, drawn where nothing nearer was. |
+| `outline` | A line round what is picked, read from `ids`. |
+| `editor` | `helpers` (DebugDraw) for the gizmo and the light and camera shapes, and `pick`. |
+| `show` | The Blit of `color` to the Screen. |
+
+Each pass imports what it uses of the ones before it. To send something else to the shaders — a script's
+value, another entity's place — wire it into `frame data` as another field and declare it in the block.
 
 It also makes a sky, a camera, a sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`
 (`<keditor/starter.h>`) do the same from code.
@@ -71,7 +91,7 @@ as its reach.
 A click on the picture picks the entity drawn there, through the graph's Pick node; what is picked is
 outlined and gets a gizmo (**Move**, **Rotate**, **Scale**, or **Select** for none) that changes its
 transform. All of this needs the graph to have the nodes for it, as the standard one does: a scene whose
-graph has no SceneView is drawn however its own nodes say, and the view and gizmo do nothing to it.
+graph has no Camera node is drawn however its own nodes say, and the view and gizmo do nothing to it.
 
 ### Playing
 

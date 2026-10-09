@@ -79,7 +79,31 @@ namespace keditor
          *        "image", "image 2". A pipeline's id is what its entities' component is named, so it is worth giving.
          * @return The id it got; empty when there is no such type.
          */
-        std::string AddNode(std::string_view type, double x, double y, std::string_view id = {});
+        std::string AddNode(std::string_view type, double x, double y, std::string_view id = {}, std::string_view pass = {});
+
+        // ---- passes -------------------------------------------------------------------------------------------
+        //
+        // A pass is a page of the graph: what it makes for itself, what it runs, and what it takes from the passes
+        // before it. The order of the passes is the order they are drawn in, where what they use does not say.
+
+        [[nodiscard]] const std::vector<std::string>& Passes() const { return Graph().passes; }
+        /** @brief A new pass so named, at @p index among them (last, when below 0). False when there is one already. */
+        bool AddPass(std::string_view name, int index = -1);
+        /** @brief Gives a pass another name, and every node of it with it. */
+        bool RenamePass(std::string_view pass, std::string_view name);
+        /** @brief Moves a pass to @p index among them: earlier is drawn first. */
+        bool MovePass(std::string_view pass, int index);
+        /** @brief Takes a pass away: with its nodes, or — @p keepNodes — leaving them in no pass. */
+        bool RemovePass(std::string_view pass, bool keepNodes = false);
+        /** @brief Puts a node in a pass; in none, for an empty name. */
+        bool SetNodePass(std::string_view node, std::string_view pass);
+        /**
+         * @brief Brings what node @p node makes into @p pass: a Reference to it there, which is wired from as the
+         *        node itself would be. The Reference's id; empty when there is no such node.
+         */
+        std::string Import(std::string_view node, std::string_view pass, double x, double y);
+        /** @brief The nodes of the passes before @p pass, and of none: what there is for it to import, by id. */
+        [[nodiscard]] std::vector<std::string> Importable(std::string_view pass) const;
         /** @brief Takes nodes out, with every wire to them. */
         void RemoveNodes(const std::vector<std::string>& ids);
         void MoveNodes(const std::vector<std::string>& ids, double dx, double dy);

@@ -3,7 +3,7 @@
 /**
  * @file scene.h
  * @brief What a scene is made of besides meshes: a camera, lights, a sky. Components every world a graph runs for
- *        has, which the SceneView node reads each frame and hands to shaders as two buffers.
+ *        has, which the Camera, Sky, Sun and Lights nodes read each frame as values to wire into buffers.
  *
  * A component here is data and nothing else: what a thing does is a script's. Where a camera or a light is, and which way it looks or shines, is its
  * entity's transform: forward is -Z.

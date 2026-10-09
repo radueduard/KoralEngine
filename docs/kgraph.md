@@ -34,6 +34,23 @@ inputs by name. An input is a value or a link to another node's output.
 ] }
 ```
 
+### Passes
+
+A graph is laid out in passes. `Graph::passes` is their names in the order they are drawn, and a node's
+`pass` is the one whose page it is on:
+
+```json
+{ "kgraph": 1, "passes": ["frame", "scene", "show"], "nodes": [
+  { "id": "color", "type": "Image", "pass": "scene", "inputs": { ... } },
+  { "id": "color (in show)", "type": "Reference", "pass": "show", "inputs": { "node": "color" } }
+] }
+```
+
+A pass holds what it makes for itself and what it runs. What it uses of an earlier pass it brings in with a
+**Reference** node, which gives every output the node it stands for gives. Passes are a way of laying a
+graph out, not a boundary: a wire may go from any node to any other. Their order decides one thing: which
+of two passes runs first when nothing they use says (see [Order](#order)).
+
 Values are JSON's own: numbers, booleans, strings, lists and objects. An enum is its name, flags are a
 list of names, a vector is a list of numbers, and a struct is an object by field name. `Graph::ToJson`
 and `Graph::FromJson` round-trip a graph exactly.
@@ -64,12 +81,13 @@ the editor will build its node list and its nodes from.
   `eSphere`, `ePlane` (facing up), `eCylinder`, `eCone`, `eCapsule`, `eTorus`, and `eQuad` (facing +z) and
   `eTriangle`. Each has positions, normals and texture coordinates, and faces outward. Its second output,
   `layout`, is what a pipeline that draws it takes as `vertex.layout`.
-- **SceneView** is the scene as shaders see it, written each frame from the world: `frame` (a uniform block:
-  the camera, the sky and its sun) and `lights` (every light, up to 64). See [The scene](#the-scene).
+- **Camera**, **Sky**, **Sun**, **Lights**, **ComponentValue** and **EntityTransform** are what the
+  scene's entities hold, as values read every frame. **DataBuffer** packs values into a buffer a shader
+  reads. See [The scene](#the-scene).
 - **Screen** is the scene's window. Its `extent`, `size`, `width` and `height` outputs are the window's
   size: an image whose `extent` is wired to it is rebuilt when the window is resized, and so is whatever is
-  made of that image. **Reference** stands for another node by id, for a resource used far
-  from where it is made.
+  made of that image. **Reference** stands for another node by id: how a pass brings in what an
+  earlier one made.
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
   multisampled image made an ordinary one), Copy (image to image of one size), CopyBuffer, ClearBuffer,
   CopyBufferToImage, CopyImageToBuffer, GenerateMipmaps, Dispatch, TraceRays and Draw. Every command the
@@ -199,36 +217,44 @@ Where a camera or a light is, and which way it faces, is its entity's transform.
 is no component for drawing a mesh (a pipeline's shader makes that one) and none that does anything (that
 is a script).
 
-A **SceneView** node reads them each frame into two buffers a pipeline's parameters are wired to. `frame`
-is laid out as this block, and `lights` as an array of `Light`:
+What they hold is there as values, through nodes that read the world every frame:
+
+| Node | Outputs |
+|---|---|
+| **Camera** | `viewProjection`, `inverseViewProjection`, `view`, `projection` (matrices: sixteen numbers, column after column), `position`, `forward`, `fieldOfView`, `near`, `far`. Its `extent` input is the picture's size, for the aspect. |
+| **Sky** | `zenith`, `horizon`, `ground`, `ambient`, `sunSize`, `sunCosine`. |
+| **Sun** | `direction` (towards it), `color` (times its intensity), `present`. The first DirectionalLight. |
+| **Lights** | `data`: every light, sixteen numbers each, room for 64. `count`. |
+| **ComponentValue** | `out`: one field of any component, a script's or a pipeline's included; `present`. |
+| **EntityTransform** | `matrix`, `worldPosition`, `forward`, `position`, `rotation`, `scale`, `present`, of an entity by name. |
+
+Each takes the first entity that has the component, or the one its `entity` input names. Colours come out
+in linear terms. The Camera's projection has Y pointing down, as the device does. Whoever runs the graph
+can put its own view in place of the scene's camera (`Runtime::SetView`), which is how an editor looks at a
+scene from where it likes; a Camera node that names its entity is left alone.
+
+These values are wired like any others: into Math and Vectors nodes (`Append`, `MatrixMultiply` and
+`MatrixInverse` among them) and into a **DataBuffer**, whose `field[n].value` inputs are packed one after
+another as a shader's block lays them out (std140: a number in four bytes, a vector of three or four
+aligned to sixteen, so a `float3` followed by a `float` share one `float4`). `field[n].type` says what a
+value is where its size doesn't: `eUInt`, or `eUVec4` for a `uint4` given one number. `usage` is `eUniform`
+for a block or `eStorage` for an array. So a shader's
 
 ```slang
-struct FrameData {
-    float4x4 viewProjection, inverseViewProjection;
-    float4 cameraPosition;
-    float4 skyZenith;      // rgb; w: how much light the sky gives all round
-    float4 skyHorizon;     // rgb; w: the cosine of the sun disc's radius
-    float4 skyGround;
-    float4 sunDirection;   // xyz: towards the sun; w: 1 when there is a sun
-    float4 sunColor;       // rgb, times its intensity
-    uint4 counts;          // x: how many lights
-};
-struct Light {
-    float4 position;       // xyz; w: range
-    float4 direction;      // xyz: the way it shines; w: 0 directional, 1 point, 2 spot
-    float4 color;          // rgb, times its intensity
-    float4 cone;           // x: cosine of the inner angle, y: of the outer
-};
+struct FrameData { float4x4 viewProjection; float4 cameraPosition; float4 skyZenith; /* w: ambient */ };
 ```
 
-Colours are in linear terms. The node's `extent` input is the size of the picture it is for, which the
-camera's aspect comes from. The projection has Y pointing down, as the device does. Whoever runs the graph
-can put its own view in place of the scene's camera (`Runtime::SetView`), which is how an editor looks at a
-scene from where it likes.
+is a DataBuffer with `camera.viewProjection`, `camera.position` (as `eVec4`), `sky.zenith` and
+`sky.ambient` wired to fields 0 to 3.
+
+A node that reads the world, every value worked out from one, and every DataBuffer one reaches are brought
+up to date each frame without anything being built again: the value changes where it is, and the buffer is
+written. Anything else wired to such a value (an image's extent, a pipeline's constant) has it as it was
+when the graph was last set.
 
 Two pass nodes go with it. **Pick** takes an image of ids — one a pipeline draws `entityId` into — and
 `Runtime::Pick(u, v, then)` reads one pixel of it back, a few frames later, as the entity there.
-**DebugDraw** draws the scene's `kor::DebugDraw` shapes over an image, seen as the last SceneView saw
+**DebugDraw** draws the scene's `kor::DebugDraw` shapes over an image, seen as the graph's Camera node sees
 (`Runtime::SetDebugDraw`).
 
 ### Default meshes
@@ -343,7 +369,8 @@ Passes are installed in the scene's `kor::FrameGraph`, which orders them by the 
 write. Where a pass sits in the node list doesn't matter. The frame graph runs two writers of the same
 resource in the order they were added, so kgraph adds a pass that only overwrites a resource (Clear)
 before one that reads and writes it (Dispatch on a read-write image). Two passes that both modify the
-same resource run in node-list order: usage does not say which is first.
+same resource run in the order of the passes they are in, and within a pass in node-list order: usage
+does not say which is first.
 
 Resources that entities hold count too. Each per-entity parameter of a pass is a set of resources (a
 `kor::ResourceSet`), refilled only when its members change. Two uses that have a resource in common are
@@ -357,8 +384,9 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   only; the reference and masks can be set on the draw. One `clearColor` is for every colour attachment.
 - A buffer holds no data of its own in a graph: an indirect buffer is written by a compute pass.
 - A debug label or a GPU timer round a pass can't be asked for yet.
-- One SceneView's view is the one a DebugDraw node and `Runtime::ViewProjection()` go by: the last written.
-  Lights cast no shadows, and a SceneView has no matrix outputs to wire elsewhere.
+- The view a DebugDraw node and `Runtime::ViewProjection()` go by is that of the Camera node that names no
+  entity. Lights cast no shadows.
+- A DataBuffer holds numbers, vectors and matrices, not nested structs or arrays of anything but floats.
 - A cycle between passes is left to the frame graph. Reading a resource as it was last frame
   (`ReadPrevious`) can't be asked for in a graph yet.
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

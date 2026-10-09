@@ -101,6 +101,15 @@ namespace keditor
         return true;
     }
 
+    void Session::GoTo(const std::string& id)
+    {
+        if (const kgraph::Node* node = Doc().Graph().Find(id); node && !_everyPass && node->pass != _pass) {
+            if (node->pass.empty()) _everyPass = true;
+            else _pass = node->pass;
+        }
+        Select(id);
+    }
+
     // ---- the editor's view ------------------------------------------------------------------------------------
 
     namespace {
@@ -970,7 +979,7 @@ namespace keditor
 
             void AddOf(const std::string& type)
             {
-                const std::string id = Doc().AddNode(type, _addAt.x, _addAt.y, _newId);
+                const std::string id = Doc().AddNode(type, _addAt.x, _addAt.y, _newId, ShownPass());
                 _session->Select(id);
                 _session->Say(std::format("Added {}.", id));
                 SetState([&] { _dialog = Dialog::eNone; });
@@ -1022,7 +1031,7 @@ namespace keditor
                         if (id.find(lowered) == std::string::npos || ++here > 6) continue;
                         if (here == 1) rows.push_back(kgui::Muted("In this graph"));
                         rows.push_back(kui::Selectable(std::format("{}   ·   {}", node.id, node.type), false, [this, picked = node.id] {
-                            _session->Select(picked);
+                            _session->GoTo(picked);
                             SetState([&] { _dialog = Dialog::eNone; });
                         }));
                     }
@@ -1046,16 +1055,124 @@ namespace keditor
 
             // ---- the graph --------------------------------------------------------------------------------------
 
+            /** The pass whose page is shown: none when every node is, or when the graph has no passes. */
+            std::string ShownPass()
+            {
+                const auto& passes = Doc().Passes();
+                if (_session->ShowsEveryPass() || passes.empty()) return {};
+                if (std::ranges::find(passes, _session->Pass()) == passes.end()) _session->ShowPass(passes.front());
+                return _session->Pass();
+            }
+
+            /**
+             * The passes a frame is made in, in the order they are drawn: pressed, a pass's page is shown. Under them,
+             * for the one shown: something to make in it, and what the passes before it made, to bring in.
+             */
+            kui::Widget PassList()
+            {
+                const auto passes = Doc().Passes();
+                const std::string shown = ShownPass();
+                const kgraph::Runtime& runtime = Doc().Runtime();
+                std::vector<kui::Widget> rows;
+                rows.push_back(kgui::Muted("Passes, in the order they are drawn"));
+                for (std::size_t i = 0; i < passes.size(); ++i) {
+                    const std::string& pass = passes[i];
+                    std::size_t nodes = 0, failed = 0;
+                    for (const auto& node : Doc().Graph().nodes) {
+                        if (node.pass != pass) continue;
+                        ++nodes;
+                        if (const auto* status = runtime.Status(node.id); status && !status->ok) ++failed;
+                    }
+                    const std::string label = std::format("{}. {}{}", i + 1, pass, failed ? std::format("   ({} wrong)", failed) : std::string());
+                    const int index = static_cast<int>(i);
+                    rows.push_back(kui::ContextMenu({
+                        { "Earlier", [this, pass, index] { Doc().MovePass(pass, index - 1); }, i > 0 },
+                        { "Later", [this, pass, index] { Doc().MovePass(pass, index + 1); }, i + 1 < passes.size() },
+                        { .separator = true },
+                        { nodes ? std::format("Delete, with its {} nodes", nodes) : std::string("Delete"), [this, pass] { Doc().RemovePass(pass); } },
+                        { "Delete the pass, keep its nodes", [this, pass] { Doc().RemovePass(pass, true); }, nodes > 0 },
+                    }, kui::Tooltip(std::format("{} nodes. Right-click to move it earlier or later, or to delete it.", nodes),
+                                    kui::Selectable(label, pass == shown, [this, pass] { _session->ShowPass(pass); }))));
+                }
+                rows.push_back(kui::Selectable("Every node at once", shown.empty(), [this] { _session->ShowEveryPass(); }));
+                rows.push_back(kui::TextField(kui::TextFieldOptions { .placeholder = "A new pass: its name, then Enter",
+                    .onSubmitted = [this](const std::string& typed) {
+                        if (typed.empty()) return;
+                        if (Doc().AddPass(typed)) _session->ShowPass(typed);
+                        else _session->Say(std::format("There is a pass called '{}' already.", typed), true);
+                    } }).Key(std::format("new pass {}", passes.size())));
+
+                if (!shown.empty()) {
+                    rows.push_back(kui::Separator());
+                    rows.push_back(Heading(shown));
+                    rows.push_back(kui::TextField(kui::TextFieldOptions { .text = shown,
+                        .onSubmitted = [this, shown](const std::string& typed) { if (typed != shown && Doc().RenamePass(shown, typed)) _session->ShowPass(typed); } }).Key("rename " + shown));
+                    // Something to make in it: the kinds of thing a pass has of its own.
+                    std::vector<std::string> kinds;
+                    for (const auto& type : kgraph::Catalog())
+                        if (type.listed && (type.category == "Resources" || type.category == "Pipelines" || type.category == "Passes" || type.category == "Scene") && type.name != "Reference")
+                            kinds.push_back(type.name);
+                    rows.push_back(kui::Tooltip("Makes a node in this pass. Right-click the graph, or Control+Space, for every kind there is.",
+                        kui::Dropdown(kinds, -1, [this, kinds, shown](const int index) {
+                            const float y = 60.f + 40.f * static_cast<float>(Doc().Graph().nodes.size() % 10);
+                            _session->Select(Doc().AddNode(kinds[static_cast<std::size_t>(index)], 320., y, {}, shown));
+                        }, kui::DropdownOptions {}.SetPlaceholder("Create..."))));
+                    // What the passes before it made: brought in, it is a node here to wire from.
+                    const auto importable = Doc().Importable(shown);
+                    std::vector<std::string> labels;
+                    for (const auto& id : importable) {
+                        const kgraph::Node* node = Doc().Graph().Find(id);
+                        labels.push_back(node && !node->pass.empty() ? std::format("{}   ({})", id, node->pass) : id);
+                    }
+                    rows.push_back(kui::Tooltip("Brings what an earlier pass made into this one: a node here that stands for it, to wire from.",
+                        kui::Dropdown(labels, -1, [this, importable, shown](const int index) {
+                            const float y = 60.f + 70.f * static_cast<float>(Doc().Graph().nodes.size() % 8);
+                            _session->Select(Doc().Import(importable[static_cast<std::size_t>(index)], shown, 40., y));
+                        }, kui::DropdownOptions {}.SetPlaceholder(importable.empty() ? "Nothing before it to import" : "Import..."))));
+                }
+                return kui::ScrollView(kui::Padding(kui::EdgeInsets::All(8.f),
+                    kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(4.f)))).Width(210.f);
+            }
+
+            /** The graph: the passes down its side, and the page of the one that is shown. */
             kui::Widget Graph()
+            {
+                return kui::Row({ PassList(), kui::Separator(kui::Axis::eVertical), kui::Expanded(GraphPage()) },
+                                kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
+            }
+
+            kui::Widget GraphPage()
             {
                 const kgraph::Graph& graph = Doc().Graph();
                 const kgraph::Runtime& runtime = Doc().Runtime();
+                const std::string page = ShownPass();
+                const bool everything = page.empty();
+                const auto here = [&](const kgraph::Node& node) { return everything || node.pass == page; };
                 kui::NodeGraph shown;
                 std::set<std::pair<std::string, std::string>> wiredFrom;
                 for (const auto& node : graph.nodes)
                     for (const auto& input : node.inputs | std::views::values)
                         if (input.link) wiredFrom.insert({ input.link->node, input.link->output });
+                // What a Reference stands for, however many References away: its outputs are that node's.
+                const auto standsFor = [&](const kgraph::Node& node) -> const kgraph::Node* {
+                    const kgraph::Node* at = &node;
+                    for (int hops = 0; at && at->type == "Reference" && hops < 8; ++hops) {
+                        const auto target = at->inputs.find("node");
+                        at = target != at->inputs.end() && target->second.value.String() ? graph.Find(*target->second.value.String()) : nullptr;
+                    }
+                    return at;
+                };
+                const auto outputsOf = [&](const kgraph::Node& node, const kgraph::NodeType* type, kui::GraphNode& card) {
+                    if (!type) return;
+                    for (const auto& output : type->outputs)
+                        if (!output.optional || wiredFrom.contains({ node.id, output.name }) || _session->Asked(node.id, "out:" + output.name))
+                            card.outputs.push_back({ output.name, output.name == "out" ? output.type : output.name,
+                                                     (output.kind == kgraph::PortKind::eResource ? "r:" : "v:") + output.type });
+                };
+                std::set<std::string> visible;
                 for (const auto& node : graph.nodes) {
+                    if (!here(node)) continue;
+                    visible.insert(node.id);
                     const kgraph::NodeType* type = kgraph::FindType(node.type);
                     kui::GraphNode card;
                     card.id = node.id;
@@ -1065,18 +1182,65 @@ namespace keditor
                     for (const auto& shown : InputsOf(runtime, node, [&](const std::string& input) { return _session->Asked(node.id, input); }))
                         if (ShowsAsPort(shown, node))
                             card.inputs.push_back({ shown.port.name, shown.port.name, (shown.port.kind == kgraph::PortKind::eResource ? "r:" : "v:") + shown.port.type });
-                    // What it gives: what it makes, and whatever else of it something is wired to or was asked for.
-                    if (type)
-                        for (const auto& output : type->outputs)
-                            if (!output.optional || wiredFrom.contains({ node.id, output.name }) || _session->Asked(node.id, "out:" + output.name))
-                                card.outputs.push_back({ output.name, output.name == "out" ? output.type : output.name,
-                                                         (output.kind == kgraph::PortKind::eResource ? "r:" : "v:") + output.type });
+                    std::string kind = node.type;
+                    if (node.type == "Reference") {
+                        // What was brought in from another pass: it gives what the node it stands for gives.
+                        const kgraph::Node* target = standsFor(node);
+                        card.title = target ? target->id : card.title;
+                        card.accent = kui::Color::Hex(0x5A6472);
+                        if (target) {
+                            outputsOf(node, kgraph::FindType(target->type), card);
+                            // Its main output is the thing itself, whatever else of it is wired from.
+                            kind = target->pass.empty() ? std::format("{}, imported", target->type) : std::format("{}, from {}", target->type, target->pass);
+                        }
+                        if (card.outputs.empty()) card.outputs.push_back({ "out", "Resource", "r:Resource" });
+                    } else {
+                        // What it gives: what it makes, and whatever else of it something is wired to or was asked for.
+                        outputsOf(node, type, card);
+                    }
                     if (const auto* status = runtime.Status(node.id); status && !status->ok) card.error = status->error;
-                    card.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 2.f), kgui::Muted(node.type, 11.f));
+                    card.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 2.f), kgui::Muted(kind, 11.f));
                     shown.nodes.push_back(std::move(card));
-                    for (const auto& [name, input] : node.inputs)
-                        if (input.link) shown.wires.push_back({ { input.link->node, input.link->output }, { node.id, name } });
                 }
+                // A wire from another page's node, not brought in by a Reference: the node is shown beside what it
+                // is wired to, as what it is — a thing of another pass.
+                if (!everything) {
+                    std::map<std::string, kor::Vec2> outside;
+                    for (const auto& node : graph.nodes) {
+                        if (!here(node)) continue;
+                        for (const auto& input : node.inputs | std::views::values)
+                            if (input.link && !visible.contains(input.link->node) && graph.Find(input.link->node)) {
+                                const auto [at, fresh] = outside.try_emplace(input.link->node, kor::Vec2(static_cast<float>(node.x) - 260.f, static_cast<float>(node.y)));
+                                if (!fresh) at->second = { std::min(at->second.x, static_cast<float>(node.x) - 260.f), std::min(at->second.y, static_cast<float>(node.y)) };
+                            }
+                    }
+                    for (const auto& [id, at] : outside) {
+                        const kgraph::Node& node = *graph.Find(id);
+                        const kgraph::Node* target = standsFor(node);
+                        kui::GraphNode card;
+                        card.id = id;
+                        card.title = node.title.empty() ? id : node.title;
+                        card.position = at;
+                        card.accent = kui::Color::Hex(0x5A6472);
+                        outputsOf(node, kgraph::FindType(target ? target->type : node.type), card);
+                        card.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 2.f),
+                                                 kgui::Muted(node.pass.empty() ? std::format("{}, in no pass", node.type) : std::format("{}, in {}", node.type, node.pass), 11.f));
+                        shown.nodes.push_back(std::move(card));
+                    }
+                }
+                std::set<std::string> drawn;
+                for (const auto& card : shown.nodes) drawn.insert(card.id);
+                for (const auto& node : graph.nodes)
+                    if (drawn.contains(node.id) && visible.contains(node.id))
+                        for (const auto& [name, input] : node.inputs)
+                            if (input.link && drawn.contains(input.link->node)) shown.wires.push_back({ { input.link->node, input.link->output }, { node.id, name } });
+                // What is here to be moved and deleted: the page's own nodes, not those shown from other pages.
+                const auto own = [visible](const std::vector<std::string>& nodes) {
+                    std::vector<std::string> kept;
+                    for (const auto& id : nodes)
+                        if (visible.contains(id)) kept.push_back(id);
+                    return kept;
+                };
                 return kui::NodeEditor(std::move(shown), kui::NodeEditorOptions {}
                     .CanConnect([](const kui::NodePort& from, const kui::NodePort& to) {
                         // A resource to what takes one of its kind (a view of an image where an image goes), a value to a value.
@@ -1087,8 +1251,9 @@ namespace keditor
                     .OnConnect([this](const kui::GraphWire& wire) { Doc().Connect(wire.from.node, wire.from.port, wire.to.node, wire.to.port); })
                     .OnDisconnect([this](const kui::GraphWire& wire) { Doc().ClearInput(wire.to.node, wire.to.port); })
                     // Built again at once: a frame with the nodes back where they were is a frame of them jumping.
-                    .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { Doc().MoveNodes(nodes, by.x, by.y); SetState(); })
-                    .OnDelete([this](const std::vector<std::string>& nodes, const std::vector<kui::GraphWire>& wires, const std::vector<std::string>&) {
+                    .OnMove([this, own](const std::vector<std::string>& nodes, const kor::Vec2 by) { Doc().MoveNodes(own(nodes), by.x, by.y); SetState(); })
+                    .OnDelete([this, own](const std::vector<std::string>& picked, const std::vector<kui::GraphWire>& wires, const std::vector<std::string>&) {
+                        const std::vector<std::string> nodes = own(picked);
                         for (const auto& wire : wires) Doc().ClearInput(wire.to.node, wire.to.port);
                         if (!nodes.empty()) Doc().RemoveNodes(nodes);
                         if (std::ranges::find(nodes, _session->selectedNode) != nodes.end()) _session->Select(std::string());
@@ -1174,6 +1339,13 @@ namespace keditor
                     return Choice(std::move(ids), value, set, "a node");
                 }
                 if (port.editor == "components") return Ticks(Doc().ComponentNames(), value, set);
+                if (port.editor == "component") return Choice(Doc().ComponentNames(), value, set, "a component");
+                if (port.editor == "entity") {
+                    std::vector<std::string> names;
+                    for (const kecs::Entity entity : Doc().Entities())
+                        if (const std::string name = Doc().NameOf(entity); std::ranges::find(names, name) == names.end()) names.push_back(name);
+                    return Choice(std::move(names), value, set, "the first that has it");
+                }
                 if (port.editor == "parameter") {
                     // The image parameters of the pipeline this pass runs.
                     std::vector<std::string> names;
@@ -1201,6 +1373,16 @@ namespace keditor
                 std::vector<kui::Widget> rows;
                 rows.push_back(Heading(id));
                 rows.push_back(kgui::Muted(node.type));
+                if (const auto& passes = Doc().Passes(); !passes.empty()) {
+                    std::vector<std::string> choices { "(in no pass)" };
+                    choices.insert(choices.end(), passes.begin(), passes.end());
+                    const auto at = std::ranges::find(passes, node.pass);
+                    rows.push_back(kui::Tooltip("The pass whose page it is on.", kgui::Labeled("Pass", kui::Dropdown(choices, at == passes.end() ? 0 : static_cast<int>(at - passes.begin()) + 1,
+                        [this, id, choices](const int index) {
+                            Doc().SetNodePass(id, index <= 0 ? std::string() : choices[static_cast<std::size_t>(index)]);
+                            _session->GoTo(id);
+                        }), LabelWidth)));
+                }
                 if (const auto* status = runtime.Status(id); status && !status->ok) rows.push_back(Problem(status->error));
                 if (const auto* report = runtime.ReportOf(id)) {
                     rows.push_back(kgui::Muted(std::format("Runs for {} {}.", report->ran, report->ran == 1 ? "entity" : "entities")));
@@ -1434,12 +1616,12 @@ namespace keditor
                 std::vector<kui::Widget> rows;
                 for (const auto& problem : runtime.Problems()) {
                     const std::string node = problem.substr(0, problem.find(':'));
-                    rows.push_back(Problem(problem).OnTap([this, node] { _session->Select(node); }));
+                    rows.push_back(Problem(problem).OnTap([this, node] { _session->GoTo(node); }));
                 }
                 for (const auto& node : Doc().Graph().nodes)
                     if (const auto* report = runtime.ReportOf(node.id); report && (report->skipped > 0 || (report->ran == 0 && !report->why.empty())))
                         rows.push_back(Problem(report->skipped > 0 ? std::format("{}: {} passed by. {}", node.id, report->skipped, report->why)
-                                                                   : std::format("{}: {}", node.id, report->why)).OnTap([this, id = node.id] { _session->Select(id); }));
+                                                                   : std::format("{}: {}", node.id, report->why)).OnTap([this, id = node.id] { _session->GoTo(id); }));
                 for (const auto& note : Doc().Notes()) rows.push_back(kgui::Muted(note));
                 if (rows.empty()) rows.push_back(kgui::Muted("Nothing is wrong."));
                 return Panel(std::move(rows));

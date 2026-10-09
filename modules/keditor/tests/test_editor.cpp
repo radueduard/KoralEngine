@@ -246,7 +246,7 @@ TEST_F(EditorTest, ThePointerPicksMakesAndAdds) {
     EXPECT_TRUE(Shows("Entity")) << "its name, to change";
 
     // A node on the graph: picked instead.
-    Click({ 530.f, 198.f });
+    Click({ 741.f, 198.f });   // the graph starts after the list of passes
     EXPECT_EQ(Session().selectedNode, "stamp");
     EXPECT_TRUE(Session().selectedEntity.IsNull());
     EXPECT_TRUE(Shows("Entities run it by having the component 'stamp'."));
@@ -790,6 +790,88 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     ASSERT_FALSE(reopened.IsNull());
     EXPECT_EQ(Doc().Field(reopened, "lit", "roughness"), kgraph::Value(0.5));
     EXPECT_EQ(Doc().Field(reopened, "Mesh", "mesh"), kgraph::Value("$sphere"));
+}
+
+// The graph is in passes, a page each: only one page's nodes are in the way at a time, and what a pass uses of the
+// passes before it is brought in.
+TEST_F(EditorTest, TheGraphIsAPageAPass) {
+    const auto project = scene::MakeProject("passes");
+    keditor::WriteStandardShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(Doc().Passes(), (std::vector<std::string> { "frame", "scene", "sky", "outline", "editor", "show" }));
+
+    // The first pass's page, to begin with: its nodes, and none of another's.
+    for (const char* pass : { "1. frame", "2. scene", "6. show", "Every node at once" }) EXPECT_TRUE(Shows(pass)) << pass;
+    EXPECT_TRUE(Shows("camera"));
+    EXPECT_TRUE(Shows("frame data"));
+    EXPECT_FALSE(Shows("draw sky"));
+    EXPECT_FALSE(Shows("overlay target"));
+    Session().ShowPass("sky");
+    EXPECT_TRUE(Shows("draw sky"));
+    EXPECT_TRUE(Shows("sky target"));
+    EXPECT_FALSE(Shows("overlay target"));
+    EXPECT_TRUE(Shows("ImageView, from scene")) << "what it took from an earlier pass says where from";
+    EXPECT_TRUE(Shows("DataBuffer, from frame"));
+    Sheet("pass");
+    Session().ShowEveryPass();
+    EXPECT_TRUE(Shows("overlay target"));
+    EXPECT_TRUE(Shows("draw sky"));
+
+    // Going to a node turns to its page.
+    Session().ShowPass("frame");
+    Session().GoTo("draw outline");
+    EXPECT_EQ(Session().Pass(), "outline");
+    EXPECT_TRUE(Shows("overlay target"));
+
+    // A new pass: something made in it, and something brought in from before it.
+    ASSERT_TRUE(Doc().AddPass("bloom", 3));
+    EXPECT_FALSE(Doc().AddPass("bloom"));
+    EXPECT_EQ(Doc().Passes()[3], "bloom");
+    const auto importable = Doc().Importable("bloom");
+    EXPECT_NE(std::ranges::find(importable, "color"), importable.end()) << "what the scene pass made";
+    EXPECT_NE(std::ranges::find(importable, "frame data"), importable.end());
+    EXPECT_EQ(std::ranges::find(importable, "overlay target"), importable.end()) << "not what a later pass makes";
+    EXPECT_EQ(std::ranges::find(importable, "draw scene"), importable.end()) << "a pass node gives nothing to take";
+    const std::string taken = Doc().Import("color", "bloom", 40, 40);
+    ASSERT_FALSE(taken.empty());
+    EXPECT_EQ(Doc().Graph().Find(taken)->type, "Reference");
+    EXPECT_EQ(Doc().Graph().Find(taken)->pass, "bloom");
+    EXPECT_EQ(Doc().Import("color", "bloom", 90, 90), taken) << "a thing is in a pass once";
+    const std::string blurred = Doc().AddNode("Image", 300, 40, "blurred", "bloom");
+    EXPECT_EQ(Doc().Graph().Find(blurred)->pass, "bloom");
+    const std::string copy = Doc().AddNode("Blit", 560, 40, "blur", "bloom");
+    EXPECT_TRUE(Doc().Connect(taken, "out", copy, "source"));
+    EXPECT_TRUE(Doc().Connect(blurred, "out", copy, "destination"));
+    EXPECT_TRUE(Doc().Runtime().Status(copy)->ok) << Doc().Runtime().Status(copy)->error;
+    Session().ShowPass("bloom");
+    EXPECT_TRUE(Shows("Image, from scene"));
+    EXPECT_TRUE(Shows("blurred"));
+    EXPECT_FALSE(Shows("camera"));
+
+    // A wire straight from another page's node, with nothing brought in: the node is shown beside what it feeds.
+    EXPECT_TRUE(Doc().Connect("screen", "extent", blurred, "extent"));
+    EXPECT_TRUE(Shows("Screen, in frame"));
+
+    // Renamed, moved and taken away. Its nodes go with it, and what was wired to them is wired to nothing.
+    EXPECT_TRUE(Doc().RenamePass("bloom", "glow"));
+    EXPECT_EQ(Doc().Graph().Find(blurred)->pass, "glow");
+    EXPECT_TRUE(Doc().MovePass("glow", 5));
+    EXPECT_EQ(Doc().Passes().back(), "show") << "moved to where the last one was, which is now after it";
+    EXPECT_EQ(Doc().Passes()[5], "glow");
+    EXPECT_TRUE(Doc().SetNodePass(blurred, "show"));
+    EXPECT_TRUE(Doc().RemovePass("glow"));
+    EXPECT_EQ(Doc().Graph().Find(copy), nullptr);
+    EXPECT_NE(Doc().Graph().Find(blurred), nullptr) << "moved to another pass before, it stays";
+    EXPECT_EQ(Doc().Passes().size(), 6u);
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+
+    // Saved and read back, the passes are as they were.
+    const std::string saved = Doc().ToJson();
+    EXPECT_NE(saved.find("\"passes\": [\"frame\", \"scene\""), std::string::npos);
+    EXPECT_NE(saved.find("\"pass\": \"sky\""), std::string::npos);
 }
 
 // Not a test: sets a project up with the standard scene and the entities a file lists, when told where.

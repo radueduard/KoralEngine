@@ -1,6 +1,7 @@
 #include <keditor/document.h>
 
 #include <algorithm>
+#include <set>
 #include <cmath>
 #include <cctype>
 #include <cstring>
@@ -155,7 +156,7 @@ namespace keditor
     }
     void Document::SetGraph(kgraph::Graph graph) { Apply(std::move(graph)); }
 
-    std::string Document::AddNode(const std::string_view type, const double x, const double y, const std::string_view id)
+    std::string Document::AddNode(const std::string_view type, const double x, const double y, const std::string_view id, const std::string_view pass)
     {
         if (!kgraph::FindType(type)) return {};
         kgraph::Graph graph = Graph();
@@ -169,12 +170,121 @@ namespace keditor
         auto& node = graph.Add(name, std::string(type));
         node.x = x;
         node.y = y;
+        node.pass = std::string(pass);
+        if (!pass.empty() && std::ranges::find(graph.passes, pass) == graph.passes.end()) graph.passes.emplace_back(pass);
         // It starts with what a node of its kind needs, set to something that works: an image has a size, a format
         // and a usage from the first, and is an image, not a list of things to fill in before it is one.
         for (const auto& port : kgraph::PortsFor(*kgraph::FindType(type), node))
             if (!port.optional && port.kind == kgraph::PortKind::eValue && !port.initial.IsNull()) node.Set(port.name, port.initial);
         Apply(std::move(graph));
         return name;
+    }
+
+    // ---- passes -----------------------------------------------------------------------------------------------
+
+    bool Document::AddPass(const std::string_view name, const int index)
+    {
+        kgraph::Graph graph = Graph();
+        if (name.empty() || std::ranges::find(graph.passes, name) != graph.passes.end()) return false;
+        if (index >= 0 && static_cast<std::size_t>(index) < graph.passes.size()) graph.passes.insert(graph.passes.begin() + index, std::string(name));
+        else graph.passes.emplace_back(name);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::RenamePass(const std::string_view pass, const std::string_view name)
+    {
+        kgraph::Graph graph = Graph();
+        const auto at = std::ranges::find(graph.passes, pass);
+        if (at == graph.passes.end() || name.empty() || std::ranges::find(graph.passes, name) != graph.passes.end()) return false;
+        *at = std::string(name);
+        for (auto& node : graph.nodes)
+            if (node.pass == pass) node.pass = std::string(name);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::MovePass(const std::string_view pass, const int index)
+    {
+        kgraph::Graph graph = Graph();
+        const auto at = std::ranges::find(graph.passes, pass);
+        if (at == graph.passes.end()) return false;
+        const std::string name = *at;
+        graph.passes.erase(at);
+        const auto to = std::clamp<std::ptrdiff_t>(index, 0, static_cast<std::ptrdiff_t>(graph.passes.size()));
+        graph.passes.insert(graph.passes.begin() + to, name);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::RemovePass(const std::string_view pass, const bool keepNodes)
+    {
+        kgraph::Graph graph = Graph();
+        if (std::erase(graph.passes, pass) == 0) return false;
+        std::set<std::string> gone;
+        for (auto& node : graph.nodes)
+            if (node.pass == pass) {
+                if (keepNodes) node.pass.clear();
+                else gone.insert(node.id);
+            }
+        if (!gone.empty()) {
+            std::erase_if(graph.nodes, [&](const kgraph::Node& node) { return gone.contains(node.id); });
+            // What was wired to one of them is no longer wired to anything; a Reference to one stands for nothing.
+            for (auto& node : graph.nodes)
+                std::erase_if(node.inputs, [&](const auto& input) {
+                    return (input.second.link && gone.contains(input.second.link->node))
+                        || (node.type == "Reference" && input.first == "node" && input.second.value.String() && gone.contains(*input.second.value.String()));
+                });
+        }
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::SetNodePass(const std::string_view id, const std::string_view pass)
+    {
+        kgraph::Graph graph = Graph();
+        auto* node = graph.Find(id);
+        if (!node) return false;
+        node->pass = std::string(pass);
+        if (!pass.empty() && std::ranges::find(graph.passes, pass) == graph.passes.end()) graph.passes.emplace_back(pass);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    std::string Document::Import(const std::string_view id, const std::string_view pass, const double x, const double y)
+    {
+        kgraph::Graph graph = Graph();
+        if (!graph.Find(id)) return {};
+        // One that is there already is the one: a thing is imported into a pass once.
+        for (const auto& node : graph.nodes)
+            if (node.type == "Reference" && node.pass == pass)
+                if (const auto target = node.inputs.find("node"); target != node.inputs.end() && target->second.value.String() && *target->second.value.String() == id) return node.id;
+        std::string name = pass.empty() ? std::format("{} (imported)", id) : std::format("{} (in {})", id, pass);
+        for (int n = 2; graph.Find(name); ++n) name = std::format("{} (in {}) {}", id, pass, n);
+        auto& node = graph.Add(name, "Reference");
+        node.title = std::string(id);
+        node.x = x;
+        node.y = y;
+        node.pass = std::string(pass);
+        node.Set("node", std::string(id));
+        Apply(std::move(graph));
+        return name;
+    }
+
+    std::vector<std::string> Document::Importable(const std::string_view pass) const
+    {
+        const auto& passes = Graph().passes;
+        const auto here = std::ranges::find(passes, pass);
+        std::vector<std::string> ids;
+        for (const auto& node : Graph().nodes) {
+            if (node.type == "Reference" || node.pass == pass) continue;
+            const kgraph::NodeType* type = kgraph::FindType(node.type);
+            if (!type || type->outputs.empty() || type->category == "Passes") continue;    // a pass node gives nothing to take
+            // From the passes before this one, and from what is in no pass.
+            if (!node.pass.empty() && std::ranges::find(passes.begin(), here, node.pass) == here) continue;
+            ids.push_back(node.id);
+        }
+        return ids;
     }
 
     void Document::RemoveNodes(const std::vector<std::string>& ids)

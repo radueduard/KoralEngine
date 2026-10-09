@@ -245,13 +245,14 @@ namespace kgraph
             bool vertexInputs = false;                          // its vertex shader reads vertices: it needs a mesh
         };
 
-        /** A SceneView node's two buffers, and how wide the picture it is for is to its height. */
-        struct SceneBuffers {
-            kor::ResourceRef<kor::Buffer> frame, lights;
-            Held held[2];       // what keeps them
-            float aspect = 1.f;
+        constexpr std::size_t LightFloats = 16, MaxLights = 64;
+
+        /** A DataBuffer node's buffer, and what was last written to it. */
+        struct Packed {
+            kor::ResourceRef<kor::Buffer> buffer;
+            Held held;
+            std::vector<std::byte> bytes;
         };
-        constexpr std::size_t FrameFloats = 60, LightFloats = 16, MaxLights = 64;
 
         /** A click asking which entity is where: the pixel is copied out one frame, and read a few frames on. */
         struct PickState {
@@ -795,7 +796,7 @@ namespace kgraph
             std::optional<kecs::Migration> migration;   // a pipeline's: what its component last became
             // The shaders it is made of — a shader node's own, a pipeline's named on it — each told of when it is edited.
             std::vector<std::pair<kor::ResourceRef<const kor::Shader>, kor::u64>> watches;
-            std::shared_ptr<SceneBuffers> scene;        // a SceneView's: what it writes each frame
+            std::shared_ptr<Packed> packed;             // a DataBuffer's: what it writes each frame
         };
 
         kor::FrameGraph& frameGraph;
@@ -809,6 +810,9 @@ namespace kgraph
         View currentView;
         float currentAspect = 1.f;
         std::shared_ptr<PickState> pick = std::make_shared<PickState>();
+        const Graph* current = nullptr;         // the graph as last set: what the nodes that follow the world are found in
+        std::vector<std::string> live;          // those nodes, in the order they depend on one another
+        bool stale = false;                     // one of them has to be built again: the graph is, next frame
         std::map<std::string, Built, std::less<>> built;
         std::map<std::string, Held, std::less<>> defaultMeshes;    // the default meshes asked for so far, by name
         std::map<std::string, GraphPass*, std::less<>> passes;
@@ -1919,6 +1923,30 @@ namespace kgraph
                 const char* letters[] { "x", "y", "z", "w" };
                 for (std::size_t i = 0; i < 4; ++i) out.outputs[letters[i]].value = Value(i < numbers->size() ? (*numbers)[i] : 0.0);
                 result = value("vector");
+            } else if (type == "Append") {
+                Value::List joined;
+                for (const char* name : { "a", "b" }) {
+                    const auto numbers = NumbersOf(value(name), name);
+                    if (!numbers) return Fail(numbers.error());
+                    for (const double number : *numbers) joined.emplace_back(number);
+                }
+                result = Value(std::move(joined));
+            } else if (type == "MatrixMultiply" || type == "MatrixInverse") {
+                const auto matrix = [&](const char* name) -> Expected<kor::Mat4> {
+                    const auto numbers = NumbersOf(value(name), name);
+                    if (!numbers || numbers->size() != 16) return Fail(std::format("'{}' is a matrix: sixteen numbers, column after column", name));
+                    kor::Mat4 m(1.f);
+                    for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = static_cast<float>((*numbers)[static_cast<std::size_t>(i)]);
+                    return m;
+                };
+                const auto a = matrix("a");
+                if (!a) return Fail(a.error());
+                if (type == "MatrixInverse") { result = Matrix(kor::Inverse(*a)); }
+                else {
+                    const auto b = matrix("b");
+                    if (!b) return Fail(b.error());
+                    result = Matrix(*a * *b);
+                }
             } else if (type == "ImageExtent") {
                 const auto it = inputs.find("image");
                 const auto image = it == inputs.end() ? kor::ResourceRef<const kor::Image>() : ImageRefOf(it->second.resource.get());
@@ -2033,105 +2061,284 @@ namespace kgraph
             return defaultMeshes.emplace(std::string(name), *made).first->second;
         }
 
-        /**
-         * What a frame is seen from, and what lights it: two buffers, written each frame from the world. `frame` is a
-         * uniform block and `lights` an array, laid out as the scene shaders' FrameData and Light are.
-         */
-        Expected<void> BuildSceneView(const Node& node, const Inputs& inputs, Built& out)
+        // ---- what is read from the world, each frame --------------------------------------------------------
+
+        /** Whether a node's outputs are read from the world every frame, rather than worked out once. */
+        static bool ReadsTheWorld(const std::string_view type)
         {
-            auto buffers = std::make_shared<SceneBuffers>();
-            if (const auto it = inputs.find("extent"); it != inputs.end() && !it->second.value.IsNull()) {
-                const auto numbers = NumbersOf(it->second.value, "extent");
-                if (!numbers || numbers->size() < 2 || (*numbers)[0] < 1 || (*numbers)[1] < 1) return Fail("'extent' is how big the picture is: its width and height");
-                buffers->aspect = static_cast<float>((*numbers)[0] / (*numbers)[1]);
-            }
-            auto frame = kor::Buffer::RawBuilder{}.SetRawSize(FrameFloats * 4).SetUsage(kor::Buffer::Usage::eUniform).SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
-            auto lights = kor::Buffer::RawBuilder{}.SetRawSize(MaxLights * LightFloats * 4).SetUsage(kor::Buffer::Usage::eStorage).SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
-            if (!frame.Valid() || !lights.Valid()) return Fail("its buffers could not be made");
-            buffers->frame = kor::ResourceRef<kor::Buffer>(frame);
-            buffers->lights = kor::ResourceRef<kor::Buffer>(lights);
-            buffers->held[0] = MakeResource(std::move(frame));
-            buffers->held[1] = MakeResource(std::move(lights));
-            for (const Held& held : buffers->held) held->node = node.id;
-            out.outputs["frame"].resource = buffers->held[0];
-            out.outputs["lights"].resource = buffers->held[1];
-            out.outputs["out"].resource = buffers->held[0];
-            out.scene = buffers;
-            FillScene(*buffers);    // right from the first frame it is drawn with
+            return type == "Camera" || type == "Sky" || type == "Sun" || type == "Lights" || type == "ComponentValue" || type == "EntityTransform";
+        }
+
+        static Value Matrix(const kor::Mat4& m)
+        {
+            Value::List out;
+            for (int column = 0; column < 4; ++column)
+                for (int row = 0; row < 4; ++row) out.emplace_back(m[column][row]);
+            return Value(std::move(out));
+        }
+        static Value Three(const kor::Vec3 v) { return Value(Value::List { v.x, v.y, v.z }); }
+        /** A colour as picked — as the display shows it — in the linear terms light adds up in. */
+        static kor::Vec3 Linear(const kor::Vec3 color) { return { std::pow(color.x, 2.2f), std::pow(color.y, 2.2f), std::pow(color.z, 2.2f) }; }
+
+        /** The entity a node is of: the one so named, or — with no name — the first that has the component. */
+        [[nodiscard]] kecs::Entity EntityFor(const Inputs& inputs, const kecs::ComponentId component) const
+        {
+            if (!world) return kecs::NullEntity;
+            if (const auto it = inputs.find("entity"); it != inputs.end() && it->second.value.String() && !it->second.value.String()->empty())
+                return world->FindEntity(*it->second.value.String());
+            if (component == kecs::NoComponent) return kecs::NullEntity;
+            for (const kecs::Entity entity : world->All())
+                if (world->Has(entity, component) && world->IsEnabled(entity, component)) return entity;
+            return kecs::NullEntity;
+        }
+
+        /** A field of a component as a value: a number, or a list of them. Null for one that is neither. */
+        static Value FieldValue(const kecs::FieldDescription& field, const std::byte* at)
+        {
+            const auto numbers = [&](const std::size_t count, const char kind) {
+                Value::List out;
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (kind == 'f') { float v; std::memcpy(&v, at + i * 4, 4); out.emplace_back(v); }
+                    else if (kind == 'i') { std::int32_t v; std::memcpy(&v, at + i * 4, 4); out.emplace_back(v); }
+                    else { std::uint32_t v; std::memcpy(&v, at + i * 4, 4); out.emplace_back(v); }
+                }
+                return count == 1 ? out.front() : Value(std::move(out));
+            };
+            const std::string& type = field.type;
+            if (type == "f32") return numbers(1, 'f');
+            if (type == "i32") return numbers(1, 'i');
+            if (type == "u32" || type == "bool32") return numbers(1, 'u');
+            if (type == "f64") { double v; std::memcpy(&v, at, 8); return Value(v); }
+            if (type == "bool") return Value(static_cast<bool>(*at != std::byte { 0 }));
+            if (type == "mat4") return numbers(16, 'f');
+            if (type == "quat") return numbers(4, 'f');
+            for (const auto& [prefix, kind] : { std::pair<std::string_view, char> { "vec", 'f' }, { "ivec", 'i' }, { "uvec", 'u' } })
+                if (type.size() == prefix.size() + 1 && type.starts_with(prefix) && type.back() >= '2' && type.back() <= '4') return numbers(static_cast<std::size_t>(type.back() - '0'), kind);
             return {};
         }
 
-        /** Writes a SceneView's buffers for this frame: the camera, the sky and its sun, and every light. */
-        void FillScene(SceneBuffers& buffers)
+        /**
+         * A node that reads the world: its outputs, as the world is now. Called when the graph is set, and again
+         * every frame, so that what is wired from one follows the scene.
+         */
+        Expected<void> BuildLive(const Node& node, const Inputs& inputs, Built& out)
         {
             static constexpr float Radians = 3.14159265358979323846f / 180.f;
-            const auto linear = [](const kor::Vec3 color) { return kor::Vec3(std::pow(color.x, 2.2f), std::pow(color.y, 2.2f), std::pow(color.z, 2.2f)); };
+            const auto set = [&](const char* name, Value value) { out.outputs[name].value = std::move(value); };
+            const std::string& type = node.type;
 
-            // Seen from where whoever runs the graph says, or else from the scene's first camera.
-            View view;
-            view.view = kor::LookAt(kor::Vec3(2.2f, 1.6f, 3.3f), kor::Vec3(0.f));
-            if (viewOverride) view = *viewOverride;
-            else if (world)
-                if (const kecs::Entity camera = FirstCamera(*world); !camera.IsNull()) view = ViewOf(*world, camera);
-            currentView = view;
-            currentAspect = buffers.aspect;
-            viewProjection = view.Projection(buffers.aspect) * view.view;
-            const kor::Mat4 eyeAt = kor::Inverse(view.view);
-
-            std::array<float, MaxLights * LightFloats> lights {};
-            std::size_t count = 0;
-            std::optional<std::pair<kor::Vec3, kor::Vec3>> sun;
-            Sky sky;
-            if (world) {
-                const auto light = [&](const kecs::Entity entity, const int type, const kor::Vec3 color, const float range, const float inner, const float outer) {
-                    if (count == MaxLights) return;
-                    kor::Vec3 position, scale;
-                    kor::Quat rotation;
-                    if (!kor::Decompose(ToKor(world->WorldMatrix(entity)), position, rotation, scale)) return;
-                    const kor::Vec3 forward = rotation * kor::Vec3(0.f, 0.f, -1.f);
-                    const float values[LightFloats] { position.x, position.y, position.z, range, forward.x, forward.y, forward.z, static_cast<float>(type),
-                                                      color.x, color.y, color.z, 0.f, std::cos(inner * Radians), std::cos(outer * Radians), 0.f, 0.f };
-                    std::ranges::copy(values, lights.begin() + static_cast<std::ptrdiff_t>(count * LightFloats));
-                    ++count;
-                    if (type == 0 && !sun) sun = std::pair { -forward, color };
-                };
-                // In the hierarchy's order, so that which light is the sun does not depend on how the world keeps them.
-                const kecs::ComponentId directional = world->Id<DirectionalLight>(), point = world->Id<PointLight>(), spot = world->Id<SpotLight>(), skyId = world->Id<Sky>();
-                bool skyFound = false;
-                const std::vector<kecs::Entity> all = world->All();
-                for (const kecs::Entity entity : all)
-                    if (const auto* l = static_cast<const DirectionalLight*>(world->Get(entity, directional)); l && world->IsEnabled(entity, directional))
-                        light(entity, 0, linear(l->color) * l->intensity, 0.f, 0.f, 0.f);
-                for (const kecs::Entity entity : all)
-                    if (const auto* l = static_cast<const PointLight*>(world->Get(entity, point)); l && world->IsEnabled(entity, point))
-                        light(entity, 1, linear(l->color) * l->intensity, l->range, 0.f, 0.f);
-                for (const kecs::Entity entity : all) {
-                    if (const auto* l = static_cast<const SpotLight*>(world->Get(entity, spot)); l && world->IsEnabled(entity, spot))
-                        light(entity, 2, linear(l->color) * l->intensity, l->range, std::min(l->innerAngle, l->outerAngle - 0.01f), l->outerAngle);
-                    if (const auto* found = static_cast<const Sky*>(world->Get(entity, skyId)); found && !skyFound && world->IsEnabled(entity, skyId)) { sky = *found; skyFound = true; }
+            if (type == "Camera") {
+                float aspect = 1.f;
+                if (const auto it = inputs.find("extent"); it != inputs.end() && !it->second.value.IsNull()) {
+                    const auto numbers = NumbersOf(it->second.value, "extent");
+                    if (!numbers || numbers->size() < 2 || (*numbers)[0] < 1 || (*numbers)[1] < 1) return Fail("'extent' is how big the picture is: its width and height");
+                    aspect = static_cast<float>((*numbers)[0] / (*numbers)[1]);
                 }
+                // Seen from where whoever runs the graph says, or else from the entity: the first with a Camera.
+                View view;
+                view.view = kor::LookAt(kor::Vec3(2.2f, 1.6f, 3.3f), kor::Vec3(0.f));
+                const bool named = inputs.contains("entity") && inputs.at("entity").value.String() && !inputs.at("entity").value.String()->empty();
+                if (viewOverride && !named) view = *viewOverride;
+                else if (world)
+                    if (const kecs::Entity camera = EntityFor(inputs, world->Id<kgraph::Camera>()); !camera.IsNull()) view = ViewOf(*world, camera);
+                const kor::Mat4 projection = view.Projection(aspect);
+                const kor::Mat4 both = projection * view.view;
+                const kor::Mat4 placed = kor::Inverse(view.view);
+                // What the editor's gizmo and the debug shapes go by: the camera the scene is seen through.
+                if (!named) { currentView = view; currentAspect = aspect; viewProjection = both; }
+                set("viewProjection", Matrix(both));
+                set("out", Matrix(both));
+                set("inverseViewProjection", Matrix(kor::Inverse(both)));
+                set("view", Matrix(view.view));
+                set("projection", Matrix(projection));
+                set("position", Three({ placed[3][0], placed[3][1], placed[3][2] }));
+                set("forward", Three({ -placed[2][0], -placed[2][1], -placed[2][2] }));
+                set("fieldOfView", view.fieldOfView / Radians);
+                set("near", view.near);
+                set("far", view.far);
+            } else if (type == "Sky") {
+                kgraph::Sky sky;
+                if (world)
+                    if (const kecs::Entity entity = EntityFor(inputs, world->Id<kgraph::Sky>()); !entity.IsNull())
+                        if (const auto* found = world->Get<kgraph::Sky>(entity)) sky = *found;
+                set("zenith", Three(Linear(sky.zenith)));
+                set("out", Three(Linear(sky.zenith)));
+                set("horizon", Three(Linear(sky.horizon)));
+                set("ground", Three(Linear(sky.ground)));
+                set("ambient", sky.ambient);
+                set("sunSize", sky.sunSize);
+                set("sunCosine", std::cos(sky.sunSize / 2.f * Radians));
+            } else if (type == "Sun") {
+                kor::Vec3 direction(0.f, 1.f, 0.f), color(0.f);
+                bool present = false;
+                if (world)
+                    if (const kecs::Entity entity = EntityFor(inputs, world->Id<DirectionalLight>()); !entity.IsNull())
+                        if (const auto* light = world->Get<DirectionalLight>(entity)) {
+                            kor::Vec3 position, scale;
+                            kor::Quat rotation;
+                            if (kor::Decompose(ToKor(world->WorldMatrix(entity)), position, rotation, scale)) {
+                                direction = -(rotation * kor::Vec3(0.f, 0.f, -1.f));
+                                color = Linear(light->color) * light->intensity;
+                                present = true;
+                            }
+                        }
+                set("direction", Three(direction));
+                set("out", Three(direction));
+                set("color", Three(color));
+                set("present", present ? 1 : 0);
+            } else if (type == "Lights") {
+                // Every light, sixteen numbers each: position and range, direction and kind, colour, cone.
+                Value::List data(MaxLights * LightFloats, Value(0));
+                std::size_t count = 0;
+                if (world) {
+                    const auto light = [&](const kecs::Entity entity, const int kind, const kor::Vec3 color, const float range, const float inner, const float outer) {
+                        if (count == MaxLights) return;
+                        kor::Vec3 position, scale;
+                        kor::Quat rotation;
+                        if (!kor::Decompose(ToKor(world->WorldMatrix(entity)), position, rotation, scale)) return;
+                        const kor::Vec3 forward = rotation * kor::Vec3(0.f, 0.f, -1.f);
+                        const float values[LightFloats] { position.x, position.y, position.z, range, forward.x, forward.y, forward.z, static_cast<float>(kind),
+                                                          color.x, color.y, color.z, 0.f, std::cos(inner * Radians), std::cos(outer * Radians), 0.f, 0.f };
+                        for (std::size_t i = 0; i < LightFloats; ++i) data[count * LightFloats + i] = Value(values[i]);
+                        ++count;
+                    };
+                    // In the hierarchy's order, each kind in turn: which light is first does not depend on how the world keeps them.
+                    const kecs::ComponentId directional = world->Id<DirectionalLight>(), point = world->Id<PointLight>(), spot = world->Id<SpotLight>();
+                    const std::vector<kecs::Entity> all = world->All();
+                    for (const kecs::Entity entity : all)
+                        if (const auto* l = static_cast<const DirectionalLight*>(world->Get(entity, directional)); l && world->IsEnabled(entity, directional))
+                            light(entity, 0, Linear(l->color) * l->intensity, 0.f, 0.f, 0.f);
+                    for (const kecs::Entity entity : all)
+                        if (const auto* l = static_cast<const PointLight*>(world->Get(entity, point)); l && world->IsEnabled(entity, point))
+                            light(entity, 1, Linear(l->color) * l->intensity, l->range, 0.f, 0.f);
+                    for (const kecs::Entity entity : all)
+                        if (const auto* l = static_cast<const SpotLight*>(world->Get(entity, spot)); l && world->IsEnabled(entity, spot))
+                            light(entity, 2, Linear(l->color) * l->intensity, l->range, std::min(l->innerAngle, l->outerAngle - 0.01f), l->outerAngle);
+                }
+                set("data", Value(std::move(data)));
+                set("out", out.outputs["data"].value);
+                set("count", static_cast<double>(count));
+            } else if (type == "ComponentValue") {
+                const auto text = [&](const char* name) -> const std::string* {
+                    const auto it = inputs.find(name);
+                    return it == inputs.end() ? nullptr : it->second.value.String();
+                };
+                const std::string* component = text("component");
+                const std::string* field = text("field");
+                if (!component || component->empty()) return Fail("'component' is the component's name");
+                if (!field || field->empty()) return Fail("'field' is the name of one of the component's fields");
+                Value value(0);
+                bool present = false;
+                if (world)
+                    if (const kecs::ComponentId id = world->Find(*component); id != kecs::NoComponent) {
+                        const kecs::FieldDescription* found = world->Describe(id).FindField(*field);
+                        if (!found) return Fail(std::format("'{}' has no field '{}'", *component, *field));
+                        if (const kecs::Entity entity = EntityFor(inputs, id); !entity.IsNull())
+                            if (const auto* bytes = static_cast<const std::byte*>(world->Get(entity, id))) {
+                                value = FieldValue(*found, bytes + found->offset);
+                                if (value.IsNull()) return Fail(std::format("'{}.{}' is a {}, which is no number or vector", *component, *field, found->type));
+                                present = true;
+                            }
+                    }
+                set("out", std::move(value));
+                set("present", present ? 1 : 0);
+            } else {   // EntityTransform
+                const std::string* name = inputs.contains("entity") ? inputs.at("entity").value.String() : nullptr;
+                if (!name || name->empty()) return Fail("'entity' is the entity's name");
+                kecs::Mat4 matrix;
+                kecs::Vec3 position, rotation, scale { 1.f, 1.f, 1.f };
+                bool present = false;
+                if (world)
+                    if (const kecs::Entity entity = world->FindEntity(*name); !entity.IsNull()) {
+                        matrix = world->WorldMatrix(entity);
+                        position = world->PositionOf(entity);
+                        rotation = world->RotationOf(entity);
+                        scale = world->ScaleOf(entity);
+                        present = true;
+                    }
+                const kor::Mat4 placed = ToKor(matrix);
+                set("matrix", Matrix(placed));
+                set("out", Matrix(placed));
+                set("worldPosition", Three({ placed[3][0], placed[3][1], placed[3][2] }));
+                set("forward", Three(kor::Normalize(kor::Vec3(-placed[2][0], -placed[2][1], -placed[2][2]))));
+                set("position", Value(Value::List { position.x, position.y, position.z }));
+                set("rotation", Value(Value::List { rotation.x, rotation.y, rotation.z }));
+                set("scale", Value(Value::List { scale.x, scale.y, scale.z }));
+                set("present", present ? 1 : 0);
             }
-            const kor::Vec3 sunDirection = sun ? sun->first : kor::Vec3(0.f, 1.f, 0.f), sunColor = sun ? sun->second : kor::Vec3(0.f);
-            const kor::Vec3 zenith = linear(sky.zenith), horizon = linear(sky.horizon), ground = linear(sky.ground);
-
-            std::array<float, FrameFloats> frame {};
-            const kor::Mat4 inverse = kor::Inverse(viewProjection);
-            std::memcpy(frame.data(), &viewProjection, 64);
-            std::memcpy(frame.data() + 16, &inverse, 64);
-            const float rest[] { eyeAt[3][0], eyeAt[3][1], eyeAt[3][2], 1.f,
-                                 zenith.x, zenith.y, zenith.z, sky.ambient,
-                                 horizon.x, horizon.y, horizon.z, std::cos(sky.sunSize / 2.f * Radians),
-                                 ground.x, ground.y, ground.z, 0.f,
-                                 sunDirection.x, sunDirection.y, sunDirection.z, sun ? 1.f : 0.f,
-                                 sunColor.x, sunColor.y, sunColor.z, 0.f };
-            std::ranges::copy(rest, frame.begin() + 32);
-            const auto lightCount = static_cast<kor::u32>(count);
-            std::memcpy(frame.data() + 56, &lightCount, 4);   // a uint, as the shader reads it
-            buffers.frame->Write(frame);
-            buffers.lights->Write(lights);
+            return {};
         }
 
-                Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
+        /**
+         * A DataBuffer's fields as the bytes a shader's block reads: each after the last, a number in four bytes, a
+         * vector of two aligned to eight and of three or four to sixteen, a matrix to sixteen (std140's rules, which
+         * are a uniform block's). A longer list of numbers is an array of floats, aligned to sixteen.
+         */
+        static Expected<std::vector<std::byte>> Pack(const Inputs& inputs)
+        {
+            std::vector<std::byte> bytes;
+            int count = 0;
+            for (const auto& name : inputs | std::views::keys)
+                if (name.starts_with("field[")) count = std::max(count, std::atoi(name.c_str() + 6) + 1);
+            for (int i = 0; i < count; ++i) {
+                const auto given = inputs.find(std::format("field[{}].value", i));
+                if (given == inputs.end() || given->second.value.IsNull()) continue;   // a place left open: nothing of it is in the buffer
+                const auto kind = inputs.find(std::format("field[{}].type", i));
+                std::string type = kind != inputs.end() && kind->second.value.String() ? *kind->second.value.String() : std::string("eAuto");
+                const Value& value = given->second.value;
+                std::vector<double> numbers;
+                if (const bool* flag = value.Bool()) numbers = { *flag ? 1.0 : 0.0 };
+                else if (const auto read = NumbersOf(value, "field"); read) numbers = *read;
+                else return Fail(std::format("'field[{}].value' is a number, or a list of them", i));
+                if (type == "eAuto")
+                    type = numbers.size() == 1 ? "eFloat" : numbers.size() == 2 ? "eVec2" : numbers.size() == 3 ? "eVec3" : numbers.size() == 4 ? "eVec4"
+                           : numbers.size() == 16 ? "eMat4" : "eFloats";
+                const bool whole = type == "eInt" || type == "eUInt" || type == "eIVec4" || type == "eUVec4";
+                const std::size_t width = type == "eFloat" || type == "eInt" || type == "eUInt" ? 1 : type == "eVec2" ? 2 : type == "eVec3" ? 3
+                                          : type == "eVec4" || type == "eIVec4" || type == "eUVec4" ? 4 : type == "eMat4" ? 16 : type == "eFloats" ? numbers.size() : 0;
+                if (width == 0) return Fail(std::format("'field[{}].type' is eAuto, eFloat, eInt, eUInt, eVec2, eVec3, eVec4, eIVec4, eUVec4, eMat4 or eFloats", i));
+                const std::size_t alignment = width == 1 ? 4 : width == 2 ? 8 : 16;
+                bytes.resize((bytes.size() + alignment - 1) / alignment * alignment);
+                const std::size_t at = bytes.size();
+                bytes.resize(at + width * 4);
+                for (std::size_t n = 0; n < width; ++n) {
+                    const double number = n < numbers.size() ? numbers[n] : 0.0;   // a vector of fewer is filled out with nothing
+                    if (!whole) { const auto v = static_cast<float>(number); std::memcpy(bytes.data() + at + n * 4, &v, 4); }
+                    else if (type == "eInt" || type == "eIVec4") { const auto v = static_cast<std::int32_t>(std::llround(number)); std::memcpy(bytes.data() + at + n * 4, &v, 4); }
+                    else { const auto v = static_cast<std::uint32_t>(std::llround(std::max(number, 0.0))); std::memcpy(bytes.data() + at + n * 4, &v, 4); }
+                }
+            }
+            bytes.resize((bytes.size() + 15) / 16 * 16);
+            return bytes;
+        }
+
+        /** A buffer made of values: what each is, packed one after another, and written again whenever one changes. */
+        Expected<void> BuildDataBuffer(const Node& node, const Inputs& inputs, Built& out)
+        {
+            auto bytes = Pack(inputs);
+            if (!bytes) return Fail(bytes.error());
+            if (bytes->empty()) return Fail("it has no fields yet: give it one, a value or a wire from one");
+            kor::Flags<kor::Buffer::Usage> usage = kor::Buffer::Usage::eUniform;
+            if (const auto it = inputs.find("usage"); it != inputs.end() && !it->second.value.IsNull()) {
+                const std::string* chosen = it->second.value.String();
+                if (chosen && *chosen == "eStorage") usage = kor::Buffer::Usage::eStorage;
+                else if (!chosen || *chosen != "eUniform") return Fail("'usage' is eUniform (a block of values) or eStorage (an array)");
+            }
+            auto buffer = kor::Buffer::RawBuilder{}.SetRawSize(static_cast<kor::i64>(bytes->size())).SetUsage(usage).SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
+            if (!buffer.Valid()) return Fail(buffer.Failure() ? buffer.Failure()->message : std::string("its buffer could not be made"));
+            auto packed = std::make_shared<Packed>();
+            packed->buffer = kor::ResourceRef<kor::Buffer>(buffer);
+            packed->held = MakeResource(std::move(buffer));
+            packed->held->node = node.id;
+            packed->buffer->Write(*bytes);
+            packed->bytes = std::move(*bytes);
+            out.outputs["out"].resource = packed->held;
+            out.outputs["bytes"].value = static_cast<double>(packed->bytes.size());
+            out.packed = std::move(packed);
+            return {};
+        }
+
+        Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
         {
             static const char* const shapes = "eCube, eSphere, ePlane, eCylinder, eCone, eCapsule, eTorus, eQuad or eTriangle";
             std::string shape = "eCube";
@@ -2156,6 +2363,14 @@ namespace kgraph
             return {};
         }
 
+        /** An input given more than once, as its type lists it: `field[2].value` is `field[].value`. */
+        static std::string Listed(std::string name)
+        {
+            if (const auto open = name.find('['); open != std::string::npos)
+                if (const auto close = name.find(']', open); close != std::string::npos) name.erase(open + 1, close - open - 1);
+            return name;
+        }
+
         Expected<void> Build(const Node& node, const Inputs& inputs, Built& out)
         {
             const NodeType* type = FindType(node.type);
@@ -2165,7 +2380,7 @@ namespace kgraph
             }
             // The engine's own: only the inputs its type lists.
             for (const auto& name : inputs | std::views::keys)
-                if (std::ranges::find(type->inputs, name, &Port::name) == type->inputs.end()) return Fail(std::format("a {} has no input '{}'", type->name, name));
+                if (std::ranges::find(type->inputs, Listed(name), &Port::name) == type->inputs.end()) return Fail(std::format("a {} has no input '{}'", type->name, name));
             if (type->category == "Passes") return BuildPass(node, inputs, out);
             if (node.type == "Screen") {
                 auto screen = std::make_shared<Resource>();
@@ -2181,7 +2396,8 @@ namespace kgraph
                 out.outputs["height"].value = size.y;
                 return {};
             }
-            if (node.type == "SceneView") return BuildSceneView(node, inputs, out);
+            if (ReadsTheWorld(node.type)) return BuildLive(node, inputs, out);
+            if (node.type == "DataBuffer") return BuildDataBuffer(node, inputs, out);
             if (node.type == "Primitive") return BuildPrimitive(node, inputs, out);
             if (node.type == "Reference") {
                 const auto it = inputs.find("node");
@@ -2407,6 +2623,21 @@ namespace kgraph
                 Retire(std::move(out));
                 out = std::move(fresh);
             }
+
+            // What follows the world from here on, each frame: the nodes that read it, and what is worked out of them.
+            current = &graph;
+            live.clear();
+            std::set<std::string> following;
+            for (const Node* node : order) {
+                const NodeType* type = FindType(node->type);
+                bool follows = ReadsTheWorld(node->type);
+                const bool carries = type && !type->builder && (node->type == "DataBuffer" || node->type == "Reference"
+                                                                || (type->category != "Passes" && type->category != "Resources" && type->category != "Scene"));
+                if (!follows && carries) follows = std::ranges::any_of(needs[node->id], [&](const std::string& other) { return following.contains(other); });
+                if (!follows) continue;
+                following.insert(node->id);
+                live.push_back(node->id);
+            }
             Install(graph);
         }
 
@@ -2570,11 +2801,71 @@ namespace kgraph
             }
         }
 
+        /** A node's inputs as they stand: its own values, and for each wire what the other end gives now. Nothing when one is missing. */
+        [[nodiscard]] std::optional<Inputs> Gather(const Node& node) const
+        {
+            Inputs inputs;
+            for (const auto& [name, input] : node.inputs) {
+                Resolved resolved;
+                if (input.link) {
+                    const auto source = built.find(input.link->node);
+                    if (source == built.end() || !source->second.status.ok) return std::nullopt;
+                    const auto output = source->second.outputs.find(input.link->output);
+                    if (output == source->second.outputs.end()) return std::nullopt;
+                    resolved.linked = true;
+                    resolved.value = output->second.value;
+                    resolved.resource = output->second.resource;
+                } else {
+                    resolved.value = input.value;
+                }
+                inputs.emplace(name, std::move(resolved));
+            }
+            return inputs;
+        }
+
+        /**
+         * What follows the world, brought up to date: each node that reads it, and — in the order they depend on one
+         * another — every value worked out from one, and every DataBuffer one is wired to. Nothing is built again:
+         * a value changes where it is, and a buffer is written.
+         */
+        void RunLive()
+        {
+            for (const std::string& id : live) {
+                const Node* node = current ? current->Find(id) : nullptr;
+                const auto found = built.find(id);
+                if (!node || found == built.end() || !found->second.status.ok) continue;
+                Built& out = found->second;
+                auto inputs = Gather(*node);
+                if (!inputs || !InParts(*node, *inputs)) continue;
+                if (ReadsTheWorld(node->type)) {
+                    (void)BuildLive(*node, *inputs, out);
+                } else if (node->type == "DataBuffer") {
+                    if (!out.packed) continue;
+                    auto bytes = Pack(*inputs);
+                    if (!bytes || *bytes == out.packed->bytes) continue;
+                    // Another size is another buffer: it is built again, with whatever is made of it.
+                    if (bytes->size() != out.packed->bytes.size()) { out.signature.clear(); stale = true; continue; }
+                    out.packed->buffer->Write(*bytes);
+                    out.packed->bytes = std::move(*bytes);
+                } else if (node->type == "Reference") {
+                    if (const auto target = node->inputs.find("node"); target != node->inputs.end() && target->second.value.String())
+                        if (const auto source = built.find(*target->second.value.String()); source != built.end())
+                            for (const auto& [name, output] : source->second.outputs)
+                                if (!output.resource) out.outputs[name].value = output.value;
+                } else {
+                    FillDefaults(*node, *inputs);
+                    Built fresh;
+                    if (!BuildValue(*node, *inputs, fresh)) continue;
+                    for (auto& [name, output] : fresh.outputs)
+                        if (!output.resource) out.outputs[name].value = std::move(output.value);
+                }
+            }
+        }
+
         /** What is done every frame, before anything is recorded: the scene's buffers written, and each pass readied. */
         void EachFrame()
         {
-            for (auto& node : built | std::views::values)
-                if (node.status.ok && node.scene) FillScene(*node.scene);
+            RunLive();
             for (const auto& id : wanted)
                 if (const auto& plan = built.at(id).pass; plan && plan->prepare) plan->prepare();
         }
@@ -2752,6 +3043,14 @@ namespace kgraph
             wanted.clear();
             for (const auto& node : graph.nodes)
                 if (const auto it = built.find(node.id); it != built.end() && it->second.status.ok && it->second.pass) wanted.push_back(node.id);
+            // In the order of the passes they are part of: what is drawn first where what is used does not say. One
+            // that is in no pass keeps its place among the rest of those.
+            const auto place = [&](const std::string& id) {
+                const Node* node = graph.Find(id);
+                const auto at = node ? std::ranges::find(graph.passes, node->pass) : graph.passes.end();
+                return at == graph.passes.end() ? graph.passes.size() : static_cast<std::size_t>(at - graph.passes.begin());
+            };
+            std::ranges::stable_sort(wanted, {}, place);
             PrepareAll();
             Resolve();
         }
@@ -2846,6 +3145,7 @@ namespace kgraph
             return;
         }
         _impl->EachFrame();
+        if (std::exchange(_impl->stale, false)) { _impl->Evaluate(_graph); return; }
         if (_impl->PrepareAll()) _impl->Resolve();
     }
 

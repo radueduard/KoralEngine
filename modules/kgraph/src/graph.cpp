@@ -90,11 +90,18 @@ namespace kgraph
     // A wire is written where a value would be, as { "$link": [node, output] }: no value a node takes is that.
     std::string Graph::ToJson() const
     {
-        std::string out = "{\n  \"kgraph\": 1,\n  \"nodes\": [";
+        std::string out = "{\n  \"kgraph\": 1,";
+        if (!passes.empty()) {
+            out += "\n  \"passes\": [";
+            for (std::size_t i = 0; i < passes.size(); ++i) out += std::format("{}{}", i ? ", " : "", json::Quote(passes[i]));
+            out += "],";
+        }
+        out += "\n  \"nodes\": [";
         for (std::size_t i = 0; i < nodes.size(); ++i) {
             const Node& node = nodes[i];
             out += std::format("{}\n    {{\n      \"id\": {},\n      \"type\": {}", i ? "," : "", json::Quote(node.id), json::Quote(node.type));
             if (!node.title.empty()) out += std::format(",\n      \"title\": {}", json::Quote(node.title));
+            if (!node.pass.empty()) out += std::format(",\n      \"pass\": {}", json::Quote(node.pass));
             out += std::format(",\n      \"at\": {}", Value(Value::List { node.x, node.y }).ToJson());
             out += ",\n      \"inputs\": {";
             bool first = true;
@@ -138,6 +145,7 @@ namespace kgraph
             }
             Node& node = graph.Add(id->string, type->string);
             if (const json::Value* title = item.Find("title")) node.title = title->string;
+            if (const json::Value* pass = item.Find("pass"); pass && pass->kind == json::Value::Kind::eString) node.pass = pass->string;
             if (const json::Value* at = item.Find("at"); at && at->items.size() == 2) { node.x = at->items[0].number; node.y = at->items[1].number; }
             if (const json::Value* inputs = item.Find("inputs"))
                 for (const auto& [name, value] : inputs->members) {
@@ -146,6 +154,12 @@ namespace kgraph
                     else node.Set(name, Value::FromJson(value));
                 }
         }
+        if (const json::Value* passes = root.Find("passes"))
+            for (const auto& pass : passes->items)
+                if (pass.kind == json::Value::Kind::eString && std::ranges::find(graph.passes, pass.string) == graph.passes.end()) graph.passes.push_back(pass.string);
+        // A node of a pass the list does not have: the pass is there all the same, after those it does.
+        for (const auto& node : graph.nodes)
+            if (!node.pass.empty() && std::ranges::find(graph.passes, node.pass) == graph.passes.end()) graph.passes.push_back(node.pass);
         out = std::move(graph);
         return true;
     }

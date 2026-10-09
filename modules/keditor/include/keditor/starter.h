@@ -31,10 +31,14 @@ namespace keditor
     std::vector<std::string> WriteStandardObjects(const std::filesystem::path& directory);
 
     /**
-     * @brief Adds the standard graph to @p document: a picture the size of the window with its depth and an image of
-     *        which entity is where; a pipeline `lit` that draws every entity with a Mesh and its component — what its
-     *        shader asks of each: an albedo, how metallic and how rough, what light it gives off; the sky behind; an outline round what is picked; the editor's shapes;
-     *        picking; and the picture shown. False, with @p error, when a node could not be added.
+     * @brief Adds the standard graph to @p document, a pass a page:
+     *        - `frame`: the scene's camera, sky, sun and lights as values, and the two buffers of them shaders read;
+     *        - `scene`: a picture the size of the window with its depth and an image of which entity is where, and
+     *          a pipeline `lit` that draws every entity with a Mesh and its component — what its shader asks of
+     *          each: an albedo, how metallic and how rough, what light it gives off;
+     *        - `sky`, `outline` (round what is picked), `editor` (the editor's shapes, and picking) and `show`.
+     *        Each pass brings in what it uses of the passes before it. False, with @p error, when a node could not
+     *        be added.
      */
     bool AddStandardGraph(Document& document, std::string& error);
     /** @brief Adds a sky, a camera, a sun and a sphere: something to see, and to see it by. The sphere, to pick. */

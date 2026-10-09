@@ -4,6 +4,12 @@
 
 #include <gtest/gtest.h>
 
+#include <kmath/transform.h>
+
+#include <capiInterop.h>
+
+#include <kgraph/scene.h>
+
 #include <array>
 #include <chrono>
 #include <filesystem>
@@ -511,6 +517,150 @@ TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
     Frame();
     Frame();
     EXPECT_EQ(scene->Pixel(8, 24).x, 255);
+}
+
+// What a scene's components hold is there as values, which follow the world every frame: worked on by other nodes,
+// and packed into a buffer as a shader's block lays it out. Nothing is built again for it.
+TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    const kecs::Entity eye = world.Create(), lamp = world.Create();
+    world.Rename(eye, "Eye");
+    world.Add<kgraph::Camera>(eye, { .fieldOfView = 90.f, .near = 0.5f, .far = 50.f });
+    world.SetPosition(eye, { 1, 2, 3 });
+    world.Rename(lamp, "Lamp");
+    world.Add<kgraph::PointLight>(lamp, { .color = { 1, 1, 1 }, .intensity = 2.f, .range = 7.f });
+    world.SetPosition(lamp, { 0, 4, 0 });
+
+    kgraph::Graph graph;
+    graph.passes = { "frame", "later" };
+    graph.Add("camera", "Camera").Set("extent", Value::List { 200, 100 });
+    graph.Add("sky", "Sky");
+    graph.Add("sun", "Sun");
+    graph.Add("lights", "Lights");
+    graph.Add("far", "ComponentValue").Set("component", "Camera").Set("field", "far");
+    graph.Add("twice as far", "Multiply").Wire("a", "far").Set("b", 2);
+    graph.Add("where", "EntityTransform").Set("entity", "Lamp");
+    graph.Add("placed", "Append").Wire("a", "camera", "position").Wire("b", "far");
+    graph.Add("back", "MatrixMultiply").Wire("a", "camera", "viewProjection").Wire("b", "camera", "inverseViewProjection");
+    // A block as a shader declares it: a matrix, a float3 with a float after it in its fourth place, a uint4.
+    graph.Add("block", "DataBuffer").Wire("field[0].value", "camera", "viewProjection").Wire("field[1].value", "camera", "position")
+        .Wire("field[2].value", "twice as far").Wire("field[3].value", "lights", "count").Set("field[3].type", "eUVec4");
+    graph.Add("array", "DataBuffer").Set("usage", "eStorage").Wire("field[0].value", "lights", "data");
+    graph.Add("taken", "Reference").Set("node", "camera");
+    graph.Find("taken")->pass = "later";
+    graph.Add("from afar", "Add").Wire("a", "taken", "far").Set("b", 1);
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(scene->runtime->Ok());
+    auto& runtime = *scene->runtime;
+
+    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 1, 2, 3 }));
+    EXPECT_EQ(runtime.ValueOf("camera", "fieldOfView"), Value(90));
+    EXPECT_EQ(runtime.ValueOf("far"), Value(50));
+    EXPECT_EQ(runtime.ValueOf("twice as far"), Value(100));
+    EXPECT_EQ(runtime.ValueOf("placed"), Value(Value::List { 1, 2, 3, 50 }));
+    EXPECT_EQ(runtime.ValueOf("where", "worldPosition"), Value(Value::List { 0, 4, 0 }));
+    EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(1));
+    EXPECT_EQ(runtime.ValueOf("sun", "present"), Value(0)) << "there is no directional light";
+    EXPECT_EQ(runtime.ValueOf("from afar"), Value(51)) << "through what another pass brought in";
+    const auto identity = *runtime.ValueOf("back").Items();
+    for (std::size_t i = 0; i < 16; ++i) EXPECT_NEAR(*identity[i].Number(), i % 5 == 0 ? 1.0 : 0.0, 1e-3) << i;
+    const Value lightData = runtime.ValueOf("lights", "data");
+    const auto& light = *lightData.Items();
+    ASSERT_EQ(light.size(), 64u * 16u);
+    EXPECT_EQ(light[1], Value(4)) << "the lamp's height";
+    EXPECT_EQ(light[3], Value(7)) << "its range";
+    EXPECT_EQ(light[7], Value(1)) << "a point light";
+    EXPECT_EQ(light[8], Value(2)) << "its colour, times its intensity";
+    EXPECT_EQ(runtime.ValueOf("block", "bytes"), Value(64 + 16 + 16)) << "a matrix; a float3 and the float in its fourth place; a uint4";
+    EXPECT_EQ(runtime.ValueOf("array", "bytes"), Value(64 * 64));
+    EXPECT_EQ(runtime.Aspect(), 2.f) << "the picture it is for is twice as wide as it is tall";
+
+    const auto bytes = [&](const char* node) { return kor::capi::BufferOf(runtime.ResourceOf(node)->handle)->Read<float>(); };
+    Frame();
+    {
+        const auto block = bytes("block");
+        ASSERT_GE(block.size(), 24u);
+        EXPECT_EQ(block[16], 1.f) << "the position, after the matrix";
+        EXPECT_EQ(block[18], 3.f);
+        EXPECT_EQ(block[19], 100.f) << "and the number, in the vector's fourth place";
+        kor::u32 count = 0;
+        std::memcpy(&count, &block[20], 4);
+        EXPECT_EQ(count, 1u) << "a whole number, as the shader reads it";
+    }
+
+    // The world changes: the values follow, and so does what is in the buffer. No node is built again.
+    const auto builds = [&](const char* node) { return runtime.Status(node)->builds; };
+    const std::uint64_t before[] { builds("camera"), builds("block"), builds("twice as far"), builds("from afar") };
+    world.SetPosition(eye, { 5, 6, 7 });
+    world.Mutable<kgraph::Camera>(eye)->far = 80.f;
+    world.Destroy(lamp);
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 5, 6, 7 }));
+    EXPECT_EQ(runtime.ValueOf("twice as far"), Value(160));
+    EXPECT_EQ(runtime.ValueOf("from afar"), Value(81));
+    EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(0));
+    EXPECT_EQ(runtime.ValueOf("where", "present"), Value(0)) << "the lamp is gone";
+    {
+        const auto block = bytes("block");
+        EXPECT_EQ(block[16], 5.f);
+        EXPECT_EQ(block[19], 160.f);
+    }
+    const std::uint64_t after[] { builds("camera"), builds("block"), builds("twice as far"), builds("from afar") };
+    for (int i = 0; i < 4; ++i) EXPECT_EQ(after[i], before[i]) << "a value changed where it was: nothing was built again";
+
+    // Whoever runs the graph can look from somewhere of its own: the camera is then that, and no entity.
+    kgraph::View view;
+    view.view = kor::LookAt(kor::Vec3(0, 0, 9), kor::Vec3(0));
+    runtime.SetView(view);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 0, 0, 9 }));
+    runtime.SetView(std::nullopt);
+
+    // What a field is not, and what a block cannot be, is said.
+    graph.Find("far")->Set("field", "nearness");
+    graph.Find("block")->Set("field[2].type", "eBlob");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("far")->error.find("'Camera' has no field 'nearness'"), std::string::npos) << runtime.Status("far")->error;
+    EXPECT_FALSE(runtime.Status("block")->ok);
+}
+
+// A graph is in passes: each node on the page of one, the passes in the order they are drawn. Saved and read back,
+// it is as it was; and where what is used does not say which of two passes goes first, their order does.
+TEST_F(EntityTest, PassesAreKeptAndDecideTheOrder) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "second", "first" };
+    graph.Add("picture", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 8, 8 }).Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+    graph.Add("screen", "Screen");
+    // Two clears of one picture: nothing they use says which is last.
+    graph.Add("red", "Clear").Wire("image", "picture").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("green", "Clear").Wire("image", "picture").Set("color", Value::List { 0, 1, 0, 1 });
+    graph.Add("show", "Blit").Wire("source", "picture").Wire("destination", "screen");
+    graph.Find("red")->pass = "second";
+    graph.Find("green")->pass = "first";
+
+    kgraph::Graph read;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), read, error)) << error;
+    EXPECT_EQ(read, graph);
+    EXPECT_EQ(read.passes, (std::vector<std::string> { "second", "first" }));
+    EXPECT_EQ(read.Find("red")->pass, "second");
+    EXPECT_TRUE(read.Find("picture")->pass.empty());
+
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(4, 4).y, 255) << "'first' is the later of the passes: its green is what is left";
+    std::swap(graph.passes[0], graph.passes[1]);
+    scene->runtime->Set(graph);
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(4, 4).x, 255) << "the other way round, the red";
+    EXPECT_EQ(scene->runtime->Status("picture")->builds, 1u) << "a pass moved builds nothing again";
 }
 
 TEST_F(EntityTest, AWorldIsSavedAndLoadedWithItsPipelinesComponents) {
