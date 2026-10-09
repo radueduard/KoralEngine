@@ -32,8 +32,8 @@ namespace keditor
 
     /**
      * @brief Adds the standard graph to @p document: a picture the size of the window with its depth and an image of
-     *        which entity is where; a pipeline `MeshRenderer` that draws every entity with a Mesh and its component
-     *        (a colour and a smoothness), lit; the sky behind; an outline round what is picked; the editor's shapes;
+     *        which entity is where; a pipeline `lit` that draws every entity with a Mesh and its component — what its
+     *        shader asks of each: an albedo, how metallic and how rough, what light it gives off; the sky behind; an outline round what is picked; the editor's shapes;
      *        picking; and the picture shown. False, with @p error, when a node could not be added.
      */
     bool AddStandardGraph(Document& document, std::string& error);

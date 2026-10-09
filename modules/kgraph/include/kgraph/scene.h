@@ -5,7 +5,7 @@
  * @brief What a scene is made of besides meshes: a camera, lights, a sky. Components every world a graph runs for
  *        has, which the SceneView node reads each frame and hands to shaders as two buffers.
  *
- * A component here is data and nothing else. Where a camera or a light is, and which way it looks or shines, is its
+ * A component here is data and nothing else: what a thing does is a script's. Where a camera or a light is, and which way it looks or shines, is its
  * entity's transform: forward is -Z.
  */
 
@@ -57,21 +57,12 @@ namespace kgraph
         float ambient = 0.35f;
         float sunSize = 1.5f;       ///< How wide the sun's disc is, in degrees.
     };
-    /** @brief Turns its entity about an axis, so many degrees a second, while the scene plays. @see RunSceneSystems */
-    struct Spin {
-        kor::Vec3 axis { 0.f, 1.f, 0.f };
-        float speed = 45.f;
-    };
-
     /** @brief Makes the components above known to @p world, so that an entity can be given one and a file can name one. */
     void RegisterSceneComponents(kecs::World& world);
     /** @brief What @p entity sees, as a camera: from where it is, turned as it is. Its scale is no part of a view. */
     [[nodiscard]] View ViewOf(const kecs::World& world, kecs::Entity entity);
     /** @brief The first entity with a Camera, parents before their children; NullEntity when there is none. */
     [[nodiscard]] kecs::Entity FirstCamera(kecs::World& world);
-    /** @brief What the scene's own components do each frame it plays: a Spin turns its entity. */
-    void RunSceneSystems(kecs::World& world, float deltaSeconds);
-
     /** @brief A kecs matrix as the framework's, and back: the same sixteen floats. */
     [[nodiscard]] kor::Mat4 ToKor(const kecs::Mat4& matrix);
     [[nodiscard]] kecs::Mat4 ToKecs(const kor::Mat4& matrix);
@@ -82,10 +73,8 @@ template <> struct kecs::Name<kgraph::DirectionalLight> { static constexpr std::
 template <> struct kecs::Name<kgraph::PointLight> { static constexpr std::string_view value = "PointLight"; };
 template <> struct kecs::Name<kgraph::SpotLight> { static constexpr std::string_view value = "SpotLight"; };
 template <> struct kecs::Name<kgraph::Sky> { static constexpr std::string_view value = "Sky"; };
-template <> struct kecs::Name<kgraph::Spin> { static constexpr std::string_view value = "Spin"; };
 KECS_FIELDS(kgraph::Camera, fieldOfView, near, far)
 KECS_FIELDS(kgraph::DirectionalLight, color, intensity)
 KECS_FIELDS(kgraph::PointLight, color, intensity, range)
 KECS_FIELDS(kgraph::SpotLight, color, intensity, range, innerAngle, outerAngle)
 KECS_FIELDS(kgraph::Sky, zenith, horizon, ground, ambient, sunSize)
-KECS_FIELDS(kgraph::Spin, axis, speed)

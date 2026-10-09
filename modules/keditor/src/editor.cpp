@@ -44,7 +44,6 @@ namespace keditor
         _project.Use();
         WriteStandardObjects(_project.directory / "objects");
         LoadObjects();
-        for (const auto& problem : Doc().LoadComponents(_project.directory / "components")) Say(problem, true);
         return Save();
     }
 
@@ -394,7 +393,6 @@ namespace keditor
         selectedNode.clear();
         selectedEntity = kecs::NullEntity;
         _folded.clear();
-        for (const auto& problem : Doc().LoadComponents(_project.directory / "components")) Say(problem, true);
         std::string error;
         if (!AddStandardGraph(Doc(), error)) { Say(error, true); return false; }
         Select(AddStandardScene(Doc()));
@@ -738,7 +736,7 @@ namespace keditor
             std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
             // A sky's colours are named for where in the sky they are.
             return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos
-                || name.find("albedo") != std::string::npos || name == "zenith" || name == "horizon" || name == "ground";
+                || name.find("albedo") != std::string::npos || name.find("emission") != std::string::npos || name.find("emissive") != std::string::npos || name == "zenith" || name == "horizon" || name == "ground";
         }
 
         /** An input of a node, as it stands. */
@@ -1376,14 +1374,7 @@ namespace keditor
                             if (!Doc().SetField(entity, component, fieldName, changed, &error)) _session->Say(error, true);
                         };
                         kui::Widget editor;
-                        const Document::FieldHint* hint = doc.HintOf(component, fieldName);
-                        if (hint && !hint->options.empty() && value.Number()) {
-                            // One of a few, by name: the field holds which.
-                            editor = kui::Dropdown(hint->options, static_cast<int>(*value.Number()), [set](const int index) { set(Value(index)); });
-                        } else if (hint && value.Number() && (hint->min || hint->max || hint->speed)) {
-                            const float low = hint->min.value_or(-1e30f), high = hint->max.value_or(1e30f);
-                            editor = kui::DragValue(NumberOf(value), [set, low, high](const float v) { set(Value(std::clamp(v, low, high))); });
-                        } else if (HoldsResource(field.type)) {
+                        if (HoldsResource(field.type)) {
                             std::vector<std::string> choices { "(nothing)" };
                             int selected = 0;
                             for (const auto& node : doc.NodesFor(field.type)) {
@@ -1401,7 +1392,7 @@ namespace keditor
                             const std::string text = *value.String();
                             editor = kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } })
                                 .Key(component + "." + fieldName + "=" + text);
-                        } else if ((field.type == "vec4" || field.type == "vec3") && ((hint && hint->color) || NamesAColor(fieldName))) {
+                        } else if ((field.type == "vec4" || field.type == "vec3") && NamesAColor(fieldName)) {
                             editor = ColorOf(value, set, field.type == "vec4");
                         } else if (const auto* items = value.Items()) {
                             std::vector<float> numbers;

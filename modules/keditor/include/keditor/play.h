@@ -36,7 +36,7 @@ namespace keditor
         void New();
 
         /**
-         * @brief Whether the scene plays: its scripts are updated and its own systems (a Spin) run. On, to begin
+         * @brief Whether the scene plays: its scripts are updated. On, to begin
          *        with — a scene run on its own plays. An editor turns it off until it is told to play.
          */
         void SetPlaying(const bool playing) { _playing = playing; }

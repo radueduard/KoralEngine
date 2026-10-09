@@ -659,13 +659,16 @@ TEST_F(EditorTest, TheStandardSceneDrawsLitMeshesUnderASky) {
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     ASSERT_TRUE(Doc().Runtime().Ok());
 
-    // The pipeline's component is what makes an entity drawn: a colour and a smoothness. Where it is, which it is
-    // and which is picked are the engine's to say, and no fields of it.
-    const kecs::ComponentId renderer = Doc().Runtime().ComponentOf("MeshRenderer");
+    // The pipeline's component is what makes an entity drawn, and it is the shader's: what its push constants ask of
+    // each entity. Where it is, which it is and which is picked are the engine's to say, and no fields of it.
+    const kecs::ComponentId renderer = Doc().Runtime().ComponentOf("lit");
     ASSERT_NE(renderer, kecs::NoComponent);
     std::vector<std::string> fields;
     for (const auto& field : Doc().World().Describe(renderer).fields) fields.push_back(field.name);
-    EXPECT_EQ(fields, (std::vector<std::string> { "color", "smoothness" }));
+    std::ranges::sort(fields);
+    EXPECT_EQ(fields, (std::vector<std::string> { "albedo", "emission", "metallic", "roughness" }));
+    EXPECT_EQ(Doc().World().Find("MeshRenderer"), kecs::NoComponent) << "there is no renderer but what a shader makes";
+    EXPECT_EQ(Doc().World().Find("Spin"), kecs::NoComponent) << "what a thing does is a script's";
     EXPECT_EQ(Doc().Runtime().ComponentOf("outline"), kecs::NoComponent) << "given its colour and thickness on the node, the outline runs once";
     EXPECT_EQ(Doc().Runtime().ComponentOf("sky"), kecs::NoComponent);
 
@@ -683,15 +686,6 @@ TEST_F(EditorTest, TheStandardSceneDrawsLitMeshesUnderASky) {
 TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "features";
     std::filesystem::remove_all(directory);
-    std::filesystem::create_directories(directory / "components");
-    { std::ofstream(directory / "components" / "Health.json") << R"json({
-      "name": "Health",
-      "fields": {
-        "current": { "type": "float", "default": 100, "min": 0, "max": 100 },
-        "invulnerable": { "type": "bool", "default": false },
-        "tint": { "type": "color", "default": [1, 0.5, 0.25] },
-        "team": { "type": "enum", "options": ["Neutral", "Red", "Blue"], "default": "Red" }
-      } })json"; }
     Open();
     ASSERT_TRUE(Session().NewProject(directory));
     ASSERT_TRUE(Session().NewStandardScene());
@@ -728,27 +722,26 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     EXPECT_TRUE(answered);
     EXPECT_TRUE(picked.IsNull()) << "the sky is nobody";
 
-    // Played, a Spin turns its entity; stopped, the scene is as it was, and what was picked still is.
-    Doc().AddComponent(sphere, "Spin");
+    // Nothing plays until it is told to. Played, the scene is seen through its own camera and is not saved; stopped,
+    // it is as it was when it began, and what was picked still is.
     EXPECT_FALSE(Session().IsPlaying());
-    for (int i = 0; i < 3; ++i) Frame();
-    EXPECT_EQ(world.RotationOf(sphere), (kecs::Vec3 {})) << "nothing runs until it plays";
     Session().StartPlaying();
     EXPECT_TRUE(Session().InPlayMode());
+    EXPECT_TRUE(Session().IsPlaying());
     EXPECT_TRUE(Session().ThroughSceneCamera()) << "played, it is seen through its own camera";
     EXPECT_FALSE(Session().Save()) << "a moment of it is not what is saved";
-    for (int i = 0; i < 5; ++i) Frame();
-    EXPECT_NE(world.RotationOf(world.FindEntity("Sphere")).y, 0.f);
-    Session().Pause();
-    const float paused = world.RotationOf(world.FindEntity("Sphere")).y;
     for (int i = 0; i < 3; ++i) Frame();
-    EXPECT_EQ(world.RotationOf(world.FindEntity("Sphere")).y, paused);
+    world.SetRotation(world.FindEntity("Sphere"), { 0, 40, 0 });   // what a script would do as it plays
+    Doc().SetField(world.FindEntity("Sphere"), "lit", "metallic", kgraph::Value(1));
+    Session().Pause();
+    EXPECT_FALSE(Session().IsPlaying());
+    EXPECT_TRUE(Session().InPlayMode()) << "paused, it is still a moment of the play";
     Session().Stop();
     EXPECT_FALSE(Session().InPlayMode());
     const kecs::Entity again = world.FindEntity("Sphere");
     EXPECT_EQ(world.RotationOf(again), (kecs::Vec3 {}));
+    EXPECT_EQ(Doc().Field(again, "lit", "metallic"), kgraph::Value(0));
     EXPECT_EQ(Session().selectedEntity, again) << "found again where it was";
-    EXPECT_TRUE(Doc().ComponentsOf(again) == (std::vector<std::string> { "Mesh", "MeshRenderer", "Spin" }) || Doc().ComponentsOf(again).size() == 3u);
 
     // The project's objects are what there is to make.
     std::vector<std::string> names;
@@ -761,7 +754,8 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     ASSERT_EQ(world.ChildrenOf(planet).size(), 1u);
     EXPECT_EQ(world.NameOf(world.ChildrenOf(planet)[0]), "Moon");
     EXPECT_EQ(Doc().Field(planet, "Mesh", "mesh"), kgraph::Value("$sphere"));
-    EXPECT_EQ(Doc().Field(planet, "Spin", "speed"), kgraph::Value(60));
+    EXPECT_EQ(*Doc().Field(planet, "lit", "albedo").Items(), (kgraph::Value::List { 0.3f, 0.55f, 1 })) << "what the object says of the shader's component";
+    EXPECT_EQ(Doc().ComponentsOf(planet).size(), 2u);
     const kecs::Entity second = Session().Create(object("Planet"));
     EXPECT_EQ(world.NameOf(second), "Planet 2") << "a name of its own";
     const kecs::Entity lamp = Session().Create(object("Spot Light"), planet);
@@ -784,18 +778,8 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     Session().Delete(planet);
     EXPECT_FALSE(world.Alive(lamp));
 
-    // A component a file describes: its defaults, and a choice by name.
-    ASSERT_TRUE(Doc().AddComponent(made, "Health"));
-    EXPECT_EQ(Doc().Field(made, "Health", "current"), kgraph::Value(100));
-    EXPECT_EQ(Doc().Field(made, "Health", "invulnerable"), kgraph::Value(false));
-    EXPECT_EQ(Doc().Field(made, "Health", "team"), kgraph::Value(1)) << "Red, the second";
-    ASSERT_NE(Doc().HintOf("Health", "team"), nullptr);
-    EXPECT_EQ(Doc().HintOf("Health", "team")->options.size(), 3u);
-    EXPECT_TRUE(Doc().HintOf("Health", "tint")->color);
-    EXPECT_EQ(*Doc().WriteEntity(made).Find("components")->Find("Health")->Find("team"), kgraph::Value("Red"));
     Session().Select(made);
-    EXPECT_TRUE(Shows("Health"));
-    EXPECT_TRUE(Shows("Red"));
+    for (const char* field : { "albedo", "metallic", "roughness", "emission" }) EXPECT_TRUE(Shows(field)) << field;
     Sheet("features");
 
     // Saved, opened again: all of it is there.
@@ -804,7 +788,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     const kecs::Entity reopened = Doc().World().FindEntity("Lit Planet 2");
     ASSERT_FALSE(reopened.IsNull());
-    EXPECT_EQ(Doc().Field(reopened, "Health", "team"), kgraph::Value(1));
+    EXPECT_EQ(Doc().Field(reopened, "lit", "roughness"), kgraph::Value(0.5));
     EXPECT_EQ(Doc().Field(reopened, "Mesh", "mesh"), kgraph::Value("$sphere"));
 }
 

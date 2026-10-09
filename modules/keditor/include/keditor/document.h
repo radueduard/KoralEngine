@@ -161,21 +161,6 @@ namespace keditor
         /** @brief Takes every entity away and makes those @p json holds: a scene put back as it was before it played. */
         bool RestoreWorld(std::string_view json, std::string& error);
 
-        /** @brief What a field is, beyond its type, for an editor to set it with the right control. */
-        struct FieldHint {
-            std::vector<std::string> options;       ///< A choice: the field holds which, from 0.
-            std::optional<float> min, max, speed;
-            bool color = false;
-        };
-        /** @brief What is known of @p component 's @p field beyond its type; null when nothing is. */
-        [[nodiscard]] const FieldHint* HintOf(std::string_view component, std::string_view field) const;
-        /**
-         * @brief Makes a component type of each JSON file in @p directory: `{ "name": "Health", "fields": { "current":
-         *        { "type": "float", "default": 100, "min": 0 }, "team": { "type": "enum", "options": [...] } } }`.
-         *        A field is a float, an int, a bool, a vec3, a color or an enum. What went wrong, a line a file.
-         */
-        std::vector<std::string> LoadComponents(const std::filesystem::path& directory);
-
         // ---- the file -----------------------------------------------------------------------------------------
 
         /** @brief The scene as JSON: its graph and its entities. */
@@ -195,7 +180,6 @@ namespace keditor
         std::unique_ptr<kgraph::Runtime> _runtime;
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
-        std::map<std::string, FieldHint, std::less<>> _hints;      // by "Component.field"
         std::vector<std::string> _notes;
         std::uint64_t _revision = 0, _saved = 0;
         std::uint64_t _reported = 0;

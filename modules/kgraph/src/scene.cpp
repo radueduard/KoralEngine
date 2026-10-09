@@ -43,7 +43,6 @@ namespace kgraph
         (void)world.Id<PointLight>();
         (void)world.Id<SpotLight>();
         (void)world.Id<Sky>();
-        (void)world.Id<Spin>();
     }
 
     View ViewOf(const kecs::World& world, const kecs::Entity entity)
@@ -67,16 +66,5 @@ namespace kgraph
         for (const kecs::Entity entity : world.All())
             if (world.Has(entity, id) && world.IsEnabled(entity, id)) return entity;
         return kecs::NullEntity;
-    }
-
-    void RunSceneSystems(kecs::World& world, const float deltaSeconds)
-    {
-        world.Query<const Spin>().Each([&](const kecs::Entity entity, const Spin& spin) {
-            if (kor::Length(spin.axis) == 0.f) return;
-            const kecs::Vec3 now = world.RotationOf(entity);
-            const kor::Quat turn = kor::Quat::AngleAxis(spin.speed * deltaSeconds * Radians, spin.axis);
-            const kor::Vec3 turned = kor::EulerAngles(turn * kor::Quat::FromEuler(kor::Vec3(now.x, now.y, now.z) * Radians)) * (1.f / Radians);
-            world.SetRotation(entity, { turned.x, turned.y, turned.z });
-        });
     }
 }

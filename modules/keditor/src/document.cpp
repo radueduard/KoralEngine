@@ -497,13 +497,7 @@ namespace keditor
         for (const std::string& component : ComponentsOf(entity)) {
             Value::Members fields;
             for (const auto& field : _world.Describe(_world.Find(component)).fields) {
-                Value value = Tidied(Field(entity, component, field.name));
-                // A choice is written as what was chosen, by name.
-                if (const FieldHint* hint = HintOf(component, field.name); hint && !hint->options.empty() && value.Number()) {
-                    const auto index = static_cast<std::size_t>(std::max(*value.Number(), 0.0));
-                    if (index < hint->options.size()) value = Value(hint->options[index]);
-                }
-                fields.emplace_back(field.name, std::move(value));
+                fields.emplace_back(field.name, Tidied(Field(entity, component, field.name)));
             }
             components.emplace_back(component, Value(std::move(fields)));
             if (!IsEnabled(entity, component)) disabled.emplace_back(component);
@@ -531,14 +525,8 @@ namespace keditor
                 if (!fields.Named()) continue;
                 for (const auto& [field, given] : *fields.Named()) {
                     if (given.IsNull()) continue;
-                    Value value = given;
-                    if (const FieldHint* hint = HintOf(component, field); hint && !hint->options.empty() && given.String()) {
-                        const auto at = std::ranges::find(hint->options, *given.String());
-                        if (at == hint->options.end()) { problem(std::format("'{}.{}' is none of its options: '{}'", component, field, *given.String())); continue; }
-                        value = Value(static_cast<double>(at - hint->options.begin()));
-                    }
                     std::string error;
-                    if (!SetField(entity, component, field, value, &error)) problem(std::format("'{}.{}': {}", component, field, error));
+                    if (!SetField(entity, component, field, given, &error)) problem(std::format("'{}.{}': {}", component, field, error));
                 }
             }
         if (const Value* disabled = data.Find("disabled"); disabled && disabled->Items())
@@ -586,99 +574,6 @@ namespace keditor
         Changed();
         if (!loaded.ok) { error = loaded.error; return false; }
         return true;
-    }
-
-    const Document::FieldHint* Document::HintOf(const std::string_view component, const std::string_view field) const
-    {
-        const auto it = _hints.find(std::format("{}.{}", component, field));
-        return it == _hints.end() ? nullptr : &it->second;
-    }
-
-    std::vector<std::string> Document::LoadComponents(const std::filesystem::path& directory)
-    {
-        std::vector<std::string> problems;
-        std::error_code ignored;
-        if (!std::filesystem::is_directory(directory, ignored)) return problems;
-        std::vector<std::filesystem::path> files;
-        for (const auto& entry : std::filesystem::directory_iterator(directory, ignored))
-            if (entry.is_regular_file() && entry.path().extension() == ".json") files.push_back(entry.path());
-        std::ranges::sort(files);
-        for (const auto& file : files) {
-            const auto fail = [&](const std::string& why) { problems.push_back(std::format("{}: {}", file.filename().string(), why)); };
-            std::ifstream in(file, std::ios::binary);
-            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-            kecs::json::Value parsed;
-            std::string error;
-            if (!kecs::json::Parse(text, parsed, error)) { fail(error); continue; }
-            const Value json = Value::FromJson(parsed);
-            const Value* name = json.Find("name");
-            if (!name || !name->String() || name->String()->empty() || name->String()->find(' ') != std::string::npos) { fail("a component needs a name, with no spaces"); continue; }
-            if (_world.Find(*name->String()) != kecs::NoComponent) continue;    // there already: the code's, or read before
-
-            kecs::ComponentDescription description;
-            description.name = *name->String();
-            auto defaults = std::make_shared<std::vector<std::byte>>();
-            std::map<std::string, FieldHint> hints;
-            std::string wrong;
-            if (const Value* fields = json.Find("fields"); fields && fields->Named())
-                for (const auto& [field, spec] : *fields->Named()) {
-                    const Value* type = spec.Find("type");
-                    const std::string kind = type && type->String() ? *type->String() : std::string();
-                    FieldHint hint;
-                    const auto number = [&](const char* key) -> std::optional<float> {
-                        const Value* v = spec.Find(key);
-                        return v && v->Number() ? std::optional(static_cast<float>(*v->Number())) : std::nullopt;
-                    };
-                    hint.min = number("min");
-                    hint.max = number("max");
-                    hint.speed = number("speed");
-                    const Value* initial = spec.Find("default");
-                    std::string stored;
-                    std::vector<double> values;
-                    if (kind == "float") { stored = "f32"; values = { initial && initial->Number() ? *initial->Number() : 0.0 }; }
-                    else if (kind == "int") { stored = "i32"; values = { initial && initial->Number() ? *initial->Number() : 0.0 }; }
-                    else if (kind == "bool") { stored = "bool32"; values = { initial && initial->Bool() && *initial->Bool() ? 1.0 : 0.0 }; }
-                    else if (kind == "vec3" || kind == "color") {
-                        stored = "vec3";
-                        kecs::Vec3 three = kind == "color" ? kecs::Vec3 { 1.f, 1.f, 1.f } : kecs::Vec3 {};
-                        Three(initial, three);
-                        values = { three.x, three.y, three.z };
-                        hint.color = kind == "color";
-                    } else if (kind == "enum") {
-                        stored = "i32";
-                        if (const Value* options = spec.Find("options"); options && options->Items())
-                            for (const auto& option : *options->Items())
-                                if (option.String()) hint.options.push_back(*option.String());
-                        if (hint.options.empty()) { wrong = std::format("{}.{}: an enum needs options", description.name, field); break; }
-                        const auto at = initial && initial->String() ? std::ranges::find(hint.options, *initial->String()) : hint.options.begin();
-                        values = { static_cast<double>(at == hint.options.end() ? 0 : at - hint.options.begin()) };
-                    } else {
-                        wrong = std::format("{}.{}: '{}' is not a field type: float, int, bool, vec3, color or enum", description.name, field, kind);
-                        break;
-                    }
-                    const std::size_t offset = defaults->size(), size = values.size() * 4;
-                    defaults->resize(offset + size);
-                    Numbers numbers;
-                    NumbersOf(stored, numbers);
-                    for (std::size_t i = 0; i < values.size(); ++i) WriteNumber(numbers, defaults->data() + offset + i * 4, values[i]);
-                    description.fields.push_back({ field, stored, offset, size, nullptr });
-                    hints.emplace(std::format("{}.{}", description.name, field), std::move(hint));
-                }
-            if (!wrong.empty()) { fail(wrong); continue; }
-            description.size = defaults->size();
-            description.alignment = 4;
-            if (description.size > 0) {
-                description.context = defaults;
-                description.construct = [](void* at, const kecs::ComponentDescription& type) {
-                    const auto& bytes = *static_cast<const std::vector<std::byte>*>(type.context.get());
-                    std::memcpy(at, bytes.data(), bytes.size());
-                };
-            }
-            _world.Register(std::move(description));
-            for (auto& [key, hint] : hints) _hints.insert_or_assign(key, std::move(hint));
-            Changed();
-        }
-        return problems;
     }
 
     // ---- the file -----------------------------------------------------------------------------------------------
@@ -733,8 +628,6 @@ namespace keditor
 
     bool Document::Load(const std::filesystem::path& path, std::string& error)
     {
-        // A scene file is in a project's `scenes`: the components its files describe are known before it is read.
-        for (const auto& problem : LoadComponents(path.parent_path().parent_path() / "components")) _notes.push_back(problem);
         std::ifstream in(path, std::ios::binary);
         if (!in) { error = std::format("'{}' cannot be read", path.string()); return false; }
         std::stringstream text;

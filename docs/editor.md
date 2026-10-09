@@ -17,7 +17,6 @@ project.json                 its name, its scenes, and the scene a run starts wi
 scenes/main.scene.json       a scene: its pass graph and its entities
 shaders/                     found before any other shaders, by module name
 objects/*.json               things to make entities from: what the Create menu lists
-components/*.json            component types described by a file, with no code
 ```
 
 A scene file holds the graph as [kgraph](kgraph.md) saves it and the world as [kecs](kecs.md) saves it.
@@ -52,8 +51,10 @@ builds the graph that uses them out of ordinary nodes, to be changed like any ot
 
 - `color`, `ids` and `depth` images the size of the window (their `extent` is the Screen's).
 - `view`, a SceneView, whose `frame` and `lights` feed the pipelines.
-- `MeshRenderer`, the lit pipeline. Its component — `color` and `smoothness` — and a `Mesh` are what make
-  an entity drawn. It also draws each entity's number into `ids`.
+- `lit`, the pipeline that draws meshes. What makes an entity drawn is a `Mesh` and this pipeline's
+  component, which the shader makes: a field for each push constant it asks of an entity — `albedo`,
+  `metallic`, `roughness` and `emission`. Add a push constant to `lit.slang` and the component has the
+  field. It also draws each entity's number into `ids`.
 - `sky`, drawn after it where nothing nearer was; `outline`, a line round what is picked, read from `ids`.
 - `helpers` (DebugDraw) for the gizmo and the light and camera shapes, `pick`, and `show`, the Blit.
 
@@ -74,54 +75,20 @@ graph has no SceneView is drawn however its own nodes say, and the view and gizm
 
 ### Playing
 
-A scene in the editor stands still until **Play**: then scripts run and a `Spin` turns its entity, seen
-through the scene's camera. **Pause** holds it. **Stop** puts every entity back as it was when Play was
+A scene in the editor stands still until **Play**: then its scripts run, and it is seen through the
+scene's camera. **Pause** holds it. **Stop** puts every entity back as it was when Play was
 pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
 plays.
 
-### Objects and components from files
+### Objects
 
 An object is an entity as a file: `{ "template": "Lamp", "name": "Lamp", "position": [0, 2, 0],
 "components": { "PointLight": { "range": 5 } }, "children": [...] }`. **Edit, Save as object** writes what
 is picked as one, and a new project starts with a cube, a sphere, the other default meshes, a planet with a
-moon, a camera, the three lights and a sky. The mesh objects name the standard graph's `MeshRenderer`.
+moon, a camera, the three lights and a sky. The mesh objects name the standard graph's `lit` component.
 
-A file in `components` describes a component with no code:
-
-```json
-{ "name": "Health",
-  "fields": {
-    "current": { "type": "float", "default": 100, "min": 0, "max": 100 },
-    "invulnerable": { "type": "bool", "default": false },
-    "team": { "type": "enum", "options": ["Neutral", "Red", "Blue"], "default": "Neutral" } } }
-```
-
-A field is a `float`, an `int`, a `bool`, a `vec3`, a `color` or an `enum`. `min`, `max` and `options` are
-what the inspector edits it by.
-
-### Adding a node
-
-The list of nodes opens on every kind there is, under its category: Resources, Pipelines, Values, Math,
-Vectors, Logic, Passes. Type what you are after and it becomes the kinds that fit, best first, each with
-what it does. Words other than the name find a node too: `texture` finds Image, `mix` finds Lerp, `run
-compute` finds Dispatch, `if` finds Select, `<` finds Less. Enter adds the first. The nodes this graph
-already has are listed under the kinds, by name, to go to one.
-
-A node is added working: what it needs is set to something sensible, so an Image is a 512 by 512 image
-from the start and not a row of blanks.
-
-### What a node gives
-
-**Add output** in the inspector lists what a node gives besides what it makes: an image's `size`, `width`
-and `height`, a buffer's `bytes`, and every one of its settings. One picked from it becomes an output on
-the node, to wire from. An output that something is wired to stays on the node.
-
-Each output a node shows this way is listed in the inspector with an **x**, which takes it off the node
-again, and whatever was wired from it with it.
-
-An input that is x, y and z on one line (`extent`, a Dispatch's `groups`) can be wired as one vector: pick
-its name from **Add input** and it becomes a port on the node, in place of the three numbers. Its own **x**
-brings the numbers back.
+A component is never described by a file. One comes from a pipeline's shader, from a script, or is one of
+the scene's own (a camera, a light, the sky).
 
 ### Entities
 
@@ -230,7 +197,7 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
   entity.
 - **Entities aren't reordered among their siblings** by dragging: a drop puts one last under what it is
   dropped on. An entity is renamed in the inspector, not in the outliner.
-- **A component file's field can't be text**, and a file edited while the editor is open is read when the
-  project is next opened. Objects and components have no icons.
+- **A component the shader makes starts at zero**: a new `lit` is black and polished until its fields are
+  set. The objects set them. Objects have no icons.
 - **The scene view's toolbar is words**, and a menu line that is on is marked with a `*`.
 - `Project, Run` finds `koral-play` beside the editor on Linux only. Elsewhere it has to be on the path.

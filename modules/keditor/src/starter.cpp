@@ -39,7 +39,7 @@ namespace keditor
 
     const std::vector<std::pair<std::string, std::string>>& StandardObjects()
     {
-        // What draws a mesh is the standard graph's MeshRenderer: a Mesh, and the pipeline's component.
+        // What draws a mesh is the standard graph's `lit` pipeline: a Mesh, and the component the pipeline's shader makes.
         static const std::vector<std::pair<std::string, std::string>> objects {
             { "Cube.json", R"json({
   "template": "Cube",
@@ -47,7 +47,7 @@ namespace keditor
   "name": "Cube",
   "components": {
     "Mesh": { "mesh": "$cube" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -57,7 +57,7 @@ namespace keditor
   "name": "Sphere",
   "components": {
     "Mesh": { "mesh": "$sphere" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -67,7 +67,7 @@ namespace keditor
   "name": "Plane",
   "components": {
     "Mesh": { "mesh": "$plane" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -77,7 +77,7 @@ namespace keditor
   "name": "Cylinder",
   "components": {
     "Mesh": { "mesh": "$cylinder" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -87,7 +87,7 @@ namespace keditor
   "name": "Cone",
   "components": {
     "Mesh": { "mesh": "$cone" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -97,7 +97,7 @@ namespace keditor
   "name": "Capsule",
   "components": {
     "Mesh": { "mesh": "$capsule" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
@@ -107,19 +107,18 @@ namespace keditor
   "name": "Torus",
   "components": {
     "Mesh": { "mesh": "$torus" },
-    "MeshRenderer": { "color": [0.85, 0.6, 1], "smoothness": 0.3 }
+    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   }
 }
 )json" },
             { "Planet.json", R"json({
   "template": "Planet",
   "icon": "public",
-  "description": "A sphere that turns while the scene plays, with a moon that goes round it.",
+  "description": "A sphere with a moon under it: turn the planet, and the moon goes round.",
   "name": "Planet",
   "components": {
     "Mesh": { "mesh": "$sphere" },
-    "MeshRenderer": { "color": [0.3, 0.55, 1], "smoothness": 0.3 },
-    "Spin": { "axis": [0, 1, 0], "speed": 60 }
+    "lit": { "albedo": [0.3, 0.55, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
   },
   "children": [
     {
@@ -128,7 +127,7 @@ namespace keditor
       "scale": [0.3, 0.3, 0.3],
       "components": {
         "Mesh": { "mesh": "$sphere" },
-        "MeshRenderer": { "color": [0.8, 0.8, 0.75], "smoothness": 0.3 }
+        "lit": { "albedo": [0.8, 0.8, 0.75], "metallic": 0, "roughness": 0.8, "emission": [0, 0, 0] }
       }
     }
   ]
@@ -259,16 +258,17 @@ namespace keditor
         wire("screen", "view", "extent", "size");
         node("Primitive", "shape", 520, 700);   // for how a default mesh's vertices are laid out
 
-        // Every entity with a Mesh and this pipeline's component — a colour and a smoothness — lit.
-        node("GraphicsPipeline", "MeshRenderer", 800, 60);
-        set("MeshRenderer", "vertex.module", "lit");
-        set("MeshRenderer", "vertex.entry", "vertex");
-        wire("shape", "MeshRenderer", "vertex.layout", "layout");
-        set("MeshRenderer", "fragment.module", "lit");
-        set("MeshRenderer", "fragment.entry", "fragment");
-        wire("scene target", "MeshRenderer", "framebuffer");
-        wire("view", "MeshRenderer", "param.frame", "frame");
-        wire("view", "MeshRenderer", "param.lights", "lights");
+        // Every entity with a Mesh and this pipeline's component, lit. The component is the shader's: what its push
+        // constants ask of each entity — an albedo, how metallic and how rough it is, what light it gives off.
+        node("GraphicsPipeline", "lit", 800, 60);
+        set("lit", "vertex.module", "lit");
+        set("lit", "vertex.entry", "vertex");
+        wire("shape", "lit", "vertex.layout", "layout");
+        set("lit", "fragment.module", "lit");
+        set("lit", "fragment.entry", "fragment");
+        wire("scene target", "lit", "framebuffer");
+        wire("view", "lit", "param.frame", "frame");
+        wire("view", "lit", "param.lights", "lights");
 
         // The sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn.
         node("GraphicsPipeline", "sky", 800, 300);
@@ -298,7 +298,7 @@ namespace keditor
 
         // The passes, in the order they are drawn where what they use does not say.
         node("Draw", "draw scene", 1100, 60);
-        wire("MeshRenderer", "draw scene", "pipeline");
+        wire("lit", "draw scene", "pipeline");
         node("Draw", "draw sky", 1100, 300);
         wire("sky", "draw sky", "pipeline");
         set("draw sky", "load", true);
@@ -334,9 +334,9 @@ namespace keditor
         const kecs::Entity sphere = doc.CreateEntity("Sphere");
         doc.AddComponent(sphere, "Mesh");
         doc.SetField(sphere, "Mesh", "mesh", Value(kgraph::DefaultMeshId("sphere")));
-        if (doc.AddComponent(sphere, "MeshRenderer")) {
-            doc.SetField(sphere, "MeshRenderer", "color", vec(0.85f, 0.6f, 1.f));
-            doc.SetField(sphere, "MeshRenderer", "smoothness", Value(0.3));
+        if (doc.AddComponent(sphere, "lit")) {
+            doc.SetField(sphere, "lit", "albedo", vec(0.85f, 0.6f, 1.f));
+            doc.SetField(sphere, "lit", "roughness", Value(0.5));
         }
         return sphere;
     }

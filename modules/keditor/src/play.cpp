@@ -34,7 +34,6 @@ namespace keditor
         if (_onFrame) _onFrame();
         if (!_document || !_playing) return;
         _document->Scripts().Update(static_cast<float>(Time::FrameTime()));
-        kgraph::RunSceneSystems(_document->World(), static_cast<float>(Time::FrameTime()));
     }
     void PlayScene::LateUpdate()
     {

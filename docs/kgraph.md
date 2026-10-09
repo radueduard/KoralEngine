@@ -194,9 +194,10 @@ them, so an entity can be given one and a file can name one:
 | `PointLight` | `color`, `intensity`, `range`. |
 | `SpotLight` | `color`, `intensity`, `range`, `innerAngle`, `outerAngle` (degrees, from the middle of the cone). |
 | `Sky` | `zenith`, `horizon`, `ground` (colours), `ambient`, `sunSize` (degrees). |
-| `Spin` | `axis`, `speed` (degrees a second). `kgraph::RunSceneSystems(world, dt)` turns its entity. |
 
-Where a camera or a light is, and which way it faces, is its entity's transform.
+Where a camera or a light is, and which way it faces, is its entity's transform. These are data only: there
+is no component for drawing a mesh (a pipeline's shader makes that one) and none that does anything (that
+is a script).
 
 A **SceneView** node reads them each frame into two buffers a pipeline's parameters are wired to. `frame`
 is laid out as this block, and `lights` as an array of `Light`:
