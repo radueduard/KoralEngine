@@ -91,6 +91,10 @@ foreach (var child in World.ChildrenOf(car)) { ... }     // in order; World.Root
 var found = World.Find("Wheel");
 ```
 
+A script that is steered reads the window's keys and mouse. In Kotlin that is `input`:
+`input.isKeyHeld(Key.eW)`, `input.isMouseButtonHeld(MouseButton.eRight)`, `input.mousePositionDelta`,
+`input.mouseScrollDelta`. In the editor it is the editor window's input, whichever panel the pointer is over.
+
 Kotlin has the same members in lowerCamel: `world.create`, `world.with("Enemy")`, `world.read<Enemy>(entity)`. The transform is `world.setPosition`, `world.worldMatrix` and so on.
 
 ## Graphics scripts
@@ -134,17 +138,20 @@ Both need `KORAL_SDK` set to the Koral SDK. `koral-engine-dotnet` is built into 
 machine has the .NET 10 SDK. `System`, `System.Linq`, `System.Collections.Generic`, `Koral` and
 `Koral.Engine` are already in scope.
 
-**Kotlin.** Kotlin is compiled by a build, so a project's scripts are a Gradle module that depends on
-`koral:koral-engine:0.1.0` (published to `<build>/maven`) and whose `main` is:
+**Kotlin.** Kotlin is compiled by a build, and the editor gives a project one: **Assets, New script** with
+Kotlin chosen writes a Gradle build at the project's root, whose sources are the `scripts` folder
+(`keditor::WriteKotlinBuild` does the same from code).
 
-```kotlin
-fun main(args: Array<String>) = koral.engine.run(args)
+```
+./gradlew edit      the project in the editor, its scripts built again and loaded whenever one is saved
+./gradlew play      the project on its own
 ```
 
-`run` takes the project's folder, `--edit`, `--classes <dir>` for where the build puts the compiled
-classes, and `--sources <dir>` with `--compile <command>` to have a saved source built. It needs
-`KORAL_SDK`, `KORAL_ENGINE_LIBRARY` (the path to `libkoral-engine.so`) and
-`--enable-native-access=ALL-UNNAMED`.
+`gradlew` needs a JDK to start with: set `JAVA_HOME`. `gradle.properties` is this machine's — where the Koral
+SDK, the engine's library and its Kotlin artifact are — and is written by the editor, not kept with the
+project. The build depends on `koral:koral-engine:0.1.0` and runs `koral.engine.MainKt`, which is
+`koral.engine.run`: the project's folder, `--edit`, `--frames N`, `--classes <dir>` for the compiled
+classes, and `--sources <dir>` with `--compile <command>` to have a saved source built.
 
 ## Editing while it runs
 
@@ -174,7 +181,8 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
   `koral-engine-dotnet --edit`: plain `koral-editor` runs no scripts.
 - **The inspector doesn't follow a script.** A field a script changes each frame shows its new value only
   when something else makes the panel rebuild.
-- **Kotlin has no runner or project template.** A project brings its own Gradle build and `main`. The
-  Kotlin layer is tested with no display, and has not been run in a window.
+- **C# scripts have no `input`** yet: only Kotlin's do.
+- **The Kotlin build's paths are a build's own.** `gradle.properties` points at the engine's build folder;
+  an installed engine would need them from elsewhere. A path with a space in it breaks the compile command.
 - **C# edits are a new build each time**, not applied in place as the framework's scene scripts are.
 - **A script named like an existing plain component** takes that component over.

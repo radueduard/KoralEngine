@@ -113,3 +113,16 @@ if(Koral_FOUND)
 else()
     message(STATUS "Koral not found (set CMAKE_PREFIX_PATH to an SDK): building kecs alone")
 endif()
+
+# Where this build's pieces are, for the editor to write into a project's Kotlin build: the SDK, the engine's library
+# and its Kotlin artifact, the JDK, and the Gradle wrapper it copies. A build's own paths: an installed editor would
+# be told another way.
+if(TARGET keditor)
+    get_filename_component(KEDITOR_SDK_PATH "${Koral_DIR}/../../.." ABSOLUTE)
+    target_compile_definitions(keditor PRIVATE
+        KEDITOR_SDK="${KEDITOR_SDK_PATH}"
+        KEDITOR_MAVEN="${CMAKE_BINARY_DIR}/maven"
+        KEDITOR_ENGINE_LIBRARY="$<TARGET_FILE:koral-engine>"
+        KEDITOR_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}"
+        KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin")
+endif()

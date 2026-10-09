@@ -7,6 +7,7 @@ import java.lang.foreign.ValueLayout.JAVA_FLOAT
 import java.lang.foreign.ValueLayout.JAVA_INT
 import koral.Buffer
 import koral.Image
+import koral.Input
 import koral.Mat4
 import koral.Resource
 import koral.Scene
@@ -35,9 +36,15 @@ class World internal constructor(internal val document: MemorySegment) {
         /** The engine's side of [scene]: one of its scenes, "Play" or "Editor". Null for any other. */
         fun of(scene: Scene): World? {
             val document = Native.kengine_document.invokeExact(scene.graph.nativeHandle) as MemorySegment
-            return if (document == MemorySegment.NULL) null else World(document)
+            return if (document == MemorySegment.NULL) null else World(document).also { it.scene = scene }
         }
     }
+
+    /** The scene this is the engine's side of: its window, its time. Null for a world not found through [of]. */
+    var scene: Scene? = null
+        private set
+    /** The keys, the mouse and the gamepads of the scene's window: what a script that is steered reads. */
+    val input: Input get() = scene?.input ?: throw EngineException("this world was not found through a scene: it has no input")
 
     /** Whether this is still the scene's: an editor that opens another project starts a new one. */
     fun isCurrentFor(scene: Scene): Boolean = (Native.kengine_document.invokeExact(scene.graph.nativeHandle) as MemorySegment) == document

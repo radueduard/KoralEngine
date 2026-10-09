@@ -552,7 +552,7 @@ class $NAME : Script() {
     {
         static const std::vector<std::pair<std::string, std::string>> kinds {
             { "C#", "Compiled when the project starts, and again whenever it is saved. Run the project with koral-engine-dotnet." },
-            { "Kotlin", "Compiled by the project's own Gradle build, which the scripts folder has to be a source of." },
+            { "Kotlin", "Compiled by a Gradle build the project is given: './gradlew edit' in its folder opens it with its scripts, built again as they are saved." },
         };
         return kinds;
     }
@@ -588,7 +588,9 @@ class $NAME : Script() {
         std::filesystem::create_directories(directory, ignored);
         const auto path = directory / (name + (kotlin ? ".kt" : ".cs"));
         { std::ofstream out(path, std::ios::binary); out << Named(kotlin ? KotlinScript : CSharpScript, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
-        Say(kotlin ? std::format("Made scripts/{}.kt: it is compiled by the project's Gradle build.", name)
+        // Kotlin is compiled by a build: the project is given one, when it has none.
+        if (kotlin) WriteKotlinBuild(_project.directory, _project.name);
+        Say(kotlin ? std::format("Made scripts/{}.kt: './gradlew edit' in the project's folder opens it with its scripts running.", name)
                    : std::format("Made scripts/{}.cs: it is a component, {}, once the project runs with koral-engine-dotnet.", name, name));
         return true;
     }

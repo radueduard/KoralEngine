@@ -31,6 +31,14 @@ namespace keditor
     std::vector<std::string> WriteStandardObjects(const std::filesystem::path& directory);
 
     /**
+     * @brief Gives a project what its Kotlin scripts are built and run with: a Gradle build at its root whose sources
+     *        are its `scripts` folder, with `play` and `edit` tasks, and a `gradle.properties` saying where this
+     *        machine's SDK, engine and JDK are. A file that is there is left as it is, but for gradle.properties,
+     *        which is this machine's and is written again. What was written, by name.
+     */
+    std::vector<std::string> WriteKotlinBuild(const std::filesystem::path& project, const std::string& name);
+
+    /**
      * @brief Adds the standard graph to @p document, a pass a page:
      *        - `frame`: the scene's camera, sky, sun and lights as values, and the two buffers of them shaders read;
      *        - `scene`: a picture the size of the window with its depth and an image of which entity is where, and

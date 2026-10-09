@@ -4,6 +4,7 @@
 
 #include <keditor/starter.h>
 
+#include <cstdlib>
 #include <format>
 #include <fstream>
 
@@ -198,6 +199,97 @@ namespace keditor
             if (std::filesystem::exists(directory / name)) continue;
             std::ofstream(directory / name, std::ios::binary) << source;
             written.push_back(name);
+        }
+        return written;
+    }
+
+    std::vector<std::string> WriteKotlinBuild(const std::filesystem::path& project, const std::string& name)
+    {
+        std::vector<std::string> written;
+        std::error_code ignored;
+        const auto write = [&](const char* file, const std::string& text, const bool always = false) {
+            if (!always && std::filesystem::exists(project / file, ignored)) return;
+            std::ofstream(project / file, std::ios::binary) << text;
+            written.emplace_back(file);
+        };
+        std::string safe = name;
+        for (char& c : safe)
+            if (c == '"' || c == '\\' || c == '$') c = '_';
+        write("settings.gradle.kts", std::format(R"kts(// {}: a Koral Engine project with scripts in Kotlin.
+pluginManagement {{
+    repositories {{ gradlePluginPortal(); mavenCentral() }}
+}}
+rootProject.name = "{}"
+)kts", safe, safe));
+        write("build.gradle.kts", R"kts(// The project's scripts: the Kotlin files in `scripts`, each class a component of its name. Written by the editor.
+//
+//   ./gradlew edit      the project in the editor, its scripts built again and loaded whenever one is saved
+//   ./gradlew play      the project on its own
+//
+// gradle.properties, which is this machine's, says where the Koral SDK, the engine and the JDK are.
+plugins {
+    kotlin("jvm") version "2.4.20"
+}
+
+fun setting(name: String, variable: String): String =
+    (findProperty(name) as String?)?.takeIf { it.isNotBlank() } ?: System.getenv(variable)
+        ?: error("$name is not set: open the project in the editor once, which writes gradle.properties, or set $variable")
+
+val koralSdk = setting("koral.sdk", "KORAL_SDK")
+val engineLibrary = setting("koral.engine.library", "KORAL_ENGINE_LIBRARY")
+val engineMaven = setting("koral.engine.maven", "KORAL_ENGINE_MAVEN")
+
+repositories {
+    maven(url = file("$koralSdk/share/Koral/maven"))    // Koral's own Kotlin libraries, as the SDK carries them
+    maven(url = file(engineMaven))                      // the engine's
+    mavenCentral()
+    google()
+}
+
+dependencies {
+    implementation("koral:koral-engine:0.1.0")
+}
+
+kotlin {
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }
+    sourceSets["main"].kotlin.srcDir("scripts")
+}
+java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25 }
+
+// The engine, run on this project: a saved script is built again by this same build and loaded while it runs.
+fun engine(name: String, what: String, vararg more: String) = tasks.register<JavaExec>(name) {
+    group = "koral"
+    description = what
+    dependsOn(tasks.classes)
+    classpath = sourceSets.main.get().runtimeClasspath
+    mainClass.set("koral.engine.MainKt")
+    jvmArgs("--enable-native-access=ALL-UNNAMED")
+    environment("KORAL_SDK", koralSdk)
+    environment("KORAL_ENGINE_LIBRARY", engineLibrary)
+    if (System.getenv("JAVA_HOME").isNullOrBlank()) environment("JAVA_HOME", System.getProperty("java.home"))
+    workingDir = projectDir
+    val wrapper = projectDir.resolve(if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "gradlew")
+    args(projectDir.absolutePath, "--classes", layout.buildDirectory.dir("classes/kotlin/main").get().asFile.absolutePath,
+         "--sources", projectDir.resolve("scripts").absolutePath, "--compile", "$wrapper -p $projectDir -q --offline classes", *more)
+}
+engine("play", "Runs the project")
+engine("edit", "Opens the project in the editor, with its scripts", "--edit")
+)kts");
+        // This machine's: where things are here. Written each time, since it is not the project's to keep.
+        std::string properties = "# Written by the Koral Engine editor: where this machine's Koral SDK, engine and JDK are. Not the project's to commit.\n";
+        const char* sdk = std::getenv("KORAL_SDK");
+        properties += std::format("koral.sdk={}\nkoral.engine.library={}\nkoral.engine.maven={}\n", sdk && *sdk ? sdk : KEDITOR_SDK, KEDITOR_ENGINE_LIBRARY, KEDITOR_MAVEN);
+        if (std::string_view(KEDITOR_JAVA_HOME).size() > 0) properties += std::format("org.gradle.java.home={}\n", KEDITOR_JAVA_HOME);
+        properties += "org.gradle.jvmargs=-Xmx1g\n";
+        write("gradle.properties", properties, true);
+        write(".gitignore", "build/\n.gradle/\n.kotlin/\ngradle.properties\n");
+        // The wrapper, so that nothing has to be installed to build.
+        const std::filesystem::path wrapper = KEDITOR_GRADLE_WRAPPER;
+        for (const char* file : { "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties" }) {
+            if (std::filesystem::exists(project / file, ignored) || !std::filesystem::exists(wrapper / file, ignored)) continue;
+            std::filesystem::create_directories((project / file).parent_path(), ignored);
+            std::filesystem::copy_file(wrapper / file, project / file, ignored);
+            written.emplace_back(file);
         }
         return written;
     }

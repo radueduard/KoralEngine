@@ -935,10 +935,22 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_NE(text("Roller.cs").find("public sealed class Roller : Script"), std::string::npos);
     EXPECT_NE(text("Drifter.kt").find("class Drifter : Script()"), std::string::npos);
     EXPECT_EQ(text("Roller.cs").find("$NAME"), std::string::npos);
+    for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew" })
+        EXPECT_TRUE(std::filesystem::exists(directory / file)) << file << ": a Kotlin script comes with the build that compiles it";
     EXPECT_FALSE(Session().NewScript("Roller", "Kotlin")) << "a script of that name is there, in whichever language";
     EXPECT_FALSE(Session().NewScript("lit", "C#")) << "a component is called that already";
     EXPECT_FALSE(Session().NewScript("My Script", "C#"));
     EXPECT_FALSE(Session().NewScript("Thing", "Lua"));
+}
+
+// Not a test: gives the project at KEDITOR_WRITE_PROJECT the build its Kotlin scripts need.
+TEST_F(EditorTest, DISABLED_WritesAKotlinBuild) {
+    const char* directory = std::getenv("KEDITOR_WRITE_PROJECT");
+    ASSERT_NE(directory, nullptr);
+    keditor::Project project;
+    std::string error;
+    ASSERT_TRUE(keditor::Project::Open(directory, project, error)) << error;
+    for (const auto& file : keditor::WriteKotlinBuild(project.directory, project.name)) std::printf("wrote %s\n", file.c_str());
 }
 
 // Not a test: sets a project up with the standard scene and the entities a file lists, when told where.

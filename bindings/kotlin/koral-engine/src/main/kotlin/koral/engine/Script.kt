@@ -39,6 +39,8 @@ abstract class Script {
     /** The scene it is in: its entities, and the nodes of its graph. */
     lateinit var world: World
         internal set
+    /** The keys, the mouse and the gamepads of the window the scene is in: `input.isKeyHeld(Key.eW)`. */
+    val input: koral.Input get() = world.input
 
     /** It was added to the entity: once, switched on or off. */
     open fun onCreated() {}
