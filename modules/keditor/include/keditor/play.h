@@ -41,6 +41,8 @@ namespace keditor
          */
         void SetPlaying(const bool playing) { _playing = playing; }
         [[nodiscard]] bool Playing() const { return _playing; }
+        /** @brief The scene running @p document, or null: how what only has the document reaches the scene. */
+        [[nodiscard]] static PlayScene* Of(const Document& document);
         /**
          * @brief What is called each frame as the scene updates, before its passes are readied: where an editor
          *        moves its view and draws its gizmo, so that both are in the frame being made.

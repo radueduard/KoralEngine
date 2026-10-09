@@ -74,6 +74,8 @@ internal object Native {
     val kengine_document_world = call("kengine_document_world", ADDRESS, ADDRESS)
     val kengine_document_json = call("kengine_document_json", ADDRESS, ADDRESS)
     val kengine_document_save = call("kengine_document_save", JAVA_BOOLEAN, ADDRESS, ADDRESS)
+    val kengine_playing = call("kengine_playing", JAVA_BOOLEAN, ADDRESS)
+    val kengine_set_playing = call("kengine_set_playing", JAVA_BOOLEAN, ADDRESS, JAVA_BOOLEAN)
 
     val kengine_node_add = call("kengine_node_add", ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_DOUBLE, JAVA_DOUBLE)
     val kengine_node_remove = call("kengine_node_remove", JAVA_BOOLEAN, ADDRESS, ADDRESS)

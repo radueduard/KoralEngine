@@ -58,6 +58,9 @@ KENGINE_API KecsWorld* kengine_document_world(KengineDocument* document);
 /** The scene as JSON, as it is saved. */
 KENGINE_API const char* kengine_document_json(KengineDocument* document);
 KENGINE_API bool kengine_document_save(KengineDocument* document, const char* path);
+/** Whether the scene plays: its scripts are updated. A scene run on its own does; one in an editor, when told to. */
+KENGINE_API bool kengine_playing(KengineDocument* document);
+KENGINE_API bool kengine_set_playing(KengineDocument* document, bool playing);
 
 /* ---- the graph ----------------------------------------------------------------------------------------------- */
 

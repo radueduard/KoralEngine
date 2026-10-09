@@ -925,8 +925,15 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().Connect("ids", "out", invert, "param.source");
     EXPECT_TRUE(Doc().Runtime().Status(invert)->ok) << Doc().Runtime().Status(invert)->error;
 
+    // With no scripts, this editor is all the project needs, and the player runs it.
+    EXPECT_TRUE(Session().EditCommand().empty());
+    EXPECT_TRUE(Session().ScriptsNotRunning().empty());
+    EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos);
+
     // A script, in either language: a file with a class of its name.
     ASSERT_TRUE(Session().NewScript("Roller", "C#")) << Session().Status();
+    EXPECT_NE(Session().RunCommand().find("koral-engine-dotnet"), std::string::npos) << "scripts in C# are run by their runner: " << Session().RunCommand();
+    EXPECT_NE(Session().EditCommand().find("--edit"), std::string::npos);
     ASSERT_TRUE(Session().NewScript("Drifter", "Kotlin")) << Session().Status();
     const auto text = [&](const char* file) {
         std::ifstream in(directory / "scripts" / file);
@@ -937,6 +944,19 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_EQ(text("Roller.cs").find("$NAME"), std::string::npos);
     for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew" })
         EXPECT_TRUE(std::filesystem::exists(directory / file)) << file << ": a Kotlin script comes with the build that compiles it";
+    EXPECT_NE(Session().RunCommand().find("gradlew"), std::string::npos) << "and scripts in Kotlin by the project's build: " << Session().RunCommand();
+    EXPECT_NE(Session().RunCommand().find(" play"), std::string::npos);
+    EXPECT_NE(Session().EditCommand().find(" edit"), std::string::npos);
+
+    // This editor was not started with them: nothing runs them, and it says so rather than play a scene whose
+    // scripts do nothing.
+    EXPECT_EQ(Session().ScriptsNotRunning(), (std::vector<std::string> { "Drifter", "Roller" }));
+    EXPECT_TRUE(Shows("Nothing is running the project's scripts (Drifter, Roller)"));
+    Session().StartPlaying();
+    EXPECT_TRUE(Session().Failed());
+    EXPECT_TRUE(Shows("nothing runs Drifter and 1 more"));
+    EXPECT_TRUE(Shows("Open with its scripts"));
+    Session().Stop();
     EXPECT_FALSE(Session().NewScript("Roller", "Kotlin")) << "a script of that name is there, in whichever language";
     EXPECT_FALSE(Session().NewScript("lit", "C#")) << "a component is called that already";
     EXPECT_FALSE(Session().NewScript("My Script", "C#"));

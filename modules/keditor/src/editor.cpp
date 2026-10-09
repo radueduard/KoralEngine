@@ -76,15 +76,87 @@ namespace keditor
         return true;
     }
 
+    namespace {
+        /** A command's word, quoted for a shell. */
+        std::string Quoted(const std::string& text) { return "\"" + text + "\""; }
+
+        /** Which language a project's scripts are in: 'k', 'c', or 0 when it has none. */
+        char ScriptLanguage(const Project& project)
+        {
+            std::error_code ignored;
+            bool kotlin = false, csharp = false;
+            for (const auto& entry : std::filesystem::directory_iterator(project.directory / "scripts", ignored)) {
+                kotlin = kotlin || entry.path().extension() == ".kt";
+                csharp = csharp || entry.path().extension() == ".cs";
+            }
+            return kotlin ? 'k' : csharp ? 'c' : 0;
+        }
+
+        /** What runs a project with its scripts, in the editor or on its own; empty for a project with none. */
+        std::string ScriptRunner(const Project& project, const bool edit)
+        {
+            const std::string folder = project.directory.string();
+            std::error_code ignored;
+            switch (ScriptLanguage(project)) {
+            case 'k': {
+                // The project's own build, which wants a JDK to start with: this build's, when none is said.
+                const char* java = std::getenv("JAVA_HOME");
+                const std::string home = (java && *java) || std::string_view(KEDITOR_JAVA_HOME).empty() ? std::string() : std::format("JAVA_HOME={} ", Quoted(KEDITOR_JAVA_HOME));
+                return std::format("{}{} -p {} -q {}", home, Quoted((project.directory / "gradlew").string()), Quoted(folder), edit ? "edit" : "play");
+            }
+            case 'c': {
+                const char* sdk = std::getenv("KORAL_SDK");
+                const std::string where = sdk && *sdk ? std::string() : std::format("KORAL_SDK={} ", Quoted(KEDITOR_SDK));
+                return std::format("{}{} {}{}", where, Quoted(KEDITOR_DOTNET_RUNNER), Quoted(folder), edit ? " --edit" : "");
+            }
+            default: return {};
+            }
+        }
+    }
+
     std::string Session::RunCommand() const
     {
         if (!_hasProject) return {};
+        if (const std::string scripted = ScriptRunner(_project, false); !scripted.empty()) return scripted;
         // The player that was built with this editor: beside it. Failing that, whichever is found by name.
         std::filesystem::path player = "koral-play";
         std::error_code ec;
         if (const auto self = std::filesystem::read_symlink("/proc/self/exe", ec); !ec && std::filesystem::exists(self.parent_path() / "koral-play", ec))
             player = self.parent_path() / "koral-play";
         return std::format("\"{}\" \"{}\"", player.string(), _project.directory.string());
+    }
+
+    std::string Session::EditCommand() const { return _hasProject ? ScriptRunner(_project, true) : std::string(); }
+
+    std::vector<std::string> Session::ScriptsNotRunning()
+    {
+        std::vector<std::string> idle;
+        if (!_hasProject) return idle;
+        std::error_code ignored;
+        for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "scripts", ignored)) {
+            if (entry.path().extension() != ".kt" && entry.path().extension() != ".cs") continue;
+            // A script is a component by its class's name, which the editor's own are named for their file.
+            if (const std::string name = entry.path().stem().string(); !Doc().Scripts().Registered(name)) idle.push_back(name);
+        }
+        std::ranges::sort(idle);
+        return idle;
+    }
+
+    bool Session::ReopenWithScripts()
+    {
+        const std::string command = EditCommand();
+        if (command.empty()) { Say("The project has no scripts: there is nothing more to open it with.", true); return false; }
+        if (InPlayMode()) Stop();
+        if (!Save()) return false;
+#ifdef _WIN32
+        const std::string detached = "start \"\" " + command;
+#else
+        const std::string detached = "(" + command + ") >/dev/null 2>&1 &";
+#endif
+        if (std::system(detached.c_str()) != 0) { Say("The editor could not be started again with the scripts.", true); return false; }
+        Say("Opening again with the project's scripts...");
+        kor::App::Current().Quit();
+        return true;
     }
 
     bool Session::Run()
@@ -264,7 +336,11 @@ namespace keditor
     {
         if (_snapshot.empty()) {
             _snapshot = Doc().WorldJson();
-            if (kgraph::FirstCamera(Doc().World()).IsNull()) Say("There is no camera in the scene: it plays seen from where the scene view's default is.", true);
+            // Scripts nothing is running: said, since a scene that plays with them idle looks like a script that does nothing.
+            if (const auto idle = ScriptsNotRunning(); !idle.empty())
+                Say(std::format("Playing, but nothing runs {}{}: this editor was started without the project's scripts. Project, Open with its scripts.",
+                                idle.front(), idle.size() > 1 ? std::format(" and {} more", idle.size() - 1) : std::string()), true);
+            else if (kgraph::FirstCamera(Doc().World()).IsNull()) Say("There is no camera in the scene: it plays seen from where the scene view's default is.", true);
             else Say("Playing.");
         }
         _play.SetPlaying(true);
@@ -1157,6 +1233,7 @@ class $NAME : Script() {
                     } },
                     { "Project", {
                         { "Run", needsProject([this] { _session->Run(); }) },
+                        { "Open with its scripts", [this] { _session->ReopenWithScripts(); }, !_session->ScriptsNotRunning().empty() },
                     } },
                     { "Graph", {
                         { "Add node...   Ctrl+Space", [this] { SetState([&] { _dialog = Dialog::eAddNode; _addAt = { 80.f, 80.f }; _filter.clear(); _newId.clear(); }); } },
@@ -1855,6 +1932,13 @@ class $NAME : Script() {
                     if (const auto* report = runtime.ReportOf(node.id); report && (report->skipped > 0 || (report->ran == 0 && !report->why.empty())))
                         rows.push_back(Problem(report->skipped > 0 ? std::format("{}: {} passed by. {}", node.id, report->skipped, report->why)
                                                                    : std::format("{}: {}", node.id, report->why)).OnTap([this, id = node.id] { _session->GoTo(id); }));
+                // Scripts that are in the project and that nothing is running: pressed, the editor is opened with them.
+                if (const auto idle = _session->ScriptsNotRunning(); !idle.empty()) {
+                    std::string names;
+                    for (const auto& name : idle) names += std::format("{}{}", names.empty() ? "" : ", ", name);
+                    rows.push_back(Problem(std::format("Nothing is running the project's scripts ({}): this editor was started without them. Press this, or Project, Open with its scripts.", names))
+                                       .OnTap([this] { _session->ReopenWithScripts(); }));
+                }
                 for (const auto& note : Doc().Notes()) rows.push_back(kgui::Muted(note));
                 if (rows.empty()) rows.push_back(kgui::Muted("Nothing is wrong."));
                 return Panel(std::move(rows));

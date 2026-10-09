@@ -79,8 +79,21 @@ namespace keditor
          *        own. False without a project, or when the scene could not be saved.
          */
         bool Run();
-        /** @brief What Run runs: the player, then the project's folder. Empty without a project. */
+        /**
+         * @brief What Run runs: whatever runs the project with its scripts — its own Gradle build for scripts in
+         *        Kotlin, the C# runner for scripts in C# — or the player, for a project with none. Empty without a project.
+         */
         [[nodiscard]] std::string RunCommand() const;
+        /** @brief The same, for the project in the editor: empty when it has no scripts, and so needs nothing but this editor. */
+        [[nodiscard]] std::string EditCommand() const;
+        /**
+         * @brief The project's scripts that nothing is running: files in its `scripts` folder whose class is no
+         *        component with its functions in place. What an editor started without the scripts' host has —
+         *        the scene plays, and they do nothing.
+         */
+        [[nodiscard]] std::vector<std::string> ScriptsNotRunning();
+        /** @brief Saves, starts the editor again on this project with its scripts, and closes this one. */
+        bool ReopenWithScripts();
 
         /**
          * @brief Makes an input a node can do without one the node shows: asked for, and not yet given. What a node
@@ -136,7 +149,7 @@ namespace keditor
 
         kecs::Entity Duplicate(kecs::Entity entity);
         void Delete(kecs::Entity entity);
-        /** @brief The objects there are to make: the project's `objects/*.json`, by name. Read again by LoadObjects. */
+        /** @brief The objects there are to make: the files of the project's `objects` folder, by name. Read again by LoadObjects. */
         [[nodiscard]] const std::vector<ObjectTemplate>& Objects() const { return _objects; }
         void LoadObjects();
         kecs::Entity Create(const ObjectTemplate& object, kecs::Entity parent = kecs::NullEntity);

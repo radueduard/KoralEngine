@@ -41,7 +41,8 @@ The menus:
 - **View** frames what is picked, looks through the scene's camera, and chooses the gizmo.
 - **Assets** makes a new shader or a new script: a name, a kind, and a file in the project to start from.
 - **Scene** plays, pauses and stops.
-- **Project, Run** saves and starts `koral-play` on the project (Control+R).
+- **Project, Run** saves and runs the project (Control+R): with its scripts' own runner when it has scripts,
+  with `koral-play` when it has none. **Open with its scripts** starts the editor again through that runner.
 - **Graph** and **Entity** add a node and an entity.
 
 ### Passes
@@ -115,6 +116,11 @@ A scene in the editor stands still until **Play**: then its scripts run, and it 
 scene's camera. **Pause** holds it. **Stop** puts every entity back as it was when Play was
 pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
 plays.
+
+Scripts are run by a host the editor is started through (`./gradlew edit` for Kotlin, `koral-engine-dotnet
+--edit` for C#), not by the editor itself. An editor started any other way has the scripts' components as
+data and runs none of them: the Problems panel says so, Play says so, and **Project, Open with its
+scripts** saves and reopens the editor through the host.
 
 ### Objects
 

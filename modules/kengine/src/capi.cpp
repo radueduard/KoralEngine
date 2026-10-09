@@ -9,6 +9,7 @@
 
 #include <kecs/json.h>
 #include <keditor/document.h>
+#include <keditor/play.h>
 
 namespace {
     thread_local std::string t_error;
@@ -80,6 +81,19 @@ const char* kengine_document_json(KengineDocument* document)
     return Guarded([&] { return Keep(Doc(document).ToJson()); }, static_cast<const char*>(nullptr));
 }
 
+bool kengine_playing(KengineDocument* document)
+{
+    return Guarded([&] { const auto* scene = keditor::PlayScene::Of(Doc(document)); return scene && scene->Playing(); }, false);
+}
+bool kengine_set_playing(KengineDocument* document, const bool playing)
+{
+    return Guarded([&] {
+        auto* scene = keditor::PlayScene::Of(Doc(document));
+        if (!scene) return false;
+        scene->SetPlaying(playing);
+        return true;
+    }, false);
+}
 bool kengine_document_save(KengineDocument* document, const char* path)
 {
     return Guarded([&] {

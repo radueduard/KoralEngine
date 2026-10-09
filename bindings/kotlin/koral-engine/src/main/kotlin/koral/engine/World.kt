@@ -43,6 +43,10 @@ class World internal constructor(internal val document: MemorySegment) {
     /** The scene this is the engine's side of: its window, its time. Null for a world not found through [of]. */
     var scene: Scene? = null
         private set
+    /** Whether the scene plays: its scripts are updated. On for a scene run on its own; in an editor, when Play is pressed. */
+    var playing: Boolean
+        get() = Native.kengine_playing.invokeExact(document) as Boolean
+        set(value) { val ignored = Native.kengine_set_playing.invokeExact(document, value) as Boolean }
     /** The keys, the mouse and the gamepads of the scene's window: what a script that is steered reads. */
     val input: Input get() = scene?.input ?: throw EngineException("this world was not found through a scene: it has no input")
 

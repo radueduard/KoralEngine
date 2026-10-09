@@ -124,5 +124,6 @@ if(TARGET keditor)
         KEDITOR_MAVEN="${CMAKE_BINARY_DIR}/maven"
         KEDITOR_ENGINE_LIBRARY="$<TARGET_FILE:koral-engine>"
         KEDITOR_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}"
-        KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin")
+        KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin"
+        KEDITOR_DOTNET_RUNNER="${CMAKE_BINARY_DIR}/dotnet/koral-engine-dotnet")
 endif()
