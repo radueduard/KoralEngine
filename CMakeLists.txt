@@ -23,8 +23,35 @@ endif()
 add_subdirectory(modules/kecs)
 add_subdirectory(modules/kscript)
 
-# What runs on the GPU needs the Koral framework: point CMAKE_PREFIX_PATH at an SDK (a Koral checkout's
-# stage/debug, say). Without one, only what stands alone is built.
+# What runs on the GPU needs the Koral framework: an SDK, which is a Koral checkout's `stage/debug` or
+# `stage/release`. The one that matches this build is found by itself when the checkout is known —
+# -DKORAL_FRAMEWORK_DIR=<checkout>, the KORAL_FRAMEWORK_DIR environment variable, or a checkout beside this one —
+# so that a Debug build and a Release build each use their own. CMAKE_PREFIX_PATH or Koral_DIR, given, win.
+# Without an SDK, only what stands alone is built.
+set(KORAL_FRAMEWORK_DIR "" CACHE PATH "A checkout of the Koral framework, whose stage/<debug|release> is the SDK to build against")
+if(NOT KORAL_FRAMEWORK_DIR)
+    foreach(candidate "$ENV{KORAL_FRAMEWORK_DIR}" "${CMAKE_SOURCE_DIR}/../CLionProjects/GFX" "${CMAKE_SOURCE_DIR}/../GFX" "${CMAKE_SOURCE_DIR}/../Koral")
+        if(candidate AND EXISTS "${candidate}/stage")
+            get_filename_component(candidate "${candidate}" ABSOLUTE)
+            set(KORAL_FRAMEWORK_DIR "${candidate}" CACHE PATH "A checkout of the Koral framework, whose stage/<debug|release> is the SDK to build against" FORCE)
+            break()
+        endif()
+    endforeach()
+endif()
+if(KORAL_FRAMEWORK_DIR AND NOT Koral_DIR AND NOT CMAKE_PREFIX_PATH)
+    # A build that is not Debug is one of the optimised ones: they all go with the framework's release SDK.
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(KORAL_ENGINE_SDK_KIND debug)
+    else()
+        set(KORAL_ENGINE_SDK_KIND release)
+    endif()
+    if(EXISTS "${KORAL_FRAMEWORK_DIR}/stage/${KORAL_ENGINE_SDK_KIND}/lib/cmake/Koral")
+        list(APPEND CMAKE_PREFIX_PATH "${KORAL_FRAMEWORK_DIR}/stage/${KORAL_ENGINE_SDK_KIND}")
+        message(STATUS "Koral SDK: ${KORAL_FRAMEWORK_DIR}/stage/${KORAL_ENGINE_SDK_KIND}")
+    else()
+        message(WARNING "The Koral checkout at ${KORAL_FRAMEWORK_DIR} has no ${KORAL_ENGINE_SDK_KIND} SDK staged: build its `stage` target in that configuration.")
+    endif()
+endif()
 find_package(Koral CONFIG QUIET)
 if(Koral_FOUND)
     message(STATUS "Koral ${Koral_VERSION} found: building what needs it")

@@ -148,6 +148,7 @@ namespace keditor
         if (command.empty()) { Say("The project has no scripts: there is nothing more to open it with.", true); return false; }
         if (InPlayMode()) Stop();
         if (!Save()) return false;
+        if (ScriptLanguage(_project) == 'k') WriteKotlinBuild(_project.directory, _project.name);    // this build of the engine
 #ifdef _WIN32
         const std::string detached = "start \"\" " + command;
 #else
@@ -163,6 +164,9 @@ namespace keditor
     {
         if (!_hasProject) { Say("There is no project to run yet: File, New project.", true); return false; }
         if (!Save()) return false;
+        // Scripts in Kotlin are run by the project's build, which is told where this build of the engine is: the
+        // one that is open, a debug build or a release one.
+        if (ScriptLanguage(_project) == 'k') WriteKotlinBuild(_project.directory, _project.name);
 #ifdef _WIN32
         const std::string command = "start \"\" " + RunCommand();
 #else
