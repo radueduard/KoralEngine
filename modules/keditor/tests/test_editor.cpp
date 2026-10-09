@@ -874,6 +874,73 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     EXPECT_NE(saved.find("\"pass\": \"sky\""), std::string::npos);
 }
 
+// A shader and a script are made from the editor: a file in the project to start from, which a pipeline can name
+// as it is and a script host loads.
+TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "assets";
+    std::filesystem::remove_all(directory);
+    Open();
+    EXPECT_FALSE(Session().NewShader("glow", "Compute")) << "there is no project for it to go in";
+    EXPECT_TRUE(Session().Failed());
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+
+    for (const auto& [kind, what] : keditor::Session::ShaderKinds()) EXPECT_FALSE(what.empty()) << kind;
+    ASSERT_TRUE(Session().NewShader("glow", "Compute")) << Session().Status();
+    ASSERT_TRUE(Session().NewShader("paint", "Mesh")) << Session().Status();
+    ASSERT_TRUE(Session().NewShader("invert", "Fullscreen")) << Session().Status();
+    for (const char* name : { "glow", "paint", "invert" }) EXPECT_TRUE(std::filesystem::exists(directory / "shaders" / (std::string(name) + ".slang"))) << name;
+    EXPECT_TRUE(Shows("Made shaders/invert.slang"));
+    EXPECT_FALSE(Session().NewShader("glow", "Compute")) << "one of that name is there";
+    EXPECT_FALSE(Session().NewShader("2 fast", "Compute")) << "not a name a module can have";
+    EXPECT_FALSE(Session().NewShader("other", "Tessellated")) << "no such kind";
+    const auto modules = Session().ShaderModules();
+    EXPECT_NE(std::ranges::find(modules, "paint"), modules.end()) << "there for a pipeline to name";
+
+    // Each is a shader as it is: a pipeline that names it is built.
+    Session().ShowPass("scene");
+    const std::string glow = Doc().AddNode("ComputePipeline", 0, 0, "glow", "scene");
+    Doc().SetInput(glow, "compute.module", "glow");
+    Doc().SetInput(glow, "compute.entry", "computeMain");
+    EXPECT_TRUE(Doc().Runtime().Status(glow)->ok) << Doc().Runtime().Status(glow)->error;
+    const std::string paint = Doc().AddNode("GraphicsPipeline", 0, 0, "paint", "scene");
+    Doc().SetInput(paint, "vertex.module", "paint");
+    Doc().SetInput(paint, "vertex.entry", "vertex");
+    Doc().SetInput(paint, "fragment.module", "paint");
+    Doc().SetInput(paint, "fragment.entry", "fragment");
+    Doc().Connect("shape", "layout", paint, "vertex.layout");
+    Doc().Connect("sky target", "out", paint, "framebuffer");
+    Doc().Connect("frame data", "out", paint, "param.frame");
+    ASSERT_TRUE(Doc().Runtime().Status(paint)->ok) << Doc().Runtime().Status(paint)->error;
+    const kecs::ComponentId component = Doc().Runtime().ComponentOf(paint);
+    ASSERT_NE(component, kecs::NoComponent);
+    ASSERT_EQ(Doc().World().Describe(component).fields.size(), 1u) << "the shader's own push constant is the component's field";
+    EXPECT_EQ(Doc().World().Describe(component).fields.front().name, "color");
+    const std::string invert = Doc().AddNode("GraphicsPipeline", 0, 0, "invert", "scene");
+    Doc().SetInput(invert, "vertex.module", "invert");
+    Doc().SetInput(invert, "vertex.entry", "vertex");
+    Doc().SetInput(invert, "fragment.module", "invert");
+    Doc().SetInput(invert, "fragment.entry", "fragment");
+    Doc().Connect("overlay target", "out", invert, "framebuffer");
+    Doc().Connect("ids", "out", invert, "param.source");
+    EXPECT_TRUE(Doc().Runtime().Status(invert)->ok) << Doc().Runtime().Status(invert)->error;
+
+    // A script, in either language: a file with a class of its name.
+    ASSERT_TRUE(Session().NewScript("Roller", "C#")) << Session().Status();
+    ASSERT_TRUE(Session().NewScript("Drifter", "Kotlin")) << Session().Status();
+    const auto text = [&](const char* file) {
+        std::ifstream in(directory / "scripts" / file);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    };
+    EXPECT_NE(text("Roller.cs").find("public sealed class Roller : Script"), std::string::npos);
+    EXPECT_NE(text("Drifter.kt").find("class Drifter : Script()"), std::string::npos);
+    EXPECT_EQ(text("Roller.cs").find("$NAME"), std::string::npos);
+    EXPECT_FALSE(Session().NewScript("Roller", "Kotlin")) << "a script of that name is there, in whichever language";
+    EXPECT_FALSE(Session().NewScript("lit", "C#")) << "a component is called that already";
+    EXPECT_FALSE(Session().NewScript("My Script", "C#"));
+    EXPECT_FALSE(Session().NewScript("Thing", "Lua"));
+}
+
 // Not a test: sets a project up with the standard scene and the entities a file lists, when told where.
 //   KEDITOR_WRITE_PROJECT=<project folder> KEDITOR_ENTITIES=<json list of entities> keditor_tests --gtest_also_run_disabled_tests --gtest_filter='*WritesAProject*'
 TEST_F(EditorTest, DISABLED_WritesAProject) {

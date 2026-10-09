@@ -30,6 +30,24 @@ float Number(Entity entity, string component, string field) => float.Parse(world
 
 // ---- a script is a component, and its methods are called on each entity that has it ----------------------------
 
+// What the editor's Assets, New script makes: as it is, it has to compile and to turn its entity.
+Write("Roller.cs", """
+    public sealed class Roller : Script
+    {
+        public float Speed;         // a field starts at zero: set it in the inspector, or in Start
+
+        protected override void Start()
+        {
+            if (Speed == 0) Speed = 45;
+        }
+
+        protected override void Update(float delta)
+        {
+            // Turns its entity about the up axis, so many degrees a second.
+            World.SetRotation(Entity, World.RotationOf(Entity) + new Vec3(0, Speed * delta, 0));
+        }
+    }
+    """);
 Write("Spin.cs", """
     public sealed class Spin : Script
     {
@@ -80,10 +98,19 @@ Write("Watcher.cs", """
     """);
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
-Check(host.Scripts.Order().SequenceEqual(["Feeder", "Spin", "Watcher"]), $"each is a script: {string.Join(", ", host.Scripts)}");
+Check(host.Scripts.Order().SequenceEqual(["Feeder", "Roller", "Spin", "Watcher"]), $"each is a script: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 
 var wheel = world.Create("Wheel");
+
+{
+    var barrel = world.Create("Barrel");
+    Check(world.Add(barrel, "Roller"), "the script the editor makes is a component");
+    Frames(3);
+    Near(Number(barrel, "Roller", "Speed"), 45, "it started");
+    Check(world.RotationOf(barrel).Y > 0, "and turns its entity");
+    world.Destroy(barrel);
+}
 
 // Every entity has a name, a place in a hierarchy and a transform: the world's own, and no components.
 {

@@ -142,6 +142,20 @@ namespace keditor
         kecs::Entity Create(const ObjectTemplate& object, kecs::Entity parent = kecs::NullEntity);
         /** @brief Saves @p entity, and what is under it, as an object of its name: a file among the project's objects. */
         bool SaveAsObject(kecs::Entity entity);
+        // ---- files ------------------------------------------------------------------------------------------
+
+        /** @brief The kinds of shader there are to start from, by name, each with what it is. */
+        [[nodiscard]] static const std::vector<std::pair<std::string, std::string>>& ShaderKinds();
+        /** @brief The languages a script is written in, the same way. */
+        [[nodiscard]] static const std::vector<std::pair<std::string, std::string>>& ScriptKinds();
+        /**
+         * @brief Makes a shader of @p kind, one of ShaderKinds, called @p name: `shaders/<name>.slang`, a module a
+         *        pipeline node then names. False, saying why, for a name that is not one or a file that is there.
+         */
+        bool NewShader(const std::string& name, const std::string& kind);
+        /** @brief Makes a script called @p name in @p language, one of ScriptKinds: `scripts/<name>.cs`, or `.kt`. */
+        bool NewScript(const std::string& name, const std::string& language);
+
         /**
          * @brief Starts the scene over as the standard one: the graph that draws meshes lit under a sky, and a sky,
          *        a camera, a sun and a sphere. Needs a project, for its shaders to be in.

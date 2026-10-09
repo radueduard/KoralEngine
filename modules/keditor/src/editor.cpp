@@ -392,6 +392,207 @@ namespace keditor
         return true;
     }
 
+    // ---- files ----------------------------------------------------------------------------------------------------
+
+    namespace {
+        /** Whether text is a name code can use: a letter or an underscore, then letters, digits and underscores. */
+        bool IsIdentifier(const std::string& name)
+        {
+            if (name.empty() || (!std::isalpha(static_cast<unsigned char>(name[0])) && name[0] != '_')) return false;
+            return std::ranges::all_of(name, [](const unsigned char c) { return std::isalnum(c) != 0 || c == '_'; });
+        }
+
+        /** `text` with every `$NAME` made @p name. */
+        std::string Named(std::string text, const std::string& name)
+        {
+            for (std::size_t at = text.find("$NAME"); at != std::string::npos; at = text.find("$NAME", at + name.size())) text.replace(at, 5, name);
+            return text;
+        }
+
+        constexpr const char* ComputeShader = R"slang(// $NAME: a compute shader. Wire an image to a ComputePipeline's `param.target`, and run it with a Dispatch
+// whose `cover` is `target`.
+module $NAME;
+
+[[vk::image_format("rgba8")]] RWTexture2D<float4> target;
+
+// A value the pipeline's node sets: `constant.strength`.
+[vk::constant_id(0)] const float strength = 1.0;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void computeMain(uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    target.GetDimensions(width, height);
+    if (id.x >= width || id.y >= height) return;
+    const float2 uv = (float2(id.xy) + 0.5) / float2(width, height);
+    target[id.xy] = float4(uv * strength, 0.0, 1.0);
+}
+)slang";
+
+        constexpr const char* MeshShader = R"slang(// $NAME: draws a mesh for each entity. A GraphicsPipeline that names it makes a component, called after the
+// pipeline's node, with a field for each push constant below that is not the engine's: here, `color`. An entity with
+// that component and a Mesh is drawn.
+module $NAME;
+
+import engineCommon;        // the frame: wire the frame pass's `frame data` to `param.frame`
+
+struct Vertex {
+    float3 position : POSITION;
+    float3 normal : NORMAL;
+};
+
+struct RasterInfo {
+    float4 position : SV_Position;
+    float3 normal;
+};
+
+struct DrawData {
+    float4x4 model;         // the engine's: where the entity is in the world
+    float3 color;           // the entity's own: a field of the component
+};
+[[vk::push_constant]] ConstantBuffer<DrawData> draw;
+
+[shader("vertex")]
+RasterInfo vertex(Vertex vertex)
+{
+    RasterInfo raster;
+    const float4 world = mul(float4(vertex.position, 1.0), draw.model);
+    raster.position = mul(world, frame.viewProjection);
+    raster.normal = mul(float4(vertex.normal, 0.0), draw.model).xyz;
+    return raster;
+}
+
+[shader("fragment")]
+float4 fragment(RasterInfo raster) : SV_Target
+{
+    const float facing = saturate(dot(normalize(raster.normal), frame.sunDirection.xyz)) * 0.8 + 0.2;
+    return float4(draw.color * facing, 1.0);
+}
+)slang";
+
+        constexpr const char* FullscreenShader = R"slang(// $NAME: one triangle over the whole picture, and a fragment shader that reads another picture: what a pass that
+// works on a picture is made of. Its pipeline needs no vertex layout, and its Draw no mesh. Wire the picture it reads
+// to `param.source`, and draw into another.
+module $NAME;
+
+Texture2D<float4> source;
+
+struct RasterInfo {
+    float4 position : SV_Position;
+};
+
+[shader("vertex")]
+RasterInfo vertex(uint index : SV_VertexID)
+{
+    const float2 corner = float2((index << 1) & 2, index & 2);
+    RasterInfo raster;
+    raster.position = float4(corner * 2.0 - 1.0, 0.0, 1.0);
+    return raster;
+}
+
+[shader("fragment")]
+float4 fragment(RasterInfo raster) : SV_Target
+{
+    const float4 color = source.Load(int3(int2(raster.position.xy), 0));
+    return float4(1.0 - color.rgb, color.a);    // the picture, inverted: change this
+}
+)slang";
+
+        constexpr const char* CSharpScript = R"cs(// $NAME: a script. Its public fields are a component — shown in the inspector, saved with the scene — and its
+// methods are called for each entity that has it, while the scene plays. Add it to an entity in the inspector.
+public sealed class $NAME : Script
+{
+    public float Speed;         // a field starts at zero: set it in the inspector, or in Start
+
+    protected override void Start()
+    {
+        if (Speed == 0) Speed = 45;
+    }
+
+    protected override void Update(float delta)
+    {
+        // Turns its entity about the up axis, so many degrees a second.
+        World.SetRotation(Entity, World.RotationOf(Entity) + new Vec3(0, Speed * delta, 0));
+    }
+}
+)cs";
+
+        constexpr const char* KotlinScript = R"kt(// $NAME: a script. Its public vars are a component — shown in the inspector, saved with the scene — and its
+// functions are called for each entity that has it, while the scene plays. Add it to an entity in the inspector.
+import koral.Vec3
+import koral.engine.Script
+
+class $NAME : Script() {
+    var speed = 0f              // a var starts at zero: set it in the inspector, or in start
+
+    override fun start() {
+        if (speed == 0f) speed = 45f
+    }
+
+    override fun update(delta: Float) {
+        // Turns its entity about the up axis, so many degrees a second.
+        world.setRotation(entity, world.rotationOf(entity) + Vec3(0f, speed * delta, 0f))
+    }
+}
+)kt";
+    }
+
+    const std::vector<std::pair<std::string, std::string>>& Session::ShaderKinds()
+    {
+        static const std::vector<std::pair<std::string, std::string>> kinds {
+            { "Compute", "Works on an image, a group of pixels at a time: for a ComputePipeline and a Dispatch." },
+            { "Mesh", "Draws a mesh for each entity that has the component it makes: for a GraphicsPipeline and a Draw." },
+            { "Fullscreen", "One triangle over the whole picture, reading another picture: for a pass that works on one." },
+        };
+        return kinds;
+    }
+
+    const std::vector<std::pair<std::string, std::string>>& Session::ScriptKinds()
+    {
+        static const std::vector<std::pair<std::string, std::string>> kinds {
+            { "C#", "Compiled when the project starts, and again whenever it is saved. Run the project with koral-engine-dotnet." },
+            { "Kotlin", "Compiled by the project's own Gradle build, which the scripts folder has to be a source of." },
+        };
+        return kinds;
+    }
+
+    bool Session::NewShader(const std::string& name, const std::string& kind)
+    {
+        if (!_hasProject) { Say("A shader goes in a project's shaders folder: File, New project.", true); return false; }
+        if (!IsIdentifier(name)) { Say(std::format("'{}' is not a name a shader module can have: letters, digits and underscores, not starting with a digit.", name), true); return false; }
+        const char* source = kind == "Compute" ? ComputeShader : kind == "Mesh" ? MeshShader : kind == "Fullscreen" ? FullscreenShader : nullptr;
+        if (!source) { Say(std::format("'{}' is no kind of shader.", kind), true); return false; }
+        const auto path = _project.ShaderDirectory() / (name + ".slang");
+        std::error_code ignored;
+        if (std::filesystem::exists(path, ignored)) { Say(std::format("There is a shader called {} already.", name), true); return false; }
+        std::filesystem::create_directories(path.parent_path(), ignored);
+        // A mesh shader reads the frame the standard shaders declare: they are the project's from here on.
+        if (kind == "Mesh") WriteStandardShaders(_project.ShaderDirectory());
+        { std::ofstream out(path, std::ios::binary); out << Named(source, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
+        Say(std::format("Made shaders/{}.slang: a pipeline node names it as its module, '{}'.", name, name));
+        return true;
+    }
+
+    bool Session::NewScript(const std::string& name, const std::string& language)
+    {
+        if (!_hasProject) { Say("A script goes in a project's scripts folder: File, New project.", true); return false; }
+        if (!IsIdentifier(name)) { Say(std::format("'{}' is not a name a script's class can have: letters, digits and underscores, not starting with a digit.", name), true); return false; }
+        const bool kotlin = language == "Kotlin";
+        if (!kotlin && language != "C#") { Say(std::format("'{}' is not a language scripts are written in.", language), true); return false; }
+        if (Doc().World().Find(name) != kecs::NoComponent) { Say(std::format("There is a component called {} already: a script is one, by its class's name.", name), true); return false; }
+        const auto directory = _project.directory / "scripts";
+        std::error_code ignored;
+        for (const char* ending : { ".cs", ".kt" })
+            if (std::filesystem::exists(directory / (name + ending), ignored)) { Say(std::format("There is a script called {} already.", name), true); return false; }
+        std::filesystem::create_directories(directory, ignored);
+        const auto path = directory / (name + (kotlin ? ".kt" : ".cs"));
+        { std::ofstream out(path, std::ios::binary); out << Named(kotlin ? KotlinScript : CSharpScript, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
+        Say(kotlin ? std::format("Made scripts/{}.kt: it is compiled by the project's Gradle build.", name)
+                   : std::format("Made scripts/{}.cs: it is a component, {}, once the project runs with koral-engine-dotnet.", name, name));
+        return true;
+    }
+
     bool Session::NewStandardScene()
     {
         if (!_hasProject) { Say("The standard scene's shaders go in a project: File, New project.", true); return false; }
@@ -861,7 +1062,7 @@ namespace keditor
             }
 
         private:
-            enum class Dialog { eNone, eAddNode, eNewProject, eOpenProject };
+            enum class Dialog { eNone, eAddNode, eNewProject, eOpenProject, eNewShader, eNewScript };
 
             Document& Doc() { return _session->Doc(); }
 
@@ -943,6 +1144,10 @@ namespace keditor
                         { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eRotate, "Rotate"), [this] { _session->SetGizmo(true, kor::GizmoMode::eRotate); } },
                         { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eScale, "Scale"), [this] { _session->SetGizmo(true, kor::GizmoMode::eScale); } },
                     } },
+                    { "Assets", {
+                        { "New shader...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; }); }) },
+                        { "New script...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewScript; _newId.clear(); _newKind = 0; }); }) },
+                    } },
                     { "Scene", {
                         _session->IsPlaying() ? kui::MenuItem { "Pause", [this] { _session->Pause(); } }
                                               : kui::MenuItem { playMode ? "Resume" : "Play", [this] { _session->StartPlaying(); } },
@@ -973,8 +1178,34 @@ namespace keditor
                     return kgui::FileBrowser({ .directories = true, .confirm = "Open" },
                         [this](const std::filesystem::path& chosen) { _session->OpenProject(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
                         [this] { SetState([&] { _dialog = Dialog::eNone; }); });
+                case Dialog::eNewShader: return NewFileDialog("A new shader", "Its name: the module a pipeline names", Session::ShaderKinds(), true);
+                case Dialog::eNewScript: return NewFileDialog("A new script", "Its name: the class, and the component", Session::ScriptKinds(), false);
                 default: return {};
                 }
+            }
+
+            /** A name and one of a few kinds, for a file to be made from: a shader, or a script. */
+            kui::Widget NewFileDialog(const char* title, const char* placeholder, const std::vector<std::pair<std::string, std::string>>& kinds, const bool shader)
+            {
+                if (_newKind >= static_cast<int>(kinds.size())) _newKind = 0;
+                const auto make = [this, kinds, shader] {
+                    const std::string& kind = kinds[static_cast<std::size_t>(_newKind)].first;
+                    if (shader ? _session->NewShader(_newId, kind) : _session->NewScript(_newId, kind)) SetState([&] { _dialog = Dialog::eNone; });
+                    else SetState();
+                };
+                std::vector<kui::Widget> rows;
+                rows.push_back(Heading(title));
+                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = _newId, .placeholder = placeholder,
+                                                                      .onChanged = [this](const std::string& typed) { _newId = typed; },
+                                                                      .onSubmitted = [this, make](const std::string& typed) { _newId = typed; make(); }, .width = 420.f }));
+                for (std::size_t i = 0; i < kinds.size(); ++i) {
+                    rows.push_back(kui::RadioButton(static_cast<int>(i) == _newKind, [this, i] { SetState([&] { _newKind = static_cast<int>(i); }); }, kinds[i].first));
+                    rows.push_back(kui::Padding(kui::EdgeInsets { 28.f, 0.f, 0.f, 4.f }, kgui::Line(kinds[i].second, kui::TextStyle {}.SetColor(kui::Theme::Current().textMuted).SetSize(12.f))));
+                }
+                if (_session->Failed()) rows.push_back(Problem(_session->Status()));
+                rows.push_back(kui::Row({ kui::Button("Make it", make), kui::Button("Cancel", [this] { SetState([&] { _dialog = Dialog::eNone; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)) },
+                                        kui::FlexOptions {}.SetGap(8.f)));
+                return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(8.f)).Width(460.f));
             }
 
             void AddOf(const std::string& type)
@@ -1633,6 +1864,7 @@ namespace keditor
             Dialog _dialog = Dialog::eNone;
             kor::Vec2 _addAt {};
             std::string _filter, _newId;
+            int _newKind = 0;
         };
     }
 

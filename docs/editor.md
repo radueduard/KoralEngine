@@ -39,6 +39,7 @@ The menus:
 - **Edit** duplicates, moves to the top, saves as an object, or deletes what is picked.
 - **Create** makes an entity from one of the project's objects, at the top or under what is picked.
 - **View** frames what is picked, looks through the scene's camera, and chooses the gizmo.
+- **Assets** makes a new shader or a new script: a name, a kind, and a file in the project to start from.
 - **Scene** plays, pauses and stops.
 - **Project, Run** saves and starts `koral-play` on the project (Control+R).
 - **Graph** and **Entity** add a node and an entity.
@@ -59,6 +60,21 @@ shows the whole graph.
   by name, turns to the page it is on.
 
 A node wired straight to one on another page, with nothing imported, shows that node greyed beside it.
+
+### New shaders and scripts
+
+**Assets, New shader** asks for a name and a kind, and writes `shaders/<name>.slang`:
+
+| Kind | What it starts as |
+|---|---|
+| Compute | Fills an image wired to `param.target`, with a constant the node sets. For a ComputePipeline and a Dispatch. |
+| Mesh | Draws a mesh for each entity, with the frame's camera and one field of its own, `color`. For a GraphicsPipeline and a Draw. It imports `engineCommon`, which is written beside it when not there. |
+| Fullscreen | One triangle over the picture, reading another picture at `param.source`. Needs no vertex layout and no mesh. |
+
+The name is the module a pipeline node then picks. **Assets, New script** writes `scripts/<Name>.cs` (or
+`.kt`): a class of that name with one field and an `Update`, which is a component of that name once the
+project runs with its scripts (see [scripts](scripts.md)). A name has to be one code can use, and not one a
+shader, a script or a component already has.
 
 ### The standard scene
 

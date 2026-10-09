@@ -121,7 +121,8 @@ one multiplies with the vector first: `mul(float4(position, 1.0), light.viewProj
 
 ## Running a project with scripts
 
-**C#.** Scripts are the `.cs` files in the project's `scripts` folder. Nothing else is needed: they are
+**C#.** Scripts are the `.cs` files in the project's `scripts` folder; the editor's **Assets, New script**
+makes one to start from. Nothing else is needed: they are
 compiled when the project starts.
 
 ```
@@ -169,7 +170,7 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 ## Not yet
 
 - **Text, lists and resources as fields.** A script reaches a resource through `World`, by node id.
-- **No play and stop.** Scripts run whenever the scene does, in the editor too. Start the editor with
+- **Scripts run only while the scene plays** in the editor (Play, in the Scene panel). Start the editor with
   `koral-engine-dotnet --edit`: plain `koral-editor` runs no scripts.
 - **The inspector doesn't follow a script.** A field a script changes each frame shows its new value only
   when something else makes the panel rebuild.
