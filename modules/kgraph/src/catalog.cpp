@@ -151,7 +151,9 @@ namespace kgraph
                 { "GenerateMipmaps", "mip mipmap levels downsample" },
                 { "Dispatch", "run compute execute kernel indirect" },
                 { "Draw", "render rasterize mesh entities triangle fullscreen indirect instanced viewport scissor mesh tasks" },
-                { "TraceRays", "ray tracing raygen rtx path trace" }, { "Resolve", "multisample msaa antialias samples" },
+                { "TraceRays", "ray tracing raygen rtx path trace" },
+                { "SceneView", "camera view projection lights sky sun frame uniform scene" }, { "Pick", "select click id entity mouse read back" },
+                { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
                 { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
                 { "CopyImageToBuffer", "download read back texels image buffer transfer" },
                 { "Number", "float scalar constant value" }, { "Bool", "boolean flag true false constant" }, { "String", "text name constant" },
@@ -280,7 +282,24 @@ namespace kgraph
                   "struct KoralVertexLayout", "How a mesh's vertices are laid out, packed in the order given: what a pipeline's vertex.layout and a Mesh's vertexLayout take.");
 
             // ---- the screen, and a node by name -------------------------------------------------------------------
-            types.push_back({ "Screen", "Resources", {}, { ResourcePort("out", "Image") }, "The scene's window: what a pass writes to show something.", nullptr });
+            {
+                const auto given = [](std::string name, std::string type, std::string doc) {
+                    Port port { std::move(name), PortKind::eValue, std::move(type), false, std::move(doc), nullptr };
+                    port.optional = true;
+                    return port;
+                };
+                types.push_back({ "Screen", "Resources", {},
+                                  { ResourcePort("out", "Image"), given("extent", "vector", "How big the window is: its width, its height, and 1. An image sized by it follows the window."),
+                                    given("size", "vector", "The window's width and height."), given("width", "number", "How many pixels across the window is."),
+                                    given("height", "number", "How many pixels down.") },
+                                  "The scene's window: what a pass writes to show something.", nullptr });
+                Port extent { "extent", PortKind::eValue, "vector", false, "How big the picture it is for is, its width and height: what the camera's aspect is worked out from. Square, when not given.", nullptr };
+                extent.optional = true;
+                types.push_back({ "SceneView", "Resources", { std::move(extent) },
+                                  { ResourcePort("frame", "Buffer", "What the frame is seen from and lit by: a uniform block, laid out as the scene shaders' FrameData."),
+                                    ResourcePort("lights", "Buffer", "Every light in the scene, up to 64: an array, laid out as the scene shaders' Light.") },
+                                  "The scene as shaders see it, written each frame from the world: the camera (the first entity with a Camera, or the editor's view), the sky and its sun, and every light.", nullptr });
+            }
             types.push_back({ "Primitive", "Resources",
                               { chosen({ "shape", PortKind::eValue, "string", false,
                                          "eCube, eSphere, ePlane (facing up), eCylinder, eCone, eCapsule and eTorus, each about a unit across; eQuad (a unit square facing +z) and eTriangle. All are centred on the origin.", nullptr },
@@ -344,6 +363,12 @@ namespace kgraph
             }
             types.push_back({ "GenerateMipmaps", "Passes", { ResourcePort("image", "Image") }, {},
                               "Fills an image's smaller mip levels from its largest.", nullptr });
+            types.push_back({ "Pick", "Passes", { ResourcePort("ids", "Image", "An image of which entity is where: one a pipeline draws its `entityId` push constant into, as a number of 32 bits.") }, {},
+                              "Lets a click on the picture pick an entity: reads back the pixel asked about. It costs nothing in a frame nobody asks.", nullptr });
+            types.push_back({ "DebugDraw", "Passes",
+                              { ResourcePort("image", "Image", "The picture they are drawn over."),
+                                optional(ResourcePort("depth", "Image", "A depth image to test them against: on top of everything, when not wired.")) }, {},
+                              "Draws the scene's debug shapes over a picture, seen as a SceneView sees it: an editor's gizmo, a camera's reach, a light's.", nullptr });
             const Port with = optional(hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have to be run for: tags, mostly.", nullptr }, "components"));
             const Port without = optional(hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components"));
             types.push_back({ "Dispatch", "Passes",

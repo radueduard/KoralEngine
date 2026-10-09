@@ -6,6 +6,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -34,10 +35,24 @@ namespace keditor
         bool Open(const std::filesystem::path& file, std::string& error);
         void New();
 
+        /**
+         * @brief Whether the scene plays: its scripts are updated and its own systems (a Spin) run. On, to begin
+         *        with — a scene run on its own plays. An editor turns it off until it is told to play.
+         */
+        void SetPlaying(const bool playing) { _playing = playing; }
+        [[nodiscard]] bool Playing() const { return _playing; }
+        /**
+         * @brief What is called each frame as the scene updates, before its passes are readied: where an editor
+         *        moves its view and draws its gizmo, so that both are in the frame being made.
+         */
+        void OnFrame(std::function<void()> hook) { _onFrame = std::move(hook); }
+
     private:
         std::filesystem::path _file;
         std::unique_ptr<Document> _document;
         std::unique_ptr<Document> _replaced;    // the one before, until the frame it was drawn in is done
         std::string _error;
+        bool _playing = true;
+        std::function<void()> _onFrame;
     };
 }

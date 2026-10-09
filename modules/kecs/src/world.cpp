@@ -403,6 +403,11 @@ namespace kecs
         return true;
     }
 
+    Entity World::EntityAt(const std::uint32_t index) const
+    {
+        return index < _records.size() && _records[index].alive ? Entity { index, _records[index].generation } : NullEntity;
+    }
+
     void World::EachEntity(const std::function<void(Entity)>& visit) const
     {
         for (std::uint32_t index = 0; index < _records.size(); ++index)

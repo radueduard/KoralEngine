@@ -1,6 +1,22 @@
 # keditor: a scene being worked on, the project it is in, and the editor over them. Needs the framework and its
 # interface modules.
-add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp)
+# The standard shaders, as text in the library: what a new project's shaders folder is given.
+set(KEDITOR_SHADER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/standard_shaders.h)
+set(KEDITOR_SHADER_TEXT "#pragma once\n\nnamespace keditor::detail\n{\n")
+foreach(shader engineCommon lit sky outline)
+    set(path ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene/${shader}.slang)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${path})
+    file(READ ${path} source)
+    string(SUBSTRING ${shader} 0 1 first)
+    string(TOUPPER ${first} first)
+    string(SUBSTRING ${shader} 1 -1 rest)
+    string(APPEND KEDITOR_SHADER_TEXT "    inline constexpr const char* ${first}${rest}Slang = R\"koralslang(${source})koralslang\";\n")
+endforeach()
+string(APPEND KEDITOR_SHADER_TEXT "}\n")
+file(GENERATE OUTPUT ${KEDITOR_SHADER_HEADER} CONTENT "${KEDITOR_SHADER_TEXT}")
+
+add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/starter.cpp)
+target_include_directories(keditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
 target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras)

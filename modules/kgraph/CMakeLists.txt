@@ -1,5 +1,5 @@
 # kgraph: a scene's pass graph, as data and running. Needs the framework.
-add_library(kgraph STATIC src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/meshes.cpp)
+add_library(kgraph STATIC src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/meshes.cpp src/scene.cpp)
 add_library(KoralEngine::kgraph ALIAS kgraph)
 target_include_directories(kgraph PUBLIC include)
 target_link_libraries(kgraph PUBLIC kecs Koral::Koral)

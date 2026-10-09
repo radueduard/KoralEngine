@@ -3,6 +3,8 @@
 
 #include <log.h>
 
+#include <kgraph/scene.h>
+
 namespace keditor
 {
     PlayScene::PlayScene(std::filesystem::path file) : _file(std::move(file)) {}
@@ -25,17 +27,23 @@ namespace keditor
 
     // A frame, in the order a script counts on: its updates, then what graphics scripts make for the passes, then the
     // passes readied with all of it.
-    void PlayScene::FixedUpdate() { if (_document) _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime())); }
+    void PlayScene::FixedUpdate() { if (_document && _playing) _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime())); }
     void PlayScene::Update()
     {
         _replaced.reset();      // the frame it may have been drawn in is done
-        if (_document) _document->Scripts().Update(static_cast<float>(Time::FrameTime()));
+        if (_onFrame) _onFrame();
+        if (!_document || !_playing) return;
+        _document->Scripts().Update(static_cast<float>(Time::FrameTime()));
+        kgraph::RunSceneSystems(_document->World(), static_cast<float>(Time::FrameTime()));
     }
     void PlayScene::LateUpdate()
     {
         if (!_document) return;
-        _document->Scripts().LateUpdate(static_cast<float>(Time::FrameTime()));
+        if (_playing) _document->Scripts().LateUpdate(static_cast<float>(Time::FrameTime()));
         _document->Scripts().Prepare();
+        // What the graph is told of the frame: how big the window is, and whose debug shapes a DebugDraw node draws.
+        _document->Runtime().SetScreenExtent(SceneWindow().Extent());
+        _document->Runtime().SetDebugDraw(&SceneDebug());
         _document->Update();
     }
     void PlayScene::Shutdown() { _replaced.reset(); _document.reset(); }

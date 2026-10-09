@@ -5,7 +5,7 @@ the inspector, saves with the scene and carries across a reload. Its methods are
 has it. Scripts are written in C# or Kotlin.
 
 ```csharp
-public sealed class Spin : Script
+public sealed class Turner : Script
 {
     public float Speed;             // in the inspector, in the file, kept across a reload
     public float Angle;
@@ -16,7 +16,7 @@ public sealed class Spin : Script
 ```
 
 ```kotlin
-class Spin : Script() {
+class Turner : Script() {
     var speed = 0f
     var angle = 0f
     private var frames = 0

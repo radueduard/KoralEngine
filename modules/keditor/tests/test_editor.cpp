@@ -4,6 +4,12 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
+
+#include <keditor/starter.h>
+#include <kecs/json.h>
+#include <kgraph/scene.h>
+
 #include <cstdlib>
 #include <chrono>
 #include <format>
@@ -640,6 +646,201 @@ TEST_F(EditorTest, EntitiesAreATreeEachWithATransform) {
     Doc().DestroyEntity(ship);
     EXPECT_EQ(Doc().Entities(), std::vector<kecs::Entity> { rock });
     EXPECT_FALSE(Shows("Barrel"));
+}
+
+// The scene a project starts from: meshes lit under a sky, by nodes alone and the four standard shaders.
+TEST_F(EditorTest, TheStandardSceneDrawsLitMeshesUnderASky) {
+    const auto project = scene::MakeProject("standard");
+    EXPECT_EQ(keditor::WriteStandardShaders(project.ShaderDirectory()).size(), 4u);
+    EXPECT_TRUE(keditor::WriteStandardShaders(project.ShaderDirectory()).empty()) << "one that is there is left as it is";
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(Doc().Runtime().Ok());
+
+    // The pipeline's component is what makes an entity drawn: a colour and a smoothness. Where it is, which it is
+    // and which is picked are the engine's to say, and no fields of it.
+    const kecs::ComponentId renderer = Doc().Runtime().ComponentOf("MeshRenderer");
+    ASSERT_NE(renderer, kecs::NoComponent);
+    std::vector<std::string> fields;
+    for (const auto& field : Doc().World().Describe(renderer).fields) fields.push_back(field.name);
+    EXPECT_EQ(fields, (std::vector<std::string> { "color", "smoothness" }));
+    EXPECT_EQ(Doc().Runtime().ComponentOf("outline"), kecs::NoComponent) << "given its colour and thickness on the node, the outline runs once";
+    EXPECT_EQ(Doc().Runtime().ComponentOf("sky"), kecs::NoComponent);
+
+    const kecs::Entity sphere = keditor::AddStandardScene(Doc());
+    for (const char* name : { "Sky", "Camera", "Sun", "Sphere" }) EXPECT_TRUE(Shows(name)) << name;
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+    ASSERT_NE(Doc().Runtime().ReportOf("draw scene"), nullptr);
+    EXPECT_EQ(Doc().Runtime().ReportOf("draw scene")->ran, 1u) << Doc().Runtime().ReportOf("draw scene")->why;
+    Session().Select(sphere);
+    Sheet("standard");
+}
+
+// What an editor does with the standard scene: looks at it from a view of its own, outlines and picks, plays and
+// stops, and makes things from the project's objects.
+TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "features";
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory / "components");
+    { std::ofstream(directory / "components" / "Health.json") << R"json({
+      "name": "Health",
+      "fields": {
+        "current": { "type": "float", "default": 100, "min": 0, "max": 100 },
+        "invulnerable": { "type": "bool", "default": false },
+        "tint": { "type": "color", "default": [1, 0.5, 0.25] },
+        "team": { "type": "enum", "options": ["Neutral", "Red", "Blue"], "default": "Red" }
+      } })json"; }
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(std::filesystem::exists(directory / "shaders" / "lit.slang")) << "the standard shaders are the project's own, to edit";
+    EXPECT_TRUE(std::filesystem::exists(directory / "objects" / "Cube.json"));
+    kecs::World& world = Doc().World();
+    const kecs::Entity sphere = world.FindEntity("Sphere");
+    ASSERT_FALSE(sphere.IsNull());
+    EXPECT_EQ(Session().selectedEntity, sphere);
+
+    // Seen from the editor's own view until it is told to look through the scene's camera.
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Session().ThroughSceneCamera());
+    EXPECT_EQ(Doc().Runtime().CurrentView().view, Session().camera.View().view);
+    Session().SetLookThroughCamera(true);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(Doc().Runtime().CurrentView().view, kgraph::ViewOf(world, world.FindEntity("Camera")).view);
+    Session().SetLookThroughCamera(false);
+    Session().Frame(sphere);
+    EXPECT_NEAR(Session().camera.distance, 0.87f * 1.2f / std::sin(30.f * 3.14159265f / 180.f), 1e-3f) << "far enough to see all of it";
+    Sheet("looked");
+
+    // A click on the picture picks what is drawn there: the sphere in the middle, nothing in a corner.
+    kecs::Entity picked = kecs::NullEntity;
+    bool answered = false;
+    ASSERT_TRUE(Doc().Runtime().Pick(0.5f, 0.5f, [&](const kecs::Entity entity) { picked = entity; answered = true; }));
+    for (int i = 0; i < 8; ++i) Frame();
+    EXPECT_TRUE(answered);
+    EXPECT_EQ(picked, sphere);
+    answered = false;
+    Doc().Runtime().Pick(0.02f, 0.02f, [&](const kecs::Entity entity) { picked = entity; answered = true; });
+    for (int i = 0; i < 8; ++i) Frame();
+    EXPECT_TRUE(answered);
+    EXPECT_TRUE(picked.IsNull()) << "the sky is nobody";
+
+    // Played, a Spin turns its entity; stopped, the scene is as it was, and what was picked still is.
+    Doc().AddComponent(sphere, "Spin");
+    EXPECT_FALSE(Session().IsPlaying());
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(world.RotationOf(sphere), (kecs::Vec3 {})) << "nothing runs until it plays";
+    Session().StartPlaying();
+    EXPECT_TRUE(Session().InPlayMode());
+    EXPECT_TRUE(Session().ThroughSceneCamera()) << "played, it is seen through its own camera";
+    EXPECT_FALSE(Session().Save()) << "a moment of it is not what is saved";
+    for (int i = 0; i < 5; ++i) Frame();
+    EXPECT_NE(world.RotationOf(world.FindEntity("Sphere")).y, 0.f);
+    Session().Pause();
+    const float paused = world.RotationOf(world.FindEntity("Sphere")).y;
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(world.RotationOf(world.FindEntity("Sphere")).y, paused);
+    Session().Stop();
+    EXPECT_FALSE(Session().InPlayMode());
+    const kecs::Entity again = world.FindEntity("Sphere");
+    EXPECT_EQ(world.RotationOf(again), (kecs::Vec3 {}));
+    EXPECT_EQ(Session().selectedEntity, again) << "found again where it was";
+    EXPECT_TRUE(Doc().ComponentsOf(again) == (std::vector<std::string> { "Mesh", "MeshRenderer", "Spin" }) || Doc().ComponentsOf(again).size() == 3u);
+
+    // The project's objects are what there is to make.
+    std::vector<std::string> names;
+    for (const auto& object : Session().Objects()) names.push_back(object.name);
+    for (const char* name : { "Empty", "Cube", "Sphere", "Planet", "Camera", "Directional Light", "Point Light", "Spot Light", "Sky" })
+        EXPECT_NE(std::ranges::find(names, name), names.end()) << name;
+    const auto object = [&](const char* name) { return *std::ranges::find(Session().Objects(), name, &keditor::ObjectTemplate::name); };
+    const kecs::Entity planet = Session().Create(object("Planet"));
+    EXPECT_EQ(world.NameOf(planet), "Planet");
+    ASSERT_EQ(world.ChildrenOf(planet).size(), 1u);
+    EXPECT_EQ(world.NameOf(world.ChildrenOf(planet)[0]), "Moon");
+    EXPECT_EQ(Doc().Field(planet, "Mesh", "mesh"), kgraph::Value("$sphere"));
+    EXPECT_EQ(Doc().Field(planet, "Spin", "speed"), kgraph::Value(60));
+    const kecs::Entity second = Session().Create(object("Planet"));
+    EXPECT_EQ(world.NameOf(second), "Planet 2") << "a name of its own";
+    const kecs::Entity lamp = Session().Create(object("Spot Light"), planet);
+    EXPECT_EQ(world.ParentOf(lamp), planet);
+    EXPECT_EQ(Doc().Field(lamp, "SpotLight", "outerAngle"), kgraph::Value(30));
+
+    // A copy is beside what it is a copy of, with everything under it.
+    const kecs::Entity copy = Session().Duplicate(planet);
+    EXPECT_EQ(world.NameOf(copy), "Planet 3");
+    EXPECT_EQ(world.ChildrenOf(copy).size(), 2u);
+    const auto& roots = world.Roots();
+    EXPECT_EQ(std::ranges::find(roots, copy) - std::ranges::find(roots, planet), 1);
+    // And an entity saved as an object is one of them from then on.
+    world.Rename(copy, "Lit Planet");
+    EXPECT_TRUE(Session().SaveAsObject(copy));
+    EXPECT_TRUE(std::filesystem::exists(directory / "objects" / "Lit Planet.json"));
+    const kecs::Entity made = Session().Create(object("Lit Planet"));
+    EXPECT_EQ(world.ChildrenOf(made).size(), 2u);
+    EXPECT_EQ(world.PositionOf(made), (kecs::Vec3 {})) << "made where it is made, not where the first one was";
+    Session().Delete(planet);
+    EXPECT_FALSE(world.Alive(lamp));
+
+    // A component a file describes: its defaults, and a choice by name.
+    ASSERT_TRUE(Doc().AddComponent(made, "Health"));
+    EXPECT_EQ(Doc().Field(made, "Health", "current"), kgraph::Value(100));
+    EXPECT_EQ(Doc().Field(made, "Health", "invulnerable"), kgraph::Value(false));
+    EXPECT_EQ(Doc().Field(made, "Health", "team"), kgraph::Value(1)) << "Red, the second";
+    ASSERT_NE(Doc().HintOf("Health", "team"), nullptr);
+    EXPECT_EQ(Doc().HintOf("Health", "team")->options.size(), 3u);
+    EXPECT_TRUE(Doc().HintOf("Health", "tint")->color);
+    EXPECT_EQ(*Doc().WriteEntity(made).Find("components")->Find("Health")->Find("team"), kgraph::Value("Red"));
+    Session().Select(made);
+    EXPECT_TRUE(Shows("Health"));
+    EXPECT_TRUE(Shows("Red"));
+    Sheet("features");
+
+    // Saved, opened again: all of it is there.
+    ASSERT_TRUE(Session().Save());
+    ASSERT_TRUE(Session().OpenProject(directory));
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    const kecs::Entity reopened = Doc().World().FindEntity("Lit Planet 2");
+    ASSERT_FALSE(reopened.IsNull());
+    EXPECT_EQ(Doc().Field(reopened, "Health", "team"), kgraph::Value(1));
+    EXPECT_EQ(Doc().Field(reopened, "Mesh", "mesh"), kgraph::Value("$sphere"));
+}
+
+// Not a test: sets a project up with the standard scene and the entities a file lists, when told where.
+//   KEDITOR_WRITE_PROJECT=<project folder> KEDITOR_ENTITIES=<json list of entities> keditor_tests --gtest_also_run_disabled_tests --gtest_filter='*WritesAProject*'
+TEST_F(EditorTest, DISABLED_WritesAProject) {
+    const char* directory = std::getenv("KEDITOR_WRITE_PROJECT");
+    const char* entities = std::getenv("KEDITOR_ENTITIES");
+    ASSERT_NE(directory, nullptr);
+    Open();
+    ASSERT_TRUE(Session().OpenProject(directory)) << Session().Status();
+    ASSERT_TRUE(Session().NewStandardScene()) << Session().Status();
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    if (entities) {
+        for (const kecs::Entity root : std::vector(Doc().World().Roots())) Doc().DestroyEntity(root);
+        std::ifstream in(entities, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        kecs::json::Value parsed;
+        std::string error;
+        ASSERT_TRUE(kecs::json::Parse(text, parsed, error)) << error;
+        std::vector<std::string> problems;
+        for (const auto& entity : *kgraph::Value::FromJson(parsed).Items()) Doc().ReadEntity(entity, kecs::NullEntity, &problems);
+        for (const auto& problem : problems) ADD_FAILURE() << problem;
+    }
+    Session().Select(kecs::NullEntity);
+    ASSERT_TRUE(Session().Save()) << Session().Status();
+    Session().SetLookThroughCamera(true);
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+    Sheet("project");
+    // Opened again from what was written, it is all there and nothing is wrong with it.
+    const std::size_t count = Doc().World().EntityCount();
+    ASSERT_TRUE(Session().OpenProject(directory)) << Session().Status();
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    for (const auto& note : Doc().Notes()) ADD_FAILURE() << note;
+    EXPECT_EQ(Doc().World().EntityCount(), count);
 }
 
 TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {

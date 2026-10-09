@@ -6,6 +6,8 @@
 
 #include <kgraph/runtime.h>
 
+#include <atomic>
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -37,8 +39,13 @@
 #include <shader.h>
 #include <vertexLayout.h>
 
+#include <debugDraw.h>
+#include <kmath/quaternion.h>
+#include <kmath/transform.h>
+
 #include <kgraph/entities.h>
 #include <kgraph/meshes.h>
+#include <kgraph/scene.h>
 
 #include "names.h"
 
@@ -136,6 +143,13 @@ namespace kgraph
             // Push constants that are the engine's to give, not the entity's component: where in the range each is.
             std::vector<kor::u32> modelAt;      // the entity's place in the world, a matrix
             std::vector<kor::u32> normalAt;     // the same for normals: its inverse, transposed
+            std::vector<kor::u32> entityAt;     // which entity it is: a number, 0 for none
+            std::vector<kor::u32> selectedAt;   // which entity is picked, the same way
+            // Those the node gives, the same for every draw: the whole range, and which bytes of it are given.
+            std::vector<std::byte> fixed;
+            std::vector<std::pair<kor::u32, kor::u32>> fixedRanges;
+            // Nothing in it is an entity's: the pipeline runs once, and there is no component.
+            bool once = false;
         };
 
         /** What a push constant is called, past the block it is in: `object.model` is `model`. */
@@ -224,8 +238,27 @@ namespace kgraph
             Held framebuffer;                                   // a graphics pipeline's
             kor::ResourceRef<const kor::Shader> vertexShader;
             kor::u32 numThreads[3] { 0, 0, 0 };                 // a compute pipeline's work group; zeros for the rest
+
+            /** Whether it runs for each entity: there is something an entity gives, or something the engine says of one. */
+            [[nodiscard]] bool PerEntity() const { return layout && !layout->once; }
             bool meshShaders = false;                           // a graphics pipeline drawn with mesh shaders
             bool vertexInputs = false;                          // its vertex shader reads vertices: it needs a mesh
+        };
+
+        /** A SceneView node's two buffers, and how wide the picture it is for is to its height. */
+        struct SceneBuffers {
+            kor::ResourceRef<kor::Buffer> frame, lights;
+            Held held[2];       // what keeps them
+            float aspect = 1.f;
+        };
+        constexpr std::size_t FrameFloats = 60, LightFloats = 16, MaxLights = 64;
+
+        /** A click asking which entity is where: the pixel is copied out one frame, and read a few frames on. */
+        struct PickState {
+            std::optional<std::pair<float, float>> asked;   // where, from 0 to 1 each way
+            std::function<void(kor::u32)> then;
+            std::optional<kor::IVec3> copyAt;               // this frame's: read while the pass records
+            int waiting = -1;
         };
 
         /** One entity a pass runs for, as readied this frame. */
@@ -276,6 +309,7 @@ namespace kgraph
             bool readsScreen = false, writesScreen = false;
             std::shared_ptr<EntityRun> entities;    // when it runs for each entity
             std::function<void(kor::CommandBuffer&, const PassContext&)> record;
+            std::function<void()> prepare;      // each frame, on the scene's thread, before it is recorded
         };
 
         /** What a pass declares to the frame graph, under the name the resource — or the set it is in — is imported by. */
@@ -407,6 +441,30 @@ namespace kgraph
                 return it == ports.end() ? nullptr : &*it;
             }
         };
+        bool NamesColor(std::string name)
+        {
+            std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos;
+        }
+
+        /**
+         * What the engine says of a draw, by the name the shader gives a push constant: 'm' for `model` or `world`
+         * (the entity's place in the world), 'n' for `normalMatrix`, 'e' for `entityId` (which entity it is, from 1;
+         * 0 is none) and 's' for `selected` (the entity that is picked, the same way). 0 for anything else.
+         */
+        template <typename Member>
+        char EngineGives(const std::string_view name, const Member& member)
+        {
+            const std::string_view leaf = LeafOf(name);
+            const bool matrix = member.scalar == 0 && member.rows == 4 && member.columns == 4;
+            const bool number = (member.scalar == 1 || member.scalar == 2) && member.rows == 1 && member.columns == 1;
+            if (matrix && (leaf == "model" || leaf == "world")) return 'm';
+            if (matrix && leaf == "normalMatrix") return 'n';
+            if (number && (leaf == "entityId" || leaf == "entity")) return 'e';
+            if (number && leaf == "selected") return 's';
+            return 0;
+        }
+
         Interface Reflect(const std::vector<kor::ResourceRef<const kor::Shader>>& shaders)
         {
             Interface out;
@@ -429,6 +487,19 @@ namespace kgraph
             }
             for (const auto& constant : out.constants)
                 out.ports.push_back({ "constant." + constant.name, PortKind::eValue, constant.scalar == 3 ? "bool" : "number", false, {}, nullptr });
+            // A push constant can be given on the node, for every draw alike, rather than left to each entity.
+            for (const auto& shader : shaders)
+                for (const auto& block : shader->BlockLayout().pushConstants | std::views::values)
+                    for (const auto& member : block.members) {
+                        if (member.aggregate || member.count != 1 || EngineGives(member.name, member)) continue;
+                        const std::string name = "push." + member.name;
+                        if (std::ranges::find(out.ports, name, &Port::name) != out.ports.end()) continue;
+                        Port port { name, PortKind::eValue, member.rows * member.columns == 1 ? (member.scalar == 3 ? "bool" : "number") : "vector", false,
+                                    "The same for every draw, in place of a field each entity has.", nullptr };
+                        port.optional = true;
+                        if (member.rows >= 3 && member.columns == 1 && member.scalar == 0 && NamesColor(member.name)) port.editor = "color";
+                        out.ports.push_back(std::move(port));
+                    }
             return out;
         }
 
@@ -724,10 +795,20 @@ namespace kgraph
             std::optional<kecs::Migration> migration;   // a pipeline's: what its component last became
             // The shaders it is made of — a shader node's own, a pipeline's named on it — each told of when it is edited.
             std::vector<std::pair<kor::ResourceRef<const kor::Shader>, kor::u64>> watches;
+            std::shared_ptr<SceneBuffers> scene;        // a SceneView's: what it writes each frame
         };
 
         kor::FrameGraph& frameGraph;
         kecs::World* world;
+        // What whoever runs the graph says of the frame: seen from where, into how big a window, with what picked.
+        std::optional<View> viewOverride;
+        kor::UVec2 screenExtent { 0, 0 };
+        std::shared_ptr<std::atomic<kor::u32>> selectedId = std::make_shared<std::atomic<kor::u32>>(0);
+        kor::DebugDraw* debug = nullptr;
+        kor::Mat4 viewProjection { 1.f };
+        View currentView;
+        float currentAspect = 1.f;
+        std::shared_ptr<PickState> pick = std::make_shared<PickState>();
         std::map<std::string, Built, std::less<>> built;
         std::map<std::string, Held, std::less<>> defaultMeshes;    // the default meshes asked for so far, by name
         std::map<std::string, GraphPass*, std::less<>> passes;
@@ -1086,15 +1167,40 @@ namespace kgraph
                     for (const auto& [name, member] : constants) {
                         if (member.aggregate || member.count != 1) continue;    // its fields and elements are listed on their own
                         const auto [type, size] = ConstantType(member);
-                        // Where the entity is in the world is the world's to say, from its transform and what it is under.
-                        if (type == "mat4" && (LeafOf(name) == "model" || LeafOf(name) == "world")) { layout->modelAt.push_back(member.offset - first); continue; }
-                        if (type == "mat4" && LeafOf(name) == "normalMatrix") { layout->normalAt.push_back(member.offset - first); continue; }
+                        // What the engine says of a draw: where the entity is, which it is, which is picked.
+                        switch (EngineGives(name, member)) {
+                        case 'm': layout->modelAt.push_back(member.offset - first); continue;
+                        case 'n': layout->normalAt.push_back(member.offset - first); continue;
+                        case 'e': layout->entityAt.push_back(member.offset - first); continue;
+                        case 's': layout->selectedAt.push_back(member.offset - first); continue;
+                        default: break;
+                        }
+                        // What the node gives, for every draw alike.
+                        if (const auto it = inputs.find("push." + name); it != inputs.end() && !it->second.value.IsNull()) {
+                            if (layout->fixed.empty()) layout->fixed.assign(layout->pushSize, std::byte { 0 });
+                            const auto numbers = it->second.value.Bool() ? Expected<std::vector<double>>(std::vector<double> { *it->second.value.Bool() ? 1.0 : 0.0 })
+                                                                         : NumbersOf(it->second.value, name.c_str());
+                            const std::size_t wanted = static_cast<std::size_t>(member.rows) * member.columns;
+                            if (!numbers || numbers->size() != wanted || member.scalar > 3)
+                                return Fail(std::format("'push.{}' is {}", name, wanted == 1 ? std::string("a number") : std::format("{} numbers", wanted)));
+                            std::byte* at = layout->fixed.data() + (member.offset - first);
+                            for (std::size_t i = 0; i < wanted; ++i) {
+                                if (member.scalar == 0) { const auto v = static_cast<float>((*numbers)[i]); std::memcpy(at + i * 4, &v, 4); }
+                                else if (member.scalar == 1) { const auto v = static_cast<std::int32_t>(std::llround((*numbers)[i])); std::memcpy(at + i * 4, &v, 4); }
+                                else { const auto v = static_cast<std::uint32_t>(std::llround(std::max((*numbers)[i], 0.0))); std::memcpy(at + i * 4, &v, 4); }
+                            }
+                            layout->fixedRanges.emplace_back(member.offset - first, static_cast<kor::u32>(wanted * 4));
+                            continue;
+                        }
                         layout->fields.push_back({ name, type, layout->pushAt + member.offset - first, size, nullptr });
                     }
+                    if (layout->fixed.empty()) layout->fixed.assign(layout->pushSize, std::byte { 0 });
                 }
                 layout->size = std::max<std::size_t>(aligned(layout->pushAt + layout->pushSize), 16);
+                // With nothing an entity gives and nothing said of one, it is run once: there is no component.
+                layout->once = layout->fields.empty() && layout->modelAt.empty() && layout->normalAt.empty() && layout->entityAt.empty();
                 info->layout = layout;
-                if (world) {
+                if (world && !layout->once) {
                     const auto registered = Register(node.id, *info, out);
                     if (!registered) return Fail(registered.error());
                 }
@@ -1141,6 +1247,17 @@ namespace kgraph
             }
             info.component = existing;
             return {};
+        }
+
+        /** The push constants of a pipeline that runs once: what its node gives, and which entity is picked. */
+        static void PushOnce(kor::CommandBuffer& cb, const PipelineInfo& info, const std::shared_ptr<std::atomic<kor::u32>>& picked)
+        {
+            const EntityLayout* layout = info.layout.get();
+            if (!layout || !layout->pushSize) return;
+            std::vector<std::byte> bytes = layout->fixed;
+            const kor::u32 id = picked->load();
+            for (const kor::u32 at : layout->selectedAt) std::memcpy(bytes.data() + at, &id, 4);
+            cb.PushConstantBytes({ bytes.data(), bytes.size() }, layout->pushFirst);
         }
 
         Expected<void> BuildPass(const Node& node, const Inputs& inputs, Built& out)
@@ -1434,6 +1551,67 @@ namespace kgraph
                 plan->uses.push_back({ MemberOf(ref), !toImage || part, toImage });
                 if (toImage) plan->record = [buffer, ref, how](kor::CommandBuffer& cb, const PassContext&) { cb.CopyBufferToImage(buffer, ref, how); };
                 else plan->record = [buffer, ref, how](kor::CommandBuffer& cb, const PassContext&) { cb.CopyImageToBuffer(ref, buffer, how); };
+            } else if (node.type == "Pick") {
+                // Which entity is at a pixel: the image of ids a pipeline draws `entityId` into, read back when asked.
+                const auto picture = image("ids");
+                if (!picture) return Fail(picture.error());
+                if ((*picture)->screen) return Fail("'ids' is an image of which entity is where, not the screen");
+                if (lacks(**picture, kor::Image::Usage::eTransferSrc)) return Fail("the image needs eTransferSrc among its usage, to be read back");
+                const auto ref = ImageRefOf(picture->get());
+                auto readback = kor::Buffer::RawBuilder{}.SetRawSize(4).SetUsage(kor::Buffer::Usage::eTransferDst).SetType(kor::Buffer::Type::eReadback).Build();
+                if (!readback.Valid()) return Fail("the buffer a pixel is read back into could not be made");
+                const kor::ResourceRef<const kor::Buffer> into(readback);
+                const auto owner = std::make_shared<kor::Resource<kor::Buffer>>(std::move(readback));
+                plan->uses.push_back({ MemberOf(ref), true, false });
+                plan->prepare = [state = this->pick, owner, ref] {
+                    // More frames than are in flight: by then the frame that copied it has finished.
+                    if (state->waiting > 0 && --state->waiting == 0) {
+                        const auto id = (*owner)->Read<kor::u32>(1);
+                        if (auto then = std::exchange(state->then, {}); then && !id.empty()) then(id[0]);
+                    }
+                    state->copyAt.reset();
+                    if (const auto asked = std::exchange(state->asked, std::nullopt)) {
+                        const auto extent = ref->Extent();
+                        state->copyAt = kor::IVec3(std::clamp(static_cast<int>(asked->first * static_cast<float>(extent.x)), 0, static_cast<int>(extent.x) - 1),
+                                                   std::clamp(static_cast<int>(asked->second * static_cast<float>(extent.y)), 0, static_cast<int>(extent.y) - 1), 0);
+                        state->waiting = 4;
+                    }
+                };
+                plan->record = [state = this->pick, into, ref](kor::CommandBuffer& cb, const PassContext&) {
+                    if (!state->copyAt) return;
+                    kor::Copy one;
+                    one.imageOffset = *state->copyAt;
+                    one.imageExtent = { 1, 1, 1 };
+                    cb.CopyImageToBuffer(ref, into, one);
+                };
+            } else if (node.type == "DebugDraw") {
+                // The scene's debug shapes — a gizmo, a light's reach — over a picture, seen as the scene is.
+                const auto picture = image("image");
+                if (!picture) return Fail(picture.error());
+                if ((*picture)->screen) return Fail("the debug shapes are drawn into an image, which is then shown: not straight to the screen");
+                if (lacks(**picture, kor::Image::Usage::eColorAttachment)) return Fail("the image needs eColorAttachment among its usage, to be drawn into");
+                const auto color = ImageRefOf(picture->get());
+                auto builder = kor::Framebuffer::Builder().AddColor({ .view = color });
+                kor::ResourceRef<const kor::Image> depth;
+                if (const auto it = inputs.find("depth"); it != inputs.end() && it->second.resource) {
+                    depth = ImageRefOf(it->second.resource.get());
+                    if (!depth.Get() || !(depth->UsageFlags() & kor::Image::Usage::eDepthStencilAttachment)) return Fail("'depth' is a depth image, with eDepthStencilAttachment among its usage");
+                    builder.SetDepth({ .view = depth });
+                }
+                auto framebuffer = builder.Build();
+                if (!framebuffer.Valid()) return Fail(framebuffer.Failure() ? framebuffer.Failure()->message : std::string("its framebuffer could not be made"));
+                const kor::ResourceRef<const kor::Framebuffer> target(framebuffer);
+                const auto owner = std::make_shared<kor::Resource<kor::Framebuffer>>(std::move(framebuffer));
+                plan->uses.push_back({ MemberOf(color), true, true });
+                if (depth.Get()) plan->uses.push_back({ MemberOf(depth), true, true });
+                auto matrix = std::make_shared<kor::Mat4>(1.f);
+                plan->prepare = [this, owner, target, matrix] {
+                    *matrix = viewProjection;
+                    if (debug) debug->Prepare(target, *matrix);
+                };
+                plan->record = [this, target, matrix](kor::CommandBuffer& cb, const PassContext&) {
+                    if (debug) debug->Record(cb, *matrix, target);
+                };
             } else if (node.type == "Dispatch" || node.type == "TraceRays") {
                 const bool rays = node.type == "TraceRays";
                 const auto info = pipelineOf(rays ? "RayTracingPipeline" : "ComputePipeline");
@@ -1451,7 +1629,7 @@ namespace kgraph
                 if (indirectBuffer.Get() && has("cover")) return Fail("'indirect' and 'cover' both say how many groups: one or the other");
 
                 std::shared_ptr<EntityRun> run;
-                if ((*info)->layout) {
+                if ((*info)->PerEntity()) {
                     auto entities = entitiesOf(*info);
                     if (!entities) return Fail(entities.error());
                     run = std::move(*entities);
@@ -1487,7 +1665,7 @@ namespace kgraph
                 KoralResource* const handle = inputs.at("pipeline").resource->handle;
                 const auto compute = rays ? kor::ResourceRef<const kor::ComputePipeline>() : kor::ResourceRef<const kor::ComputePipeline>(kor::capi::ComputePipelineOf(handle));
                 const auto tracing = rays ? kor::ResourceRef<const kor::RayTracingPipeline>(kor::capi::RayTracingPipelineOf(handle)) : kor::ResourceRef<const kor::RayTracingPipeline>();
-                plan->record = [compute, tracing, rays, indirectBuffer, indirectOffset,
+                plan->record = [compute, tracing, rays, indirectBuffer, indirectOffset, picked = selectedId,
                                 info = *info, run, x = groups[0], y = groups[1], z = groups[2]](kor::CommandBuffer& cb, const PassContext&) {
                     if (run && run->items.empty()) return;
                     if (rays) cb.BindRayTracingPipeline(tracing);
@@ -1498,7 +1676,7 @@ namespace kgraph
                         else if (indirectBuffer.Get()) cb.DispatchIndirect(indirectBuffer, indirectOffset);
                         else cb.Dispatch(a, b, c);
                     };
-                    if (!run) { go(x, y, z); return; }
+                    if (!run) { PushOnce(cb, *info, picked); go(x, y, z); return; }
                     const EntityLayout& layout = *info->layout;
                     for (const Item& item : run->items) {
                         if (item.set.Get()) cb.BindDescriptorSet(1, item.set);
@@ -1607,7 +1785,7 @@ namespace kgraph
 
                 // For each entity, when there is anything an entity gives: its mesh, or what the pipeline leaves it to supply.
                 std::shared_ptr<EntityRun> run;
-                if ((*info)->layout || entityMesh) {
+                if ((*info)->PerEntity() || entityMesh) {
                     auto entities = entitiesOf(*info);
                     if (!entities) return Fail(entities.error());
                     run = std::move(*entities);
@@ -1626,7 +1804,7 @@ namespace kgraph
                 if (indirectBuffer.Get()) plan->uses.push_back({ bufferUse(indirectBuffer), true, false });
                 if (countBuffer.Get()) plan->uses.push_back({ bufferUse(countBuffer), true, false });
                 plan->entities = run;
-                plan->record = [=, info = *info, t0 = taskGroups[0], t1 = taskGroups[1], t2 = taskGroups[2]](kor::CommandBuffer& cb, const PassContext&) {
+                plan->record = [=, picked = selectedId, info = *info, t0 = taskGroups[0], t1 = taskGroups[1], t2 = taskGroups[2]](kor::CommandBuffer& cb, const PassContext&) {
                     const auto extent = framebuffer->Extent();
                     cb.BeginRendering(render);   // with nothing to draw, it still clears
                     if (!run || !run->items.empty()) {
@@ -1674,7 +1852,7 @@ namespace kgraph
                             else cb.Draw(vertexCount.value_or(bound.Get() ? kor::WholeSize : 3), instances, firstVertex, firstInstance);
                         }
                     };
-                    if (!run) draw(nullptr);
+                    if (!run) { PushOnce(cb, *info, picked); draw(nullptr); }
                     else {
                         const EntityLayout* layout = info->layout.get();
                         for (const Item& item : run->items) {
@@ -1855,7 +2033,105 @@ namespace kgraph
             return defaultMeshes.emplace(std::string(name), *made).first->second;
         }
 
-        Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
+        /**
+         * What a frame is seen from, and what lights it: two buffers, written each frame from the world. `frame` is a
+         * uniform block and `lights` an array, laid out as the scene shaders' FrameData and Light are.
+         */
+        Expected<void> BuildSceneView(const Node& node, const Inputs& inputs, Built& out)
+        {
+            auto buffers = std::make_shared<SceneBuffers>();
+            if (const auto it = inputs.find("extent"); it != inputs.end() && !it->second.value.IsNull()) {
+                const auto numbers = NumbersOf(it->second.value, "extent");
+                if (!numbers || numbers->size() < 2 || (*numbers)[0] < 1 || (*numbers)[1] < 1) return Fail("'extent' is how big the picture is: its width and height");
+                buffers->aspect = static_cast<float>((*numbers)[0] / (*numbers)[1]);
+            }
+            auto frame = kor::Buffer::RawBuilder{}.SetRawSize(FrameFloats * 4).SetUsage(kor::Buffer::Usage::eUniform).SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
+            auto lights = kor::Buffer::RawBuilder{}.SetRawSize(MaxLights * LightFloats * 4).SetUsage(kor::Buffer::Usage::eStorage).SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
+            if (!frame.Valid() || !lights.Valid()) return Fail("its buffers could not be made");
+            buffers->frame = kor::ResourceRef<kor::Buffer>(frame);
+            buffers->lights = kor::ResourceRef<kor::Buffer>(lights);
+            buffers->held[0] = MakeResource(std::move(frame));
+            buffers->held[1] = MakeResource(std::move(lights));
+            for (const Held& held : buffers->held) held->node = node.id;
+            out.outputs["frame"].resource = buffers->held[0];
+            out.outputs["lights"].resource = buffers->held[1];
+            out.outputs["out"].resource = buffers->held[0];
+            out.scene = buffers;
+            FillScene(*buffers);    // right from the first frame it is drawn with
+            return {};
+        }
+
+        /** Writes a SceneView's buffers for this frame: the camera, the sky and its sun, and every light. */
+        void FillScene(SceneBuffers& buffers)
+        {
+            static constexpr float Radians = 3.14159265358979323846f / 180.f;
+            const auto linear = [](const kor::Vec3 color) { return kor::Vec3(std::pow(color.x, 2.2f), std::pow(color.y, 2.2f), std::pow(color.z, 2.2f)); };
+
+            // Seen from where whoever runs the graph says, or else from the scene's first camera.
+            View view;
+            view.view = kor::LookAt(kor::Vec3(2.2f, 1.6f, 3.3f), kor::Vec3(0.f));
+            if (viewOverride) view = *viewOverride;
+            else if (world)
+                if (const kecs::Entity camera = FirstCamera(*world); !camera.IsNull()) view = ViewOf(*world, camera);
+            currentView = view;
+            currentAspect = buffers.aspect;
+            viewProjection = view.Projection(buffers.aspect) * view.view;
+            const kor::Mat4 eyeAt = kor::Inverse(view.view);
+
+            std::array<float, MaxLights * LightFloats> lights {};
+            std::size_t count = 0;
+            std::optional<std::pair<kor::Vec3, kor::Vec3>> sun;
+            Sky sky;
+            if (world) {
+                const auto light = [&](const kecs::Entity entity, const int type, const kor::Vec3 color, const float range, const float inner, const float outer) {
+                    if (count == MaxLights) return;
+                    kor::Vec3 position, scale;
+                    kor::Quat rotation;
+                    if (!kor::Decompose(ToKor(world->WorldMatrix(entity)), position, rotation, scale)) return;
+                    const kor::Vec3 forward = rotation * kor::Vec3(0.f, 0.f, -1.f);
+                    const float values[LightFloats] { position.x, position.y, position.z, range, forward.x, forward.y, forward.z, static_cast<float>(type),
+                                                      color.x, color.y, color.z, 0.f, std::cos(inner * Radians), std::cos(outer * Radians), 0.f, 0.f };
+                    std::ranges::copy(values, lights.begin() + static_cast<std::ptrdiff_t>(count * LightFloats));
+                    ++count;
+                    if (type == 0 && !sun) sun = std::pair { -forward, color };
+                };
+                // In the hierarchy's order, so that which light is the sun does not depend on how the world keeps them.
+                const kecs::ComponentId directional = world->Id<DirectionalLight>(), point = world->Id<PointLight>(), spot = world->Id<SpotLight>(), skyId = world->Id<Sky>();
+                bool skyFound = false;
+                const std::vector<kecs::Entity> all = world->All();
+                for (const kecs::Entity entity : all)
+                    if (const auto* l = static_cast<const DirectionalLight*>(world->Get(entity, directional)); l && world->IsEnabled(entity, directional))
+                        light(entity, 0, linear(l->color) * l->intensity, 0.f, 0.f, 0.f);
+                for (const kecs::Entity entity : all)
+                    if (const auto* l = static_cast<const PointLight*>(world->Get(entity, point)); l && world->IsEnabled(entity, point))
+                        light(entity, 1, linear(l->color) * l->intensity, l->range, 0.f, 0.f);
+                for (const kecs::Entity entity : all) {
+                    if (const auto* l = static_cast<const SpotLight*>(world->Get(entity, spot)); l && world->IsEnabled(entity, spot))
+                        light(entity, 2, linear(l->color) * l->intensity, l->range, std::min(l->innerAngle, l->outerAngle - 0.01f), l->outerAngle);
+                    if (const auto* found = static_cast<const Sky*>(world->Get(entity, skyId)); found && !skyFound && world->IsEnabled(entity, skyId)) { sky = *found; skyFound = true; }
+                }
+            }
+            const kor::Vec3 sunDirection = sun ? sun->first : kor::Vec3(0.f, 1.f, 0.f), sunColor = sun ? sun->second : kor::Vec3(0.f);
+            const kor::Vec3 zenith = linear(sky.zenith), horizon = linear(sky.horizon), ground = linear(sky.ground);
+
+            std::array<float, FrameFloats> frame {};
+            const kor::Mat4 inverse = kor::Inverse(viewProjection);
+            std::memcpy(frame.data(), &viewProjection, 64);
+            std::memcpy(frame.data() + 16, &inverse, 64);
+            const float rest[] { eyeAt[3][0], eyeAt[3][1], eyeAt[3][2], 1.f,
+                                 zenith.x, zenith.y, zenith.z, sky.ambient,
+                                 horizon.x, horizon.y, horizon.z, std::cos(sky.sunSize / 2.f * Radians),
+                                 ground.x, ground.y, ground.z, 0.f,
+                                 sunDirection.x, sunDirection.y, sunDirection.z, sun ? 1.f : 0.f,
+                                 sunColor.x, sunColor.y, sunColor.z, 0.f };
+            std::ranges::copy(rest, frame.begin() + 32);
+            const auto lightCount = static_cast<kor::u32>(count);
+            std::memcpy(frame.data() + 56, &lightCount, 4);   // a uint, as the shader reads it
+            buffers.frame->Write(frame);
+            buffers.lights->Write(lights);
+        }
+
+                Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
         {
             static const char* const shapes = "eCube, eSphere, ePlane, eCylinder, eCone, eCapsule, eTorus, eQuad or eTriangle";
             std::string shape = "eCube";
@@ -1897,8 +2173,15 @@ namespace kgraph
                 screen->node = node.id;
                 screen->screen = true;
                 out.outputs["out"].resource = std::move(screen);
+                // How big the window is: what an image that is to be shown in it, a pixel for a pixel, is sized by.
+                const kor::UVec2 size { std::max(screenExtent.x, 1u), std::max(screenExtent.y, 1u) };
+                out.outputs["extent"].value = Value(Value::List { size.x, size.y, 1 });
+                out.outputs["size"].value = Value(Value::List { size.x, size.y });
+                out.outputs["width"].value = size.x;
+                out.outputs["height"].value = size.y;
                 return {};
             }
+            if (node.type == "SceneView") return BuildSceneView(node, inputs, out);
             if (node.type == "Primitive") return BuildPrimitive(node, inputs, out);
             if (node.type == "Reference") {
                 const auto it = inputs.find("node");
@@ -2089,6 +2372,7 @@ namespace kgraph
                     }
                     inputs.emplace(name, std::move(resolved));
                 }
+                if (node->type == "Screen") signature += std::format("|{}x{}", screenExtent.x, screenExtent.y);
                 if (node->type == "Reference")
                     if (const auto it = node->inputs.find("node"); it != node->inputs.end() && it->second.value.String())
                         if (const auto target = built.find(*it->second.value.String()); target != built.end()) signature += std::format("|#{}", target->second.stamp);
@@ -2156,7 +2440,7 @@ namespace kgraph
             const auto graphics = run.draws ? kor::ResourceRef<const kor::GraphicsPipeline>(kor::capi::GraphicsPipelineOf(info.resource->handle)) : kor::ResourceRef<const kor::GraphicsPipeline>();
 
             if (!nobody) world->Each(query, [&](const kecs::ChunkView& view) {
-                const auto* column = layout ? static_cast<const std::byte*>(view.Column(info.component)) : nullptr;
+                const auto* column = layout && !layout->once ? static_cast<const std::byte*>(view.Column(info.component)) : nullptr;
                 const auto* meshes = run.draws ? static_cast<const Mesh*>(view.Column(meshId)) : nullptr;
                 for (std::size_t row = 0; row < view.Count(); ++row) {
                     if (!view.AllMatch() && !view.Matches(row)) continue;
@@ -2243,7 +2527,13 @@ namespace kgraph
 
                     if (layout && layout->pushSize) {
                         item.push = run.pushed.size();
-                        run.pushed.insert(run.pushed.end(), bytes + layout->pushAt, bytes + layout->pushAt + layout->pushSize);
+                        if (bytes) run.pushed.insert(run.pushed.end(), bytes + layout->pushAt, bytes + layout->pushAt + layout->pushSize);
+                        else run.pushed.insert(run.pushed.end(), layout->fixed.begin(), layout->fixed.end());
+                        std::byte* const pushed = run.pushed.data() + item.push;
+                        for (const auto& [at, size] : layout->fixedRanges) std::memcpy(pushed + at, layout->fixed.data() + at, size);
+                        const kor::u32 id = entity.index + 1, picked = selectedId->load();
+                        for (const kor::u32 at : layout->entityAt) std::memcpy(pushed + at, &id, 4);
+                        for (const kor::u32 at : layout->selectedAt) std::memcpy(pushed + at, &picked, 4);
                         if (!layout->modelAt.empty() || !layout->normalAt.empty()) {
                             const kecs::Mat4 model = world->WorldMatrix(entity);
                             for (const kor::u32 at : layout->modelAt) std::memcpy(run.pushed.data() + item.push + at, model.m.data(), 64);
@@ -2278,6 +2568,15 @@ namespace kgraph
                     if (cached.members[i].id && had.insert(cached.members[i].id).second) run.members[i].push_back(cached.members[i]);
                 std::ranges::sort(run.members[i], {}, &Member::id);
             }
+        }
+
+        /** What is done every frame, before anything is recorded: the scene's buffers written, and each pass readied. */
+        void EachFrame()
+        {
+            for (auto& node : built | std::views::values)
+                if (node.status.ok && node.scene) FillScene(*node.scene);
+            for (const auto& id : wanted)
+                if (const auto& plan = built.at(id).pass; plan && plan->prepare) plan->prepare();
         }
 
         /** Readies every pass that runs per entity. Whether what any of them uses changed. */
@@ -2349,7 +2648,7 @@ namespace kgraph
             for (std::size_t pass = 0; pass < wanted.size(); ++pass) {
                 const auto& plan = built.at(wanted[pass]).pass;
                 for (const auto& use : plan->uses) uses.push_back({ pass, use.read, use.write, false, { use.what }, {} });
-                if (!plan->entities || !plan->entities->info->layout) continue;
+                if (!plan->entities || !plan->entities->info->layout) continue;   // (a run has a layout that is not once)
                 const auto& slots = plan->entities->info->layout->slots;
                 for (std::size_t i = 0; i < slots.size(); ++i)
                     if (!slots[i].sampler) uses.push_back({ pass, slots[i].read, slots[i].write, true, plan->entities->members[i], wanted[pass] + "/" + slots[i].field });
@@ -2501,7 +2800,10 @@ namespace kgraph
         }
     };
 
-    Runtime::Runtime(kor::FrameGraph& frameGraph, kecs::World* world) : _impl(std::make_unique<Impl>(frameGraph, world)) {}
+    Runtime::Runtime(kor::FrameGraph& frameGraph, kecs::World* world) : _impl(std::make_unique<Impl>(frameGraph, world))
+    {
+        if (world) RegisterSceneComponents(*world);
+    }
     Runtime::~Runtime() = default;
 
     // A node that cannot be built keeps why (Status), and an entity that cannot be run is reported (ReportOf): the
@@ -2543,7 +2845,34 @@ namespace kgraph
             _impl->Evaluate(_graph);
             return;
         }
+        _impl->EachFrame();
         if (_impl->PrepareAll()) _impl->Resolve();
+    }
+
+    void Runtime::SetView(std::optional<View> view) { _impl->viewOverride = std::move(view); }
+    void Runtime::SetSelected(const kecs::Entity entity) { _impl->selectedId->store(entity.IsNull() ? 0 : entity.index + 1); }
+    void Runtime::SetDebugDraw(kor::DebugDraw* debug) { _impl->debug = debug; }
+    kor::Mat4 Runtime::ViewProjection() const { return _impl->viewProjection; }
+    View Runtime::CurrentView() const { return _impl->currentView; }
+    float Runtime::Aspect() const { return _impl->currentAspect; }
+
+    void Runtime::SetScreenExtent(const kor::UVec2 extent)
+    {
+        if (extent == _impl->screenExtent || extent.x == 0 || extent.y == 0) return;
+        _impl->screenExtent = extent;
+        const kor::log::Quiet quiet;
+        _impl->Evaluate(_graph);    // only a Screen node, and what is sized by one, is built again
+    }
+
+    bool Runtime::Pick(const float u, const float v, std::function<void(kecs::Entity)> then)
+    {
+        const bool there = std::ranges::any_of(_graph.nodes, [&](const Node& node) { return node.type == "Pick" && Status(node.id) && Status(node.id)->ok; });
+        if (!there) return false;
+        _impl->pick->asked = std::pair { std::clamp(u, 0.f, 1.f), std::clamp(v, 0.f, 1.f) };
+        _impl->pick->then = [world = _impl->world, then = std::move(then)](const kor::u32 id) {
+            then(world && id != 0 ? world->EntityAt(id - 1) : kecs::NullEntity);
+        };
+        return true;
     }
 
     const NodeStatus* Runtime::Status(const std::string_view id) const

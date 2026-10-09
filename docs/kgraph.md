@@ -64,7 +64,11 @@ the editor will build its node list and its nodes from.
   `eSphere`, `ePlane` (facing up), `eCylinder`, `eCone`, `eCapsule`, `eTorus`, and `eQuad` (facing +z) and
   `eTriangle`. Each has positions, normals and texture coordinates, and faces outward. Its second output,
   `layout`, is what a pipeline that draws it takes as `vertex.layout`.
-- **Screen** is the scene's window. **Reference** stands for another node by id, for a resource used far
+- **SceneView** is the scene as shaders see it, written each frame from the world: `frame` (a uniform block:
+  the camera, the sky and its sun) and `lights` (every light, up to 64). See [The scene](#the-scene).
+- **Screen** is the scene's window. Its `extent`, `size`, `width` and `height` outputs are the window's
+  size: an image whose `extent` is wired to it is rebuilt when the window is resized, and so is whatever is
+  made of that image. **Reference** stands for another node by id, for a resource used far
   from where it is made.
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
   multisampled image made an ordinary one), Copy (image to image of one size), CopyBuffer, ClearBuffer,
@@ -148,10 +152,20 @@ generates a component for it in the world, named after the pipeline's node:
 - a field for each push constant, by the name the shader gives it (type `f32`, `i32`, `u32`, `vec2` to
   `vec4`, `ivec`, `uvec`, `mat4`, and `bytes<N>` for anything else).
 
-Where the entity is, is not one of those fields. A push constant that is a `float4x4` named `model` (or
-`world`) is filled each frame with the entity's world matrix: its own transform under those of everything
-it is under (see [kecs](kecs.md)). One named `normalMatrix` gets its inverse, transposed. In Slang,
-`mul(float4(position, 1.0), object.model)`.
+Some push constants are the engine's to give, by the name the shader gives them, and are no fields:
+
+| Push constant | Type | What it is given |
+|---|---|---|
+| `model`, `world` | `float4x4` | The entity's world matrix: its transform under those of everything it is under (see [kecs](kecs.md)). In Slang, `mul(float4(position, 1.0), object.model)`. |
+| `normalMatrix` | `float4x4` | Its inverse, transposed. |
+| `entityId`, `entity` | `uint` or `int` | Which entity it is, from 1. 0 is none: what an image of ids is cleared to. |
+| `selected` | `uint` or `int` | The entity that is picked (`Runtime::SetSelected`), the same way. |
+
+Any other push constant can be given on the pipeline's node instead, as `push.<name>`: a number, or a list
+of them for a vector. It is then the same for every draw and not a field. A pipeline with everything wired,
+every push constant given or the engine's, and nothing said of an entity (`model`, `normalMatrix`,
+`entityId`) has no component and runs once. An outline pass is one: its colour and thickness are given on
+the node, and `selected` is the engine's.
 
 `runtime.ComponentOf(id)` returns the component, or `NoComponent` for a pipeline with everything wired and
 no push constants, which runs once. `<kgraph/entities.h>` is how code fills one:
@@ -167,6 +181,54 @@ world.Add<kgraph::Mesh>(entity, { kgraph::MakeResource(std::move(mesh)) });   //
 ```
 
 Resources are shared and counted: an image lives while a node or a component holds it.
+
+### The scene
+
+`<kgraph/scene.h>` has the components a scene is made of besides meshes. A runtime with a world registers
+them, so an entity can be given one and a file can name one:
+
+| Component | Fields |
+|---|---|
+| `Camera` | `fieldOfView` (degrees, top to bottom), `near`, `far`. The scene is seen through the first there is. |
+| `DirectionalLight` | `color`, `intensity`. It shines along its entity's forward (-Z). The first is the sky's sun. |
+| `PointLight` | `color`, `intensity`, `range`. |
+| `SpotLight` | `color`, `intensity`, `range`, `innerAngle`, `outerAngle` (degrees, from the middle of the cone). |
+| `Sky` | `zenith`, `horizon`, `ground` (colours), `ambient`, `sunSize` (degrees). |
+| `Spin` | `axis`, `speed` (degrees a second). `kgraph::RunSceneSystems(world, dt)` turns its entity. |
+
+Where a camera or a light is, and which way it faces, is its entity's transform.
+
+A **SceneView** node reads them each frame into two buffers a pipeline's parameters are wired to. `frame`
+is laid out as this block, and `lights` as an array of `Light`:
+
+```slang
+struct FrameData {
+    float4x4 viewProjection, inverseViewProjection;
+    float4 cameraPosition;
+    float4 skyZenith;      // rgb; w: how much light the sky gives all round
+    float4 skyHorizon;     // rgb; w: the cosine of the sun disc's radius
+    float4 skyGround;
+    float4 sunDirection;   // xyz: towards the sun; w: 1 when there is a sun
+    float4 sunColor;       // rgb, times its intensity
+    uint4 counts;          // x: how many lights
+};
+struct Light {
+    float4 position;       // xyz; w: range
+    float4 direction;      // xyz: the way it shines; w: 0 directional, 1 point, 2 spot
+    float4 color;          // rgb, times its intensity
+    float4 cone;           // x: cosine of the inner angle, y: of the outer
+};
+```
+
+Colours are in linear terms. The node's `extent` input is the size of the picture it is for, which the
+camera's aspect comes from. The projection has Y pointing down, as the device does. Whoever runs the graph
+can put its own view in place of the scene's camera (`Runtime::SetView`), which is how an editor looks at a
+scene from where it likes.
+
+Two pass nodes go with it. **Pick** takes an image of ids — one a pipeline draws `entityId` into — and
+`Runtime::Pick(u, v, then)` reads one pixel of it back, a few frames later, as the entity there.
+**DebugDraw** draws the scene's `kor::DebugDraw` shapes over an image, seen as the last SceneView saw
+(`Runtime::SetDebugDraw`).
 
 ### Default meshes
 
@@ -294,6 +356,8 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   only; the reference and masks can be set on the draw. One `clearColor` is for every colour attachment.
 - A buffer holds no data of its own in a graph: an indirect buffer is written by a compute pass.
 - A debug label or a GPU timer round a pass can't be asked for yet.
+- One SceneView's view is the one a DebugDraw node and `Runtime::ViewProjection()` go by: the last written.
+  Lights cast no shadows, and a SceneView has no matrix outputs to wire elsewhere.
 - A cycle between passes is left to the frame graph. Reading a resource as it was last frame
   (`ReadPrevious`) can't be asked for in a graph yet.
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

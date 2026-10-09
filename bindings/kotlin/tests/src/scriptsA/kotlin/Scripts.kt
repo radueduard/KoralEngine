@@ -3,7 +3,7 @@ import koral.engine.Entity
 import koral.engine.GraphicsScript
 import koral.engine.Script
 
-class Spin : Script() {
+class Turner : Script() {
     var angle = 0f
     var speed = 99f             // an initialiser is the class's, not the component's: a new component starts at zero
     var updates = 0
@@ -16,14 +16,14 @@ class Spin : Script() {
     override fun update(delta: Float) { angle += speed; ++updates; ++mine }
 }
 
-/** Reads the Spin of the first entity that has one, and sets it turning from 118: once. */
+/** Reads the Turner of the first entity that has one, and sets it turning from 118: once. */
 class Watcher : Script() {
     var seen = 0f
     var done = false
     override fun lateUpdate(delta: Float) {
         if (done) return
-        for (entity in world.with("Spin")) {
-            val spin = world.read<Spin>(entity)!!
+        for (entity in world.with("Turner")) {
+            val spin = world.read<Turner>(entity)!!
             seen = spin.angle
             spin.angle = 118f
             world.write(entity, spin)

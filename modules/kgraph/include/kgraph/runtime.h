@@ -21,6 +21,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <map>
 #include <memory>
 #include <string>
@@ -34,9 +36,10 @@
 
 #include "catalog.h"
 #include "graph.h"
+#include "view.h"
 
 struct KoralResource;
-namespace kor { class FrameGraph; }
+namespace kor { class FrameGraph; class DebugDraw; }
 
 namespace kgraph
 {
@@ -100,6 +103,30 @@ namespace kgraph
          *        replace is kept so already.
          */
         void Retire(std::shared_ptr<Resource> resource);
+
+        // ---- the frame, as whoever runs the graph has it ------------------------------------------------------
+
+        /**
+         * @brief What a SceneView node sees from, in place of the scene's own camera: an editor's view. With none
+         *        (the default) it is the first entity with a Camera.
+         */
+        void SetView(std::optional<View> view);
+        /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
+        void SetSelected(kecs::Entity entity);
+        /** @brief How big the scene's window is, each frame: what a Screen node gives as its extent. Sized by it, an image follows the window. */
+        void SetScreenExtent(kor::UVec2 extent);
+        /** @brief Where a DebugDraw node's shapes come from: the scene's. Null, the default, draws none. */
+        void SetDebugDraw(kor::DebugDraw* debug);
+        /** @brief What the last SceneView written saw: its view, its view and projection as one, and its picture's aspect. */
+        [[nodiscard]] View CurrentView() const;
+        [[nodiscard]] kor::Mat4 ViewProjection() const;
+        [[nodiscard]] float Aspect() const;
+        /**
+         * @brief Asks which entity is drawn at a place in the picture — @p u across and @p v down, each from 0 to
+         *        1 — through the graph's Pick node. @p then hears, a few frames on: it, or NullEntity. False when
+         *        the graph has no Pick node that is built.
+         */
+        bool Pick(float u, float v, std::function<void(kecs::Entity)> then);
 
         /** @brief How node @p id fared, or null when there is none. */
         [[nodiscard]] const NodeStatus* Status(std::string_view id) const;

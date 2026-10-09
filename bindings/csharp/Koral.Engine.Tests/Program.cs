@@ -30,8 +30,8 @@ float Number(Entity entity, string component, string field) => float.Parse(world
 
 // ---- a script is a component, and its methods are called on each entity that has it ----------------------------
 
-Write("Spin.cs", """
-    public sealed class Spin : Script
+Write("Turner.cs", """
+    public sealed class Turner : Script
     {
         public float Angle;
         public float Speed = 99;        // an initialiser is the class's, not the component's: a new component starts at zero
@@ -59,7 +59,7 @@ Write("Feeder.cs", """
     }
     """);
 Write("Watcher.cs", """
-    // Reads the Spin of the first entity that has one, and sets it turning from 100: once.
+    // Reads the Turner of the first entity that has one, and sets it turning from 100: once.
     public sealed class Watcher : Script
     {
         public float Seen;
@@ -67,9 +67,9 @@ Write("Watcher.cs", """
         protected override void LateUpdate(float delta)
         {
             if (Done) return;
-            foreach (var entity in World.With("Spin"))
+            foreach (var entity in World.With("Turner"))
             {
-                var spin = World.Read<Spin>(entity)!;
+                var spin = World.Read<Turner>(entity)!;
                 Seen = spin.Angle;
                 spin.Angle = 118;
                 World.Write(entity, spin);
@@ -80,8 +80,8 @@ Write("Watcher.cs", """
     """);
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
-Check(host.Scripts.Order().SequenceEqual(["Feeder", "Spin", "Watcher"]), $"each is a script: {string.Join(", ", host.Scripts)}");
-Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
+Check(host.Scripts.Order().SequenceEqual(["Feeder", "Turner", "Watcher"]), $"each is a script: {string.Join(", ", host.Scripts)}");
+Check(world.HasComponentType("Turner"), "a script is a component type, by its class name");
 
 var wheel = world.Create("Wheel");
 
@@ -108,33 +108,33 @@ var wheel = world.Create("Wheel");
     Check(world.ToJson().Contains("\"name\": \"Car\""), "and the scene's file has it");
     world.Destroy(car);
 }
-Check(world.Add(wheel, "Spin"), "an entity is given a script");
-world.Set(wheel, "Spin", "Speed", 2);
-world.Set(wheel, "Spin", "Angle", 10);
+Check(world.Add(wheel, "Turner"), "an entity is given a script");
+world.Set(wheel, "Turner", "Speed", 2);
+world.Set(wheel, "Turner", "Angle", 10);
 Frames(3);
-Near(Number(wheel, "Spin", "Updates"), 3, "updated once a frame");
-Near(Number(wheel, "Spin", "Angle"), 16, "its data is the engine's: 10 + 3 * 2");
-Equal(world.FieldJson(wheel, "Spin", "Started"), "true", "started, before its first update");
-Equal(world.FieldJson(wheel, "Spin", "Axis").Replace(" ", ""), "[0,1,0]", "a vector field");
-Check(world.ToJson().Contains("\"Spin\""), "and it is in the scene's file");
+Near(Number(wheel, "Turner", "Updates"), 3, "updated once a frame");
+Near(Number(wheel, "Turner", "Angle"), 16, "its data is the engine's: 10 + 3 * 2");
+Equal(world.FieldJson(wheel, "Turner", "Started"), "true", "started, before its first update");
+Equal(world.FieldJson(wheel, "Turner", "Axis").Replace(" ", ""), "[0,1,0]", "a vector field");
+Check(world.ToJson().Contains("\"Turner\""), "and it is in the scene's file");
 
 // One script reading and writing another's, on another entity.
 var watcher = world.Create("Watcher");
 world.Add(watcher, "Watcher");
 Frames(1);
 Near(Number(watcher, "Watcher", "Seen"), 18, "a script reads another entity's script");
-Near(Number(wheel, "Spin", "Angle"), 118, "and writes it");
+Near(Number(wheel, "Turner", "Angle"), 118, "and writes it");
 
 // Switched off: it has the script, and nothing runs.
-world.SetEnabled(wheel, "Spin", false);
+world.SetEnabled(wheel, "Turner", false);
 Frames(1);
-var off = Number(wheel, "Spin", "Updates");
+var off = Number(wheel, "Turner", "Updates");
 Frames(2);
-Near(Number(wheel, "Spin", "Updates"), off, "switched off, it is left alone");
-world.SetEnabled(wheel, "Spin", true);
+Near(Number(wheel, "Turner", "Updates"), off, "switched off, it is left alone");
+world.SetEnabled(wheel, "Turner", true);
 Frames(1);
-Near(Number(wheel, "Spin", "Updates"), off + 1, "and switched on, it carries on");
-Equal(world.With("Spin").Length, 1, "found by a query");
+Near(Number(wheel, "Turner", "Updates"), off + 1, "and switched on, it carries on");
+Equal(world.With("Turner").Length, 1, "found by a query");
 
 // ---- a graphics script writes what the graph takes ---------------------------------------------------------------
 
@@ -153,8 +153,8 @@ Check(Number(source, "Feeder", "Prepared") >= 2, "once a frame");
 
 // ---- edited while it runs: the code is new, the data is the entity's -------------------------------------------
 
-Write("Spin.cs", """
-    public sealed class Spin : Script
+Write("Turner.cs", """
+    public sealed class Turner : Script
     {
         public float Angle;             // as it was: kept
         public double Speed;            // a double now: reset
@@ -165,40 +165,40 @@ Write("Spin.cs", """
         protected override void Update(float delta) { Angle -= 1; ++Updates; ++Laps; }
     }
     """);
-var (angleBefore, updatesBefore) = (Number(wheel, "Spin", "Angle"), (int)Number(wheel, "Spin", "Updates"));
+var (angleBefore, updatesBefore) = (Number(wheel, "Turner", "Angle"), (int)Number(wheel, "Turner", "Updates"));
 Check(host.Reload(), $"the edited script compiles: {string.Join("; ", host.Errors)}");
 Equal(host.Generation, 2, "loaded a second time");
-Near(Number(wheel, "Spin", "Angle"), angleBefore, "a field that kept its name and type kept its value");
-Near(Number(wheel, "Spin", "Updates"), updatesBefore, "and so did this one");
-Equal(world.FieldJson(wheel, "Spin", "Speed"), "0", "one that changed type starts again");
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "0", "and so does a new one");
-Equal(world.FieldJson(wheel, "Spin", "Started"), "null", "one that is gone is gone");
+Near(Number(wheel, "Turner", "Angle"), angleBefore, "a field that kept its name and type kept its value");
+Near(Number(wheel, "Turner", "Updates"), updatesBefore, "and so did this one");
+Equal(world.FieldJson(wheel, "Turner", "Speed"), "0", "one that changed type starts again");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "0", "and so does a new one");
+Equal(world.FieldJson(wheel, "Turner", "Started"), "null", "one that is gone is gone");
 Frames(2);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "2", "the new code runs, on the same entity");
-Near(Number(wheel, "Spin", "Updates"), updatesBefore + 2, "counting on from where it was");
-Near(Number(wheel, "Spin", "Angle"), angleBefore - 2, "the new Update, not the old");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "2", "the new code runs, on the same entity");
+Near(Number(wheel, "Turner", "Updates"), updatesBefore + 2, "counting on from where it was");
+Near(Number(wheel, "Turner", "Angle"), angleBefore - 2, "the new Update, not the old");
 Near(world.Buffer("numbers")!.Read<float>(1)[0], 21, "a script that was not edited carries on as it was");
 
 // ---- an edit that does not compile changes nothing -------------------------------------------------------------
 
-Write("Spin.cs", "public sealed class Spin : Script { public float Angle; protected override void Update(float delta) { this is not C# } }");
+Write("Turner.cs", "public sealed class Turner : Script { public float Angle; protected override void Update(float delta) { this is not C# } }");
 Check(!host.Reload(), "what does not compile is refused");
-Check(host.Errors.Count > 0 && host.Errors[0].Contains("Spin.cs"), $"with the file and the error: {host.Errors.FirstOrDefault()}");
+Check(host.Errors.Count > 0 && host.Errors[0].Contains("Turner.cs"), $"with the file and the error: {host.Errors.FirstOrDefault()}");
 Equal(host.Generation, 2, "nothing was loaded");
 Frames(1);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "3", "the scripts that were running carry on");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "3", "the scripts that were running carry on");
 
 // A field of a kind a script cannot keep is refused the same way, and said plainly.
-Write("Spin.cs", "public sealed class Spin : Script { public float Angle; public string Name = \"\"; }");
+Write("Turner.cs", "public sealed class Turner : Script { public float Angle; public string Name = \"\"; }");
 Check(!host.Reload(), "a field a script cannot keep is refused");
-Check(host.Errors.Count == 1 && host.Errors[0].Contains("Spin.Name") && host.Errors[0].Contains("private"), $"saying which, and what to do: {host.Errors.FirstOrDefault()}");
+Check(host.Errors.Count == 1 && host.Errors[0].Contains("Turner.Name") && host.Errors[0].Contains("private"), $"saying which, and what to do: {host.Errors.FirstOrDefault()}");
 Frames(1);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "4", "and what was running still runs");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "4", "and what was running still runs");
 
 // ---- a script that throws is reported, and the rest carry on -----------------------------------------------------
 
-Write("Spin.cs", """
-    public sealed class Spin : Script
+Write("Turner.cs", """
+    public sealed class Turner : Script
     {
         public float Angle; public double Speed; public int Updates; public int Laps;
         protected override void Update(float delta) { ++Laps; throw new InvalidOperationException("on purpose"); }
@@ -206,24 +206,24 @@ Write("Spin.cs", """
     """);
 Check(host.Reload(), "it compiles");
 Frames(3);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "7", "what it did before throwing is kept, each frame");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "7", "what it did before throwing is kept, each frame");
 Check(Number(source, "Feeder", "Prepared") > 5, "and the other scripts were not stopped by it");
 
 // ---- a script removed from the source stops, and its data stays for when it is back ---------------------------
 
-File.Delete(Path.Combine(scripts, "Spin.cs"));
-File.Delete(Path.Combine(scripts, "Watcher.cs"));     // it reads a Spin, and would not compile without one
+File.Delete(Path.Combine(scripts, "Turner.cs"));
+File.Delete(Path.Combine(scripts, "Watcher.cs"));     // it reads a Turner, and would not compile without one
 Check(host.Reload(), "with a script's file gone, the rest load");
-Check(!host.Scripts.Contains("Spin") && host.Scripts.Contains("Feeder"), "and it is no longer one");
+Check(!host.Scripts.Contains("Turner") && host.Scripts.Contains("Feeder"), "and it is no longer one");
 Frames(2);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "7", "nothing runs for it, and the entity keeps what it had");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "7", "nothing runs for it, and the entity keeps what it had");
 
 // ---- files watched: saved, settled, loaded --------------------------------------------------------------------
 
 host.PollInterval = TimeSpan.FromMilliseconds(10);
 host.SettleTime = TimeSpan.FromMilliseconds(60);
-Write("Spin.cs", """
-    public sealed class Spin : Script
+Write("Turner.cs", """
+    public sealed class Turner : Script
     {
         public float Angle; public double Speed; public int Updates; public int Laps;
         protected override void Update(float delta) => Laps += 10;
@@ -233,7 +233,7 @@ var generation = host.Generation;
 for (var i = 0; i < 200 && host.Generation == generation; ++i) { Thread.Sleep(10); host.Poll(); }
 Equal(host.Generation, generation + 1, "a saved script is noticed and loaded");
 Frames(1);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), "17", "and runs, with what the entity had");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), "17", "and runs, with what the entity had");
 
 // ---- the code that was replaced can go -------------------------------------------------------------------------
 
@@ -241,10 +241,10 @@ var previous = host.PreviousContext;
 for (var i = 0; i < 20 && previous is { IsAlive: true }; ++i) { GC.Collect(); GC.WaitForPendingFinalizers(); Frames(1); }
 Check(previous is { IsAlive: false }, "a build that was replaced is unloaded");
 
-var laps = world.FieldJson(wheel, "Spin", "Laps");
+var laps = world.FieldJson(wheel, "Turner", "Laps");
 host.Dispose();
 Frames(2);
-Equal(world.FieldJson(wheel, "Spin", "Laps"), laps, "with the host gone nothing runs, and the data is still the scene's");
+Equal(world.FieldJson(wheel, "Turner", "Laps"), laps, "with the host gone nothing runs, and the data is still the scene's");
 
 Console.WriteLine(failures == 0 ? "Koral.Engine: all checks passed" : $"Koral.Engine: {failures} checks FAILED");
 return failures == 0 ? 0 : 1;

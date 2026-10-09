@@ -17,6 +17,10 @@
 
 #include <kgui/layout.h>
 #include <koralFileBrowser.h>
+#include <keditor/starter.h>
+#include <kgraph/scene.h>
+#include <kmath/quaternion.h>
+#include <kmath/transform.h>
 #include <koralSceneView.h>
 
 #include <kecs/json.h>
@@ -38,6 +42,9 @@ namespace keditor
         _hasProject = true;
         _scene = _project.start;
         _project.Use();
+        WriteStandardObjects(_project.directory / "objects");
+        LoadObjects();
+        for (const auto& problem : Doc().LoadComponents(_project.directory / "components")) Say(problem, true);
         return Save();
     }
 
@@ -53,6 +60,9 @@ namespace keditor
         _scene = _project.start;
         selectedNode.clear();
         selectedEntity = kecs::NullEntity;
+        _snapshot.clear();
+        _folded.clear();
+        LoadObjects();
         Say(std::format("Opened {}.", _project.name));
         return true;
     }
@@ -60,6 +70,7 @@ namespace keditor
     bool Session::Save()
     {
         if (!_hasProject) { Say("There is no project to save it in yet: File, New project.", true); return false; }
+        if (InPlayMode()) { Say("Stop playing to save: what is saved is the scene, not a moment of it.", true); return false; }
         std::string error;
         if (!Doc().Save(_project.ScenePath(_scene), error)) { Say(error, true); return false; }
         Say(std::format("Saved {}.", _project.ScenePath(_scene).filename().string()));
@@ -88,6 +99,320 @@ namespace keditor
 #endif
         if (std::system(command.c_str()) != 0) { Say("The player could not be started.", true); return false; }
         Say(std::format("Running {}.", _project.name));
+        return true;
+    }
+
+    // ---- the editor's view ------------------------------------------------------------------------------------
+
+    namespace {
+        constexpr float Radians = 3.14159265358979323846f / 180.f;
+    }
+
+    kor::Vec3 EditorCamera::Position() const
+    {
+        const float y = yaw * Radians, p = pitch * Radians;
+        return target + kor::Vec3(std::cos(p) * std::sin(y), -std::sin(p), std::cos(p) * std::cos(y)) * distance;
+    }
+
+    kgraph::View EditorCamera::View() const
+    {
+        kgraph::View view;
+        view.view = kor::LookAt(Position(), target);
+        view.fieldOfView = fieldOfView * Radians;
+        view.near = near;
+        view.far = far;
+        return view;
+    }
+
+    void EditorCamera::Orbit(const float dx, const float dy)
+    {
+        yaw -= dx * 0.3f;
+        pitch = std::clamp(pitch - dy * 0.3f, -89.f, 89.f);
+    }
+
+    void EditorCamera::Pan(const float dx, const float dy, const float height)
+    {
+        const float perPixel = 2.f * distance * std::tan(fieldOfView * Radians / 2.f) / std::max(height, 1.f);
+        const kor::Vec3 forward = kor::Normalize(target - Position());
+        const kor::Vec3 right = kor::Normalize(kor::Cross(forward, kor::Vec3(0.f, 1.f, 0.f)));
+        const kor::Vec3 up = kor::Cross(right, forward);
+        target = target - right * (dx * perPixel) + up * (dy * perPixel);
+    }
+
+    void EditorCamera::Zoom(const float steps) { distance = std::clamp(distance * std::pow(0.85f, steps), 0.05f, 5000.f); }
+
+    void EditorCamera::Frame(const kecs::Mat4& world)
+    {
+        target = { world.At(3, 0), world.At(3, 1), world.At(3, 2) };
+        float size = 0.f;
+        for (int column = 0; column < 3; ++column)
+            size = std::max(size, kor::Length(kor::Vec3(world.At(column, 0), world.At(column, 1), world.At(column, 2))));
+        const float radius = std::max(size * 0.87f, 0.25f);    // half a unit cube's diagonal
+        distance = radius / std::sin(fieldOfView * Radians / 2.f) * 1.2f;
+    }
+
+    void Session::Frame(const kecs::Entity entity)
+    {
+        if (!Doc().World().Alive(entity)) return;
+        camera.Frame(Doc().World().WorldMatrix(entity));
+        lookThroughCamera = false;
+        ++_changes;
+    }
+
+    void Session::Tick(const kor::Input& input, const float seconds)
+    {
+        Document& doc = Doc();
+        kecs::World& world = doc.World();
+        kgraph::Runtime& runtime = doc.Runtime();
+        kor::DebugDraw& debug = _play.SceneDebug();
+
+        // Frames a second, over a quarter of one: steady enough to read.
+        ++_framesCounted;
+        _secondsCounted += seconds;
+        if (_secondsCounted >= 0.25f) {
+            const int now = static_cast<int>(std::lround(static_cast<float>(_framesCounted) / _secondsCounted));
+            if (now != _fps) { _fps = now; ++_changes; }
+            _framesCounted = 0;
+            _secondsCounted = 0.f;
+        }
+
+        const kecs::Entity selected = world.Alive(selectedEntity) ? selectedEntity : kecs::NullEntity;
+        runtime.SetSelected(selected);
+
+        // The view, moved by the mouse over the scene's panel: how far it went since the last frame, from where it was.
+        const kor::Vec2 mouse = input.MousePosition();
+        const kor::Vec2 delta = _lastMouse ? mouse - *_lastMouse : kor::Vec2(0.f);
+        _lastMouse = mouse;
+        const auto pointer = viewport->PointerPosition();
+        const kor::UVec2 size = viewport->Size();
+        if (ThroughSceneCamera()) {
+            _viewDrag.reset();
+            runtime.SetView(std::nullopt);
+        } else {
+            if (_viewDrag && !input.IsMouseButtonHeld(*_viewDrag) && !input.IsMouseButtonPressed(*_viewDrag)) _viewDrag.reset();
+            if (!_viewDrag && viewport->Hovered())
+                for (const kor::MouseButton button : { kor::MouseButton::eRight, kor::MouseButton::eMiddle })
+                    if (input.IsMouseButtonPressed(button)) { _viewDrag = button; break; }
+            if (_viewDrag == kor::MouseButton::eRight) camera.Orbit(delta.x, delta.y);
+            else if (_viewDrag == kor::MouseButton::eMiddle) camera.Pan(delta.x, delta.y, static_cast<float>(std::max(size.y, 1u)));
+            if (viewport->Hovered())
+                if (const float wheel = input.MouseScrollDelta().y; wheel != 0.f) camera.Zoom(wheel);
+            runtime.SetView(camera.View());
+
+            // What the editor's view shows of what is not drawn: each scene camera as the pyramid it sees through,
+            // and the picked light's reach.
+            const float aspect = runtime.Aspect();
+            world.Query<const kgraph::Camera>().Each([&](const kecs::Entity entity, const kgraph::Camera&) {
+                const kgraph::View lens = kgraph::ViewOf(world, entity);
+                debug.Camera(lens.view, lens.Projection(aspect, false), 0.5f);
+            });
+            if (!selected.IsNull()) {
+                kor::Vec3 position, scale;
+                kor::Quat rotation;
+                if (kor::Decompose(kgraph::ToKor(world.WorldMatrix(selected)), position, rotation, scale)) {
+                    const kor::Vec3 forward = rotation * kor::Vec3(0.f, 0.f, -1.f);
+                    if (world.Has<kgraph::DirectionalLight>(selected)) debug.DirectionalLight(position, forward);
+                    if (const auto* light = world.Get<kgraph::PointLight>(selected)) debug.PointLight(position, light->range);
+                    if (const auto* light = world.Get<kgraph::SpotLight>(selected))
+                        debug.SpotLight(position, forward, light->range, light->outerAngle * Radians, light->innerAngle * Radians);
+                }
+            }
+        }
+
+        // The gizmo on what is picked, and what dragging it does to its transform.
+        kor::GizmoPointer hand = viewport->GizmoPointer();
+        if (!selected.IsNull() && gizmoEnabled && size.x > 0 && size.y > 0) {
+            kor::Mat4 transform = kgraph::ToKor(world.WorldMatrix(selected));
+            kor::GizmoOptions options;
+            options.space = kor::GizmoSpace::eLocal;
+            if (debug.Gizmo(gizmo, transform, runtime.ViewProjection(), hand, options)) {
+                _gizmoMoved = true;
+                // Only what this gizmo moves: taking the rest back out of the matrix would round it off a little each frame.
+                world.SetWorldMatrix(selected, kgraph::ToKecs(transform), gizmo == kor::GizmoMode::eTranslate, gizmo == kor::GizmoMode::eRotate,
+                                     gizmo == kor::GizmoMode::eScale);
+                ++_changes;
+            }
+        }
+
+        // A click on the picture — the button let go where it went down, the gizmo not dragged — picks what is under it.
+        const bool down = hand.down;
+        if (down && !_wasDown) { _pressAt = pointer; _gizmoMoved = false; }
+        if (!down && _wasDown) {
+            if (_pressAt && pointer && !_gizmoMoved && kor::Length(*pointer - *_pressAt) < 4.f && size.x > 0 && size.y > 0) {
+                // The answer comes a few frames on: by then something else may have been picked, and that, being later, stands.
+                const kecs::Entity before = selectedEntity;
+                runtime.Pick(pointer->x / static_cast<float>(size.x), pointer->y / static_cast<float>(size.y), [this, before](const kecs::Entity picked) {
+                    if (selectedEntity == before) Select(picked);
+                });
+            }
+            _pressAt.reset();
+        }
+        _wasDown = down;
+    }
+
+    // ---- playing ------------------------------------------------------------------------------------------------
+
+    void Session::StartPlaying()
+    {
+        if (_snapshot.empty()) {
+            _snapshot = Doc().WorldJson();
+            if (kgraph::FirstCamera(Doc().World()).IsNull()) Say("There is no camera in the scene: it plays seen from where the scene view's default is.", true);
+            else Say("Playing.");
+        }
+        _play.SetPlaying(true);
+        ++_changes;
+    }
+
+    void Session::Pause()
+    {
+        _play.SetPlaying(false);
+        ++_changes;
+    }
+
+    void Session::Stop()
+    {
+        if (_snapshot.empty()) return;
+        // Where what is picked is, by its place among its siblings up to the top: found again when the scene is put back.
+        std::vector<std::size_t> path;
+        const kecs::World& world = Doc().World();
+        for (kecs::Entity at = world.Alive(selectedEntity) ? selectedEntity : kecs::NullEntity; !at.IsNull(); at = world.ParentOf(at)) {
+            const kecs::Entity parent = world.ParentOf(at);
+            const auto& siblings = parent.IsNull() ? world.Roots() : world.ChildrenOf(parent);
+            path.insert(path.begin(), static_cast<std::size_t>(std::ranges::find(siblings, at) - siblings.begin()));
+        }
+        _play.SetPlaying(false);
+        std::string error;
+        if (!Doc().RestoreWorld(_snapshot, error)) Say(error, true);
+        else Say("Stopped: the scene is as it was.");
+        _snapshot.clear();
+        _folded.clear();
+        kecs::Entity found = kecs::NullEntity;
+        const std::vector<kecs::Entity>* siblings = &world.Roots();
+        for (const std::size_t index : path) {
+            if (index >= siblings->size()) { found = kecs::NullEntity; break; }
+            found = (*siblings)[index];
+            siblings = &world.ChildrenOf(found);
+        }
+        selectedEntity = found;
+        ++_changes;
+    }
+
+    // ---- entities -----------------------------------------------------------------------------------------------
+
+    kecs::Entity Session::Duplicate(const kecs::Entity entity)
+    {
+        const kecs::Entity copy = Doc().Duplicate(entity);
+        if (!copy.IsNull()) Select(copy);
+        return copy;
+    }
+
+    void Session::Delete(const kecs::Entity entity)
+    {
+        const kecs::World& world = Doc().World();
+        if (selectedEntity == entity || world.IsAncestor(entity, selectedEntity)) selectedEntity = kecs::NullEntity;
+        Doc().DestroyEntity(entity);
+        ++_changes;
+    }
+
+    void Session::LoadObjects()
+    {
+        _objects.clear();
+        // An entity with nothing but a name and a place: there with or without a project.
+        _objects.push_back({ "Empty", "An entity with nothing but a name and a place.", Value(Value::Members { { "name", "Empty" } }), {} });
+        std::error_code ignored;
+        std::vector<std::filesystem::path> files;
+        if (_hasProject)
+            for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "objects", ignored))
+                if (entry.is_regular_file() && entry.path().extension() == ".json") files.push_back(entry.path());
+        std::ranges::sort(files);
+        for (const auto& file : files) {
+            std::ifstream in(file, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            kecs::json::Value parsed;
+            std::string error;
+            if (!kecs::json::Parse(text, parsed, error)) { Say(std::format("{}: {}", file.filename().string(), error), true); continue; }
+            ObjectTemplate object;
+            object.data = Value::FromJson(parsed);
+            const Value* name = object.data.Find("template");
+            object.name = name && name->String() ? *name->String() : file.stem().string();
+            if (const Value* description = object.data.Find("description"); description && description->String()) object.description = *description->String();
+            object.file = file;
+            std::erase_if(_objects, [&](const ObjectTemplate& other) { return other.name == object.name; });
+            _objects.push_back(std::move(object));
+        }
+        ++_changes;
+    }
+
+    kecs::Entity Session::Create(const ObjectTemplate& object, const kecs::Entity parent)
+    {
+        Document& doc = Doc();
+        const auto& siblings = parent.IsNull() ? doc.World().Roots() : doc.World().ChildrenOf(parent);
+        std::vector<std::string> names;
+        for (const kecs::Entity sibling : siblings) names.push_back(doc.World().NameOf(sibling));
+        std::vector<std::string> problems;
+        const kecs::Entity entity = doc.ReadEntity(object.data, parent, &problems);
+        doc.Rename(entity, Document::UniqueName(doc.World().NameOf(entity), names));
+        if (!problems.empty()) Say(std::format("{}: {}", object.name, problems.front()), true);
+        if (!parent.IsNull()) Fold(parent, false);
+        Select(entity);
+        return entity;
+    }
+
+    bool Session::SaveAsObject(const kecs::Entity entity)
+    {
+        if (!_hasProject) { Say("There is no project to keep objects in yet: File, New project.", true); return false; }
+        if (!Doc().World().Alive(entity)) return false;
+        const std::string name = Doc().World().NameOf(entity);
+        const Value written = Doc().WriteEntity(entity);
+        Value::Members data { { "template", name } };
+        // Made from it, a thing is wherever it is made: where this one was is no part of what it is.
+        for (const auto& [key, value] : *written.Named()) data.emplace_back(key, key == "position" ? Value(Value::List { 0, 0, 0 }) : value);
+        std::string file = name;
+        for (char& c : file)
+            if (!std::isalnum(static_cast<unsigned char>(c)) && c != ' ' && c != '_' && c != '-') c = '_';
+        if (file.empty()) file = "Object";
+        const auto path = _project.directory / "objects" / (file + ".json");
+        std::error_code ignored;
+        std::filesystem::create_directories(path.parent_path(), ignored);
+        {
+            std::ofstream out(path, std::ios::binary);
+            out << Value(std::move(data)).ToJson() << "\n";
+            if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; }
+        }   // closed, before it is read back among the objects
+        LoadObjects();
+        Say(std::format("Saved {} as an object: {}", name, path.filename().string()));
+        return true;
+    }
+
+    bool Session::NewStandardScene()
+    {
+        if (!_hasProject) { Say("The standard scene's shaders go in a project: File, New project.", true); return false; }
+        if (InPlayMode()) Stop();
+        WriteStandardShaders(_project.ShaderDirectory());
+        WriteStandardObjects(_project.directory / "objects");
+        _play.New();
+        selectedNode.clear();
+        selectedEntity = kecs::NullEntity;
+        _folded.clear();
+        for (const auto& problem : Doc().LoadComponents(_project.directory / "components")) Say(problem, true);
+        std::string error;
+        if (!AddStandardGraph(Doc(), error)) { Say(error, true); return false; }
+        Select(AddStandardScene(Doc()));
+        LoadObjects();
+        Say("A new scene: saving writes it to the project.");
+        return true;
+    }
+
+    bool Session::Revert()
+    {
+        if (!_hasProject) return false;
+        if (InPlayMode()) { _snapshot.clear(); _play.SetPlaying(false); }
+        std::string error;
+        if (!_play.Open(_project.ScenePath(_scene), error)) { Say(error, true); return false; }
+        selectedNode.clear();
+        selectedEntity = kecs::NullEntity;
+        _folded.clear();
+        Say(std::format("{} is as it was saved.", _scene));
         return true;
     }
 
@@ -411,8 +736,9 @@ namespace keditor
         bool NamesAColor(std::string name)
         {
             std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            // A sky's colours are named for where in the sky they are.
             return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos
-                || name.find("albedo") != std::string::npos;
+                || name.find("albedo") != std::string::npos || name == "zenith" || name == "horizon" || name == "ground";
         }
 
         /** An input of a node, as it stands. */
@@ -516,12 +842,13 @@ namespace keditor
                     Menus(),
                     kui::Expanded(kui::DockSpace(_layout, {
                         { "graph", "Graph", Graph(), false },
-                        { "scene", "Scene", kgui::SceneView(_session->Play()), false },
+                        { "scene", "Scene", ScenePanel(), false },
                         { "outliner", "Outliner", Outliner(), false },
                         { "inspector", "Inspector", Inspector(), false },
                         { "problems", "Problems", Problems(), false },
                     })),
-                    kui::StatusBar(_session->Status(), _session->Failed() ? kui::StatusLevel::eError : kui::StatusLevel::eInfo),
+                    kui::StatusBar(std::format("{}      {} {}", _session->Status(), Doc().World().EntityCount(), Doc().World().EntityCount() == 1 ? "entity" : "entities"),
+                                   _session->Failed() ? kui::StatusLevel::eError : kui::StatusLevel::eInfo),
                 }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetMainAxisSize(kui::MainAxisSize::eMax));
                 return kui::Modal(_dialog != Dialog::eNone, std::move(body), DialogBody(), [this] { SetState([&] { _dialog = Dialog::eNone; }); });
             }
@@ -531,19 +858,91 @@ namespace keditor
 
             Document& Doc() { return _session->Doc(); }
 
+            // ---- the scene ---------------------------------------------------------------------------------------
+
+            /** A button of the scene's toolbar: lit while what it stands for is on. */
+            kui::Widget Tool(const std::string& label, const std::string& what, const bool active, std::function<void()> pressed)
+            {
+                return kui::Tooltip(what, Small(active ? "[" + label + "]" : label, std::move(pressed)));
+            }
+
+            /** The scene as it runs, under what looks at it and plays it: the gizmo, the view, play and stop. */
+            kui::Widget ScenePanel()
+            {
+                const kecs::Entity selected = _session->selectedEntity;
+                const bool playMode = _session->InPlayMode();
+                std::vector<kui::Widget> tools;
+                tools.push_back(Tool("Select", "Select only: no gizmo", !_session->gizmoEnabled, [this] { _session->SetGizmo(false, _session->gizmo); }));
+                for (const auto& [mode, label, what] : { std::tuple { kor::GizmoMode::eTranslate, "Move", "Move what is picked" },
+                                                         std::tuple { kor::GizmoMode::eRotate, "Rotate", "Rotate what is picked" },
+                                                         std::tuple { kor::GizmoMode::eScale, "Scale", "Scale what is picked" } })
+                    tools.push_back(Tool(label, what, _session->gizmoEnabled && _session->gizmo == mode, [this, mode] { _session->SetGizmo(true, mode); }));
+                tools.push_back(kui::Tooltip("Frame what is picked (the view: right-drag turns, middle-drag moves, the wheel zooms)",
+                                             Small("Frame", [this, selected] { _session->Frame(selected); })));
+                tools.push_back(Tool("Camera", playMode ? "Playing: seen through the scene's camera" : "Look through the scene's camera", _session->ThroughSceneCamera(),
+                                     [this, playMode] { if (!playMode) _session->SetLookThroughCamera(!_session->lookThroughCamera); }));
+                tools.push_back(kui::Expanded(kui::Text("")));
+                if (_session->IsPlaying()) tools.push_back(Tool("Pause", "Pause", false, [this] { _session->Pause(); }));
+                else tools.push_back(Tool(playMode ? "Resume" : "Play", playMode ? "Resume" : "Play: scripts and the scene's systems run", playMode, [this] { _session->StartPlaying(); }));
+                if (playMode) tools.push_back(Tool("Stop", "Stop, and put the scene back as it was", false, [this] { _session->Stop(); }));
+                tools.push_back(kgui::Muted(std::format("{} fps", _session->Fps())));
+                return kui::Column({
+                    kui::Padding(kui::EdgeInsets::Symmetric(6.f, 3.f), kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))),
+                    kui::Expanded(kgui::SceneView(_session->Play(), _session->viewport)),
+                }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetMainAxisSize(kui::MainAxisSize::eMax));
+            }
+
             // ---- menus and dialogs ------------------------------------------------------------------------------
 
             kui::Widget Menus()
             {
+                const kecs::Entity selected = Doc().World().Alive(_session->selectedEntity) ? _session->selectedEntity : kecs::NullEntity;
+                const bool some = !selected.IsNull(), playMode = _session->InPlayMode();
+                const auto needsProject = [this](std::function<void()> then) {
+                    return [this, then = std::move(then)] { if (!_session->HasProject()) SetState([&] { _dialog = Dialog::eNewProject; }); else then(); };
+                };
+                // What there is to make: each object, at the top and — with something picked — under it.
+                std::vector<kui::MenuItem> create;
+                for (const auto& object : _session->Objects()) create.push_back({ object.name, [this, object] { _session->Create(object); } });
+                if (some) {
+                    create.push_back({ .separator = true });
+                    for (const auto& object : _session->Objects())
+                        create.push_back({ std::format("{} under {}", object.name, Doc().NameOf(selected)), [this, object, selected] { _session->Create(object, selected); } });
+                }
+                const auto ticked = [](const bool on, const char* label) { return std::string(on ? "* " : "  ") + label; };
                 return kui::MenuBar({
                     { "File", {
                         { "New project...", [this] { SetState([&] { _dialog = Dialog::eNewProject; }); } },
                         { "Open project...", [this] { SetState([&] { _dialog = Dialog::eOpenProject; }); } },
                         { .separator = true },
-                        { "Save scene", [this] { if (!_session->HasProject()) SetState([&] { _dialog = Dialog::eNewProject; }); else _session->Save(); } },
+                        { "New scene", needsProject([this] { _session->NewStandardScene(); }), !playMode },
+                        { "Revert to saved", [this] { _session->Revert(); }, _session->HasProject() && !playMode },
+                        { "Save scene", needsProject([this] { _session->Save(); }), !playMode },
+                    } },
+                    { "Edit", {
+                        { "Duplicate", [this, selected] { _session->Duplicate(selected); }, some },
+                        { "Move to the top", [this, selected] { Doc().SetParent(selected, kecs::NullEntity); }, some && !Doc().World().ParentOf(selected).IsNull() },
+                        { "Save as object", [this, selected] { _session->SaveAsObject(selected); }, some },
+                        { .separator = true },
+                        { "Delete", [this, selected] { _session->Delete(selected); }, some },
+                    } },
+                    { "Create", std::move(create) },
+                    { "View", {
+                        { "Frame the selection", [this, selected] { _session->Frame(selected); }, some },
+                        { ticked(_session->ThroughSceneCamera(), "Look through the scene's camera"), [this] { _session->SetLookThroughCamera(!_session->lookThroughCamera); }, !playMode },
+                        { .separator = true },
+                        { ticked(!_session->gizmoEnabled, "Select only"), [this] { _session->SetGizmo(false, _session->gizmo); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eTranslate, "Move"), [this] { _session->SetGizmo(true, kor::GizmoMode::eTranslate); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eRotate, "Rotate"), [this] { _session->SetGizmo(true, kor::GizmoMode::eRotate); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eScale, "Scale"), [this] { _session->SetGizmo(true, kor::GizmoMode::eScale); } },
+                    } },
+                    { "Scene", {
+                        _session->IsPlaying() ? kui::MenuItem { "Pause", [this] { _session->Pause(); } }
+                                              : kui::MenuItem { playMode ? "Resume" : "Play", [this] { _session->StartPlaying(); } },
+                        { "Stop", [this] { _session->Stop(); }, playMode },
                     } },
                     { "Project", {
-                        { "Run", [this] { if (!_session->HasProject()) SetState([&] { _dialog = Dialog::eNewProject; }); else _session->Run(); } },
+                        { "Run", needsProject([this] { _session->Run(); }) },
                     } },
                     { "Graph", {
                         { "Add node...   Ctrl+Space", [this] { SetState([&] { _dialog = Dialog::eAddNode; _addAt = { 80.f, 80.f }; _filter.clear(); _newId.clear(); }); } },
@@ -719,10 +1118,15 @@ namespace keditor
                         _session->Say(std::format("'{}' is above '{}': it cannot go under it", Doc().NameOf(*moved), Doc().NameOf(entity)), true);
                 }), std::move(node));
                 std::vector<kui::MenuItem> menu;
-                menu.push_back({ "New entity under it", [this, entity] { _session->Fold(entity, false); _session->Select(Doc().CreateEntity("Entity", entity)); } });
+                menu.push_back({ "Frame in the scene view", [this, entity] { _session->Select(entity); _session->Frame(entity); } });
+                menu.push_back({ "Duplicate", [this, entity] { _session->Duplicate(entity); } });
                 if (!Doc().World().ParentOf(entity).IsNull()) menu.push_back({ "Move to the top", [this, entity] { Doc().SetParent(entity, kecs::NullEntity); } });
+                menu.push_back({ "Save as object", [this, entity] { _session->SaveAsObject(entity); } });
                 menu.push_back({ .separator = true });
-                menu.push_back({ "Delete, with what is under it", [this, entity] { Doc().DestroyEntity(entity); _session->Select(kecs::NullEntity); } });
+                for (const auto& object : _session->Objects())
+                    menu.push_back({ std::format("New {} under it", object.name), [this, object, entity] { _session->Create(object, entity); } });
+                menu.push_back({ .separator = true });
+                menu.push_back({ "Delete, with what is under it", [this, entity] { _session->Delete(entity); } });
                 return kui::ContextMenu(std::move(menu), std::move(node)).Key(std::format("entity {}.{}", entity.index, entity.generation));
             }
 
@@ -972,7 +1376,14 @@ namespace keditor
                             if (!Doc().SetField(entity, component, fieldName, changed, &error)) _session->Say(error, true);
                         };
                         kui::Widget editor;
-                        if (HoldsResource(field.type)) {
+                        const Document::FieldHint* hint = doc.HintOf(component, fieldName);
+                        if (hint && !hint->options.empty() && value.Number()) {
+                            // One of a few, by name: the field holds which.
+                            editor = kui::Dropdown(hint->options, static_cast<int>(*value.Number()), [set](const int index) { set(Value(index)); });
+                        } else if (hint && value.Number() && (hint->min || hint->max || hint->speed)) {
+                            const float low = hint->min.value_or(-1e30f), high = hint->max.value_or(1e30f);
+                            editor = kui::DragValue(NumberOf(value), [set, low, high](const float v) { set(Value(std::clamp(v, low, high))); });
+                        } else if (HoldsResource(field.type)) {
                             std::vector<std::string> choices { "(nothing)" };
                             int selected = 0;
                             for (const auto& node : doc.NodesFor(field.type)) {
@@ -990,7 +1401,7 @@ namespace keditor
                             const std::string text = *value.String();
                             editor = kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } })
                                 .Key(component + "." + fieldName + "=" + text);
-                        } else if ((field.type == "vec4" || field.type == "vec3") && NamesAColor(fieldName)) {
+                        } else if ((field.type == "vec4" || field.type == "vec3") && ((hint && hint->color) || NamesAColor(fieldName))) {
                             editor = ColorOf(value, set, field.type == "vec4");
                         } else if (const auto* items = value.Items()) {
                             std::vector<float> numbers;
@@ -1064,7 +1475,12 @@ namespace keditor
     {
         // The scene being worked on runs as it would on its own, into an image a panel shows.
         _play = kor::App::Current().OpenOffscreen<PlayScene>({ .title = "Scene", .extent = { 640, 360 } });
+        // It does not play until it is told to: what is edited is the scene, not a moment of it.
+        _play->SetPlaying(false);
         _session = std::make_shared<Session>(*_play);
+        _session->LoadObjects();
+        // The editor's view, its gizmo and its picking, as the scene updates: in the frame being made.
+        _play->OnFrame([this] { if (_session) _session->Tick(SceneInput(), static_cast<float>(SceneTime().FrameTime())); });
         Document::Alias(&Graph(), &_play->Graph());     // whoever is handed this scene is after the one it edits
         if (!_projectPath.empty()) _session->OpenProject(_projectPath);
         _ui = std::make_unique<kui::Ui>(EditorRoot(_session));
@@ -1085,6 +1501,7 @@ namespace keditor
 
     void EditorScene::Shutdown()
     {
+        if (_play) _play->OnFrame({});
         _ui.reset();
         _session.reset();
         Document::Alias(&Graph(), nullptr);

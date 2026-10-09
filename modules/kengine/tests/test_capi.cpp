@@ -70,7 +70,7 @@ namespace {
     };
 
     // A script as another language registers one: its data a plain struct, its behaviour plain functions.
-    struct Spin {
+    struct Turner {
         float angle;
         float speed;
         int32_t updates;
@@ -86,9 +86,9 @@ namespace {
         KengineScriptCallbacks callbacks {};
         callbacks.user = &seen;
         callbacks.created = [](void* user, KecsEntity, void*) { static_cast<Seen*>(user)->calls.emplace_back("created"); };
-        callbacks.started = [](void* user, KecsEntity, void* data) { static_cast<Spin*>(data)->started = 1; static_cast<Seen*>(user)->calls.emplace_back("started"); };
+        callbacks.started = [](void* user, KecsEntity, void* data) { static_cast<Turner*>(data)->started = 1; static_cast<Seen*>(user)->calls.emplace_back("started"); };
         callbacks.update = [](void*, KecsEntity, void* data, const float delta) {
-            auto& spin = *static_cast<Spin*>(data);
+            auto& spin = *static_cast<Turner*>(data);
             spin.angle += spin.speed * (delta > 0.f ? 1.f : 1.f);   // a turn a frame, whatever the clock says
             ++spin.updates;
         };
@@ -97,16 +97,16 @@ namespace {
             auto& seen = *static_cast<Seen*>(user);
             KoralResource* buffer = kengine_node_resource(seen.doc, "angles", nullptr);
             if (!buffer) return;
-            koral_buffer_write(buffer, &static_cast<Spin*>(data)->angle, sizeof(float), 0);
+            koral_buffer_write(buffer, &static_cast<Turner*>(data)->angle, sizeof(float), 0);
             koral_resource_release(buffer);
-            seen.prepared = static_cast<Spin*>(data)->angle;
+            seen.prepared = static_cast<Turner*>(data)->angle;
         };
         callbacks.destroyed = [](void* user, KecsEntity, void*) { static_cast<Seen*>(user)->calls.emplace_back("destroyed"); };
         return callbacks;
     }
     const KecsField SpinFields[] {
-        { "angle", "f32", offsetof(Spin, angle), 4 }, { "speed", "f32", offsetof(Spin, speed), 4 },
-        { "updates", "i32", offsetof(Spin, updates), 4 }, { "started", "bool32", offsetof(Spin, started), 4 } };
+        { "angle", "f32", offsetof(Turner, angle), 4 }, { "speed", "f32", offsetof(Turner, speed), 4 },
+        { "updates", "i32", offsetof(Turner, updates), 4 }, { "started", "bool32", offsetof(Turner, started), 4 } };
 }
 
 TEST_F(CApiTest, EntitiesAndComponentsByHandle) {
@@ -196,7 +196,7 @@ TEST_F(CApiTest, AScriptIsAComponentWithFunctionsCalledOnIt) {
     Seen seen;
     seen.doc = doc;
     const KengineScriptCallbacks callbacks = SpinCallbacks(seen);
-    const uint32_t spin = kengine_script_register(doc, "Spin", sizeof(Spin), alignof(Spin), SpinFields, 4, &callbacks);
+    const uint32_t spin = kengine_script_register(doc, "Turner", sizeof(Turner), alignof(Turner), SpinFields, 4, &callbacks);
     ASSERT_NE(spin, KECS_NO_COMPONENT) << kengine_last_error();
     EXPECT_EQ(kecs_component_field_count(world, spin), 4u);
     KecsField field {};
@@ -213,13 +213,13 @@ TEST_F(CApiTest, AScriptIsAComponentWithFunctionsCalledOnIt) {
     ASSERT_TRUE(kengine_node_ok(doc, "angles")) << kengine_last_error();
 
     const KecsEntity wheel = kengine_entity_create(doc, "Wheel");
-    const Spin start { 10.f, 2.f, 0, 0 };
+    const Turner start { 10.f, 2.f, 0, 0 };
     ASSERT_TRUE(kecs_add(world, wheel, spin, &start));
     Frame();
     Frame();
     Frame();
     EXPECT_EQ(seen.calls, (std::vector<std::string> { "created", "started" }));
-    const auto* now = static_cast<const Spin*>(kecs_get(world, wheel, spin));
+    const auto* now = static_cast<const Turner*>(kecs_get(world, wheel, spin));
     ASSERT_NE(now, nullptr);
     EXPECT_EQ(now->updates, 3);
     EXPECT_FLOAT_EQ(now->angle, 16.f);
@@ -235,23 +235,23 @@ TEST_F(CApiTest, AScriptIsAComponentWithFunctionsCalledOnIt) {
     EXPECT_FLOAT_EQ(written, 16.f);
 
     // Its fields are fields like any other: as JSON, for whatever shows or saves them.
-    EXPECT_STREQ(kengine_field_json(doc, wheel, "Spin", "speed"), "2");
-    EXPECT_TRUE(kengine_field_set_json(doc, wheel, "Spin", "speed", "5"));
+    EXPECT_STREQ(kengine_field_json(doc, wheel, "Turner", "speed"), "2");
+    EXPECT_TRUE(kengine_field_set_json(doc, wheel, "Turner", "speed", "5"));
     Frame();
-    EXPECT_FLOAT_EQ(static_cast<const Spin*>(kecs_get(world, wheel, spin))->angle, 21.f);
-    EXPECT_FALSE(kengine_field_set_json(doc, wheel, "Spin", "speed", "[1, 2]"));
+    EXPECT_FLOAT_EQ(static_cast<const Turner*>(kecs_get(world, wheel, spin))->angle, 21.f);
+    EXPECT_FALSE(kengine_field_set_json(doc, wheel, "Turner", "speed", "[1, 2]"));
     EXPECT_NE(std::string(kengine_last_error()).find("number"), std::string::npos) << kengine_last_error();
-    EXPECT_NE(std::string(kengine_document_json(doc)).find("\"Spin\""), std::string::npos) << "and it is in the scene's file";
+    EXPECT_NE(std::string(kengine_document_json(doc)).find("\"Turner\""), std::string::npos) << "and it is in the scene's file";
 
     // The script loaded again with a field renamed: the data that kept its name is kept.
-    kengine_script_unregister(doc, "Spin");
+    kengine_script_unregister(doc, "Turner");
     Frame();
-    EXPECT_EQ(static_cast<const Spin*>(kecs_get(world, wheel, spin))->updates, 4) << "nothing ran while its code was gone";
+    EXPECT_EQ(static_cast<const Turner*>(kecs_get(world, wheel, spin))->updates, 4) << "nothing ran while its code was gone";
     KecsField edited[4];
     std::memcpy(edited, SpinFields, sizeof(edited));
     edited[1].name = "rate";
-    EXPECT_EQ(kengine_script_register(doc, "Spin", sizeof(Spin), alignof(Spin), edited, 4, &callbacks), spin);
-    const auto* after = static_cast<const Spin*>(kecs_get(world, wheel, spin));
+    EXPECT_EQ(kengine_script_register(doc, "Turner", sizeof(Turner), alignof(Turner), edited, 4, &callbacks), spin);
+    const auto* after = static_cast<const Turner*>(kecs_get(world, wheel, spin));
     EXPECT_FLOAT_EQ(after->angle, 21.f);
     EXPECT_FLOAT_EQ(after->speed, 0.f) << "what was 'speed' is 'rate', and new";
     EXPECT_EQ(after->updates, 4);

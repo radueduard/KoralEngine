@@ -1,8 +1,8 @@
 import koral.engine.GraphicsScript
 import koral.engine.Script
 
-// Spin, edited. Watcher is gone.
-class Spin : Script() {
+// Turner, edited. Watcher is gone.
+class Turner : Script() {
     var angle = 0f              // as it was: kept
     var speed = 0.0             // a Double now: reset
     var updates = 0             // as it was: kept

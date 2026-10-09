@@ -255,6 +255,8 @@ namespace kecs
         /** @brief Destroys @p entity, and every entity under it in the hierarchy. False when it was not alive. */
         bool Destroy(Entity entity);
         [[nodiscard]] bool Alive(Entity entity) const;
+        /** @brief The entity alive at place @p index, whichever generation it is; NullEntity when the place is free. */
+        [[nodiscard]] Entity EntityAt(std::uint32_t index) const;
         [[nodiscard]] std::size_t EntityCount() const { return _alive; }
 
         // ---- components, by type --------------------------------------------------------------------------

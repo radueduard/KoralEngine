@@ -1,6 +1,7 @@
 #include <keditor/document.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cctype>
 #include <cstring>
 #include <format>
@@ -454,6 +455,232 @@ namespace keditor
         return ids;
     }
 
+    // ---- entities as data ---------------------------------------------------------------------------------------
+
+    namespace {
+        /** A float as the number someone typed, not as the nearest double to what a float holds of it: 0.3, not 0.30000001192. */
+        double Tidy(const double value)
+        {
+            if (!std::isfinite(value) || value == 0.0) return value;
+            const double scale = std::pow(10.0, 6 - static_cast<int>(std::ceil(std::log10(std::abs(value)))));
+            return std::round(value * scale) / scale;
+        }
+        Value Tidied(const Value& value)
+        {
+            if (const double* number = value.Number()) return Value(Tidy(*number));
+            if (const auto* items = value.Items()) {
+                Value::List out;
+                for (const auto& item : *items) out.push_back(Tidied(item));
+                return Value(std::move(out));
+            }
+            return value;
+        }
+        Value Three(const kecs::Vec3& v) { return Value(Value::List { Tidy(v.x), Tidy(v.y), Tidy(v.z) }); }
+        bool Three(const Value* value, kecs::Vec3& out)
+        {
+            const auto* items = value ? value->Items() : nullptr;
+            if (!items || items->size() != 3 || !std::ranges::all_of(*items, [](const Value& v) { return v.Number() != nullptr; })) return false;
+            out = { static_cast<float>(*(*items)[0].Number()), static_cast<float>(*(*items)[1].Number()), static_cast<float>(*(*items)[2].Number()) };
+            return true;
+        }
+    }
+
+    Value Document::WriteEntity(const kecs::Entity entity) const
+    {
+        Value::Members out;
+        out.emplace_back("name", _world.NameOf(entity));
+        out.emplace_back("position", Three(_world.PositionOf(entity)));
+        out.emplace_back("rotation", Three(_world.RotationOf(entity)));
+        out.emplace_back("scale", Three(_world.ScaleOf(entity)));
+        Value::Members components;
+        Value::List disabled;
+        for (const std::string& component : ComponentsOf(entity)) {
+            Value::Members fields;
+            for (const auto& field : _world.Describe(_world.Find(component)).fields) {
+                Value value = Tidied(Field(entity, component, field.name));
+                // A choice is written as what was chosen, by name.
+                if (const FieldHint* hint = HintOf(component, field.name); hint && !hint->options.empty() && value.Number()) {
+                    const auto index = static_cast<std::size_t>(std::max(*value.Number(), 0.0));
+                    if (index < hint->options.size()) value = Value(hint->options[index]);
+                }
+                fields.emplace_back(field.name, std::move(value));
+            }
+            components.emplace_back(component, Value(std::move(fields)));
+            if (!IsEnabled(entity, component)) disabled.emplace_back(component);
+        }
+        out.emplace_back("components", Value(std::move(components)));
+        if (!disabled.empty()) out.emplace_back("disabled", Value(std::move(disabled)));
+        Value::List children;
+        for (const kecs::Entity child : _world.ChildrenOf(entity)) children.push_back(WriteEntity(child));
+        out.emplace_back("children", Value(std::move(children)));
+        return Value(std::move(out));
+    }
+
+    kecs::Entity Document::ReadEntity(const Value& data, const kecs::Entity parent, std::vector<std::string>* problems)
+    {
+        const auto problem = [&](std::string what) { if (problems) problems->push_back(std::move(what)); };
+        const Value* name = data.Find("name");
+        const kecs::Entity entity = CreateEntity(name && name->String() ? *name->String() : std::string("Entity"), parent);
+        kecs::Vec3 three;
+        if (Three(data.Find("position"), three)) _world.SetPosition(entity, three);
+        if (Three(data.Find("rotation"), three)) _world.SetRotation(entity, three);
+        if (Three(data.Find("scale"), three)) _world.SetScale(entity, three);
+        if (const Value* components = data.Find("components"); components && components->Named())
+            for (const auto& [component, fields] : *components->Named()) {
+                if (!AddComponent(entity, component)) { problem(std::format("there is no component '{}': left out", component)); continue; }
+                if (!fields.Named()) continue;
+                for (const auto& [field, given] : *fields.Named()) {
+                    if (given.IsNull()) continue;
+                    Value value = given;
+                    if (const FieldHint* hint = HintOf(component, field); hint && !hint->options.empty() && given.String()) {
+                        const auto at = std::ranges::find(hint->options, *given.String());
+                        if (at == hint->options.end()) { problem(std::format("'{}.{}' is none of its options: '{}'", component, field, *given.String())); continue; }
+                        value = Value(static_cast<double>(at - hint->options.begin()));
+                    }
+                    std::string error;
+                    if (!SetField(entity, component, field, value, &error)) problem(std::format("'{}.{}': {}", component, field, error));
+                }
+            }
+        if (const Value* disabled = data.Find("disabled"); disabled && disabled->Items())
+            for (const auto& component : *disabled->Items())
+                if (component.String()) SetEnabled(entity, *component.String(), false);
+        if (const Value* children = data.Find("children"); children && children->Items())
+            for (const auto& child : *children->Items()) ReadEntity(child, entity, problems);
+        Changed();
+        return entity;
+    }
+
+    std::string Document::UniqueName(const std::string& name, const std::vector<std::string>& siblings)
+    {
+        if (std::ranges::find(siblings, name) == siblings.end()) return name;
+        // "Cube 2" copied is "Cube 3", not "Cube 2 2".
+        std::string base = name;
+        if (const auto space = base.rfind(' '); space != std::string::npos && space + 1 < base.size()
+            && std::all_of(base.begin() + static_cast<std::ptrdiff_t>(space) + 1, base.end(), [](const unsigned char c) { return std::isdigit(c) != 0; }))
+            base.erase(space);
+        for (int n = 2;; ++n)
+            if (std::string candidate = std::format("{} {}", base, n); std::ranges::find(siblings, candidate) == siblings.end()) return candidate;
+    }
+
+    kecs::Entity Document::Duplicate(const kecs::Entity entity)
+    {
+        if (!_world.Alive(entity)) return kecs::NullEntity;
+        const kecs::Entity parent = _world.ParentOf(entity);
+        const auto& siblings = parent.IsNull() ? _world.Roots() : _world.ChildrenOf(parent);
+        std::vector<std::string> names;
+        for (const kecs::Entity sibling : siblings) names.push_back(_world.NameOf(sibling));
+        const auto place = static_cast<int>(std::ranges::find(siblings, entity) - siblings.begin()) + 1;
+        const kecs::Entity copy = ReadEntity(WriteEntity(entity), parent);
+        _world.Rename(copy, UniqueName(_world.NameOf(entity), names));
+        _world.SetParent(copy, parent, place, false);
+        Changed();
+        return copy;
+    }
+
+    std::string Document::WorldJson() const { return kecs::Save(_world, _codecs).json; }
+
+    bool Document::RestoreWorld(const std::string_view json, std::string& error)
+    {
+        for (const kecs::Entity root : std::vector(_world.Roots())) _world.Destroy(root);
+        const auto loaded = kecs::Load(_world, json, _codecs);
+        Changed();
+        if (!loaded.ok) { error = loaded.error; return false; }
+        return true;
+    }
+
+    const Document::FieldHint* Document::HintOf(const std::string_view component, const std::string_view field) const
+    {
+        const auto it = _hints.find(std::format("{}.{}", component, field));
+        return it == _hints.end() ? nullptr : &it->second;
+    }
+
+    std::vector<std::string> Document::LoadComponents(const std::filesystem::path& directory)
+    {
+        std::vector<std::string> problems;
+        std::error_code ignored;
+        if (!std::filesystem::is_directory(directory, ignored)) return problems;
+        std::vector<std::filesystem::path> files;
+        for (const auto& entry : std::filesystem::directory_iterator(directory, ignored))
+            if (entry.is_regular_file() && entry.path().extension() == ".json") files.push_back(entry.path());
+        std::ranges::sort(files);
+        for (const auto& file : files) {
+            const auto fail = [&](const std::string& why) { problems.push_back(std::format("{}: {}", file.filename().string(), why)); };
+            std::ifstream in(file, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            kecs::json::Value parsed;
+            std::string error;
+            if (!kecs::json::Parse(text, parsed, error)) { fail(error); continue; }
+            const Value json = Value::FromJson(parsed);
+            const Value* name = json.Find("name");
+            if (!name || !name->String() || name->String()->empty() || name->String()->find(' ') != std::string::npos) { fail("a component needs a name, with no spaces"); continue; }
+            if (_world.Find(*name->String()) != kecs::NoComponent) continue;    // there already: the code's, or read before
+
+            kecs::ComponentDescription description;
+            description.name = *name->String();
+            auto defaults = std::make_shared<std::vector<std::byte>>();
+            std::map<std::string, FieldHint> hints;
+            std::string wrong;
+            if (const Value* fields = json.Find("fields"); fields && fields->Named())
+                for (const auto& [field, spec] : *fields->Named()) {
+                    const Value* type = spec.Find("type");
+                    const std::string kind = type && type->String() ? *type->String() : std::string();
+                    FieldHint hint;
+                    const auto number = [&](const char* key) -> std::optional<float> {
+                        const Value* v = spec.Find(key);
+                        return v && v->Number() ? std::optional(static_cast<float>(*v->Number())) : std::nullopt;
+                    };
+                    hint.min = number("min");
+                    hint.max = number("max");
+                    hint.speed = number("speed");
+                    const Value* initial = spec.Find("default");
+                    std::string stored;
+                    std::vector<double> values;
+                    if (kind == "float") { stored = "f32"; values = { initial && initial->Number() ? *initial->Number() : 0.0 }; }
+                    else if (kind == "int") { stored = "i32"; values = { initial && initial->Number() ? *initial->Number() : 0.0 }; }
+                    else if (kind == "bool") { stored = "bool32"; values = { initial && initial->Bool() && *initial->Bool() ? 1.0 : 0.0 }; }
+                    else if (kind == "vec3" || kind == "color") {
+                        stored = "vec3";
+                        kecs::Vec3 three = kind == "color" ? kecs::Vec3 { 1.f, 1.f, 1.f } : kecs::Vec3 {};
+                        Three(initial, three);
+                        values = { three.x, three.y, three.z };
+                        hint.color = kind == "color";
+                    } else if (kind == "enum") {
+                        stored = "i32";
+                        if (const Value* options = spec.Find("options"); options && options->Items())
+                            for (const auto& option : *options->Items())
+                                if (option.String()) hint.options.push_back(*option.String());
+                        if (hint.options.empty()) { wrong = std::format("{}.{}: an enum needs options", description.name, field); break; }
+                        const auto at = initial && initial->String() ? std::ranges::find(hint.options, *initial->String()) : hint.options.begin();
+                        values = { static_cast<double>(at == hint.options.end() ? 0 : at - hint.options.begin()) };
+                    } else {
+                        wrong = std::format("{}.{}: '{}' is not a field type: float, int, bool, vec3, color or enum", description.name, field, kind);
+                        break;
+                    }
+                    const std::size_t offset = defaults->size(), size = values.size() * 4;
+                    defaults->resize(offset + size);
+                    Numbers numbers;
+                    NumbersOf(stored, numbers);
+                    for (std::size_t i = 0; i < values.size(); ++i) WriteNumber(numbers, defaults->data() + offset + i * 4, values[i]);
+                    description.fields.push_back({ field, stored, offset, size, nullptr });
+                    hints.emplace(std::format("{}.{}", description.name, field), std::move(hint));
+                }
+            if (!wrong.empty()) { fail(wrong); continue; }
+            description.size = defaults->size();
+            description.alignment = 4;
+            if (description.size > 0) {
+                description.context = defaults;
+                description.construct = [](void* at, const kecs::ComponentDescription& type) {
+                    const auto& bytes = *static_cast<const std::vector<std::byte>*>(type.context.get());
+                    std::memcpy(at, bytes.data(), bytes.size());
+                };
+            }
+            _world.Register(std::move(description));
+            for (auto& [key, hint] : hints) _hints.insert_or_assign(key, std::move(hint));
+            Changed();
+        }
+        return problems;
+    }
+
     // ---- the file -----------------------------------------------------------------------------------------------
 
     std::string Document::ToJson() const
@@ -506,6 +733,8 @@ namespace keditor
 
     bool Document::Load(const std::filesystem::path& path, std::string& error)
     {
+        // A scene file is in a project's `scenes`: the components its files describe are known before it is read.
+        for (const auto& problem : LoadComponents(path.parent_path().parent_path() / "components")) _notes.push_back(problem);
         std::ifstream in(path, std::ios::binary);
         if (!in) { error = std::format("'{}' cannot be read", path.string()); return false; }
         std::stringstream text;

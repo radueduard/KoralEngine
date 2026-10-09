@@ -16,6 +16,8 @@ A project is a folder:
 project.json                 its name, its scenes, and the scene a run starts with
 scenes/main.scene.json       a scene: its pass graph and its entities
 shaders/                     found before any other shaders, by module name
+objects/*.json               things to make entities from: what the Create menu lists
+components/*.json            component types described by a file, with no code
 ```
 
 A scene file holds the graph as [kgraph](kgraph.md) saves it and the world as [kecs](kecs.md) saves it.
@@ -31,8 +33,71 @@ A resource an entity holds is saved as the id of the node that makes it.
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
 | **Problems** | Every node that failed and every pass that passed an entity by, with the reason. Click one to pick its node. |
 
-The menus: **File** makes a project, opens one and saves the scene (Control+S). **Project, Run** saves and
-starts `koral-play` on the project (Control+R). **Graph** and **Entity** add a node and an entity.
+The menus:
+
+- **File** makes a project, opens one, starts the standard scene over (**New scene**), reads the scene
+  again from its file (**Revert to saved**) and saves it (Control+S).
+- **Edit** duplicates, moves to the top, saves as an object, or deletes what is picked.
+- **Create** makes an entity from one of the project's objects, at the top or under what is picked.
+- **View** frames what is picked, looks through the scene's camera, and chooses the gizmo.
+- **Scene** plays, pauses and stops.
+- **Project, Run** saves and starts `koral-play` on the project (Control+R).
+- **Graph** and **Entity** add a node and an entity.
+
+### The standard scene
+
+**File, New scene** replaces the scene with one that draws meshes lit under a sky. It writes four shaders
+into the project's `shaders` (`engineCommon`, `lit`, `sky`, `outline`; one already there is left alone) and
+builds the graph that uses them out of ordinary nodes, to be changed like any other:
+
+- `color`, `ids` and `depth` images the size of the window (their `extent` is the Screen's).
+- `view`, a SceneView, whose `frame` and `lights` feed the pipelines.
+- `MeshRenderer`, the lit pipeline. Its component — `color` and `smoothness` — and a `Mesh` are what make
+  an entity drawn. It also draws each entity's number into `ids`.
+- `sky`, drawn after it where nothing nearer was; `outline`, a line round what is picked, read from `ids`.
+- `helpers` (DebugDraw) for the gizmo and the light and camera shapes, `pick`, and `show`, the Blit.
+
+It also makes a sky, a camera, a sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`
+(`<keditor/starter.h>`) do the same from code.
+
+### The scene view
+
+The Scene panel shows the scene from the editor's own view: right-drag turns it about what it looks at,
+middle-drag moves it, the wheel zooms, and **Frame** points it at what is picked. **Camera** looks through
+the scene's camera instead. Each Camera entity is drawn as the pyramid it sees through, and a picked light
+as its reach.
+
+A click on the picture picks the entity drawn there, through the graph's Pick node; what is picked is
+outlined and gets a gizmo (**Move**, **Rotate**, **Scale**, or **Select** for none) that changes its
+transform. All of this needs the graph to have the nodes for it, as the standard one does: a scene whose
+graph has no SceneView is drawn however its own nodes say, and the view and gizmo do nothing to it.
+
+### Playing
+
+A scene in the editor stands still until **Play**: then scripts run and a `Spin` turns its entity, seen
+through the scene's camera. **Pause** holds it. **Stop** puts every entity back as it was when Play was
+pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
+plays.
+
+### Objects and components from files
+
+An object is an entity as a file: `{ "template": "Lamp", "name": "Lamp", "position": [0, 2, 0],
+"components": { "PointLight": { "range": 5 } }, "children": [...] }`. **Edit, Save as object** writes what
+is picked as one, and a new project starts with a cube, a sphere, the other default meshes, a planet with a
+moon, a camera, the three lights and a sky. The mesh objects name the standard graph's `MeshRenderer`.
+
+A file in `components` describes a component with no code:
+
+```json
+{ "name": "Health",
+  "fields": {
+    "current": { "type": "float", "default": 100, "min": 0, "max": 100 },
+    "invulnerable": { "type": "bool", "default": false },
+    "team": { "type": "enum", "options": ["Neutral", "Red", "Blue"], "default": "Neutral" } } }
+```
+
+A field is a `float`, an `int`, a `bool`, a `vec3`, a `color` or an `enum`. `min`, `max` and `options` are
+what the inspector edits it by.
 
 ### Adding a node
 
@@ -164,5 +229,8 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 - **An entity's own image or buffer** has to come from a node. Nothing in the editor makes a resource per
   entity.
 - **Entities aren't reordered among their siblings** by dragging: a drop puts one last under what it is
-  dropped on. There is no duplicate, and no gizmo to move one in the scene view.
+  dropped on. An entity is renamed in the inspector, not in the outliner.
+- **A component file's field can't be text**, and a file edited while the editor is open is read when the
+  project is next opened. Objects and components have no icons.
+- **The scene view's toolbar is words**, and a menu line that is on is marked with a `*`.
 - `Project, Run` finds `koral-play` beside the editor on Linux only. Elsewhere it has to be on the path.

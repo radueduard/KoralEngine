@@ -17,6 +17,9 @@
 #include <kecs/kecs.h>
 #include <kecs/serialize.h>
 #include <kgraph/graph.h>
+#include <map>
+#include <optional>
+
 #include <kgraph/runtime.h>
 #include <kscript/scripts.h>
 
@@ -134,6 +137,45 @@ namespace keditor
         /** @brief The nodes whose output a resource field of type @p fieldType can hold, by id. */
         [[nodiscard]] std::vector<std::string> NodesFor(std::string_view fieldType) const;
 
+        // ---- entities as data ---------------------------------------------------------------------------------
+
+        /**
+         * @brief An entity and everything under it, as a value: its `name`, its `position`, `rotation` and `scale`,
+         *        its `components` by name (each a field's value by the field's name), what is `disabled`, and its
+         *        `children`. What an object file holds, and what a copy is made from.
+         */
+        [[nodiscard]] kgraph::Value WriteEntity(kecs::Entity entity) const;
+        /**
+         * @brief Makes an entity, and everything under it, from such a value: last under @p parent, or at the top.
+         *        What it names that the scene does not have — a component, a field — is left out and said in
+         *        @p problems.
+         */
+        kecs::Entity ReadEntity(const kgraph::Value& data, kecs::Entity parent = kecs::NullEntity, std::vector<std::string>* problems = nullptr);
+        /** @brief A copy of @p entity and what is under it, beside it, under a name of its own. */
+        kecs::Entity Duplicate(kecs::Entity entity);
+        /** @brief @p name, or with a number after it when one of @p siblings has it: "Cube", "Cube 2". */
+        [[nodiscard]] static std::string UniqueName(const std::string& name, const std::vector<std::string>& siblings);
+
+        /** @brief Every entity as it is now: what RestoreWorld puts back. The graph is no part of it. */
+        [[nodiscard]] std::string WorldJson() const;
+        /** @brief Takes every entity away and makes those @p json holds: a scene put back as it was before it played. */
+        bool RestoreWorld(std::string_view json, std::string& error);
+
+        /** @brief What a field is, beyond its type, for an editor to set it with the right control. */
+        struct FieldHint {
+            std::vector<std::string> options;       ///< A choice: the field holds which, from 0.
+            std::optional<float> min, max, speed;
+            bool color = false;
+        };
+        /** @brief What is known of @p component 's @p field beyond its type; null when nothing is. */
+        [[nodiscard]] const FieldHint* HintOf(std::string_view component, std::string_view field) const;
+        /**
+         * @brief Makes a component type of each JSON file in @p directory: `{ "name": "Health", "fields": { "current":
+         *        { "type": "float", "default": 100, "min": 0 }, "team": { "type": "enum", "options": [...] } } }`.
+         *        A field is a float, an int, a bool, a vec3, a color or an enum. What went wrong, a line a file.
+         */
+        std::vector<std::string> LoadComponents(const std::filesystem::path& directory);
+
         // ---- the file -----------------------------------------------------------------------------------------
 
         /** @brief The scene as JSON: its graph and its entities. */
@@ -153,6 +195,7 @@ namespace keditor
         std::unique_ptr<kgraph::Runtime> _runtime;
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
+        std::map<std::string, FieldHint, std::less<>> _hints;      // by "Component.field"
         std::vector<std::string> _notes;
         std::uint64_t _revision = 0, _saved = 0;
         std::uint64_t _reported = 0;
