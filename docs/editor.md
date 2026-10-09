@@ -22,6 +22,9 @@ objects/*.json               things to make entities from: what the Create menu 
 A scene file holds the graph as [kgraph](kgraph.md) saves it and the world as [kecs](kecs.md) saves it.
 A resource an entity holds is saved as the id of the node that makes it.
 
+`koral-editor` and `koral-play` take `--no-vsync`, to draw frames as fast as they are made rather than at
+the display's rate, and `--frames N` to stop after so many.
+
 ## The panels
 
 | Panel | |
