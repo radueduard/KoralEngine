@@ -442,6 +442,77 @@ TEST_F(EntityTest, ManyEntitiesEachWithAnImageOfItsOwn) {
     EXPECT_EQ(scene->runtime->ReportOf("draw")->ran, static_cast<std::size_t>(Count / 2));
 }
 
+// An entity is drawn where it is: its own transform, under those of everything it is under. And with a default
+// mesh, which no node makes.
+TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive");   // only for its layout: the meshes drawn are the default ones
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "placed");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(scene->runtime->Ok());
+
+    const kecs::ComponentId placed = scene->runtime->ComponentOf("placed");
+    ASSERT_NE(placed, kecs::NoComponent);
+    const auto& fields = scene->world.Describe(placed).fields;
+    EXPECT_EQ(fields.size(), 1u) << "the colour is the entity's; where it is, is not a field of anything";
+    EXPECT_EQ(fields.front().name, "color");
+
+    const auto cube = scene->runtime->ResourceOf("$cube");
+    ASSERT_NE(cube, nullptr) << "a default mesh, with no node for it";
+    EXPECT_EQ(cube->kind, "Mesh");
+    EXPECT_EQ(scene->runtime->ResourceOf("$cube"), cube) << "made once";
+    EXPECT_EQ(scene->runtime->ResourceOf("$blob"), nullptr);
+
+    // A parent off to the right and half the size; under it, a cube one of its units to the left: the middle of the picture.
+    kecs::World& world = scene->world;
+    const kecs::Entity parent = world.Create(), child = world.Create();
+    world.SetParent(child, parent);
+    world.SetPosition(parent, { 0.5f, 0, 0 });
+    world.SetScale(parent, { 0.5f, 0.5f, 0.5f });
+    world.SetPosition(child, { -1, 0, 0 });
+    world.Add<kgraph::Mesh>(child, { cube });
+    world.Add(child, placed);
+    kgraph::Parameters(world, child, placed).Set("color", kor::Vec4 { 1, 0, 0, 1 });
+    Frame();
+    Frame();
+    ASSERT_EQ(scene->runtime->ReportOf("draw")->ran, 1u) << scene->runtime->ReportOf("draw")->why;
+    // The cube is half a unit across in the world: a quarter of the picture's width, about its middle.
+    EXPECT_EQ(scene->Pixel(16, 16).x, 255) << "in the middle";
+    EXPECT_EQ(scene->Pixel(13, 19).x, 255);
+    EXPECT_EQ(scene->Pixel(10, 16).x, 0) << "and no wider than it is";
+    EXPECT_EQ(scene->Pixel(22, 16).x, 0);
+
+    // The parent moved: the child with it, with nothing of the child's changed.
+    world.SetPosition(parent, { 0, 0.5f, 0 });
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(16, 16).x, 0);
+    EXPECT_EQ(scene->Pixel(8, 24).x, 255) << "half a unit left of its parent, which is half way down";
+
+    // Saved and read back, it is where it was and what it was.
+    const auto codecs = [&] { kecs::Codecs c = kecs::Codecs::Default(); kgraph::RegisterCodecs(c, scene->runtime.get()); return c; }();
+    const std::string saved = kecs::Save(world, codecs).json;
+    EXPECT_NE(saved.find("\"$cube\""), std::string::npos) << saved;
+    world.Destroy(parent);
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(8, 24).x, 0) << "gone, with its parent";
+    ASSERT_TRUE(kecs::Load(world, saved, codecs).ok);
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(8, 24).x, 255);
+}
+
 TEST_F(EntityTest, AWorldIsSavedAndLoadedWithItsPipelinesComponents) {
     Load(SceneGraph());
     auto& world = scene->world;

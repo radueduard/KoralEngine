@@ -189,7 +189,8 @@ TEST_F(DocumentTest, AnEntitysFieldsAreReadAndSetAsValues) {
     EXPECT_NE(std::ranges::find(images, "backdrop"), images.end());
     EXPECT_NE(std::ranges::find(images, "canvas view"), images.end()) << "a view of an image will do";
     EXPECT_EQ(std::ranges::find(images, "square"), images.end());
-    EXPECT_EQ(doc.NodesFor("Mesh"), std::vector<std::string> { "square" });
+    EXPECT_EQ(doc.NodesFor("Mesh"), (std::vector<std::string> { "square", "$cube", "$sphere", "$plane", "$cylinder", "$cone", "$capsule", "$torus" }))
+        << "the node that makes one, and the meshes there are without a node";
 
     EXPECT_TRUE(doc.RemoveComponent(entity, "stamp"));
     EXPECT_FALSE(doc.RemoveComponent(entity, "stamp"));

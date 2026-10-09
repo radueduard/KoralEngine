@@ -171,13 +171,12 @@ namespace kecs
         Saved saved;
         std::set<std::string> problems;
 
-        std::vector<Entity> entities;
-        world.EachEntity([&](const Entity e) { entities.push_back(e); });
+        // Parents before their children, and the top of the hierarchy in its order: read back the same way, the
+        // order is the same.
+        const std::vector<Entity> entities = world.All();
         std::map<Entity, std::int64_t> numbers;
         for (std::size_t i = 0; i < entities.size(); ++i) numbers.emplace(entities[i], static_cast<std::int64_t>(i));
         const SaveContext context { [&](const Entity e) { const auto it = numbers.find(e); return it == numbers.end() ? std::int64_t { -1 } : it->second; } };
-
-        const ComponentId parentId = world.Find(Name<Parent>::value), childrenId = world.Find(Name<Children>::value);
 
         // A component as JSON, or nothing when it cannot be saved.
         const auto component = [&](const Entity e, const ComponentId id) -> std::optional<std::string> {
@@ -214,7 +213,7 @@ namespace kecs
             // By name, so the order is the same whatever order the types were registered in.
             std::vector<std::pair<std::string, ComponentId>> components;
             for (const ComponentId id : world.ComponentsOf(e))
-                if (id != parentId && id != childrenId) components.emplace_back(world.Describe(id).name, id);
+                components.emplace_back(world.Describe(id).name, id);
             std::ranges::sort(components);
 
             std::string componentText, disabled;
@@ -226,6 +225,14 @@ namespace kecs
                 if (!world.IsEnabled(e, id)) disabled += std::format("{}{}", disabled.empty() ? "" : ", ", json::Quote(name));
             }
             entityText += std::format("{}\n    {{\n      \"id\": {}", i == 0 ? "" : ",", i);
+            entityText += std::format(",\n      \"name\": {}", json::Quote(world.NameOf(e)));
+            // Where it is, relative to what it is under: said only where it is not where everything starts.
+            const auto vector = [&](const char* key, const Vec3& value, const Vec3& usual) {
+                if (value != usual) entityText += std::format(",\n      \"{}\": [{}, {}, {}]", key, value.x, value.y, value.z);
+            };
+            vector("position", world.PositionOf(e), {});
+            vector("rotation", world.RotationOf(e), {});
+            vector("scale", world.ScaleOf(e), { 1.f, 1.f, 1.f });
             // What is under it, in the order it is under it.
             if (const auto& children = world.ChildrenOf(e); !children.empty()) {
                 std::string list;
@@ -374,11 +381,27 @@ namespace kecs
                     if (const auto saved = savedTypes.find(name.string); saved != savedTypes.end()) world.SetEnabled(e, saved->second.id, false);
         }
 
-        // The hierarchy last, each entity's children in the order they were.
+        // The hierarchy last, each entity's children in the order they were; then where each is, which is relative
+        // to what it is now under.
         for (std::size_t i = 0; i < entities->items.size(); ++i)
             if (const json::Value* children = entities->items[i].Find("children"))
                 for (const auto& child : children->items)
-                    if (child.kind == json::Value::Kind::eNumber) world.SetParent(context.entityOf(static_cast<std::int64_t>(child.number)), loaded.entities[i]);
+                    if (child.kind == json::Value::Kind::eNumber)
+                        world.SetParent(context.entityOf(static_cast<std::int64_t>(child.number)), loaded.entities[i], -1, false);
+        for (std::size_t i = 0; i < entities->items.size(); ++i) {
+            const json::Value& entity = entities->items[i];
+            if (const json::Value* name = entity.Find("name"); name && name->kind == json::Value::Kind::eString) world.Rename(loaded.entities[i], name->string);
+            const auto vector = [&](const char* key, Vec3& into) {
+                const json::Value* value = entity.Find(key);
+                if (!value || value->items.size() != 3) return false;
+                into = { static_cast<float>(value->items[0].number), static_cast<float>(value->items[1].number), static_cast<float>(value->items[2].number) };
+                return true;
+            };
+            Vec3 value;
+            if (vector("position", value)) world.SetPosition(loaded.entities[i], value);
+            if (vector("rotation", value)) world.SetRotation(loaded.entities[i], value);
+            if (vector("scale", value)) world.SetScale(loaded.entities[i], value);
+        }
 
         loaded.problems.assign(problems.begin(), problems.end());
         loaded.ok = true;

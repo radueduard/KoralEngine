@@ -4,4 +4,5 @@
 
 #include "component.h"
 #include "serialize.h"
+#include "transform.h"
 #include "world.h"

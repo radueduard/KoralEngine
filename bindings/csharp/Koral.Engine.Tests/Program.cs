@@ -84,6 +84,30 @@ Check(host.Scripts.Order().SequenceEqual(["Feeder", "Spin", "Watcher"]), $"each 
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 
 var wheel = world.Create("Wheel");
+
+// Every entity has a name, a place in a hierarchy and a transform: the world's own, and no components.
+{
+    var car = world.Create("Car");
+    Check(world.SetParent(wheel, car), "an entity goes under another");
+    Equal(world.ParentOf(wheel), car, "and knows what it is under");
+    Check(world.ChildrenOf(car).SequenceEqual([wheel]), "which knows what is under it");
+    Check(world.Roots.Contains(car) && !world.Roots.Contains(wheel), "the top of the hierarchy is what is under nothing");
+    Equal(world.Find("Wheel"), wheel, "found by name");
+    Check(world.SetPosition(car, new Vec3(10, 0, 0)) && world.SetPosition(wheel, new Vec3(1, 2, 0)), "placed");
+    world.SetRotation(wheel, new Vec3(0, 30, 0));
+    Equal(world.PositionOf(wheel), new Vec3(1, 2, 0), "its own place");
+    Equal(world.RotationOf(wheel), new Vec3(0, 30, 0), "its own turn, in degrees");
+    Equal(world.ScaleOf(wheel), new Vec3(1, 1, 1), "a scale of one, to begin with");
+    Near(world.WorldMatrix(wheel)[3].X, 11, "in the world, it is where its parent is and then where it is");
+    Near(world.LocalMatrix(wheel)[3].X, 1, "its own matrix is its own");
+    Check(world.SetParent(wheel, Entity.Null), "taken out from under it");
+    Near(world.PositionOf(wheel).X, 11, "it stays where it was in the world");
+    Check(world.SetWorldMatrix(wheel, Mat4.Identity), "placed in the world");
+    Near(world.PositionOf(wheel).X, 0, "which is its own place, under nothing");
+    world.SetRotation(wheel, default);
+    Check(world.ToJson().Contains("\"name\": \"Car\""), "and the scene's file has it");
+    world.Destroy(car);
+}
 Check(world.Add(wheel, "Spin"), "an entity is given a script");
 world.Set(wheel, "Spin", "Speed", 2);
 world.Set(wheel, "Spin", "Angle", 10);

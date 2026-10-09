@@ -108,7 +108,10 @@ namespace kgraph
         /** @brief Every node that is not ok, with why: "id: error". */
         [[nodiscard]] std::vector<std::string> Problems() const;
 
-        /** @brief What node @p id 's @p output is, when it is a resource; null otherwise. */
+        /**
+         * @brief What node @p id 's @p output is, when it is a resource; null otherwise. A default mesh is found
+         *        the same way, with no node for it: `$cube`, `$sphere` (kgraph::DefaultMeshId), made when first asked for.
+         */
         [[nodiscard]] std::shared_ptr<Resource> ResourceOf(std::string_view id, std::string_view output = "out") const;
         /** @brief The same, as the image it is; empty when it is not one. */
         [[nodiscard]] kor::ResourceRef<const kor::Image> ImageOf(std::string_view id, std::string_view output = "out") const;

@@ -79,7 +79,19 @@ foreach (var entity in World.With("Enemy"))              // every entity with a 
 World.Buffer("light camera")?.Write(matrix);             // what a node made: a Koral Buffer, an Image
 ```
 
-Kotlin has the same members in lowerCamel: `world.create`, `world.with("Enemy")`, `world.read<Enemy>(entity)`.
+Every entity has a name, a place in the hierarchy and a transform, which are the world's own and not
+components:
+
+```csharp
+World.SetParent(wheel, car);                             // it stays where it is in the world
+World.SetPosition(wheel, new Vec3(1, 0.5f, 0));          // relative to the car
+World.SetRotation(wheel, new Vec3(0, 0, 90));            // degrees, about X, Y and Z
+Mat4 placed = World.WorldMatrix(wheel);                  // the car's transform, and its own
+foreach (var child in World.ChildrenOf(car)) { ... }     // in order; World.Roots is the top
+var found = World.Find("Wheel");
+```
+
+Kotlin has the same members in lowerCamel: `world.create`, `world.with("Enemy")`, `world.read<Enemy>(entity)`. The transform is `world.setPosition`, `world.worldMatrix` and so on.
 
 ## Graphics scripts
 

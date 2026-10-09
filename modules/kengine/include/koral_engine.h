@@ -91,8 +91,31 @@ KENGINE_API KecsEntity kecs_create(KecsWorld* world);
 KENGINE_API bool kecs_destroy(KecsWorld* world, KecsEntity entity);
 KENGINE_API bool kecs_alive(KecsWorld* world, KecsEntity entity);
 KENGINE_API size_t kecs_entity_count(KecsWorld* world);
+/** Puts child under parent (the null entity: at the top), last there, staying where it is in the world. */
 KENGINE_API bool kecs_set_parent(KecsWorld* world, KecsEntity child, KecsEntity parent);
+/** The same, at index among what is there (last, when below 0), and staying where it is in the world or not. */
+KENGINE_API bool kecs_set_parent_at(KecsWorld* world, KecsEntity child, KecsEntity parent, int32_t index, bool keep_world_transform);
 KENGINE_API KecsEntity kecs_parent(KecsWorld* world, KecsEntity entity);
+/** How many entities are directly under entity; for the null entity, how many are at the top. */
+KENGINE_API size_t kecs_child_count(KecsWorld* world, KecsEntity entity);
+/** The index th of them, in order; the null entity past the last. */
+KENGINE_API KecsEntity kecs_child(KecsWorld* world, KecsEntity entity, size_t index);
+/** The first entity so named, parents before their children; the null entity when there is none. */
+KENGINE_API KecsEntity kecs_find(KecsWorld* world, const char* name);
+
+/* An entity's transform, relative to what it is under: a position, a rotation (Euler angles, in degrees: about X,
+   about Y, about Z) and a scale, three floats each. The matrices are sixteen, column after column. */
+KENGINE_API bool kecs_position(KecsWorld* world, KecsEntity entity, float out[3]);
+KENGINE_API bool kecs_rotation(KecsWorld* world, KecsEntity entity, float out[3]);
+KENGINE_API bool kecs_scale(KecsWorld* world, KecsEntity entity, float out[3]);
+KENGINE_API bool kecs_set_position(KecsWorld* world, KecsEntity entity, const float value[3]);
+KENGINE_API bool kecs_set_rotation(KecsWorld* world, KecsEntity entity, const float value[3]);
+KENGINE_API bool kecs_set_scale(KecsWorld* world, KecsEntity entity, const float value[3]);
+KENGINE_API bool kecs_local_matrix(KecsWorld* world, KecsEntity entity, float out[16]);
+/** Where it is in the world: what it is under, and its own. */
+KENGINE_API bool kecs_world_matrix(KecsWorld* world, KecsEntity entity, float out[16]);
+/** Places it in the world, by changing its own transform. */
+KENGINE_API bool kecs_set_world_matrix(KecsWorld* world, KecsEntity entity, const float matrix[16]);
 
 /** An entity with a name, as the editor makes one. */
 KENGINE_API KecsEntity kengine_entity_create(KengineDocument* document, const char* name);

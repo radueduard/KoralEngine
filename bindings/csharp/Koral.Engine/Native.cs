@@ -109,6 +109,20 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] public static partial nuint kecs_entity_count(IntPtr world);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_parent(IntPtr world, Entity child, Entity parent);
     [LibraryImport(Lib)] public static partial Entity kecs_parent(IntPtr world, Entity entity);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kecs_set_parent_at(IntPtr world, Entity child, Entity parent, int index, [MarshalAs(UnmanagedType.U1)] bool keepWorldTransform);
+    [LibraryImport(Lib)] public static partial nuint kecs_child_count(IntPtr world, Entity entity);
+    [LibraryImport(Lib)] public static partial Entity kecs_child(IntPtr world, Entity entity, nuint index);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial Entity kecs_find(IntPtr world, string name);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_position(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_rotation(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_scale(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_position(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_rotation(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_scale(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_local_matrix(IntPtr world, Entity entity, Mat4* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_world_matrix(IntPtr world, Entity entity, Mat4* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_world_matrix(IntPtr world, Entity entity, Mat4* value);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial Entity kengine_entity_create(IntPtr document, string? name);
     [LibraryImport(Lib)] public static partial byte* kengine_entity_name(IntPtr document, Entity entity);

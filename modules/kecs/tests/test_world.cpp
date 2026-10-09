@@ -170,7 +170,6 @@ TEST(World, ATypeIsNamedAfterItselfUnlessToldOtherwise) {
     World world;
     EXPECT_EQ(world.Describe(world.Id<Position>()).name, "Position");
     EXPECT_EQ(world.Describe(world.Id<Health>()).name, "Health");
-    EXPECT_EQ(world.Describe(world.Id<kecs::Parent>()).name, "kecs::Parent");
     EXPECT_EQ(world.Id<Position>(), world.Id<const Position&>());
     World other;
     (void)other.Id<Health>();

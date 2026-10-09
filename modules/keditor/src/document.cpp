@@ -10,6 +10,7 @@
 
 #include <kecs/json.h>
 #include <kgraph/catalog.h>
+#include <kgraph/meshes.h>
 #include <kgraph/entities.h>
 
 namespace keditor
@@ -62,7 +63,7 @@ namespace keditor
             }
         }
 
-        bool Structural(const std::string_view component) { return component == "Name" || component == "kecs::Parent" || component == "kecs::Children"; }
+        bool Structural(const std::string_view component) { return component == "Name"; }
     }
 
     bool HoldsResource(const std::string_view type)
@@ -260,12 +261,41 @@ namespace keditor
 
     // ---- entities -----------------------------------------------------------------------------------------------
 
-    kecs::Entity Document::CreateEntity(const std::string_view name)
+    kecs::Entity Document::CreateEntity(const std::string_view name, const kecs::Entity parent)
     {
         const kecs::Entity entity = _world.Create();
-        _world.Add<Label>(entity, { std::string(name) });
+        _world.Rename(entity, std::string(name));
+        if (!parent.IsNull()) _world.SetParent(entity, parent, -1, false);
         Changed();
         return entity;
+    }
+
+    bool Document::SetParent(const kecs::Entity entity, const kecs::Entity parent, const int index)
+    {
+        if (!_world.SetParent(entity, parent, index)) return false;
+        Changed();
+        return true;
+    }
+
+    bool Document::SetPosition(const kecs::Entity entity, const kecs::Vec3& position)
+    {
+        if (!_world.SetPosition(entity, position)) return false;
+        Changed();
+        return true;
+    }
+
+    bool Document::SetRotation(const kecs::Entity entity, const kecs::Vec3& degrees)
+    {
+        if (!_world.SetRotation(entity, degrees)) return false;
+        Changed();
+        return true;
+    }
+
+    bool Document::SetScale(const kecs::Entity entity, const kecs::Vec3& scale)
+    {
+        if (!_world.SetScale(entity, scale)) return false;
+        Changed();
+        return true;
     }
 
     bool Document::DestroyEntity(const kecs::Entity entity)
@@ -275,24 +305,13 @@ namespace keditor
         return true;
     }
 
-    std::vector<kecs::Entity> Document::Entities() const
-    {
-        std::vector<kecs::Entity> all;
-        _world.EachEntity([&](const kecs::Entity entity) { all.push_back(entity); });
-        std::ranges::sort(all, {}, &kecs::Entity::index);
-        return all;
-    }
+    std::vector<kecs::Entity> Document::Entities() const { return _world.All(); }
 
-    std::string Document::NameOf(const kecs::Entity entity) const
-    {
-        const Label* label = _world.Alive(entity) ? _world.Get<Label>(entity) : nullptr;
-        return label ? label->text : std::format("Entity {}", entity.index);
-    }
+    std::string Document::NameOf(const kecs::Entity entity) const { return _world.NameOf(entity); }
 
     bool Document::Rename(const kecs::Entity entity, std::string name)
     {
-        if (!_world.Alive(entity)) return false;
-        _world.Add<Label>(entity, { std::move(name) });
+        if (!_world.Rename(entity, std::move(name))) return false;
         Changed();
         return true;
     }
@@ -429,6 +448,9 @@ namespace keditor
             const bool fits = fieldType == "resource" || resource->kind == fieldType || (fieldType == "Image" && resource->kind == "ImageView");
             if (fits) ids.push_back(node.id);
         }
+        // And the meshes there are without a node for any of them.
+        if (fieldType == "Mesh" || fieldType == "resource")
+            for (const auto& name : kgraph::DefaultMeshNames()) ids.push_back(kgraph::DefaultMeshId(name));
         return ids;
     }
 
@@ -457,6 +479,12 @@ namespace keditor
         if (const auto* tags = file.Find("tags"))
             for (const auto& tag : tags->items) AddTag(tag.string);
         const auto loaded = kecs::Load(_world, worldText->raw, _codecs);
+        // A scene saved before a name was the world's own had it as a component: the name is taken from it.
+        for (const kecs::Entity entity : loaded.entities)
+            if (const Label* label = _world.Get<Label>(entity)) {
+                _world.Rename(entity, label->text);
+                _world.Remove<Label>(entity);
+            }
         if (!loaded.ok) { error = loaded.error; return false; }
         for (const auto& problem : loaded.problems) _notes.push_back(problem);
         Changed();

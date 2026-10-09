@@ -27,7 +27,7 @@ A resource an entity holds is saved as the id of the node that makes it.
 |---|---|
 | **Graph** | The scene's pass graph. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
 | **Scene** | The scene as it runs, sized to the panel. |
-| **Outliner** | The entities, and a button that makes one. |
+| **Outliner** | The entities, as a tree, and a button that makes one. |
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
 | **Problems** | Every node that failed and every pass that passed an entity by, with the reason. Click one to pick its node. |
 
@@ -57,6 +57,19 @@ again, and whatever was wired from it with it.
 An input that is x, y and z on one line (`extent`, a Dispatch's `groups`) can be wired as one vector: pick
 its name from **Add input** and it becomes a port on the node, in place of the three numbers. Its own **x**
 brings the numbers back.
+
+### Entities
+
+The outliner is the hierarchy. An arrow folds what is under an entity. Drag an entity onto another to put it
+under it, or onto the empty part of the panel to bring it to the top; it stays where it is in the world.
+Right-click one for a new entity under it, to move it to the top, or to delete it with everything under it.
+
+An entity's inspector starts with its name and its transform: position, rotation (degrees about X, Y and
+Z) and scale, relative to what it is under. These are not components and can't be removed. A pipeline whose
+shader has a `float4x4 model` push constant draws the entity where its transform puts it.
+
+A `Mesh` component's field lists the graph's mesh nodes and the default meshes (`$cube`, `$sphere`,
+`$plane`, `$cylinder`, `$cone`, `$capsule`, `$torus`), which need no node.
 
 ### Drawing
 
@@ -150,5 +163,6 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
   file, but the editor opens the starting one only.
 - **An entity's own image or buffer** has to come from a node. Nothing in the editor makes a resource per
   entity.
-- **The hierarchy** isn't shown: the outliner is a flat list.
+- **Entities aren't reordered among their siblings** by dragging: a drop puts one last under what it is
+  dropped on. There is no duplicate, and no gizmo to move one in the scene view.
 - `Project, Run` finds `koral-play` beside the editor on Linux only. Elsewhere it has to be on the path.

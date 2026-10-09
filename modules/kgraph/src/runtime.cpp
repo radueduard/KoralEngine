@@ -38,6 +38,7 @@
 #include <vertexLayout.h>
 
 #include <kgraph/entities.h>
+#include <kgraph/meshes.h>
 
 #include "names.h"
 
@@ -132,7 +133,17 @@ namespace kgraph
             std::size_t pushAt = 0;                 // where that range is, in the component
             std::size_t size = 0;
             std::vector<kecs::FieldDescription> fields;
+            // Push constants that are the engine's to give, not the entity's component: where in the range each is.
+            std::vector<kor::u32> modelAt;      // the entity's place in the world, a matrix
+            std::vector<kor::u32> normalAt;     // the same for normals: its inverse, transposed
         };
+
+        /** What a push constant is called, past the block it is in: `object.model` is `model`. */
+        std::string_view LeafOf(const std::string_view name)
+        {
+            const auto dot = name.rfind('.');
+            return dot == std::string_view::npos ? name : name.substr(dot + 1);
+        }
 
         std::size_t SlotCount(const kecs::ComponentDescription& type) { return static_cast<const EntityLayout*>(type.context.get())->slots.size(); }
 
@@ -718,6 +729,7 @@ namespace kgraph
         kor::FrameGraph& frameGraph;
         kecs::World* world;
         std::map<std::string, Built, std::less<>> built;
+        std::map<std::string, Held, std::less<>> defaultMeshes;    // the default meshes asked for so far, by name
         std::map<std::string, GraphPass*, std::less<>> passes;
         std::vector<std::string> wanted;        // the passes that built, in the graph's order
         std::vector<std::string> passOrder;     // as they were added to the frame graph
@@ -1074,6 +1086,9 @@ namespace kgraph
                     for (const auto& [name, member] : constants) {
                         if (member.aggregate || member.count != 1) continue;    // its fields and elements are listed on their own
                         const auto [type, size] = ConstantType(member);
+                        // Where the entity is in the world is the world's to say, from its transform and what it is under.
+                        if (type == "mat4" && (LeafOf(name) == "model" || LeafOf(name) == "world")) { layout->modelAt.push_back(member.offset - first); continue; }
+                        if (type == "mat4" && LeafOf(name) == "normalMatrix") { layout->normalAt.push_back(member.offset - first); continue; }
                         layout->fields.push_back({ name, type, layout->pushAt + member.offset - first, size, nullptr });
                     }
                 }
@@ -1813,52 +1828,50 @@ namespace kgraph
         }
 
         /** A mesh of a simple shape, and the layout of its vertices for a pipeline to be built against. */
-        Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
+        /** A shape's numbers made a mesh: positions, normals and texture coordinates in one buffer, and indices. */
+        static Expected<Held> MeshOf(const MeshData& data)
         {
-            struct Vertex { kor::Vec3 position; kor::Vec3 normal; kor::Vec2 uv; };
-            std::string shape = "eQuad";
-            if (const auto it = inputs.find("shape"); it != inputs.end() && !it->second.value.IsNull()) {
-                if (!it->second.value.String()) return Fail("'shape' is eQuad, eCube or eTriangle");
-                shape = *it->second.value.String();
-            }
-            std::vector<Vertex> vertices;
-            std::vector<kor::u32> indices;
-            // One face: a unit square across `right` and `up`, half a unit out along where they face.
-            const auto face = [&](const kor::Vec3 right, const kor::Vec3 up, const float out) {
-                const kor::Vec3 normal = kor::Cross(right, up);
-                const auto first = static_cast<kor::u32>(vertices.size());
-                for (const auto [x, y] : { std::pair { -0.5f, -0.5f }, std::pair { 0.5f, -0.5f }, std::pair { -0.5f, 0.5f }, std::pair { 0.5f, 0.5f } })
-                    vertices.push_back({ right * x + up * y + normal * out, normal, { x + 0.5f, y + 0.5f } });
-                for (const kor::u32 corner : { 0u, 1u, 2u, 2u, 1u, 3u }) indices.push_back(first + corner);
-            };
-            if (shape == "eQuad") {
-                face({ 1, 0, 0 }, { 0, 1, 0 }, 0.f);
-            } else if (shape == "eCube") {
-                face({ 1, 0, 0 }, { 0, 1, 0 }, 0.5f);
-                face({ -1, 0, 0 }, { 0, 1, 0 }, 0.5f);
-                face({ 0, 0, -1 }, { 0, 1, 0 }, 0.5f);
-                face({ 0, 0, 1 }, { 0, 1, 0 }, 0.5f);
-                face({ 1, 0, 0 }, { 0, 0, -1 }, 0.5f);
-                face({ 1, 0, 0 }, { 0, 0, 1 }, 0.5f);
-            } else if (shape == "eTriangle") {
-                vertices = { { { -0.5f, -0.5f, 0 }, { 0, 0, 1 }, { 0, 0 } }, { { 0.5f, -0.5f, 0 }, { 0, 0, 1 }, { 1, 0 } }, { { 0, 0.5f, 0 }, { 0, 0, 1 }, { 0.5f, 1 } } };
-                indices = { 0, 1, 2 };
-            } else {
-                return Fail(std::format("'{}' is no shape: eQuad, eCube or eTriangle", shape));
-            }
             auto mesh = kor::Mesh::Builder()
-                .SetVertexBuffer(0, kor::Mesh::MakeBuffer(vertices, kor::Buffer::Usage::eVertex))
-                .SetIndexBuffer(kor::Mesh::MakeBuffer(indices, kor::Buffer::Usage::eIndex))
+                .SetVertexBuffer(0, kor::Mesh::MakeBuffer(data.vertices, kor::Buffer::Usage::eVertex))
+                .SetIndexBuffer(kor::Mesh::MakeBuffer(data.indices, kor::Buffer::Usage::eIndex))
                 .SetVertexLayout(kor::VertexLayout {
-                    .bindings = { kor::VertexInputBindingDescription(0, sizeof(Vertex)) },
-                    .attributes = { kor::VertexLayout::Attribute("POSITION", "", 0, offsetof(Vertex, position), kor::ChannelType::eFloat, 3),
-                                    kor::VertexLayout::Attribute("NORMAL", "", 0, offsetof(Vertex, normal), kor::ChannelType::eFloat, 3),
-                                    kor::VertexLayout::Attribute("UV", "", 0, offsetof(Vertex, uv), kor::ChannelType::eFloat, 2) } })
+                    .bindings = { kor::VertexInputBindingDescription(0, sizeof(MeshVertex)) },
+                    .attributes = { kor::VertexLayout::Attribute("POSITION", "", 0, offsetof(MeshVertex, position), kor::ChannelType::eFloat, 3),
+                                    kor::VertexLayout::Attribute("NORMAL", "", 0, offsetof(MeshVertex, normal), kor::ChannelType::eFloat, 3),
+                                    kor::VertexLayout::Attribute("UV", "", 0, offsetof(MeshVertex, uv), kor::ChannelType::eFloat, 2) } })
                 .Build();
             if (!mesh.Valid()) return Fail(mesh.Failure() ? mesh.Failure()->message : std::string("the mesh could not be built"));
-            Held resource = MakeResource(std::move(mesh));
-            resource->node = node.id;
-            out.outputs["out"].resource = std::move(resource);
+            return MakeResource(std::move(mesh));
+        }
+
+        /** A default mesh, by its name: made the first time it is asked for, and kept. Null for a name that is none. */
+        Held DefaultMesh(const std::string_view name)
+        {
+            if (const auto it = defaultMeshes.find(name); it != defaultMeshes.end()) return it->second;
+            if (std::ranges::find(DefaultMeshNames(), name) == DefaultMeshNames().end()) return nullptr;
+            const auto made = MeshOf(*ShapeData(name));
+            if (!made) return nullptr;
+            (*made)->node = DefaultMeshId(name);   // what it is saved as, and found again by
+            return defaultMeshes.emplace(std::string(name), *made).first->second;
+        }
+
+        Expected<void> BuildPrimitive(const Node& node, const Inputs& inputs, Built& out)
+        {
+            static const char* const shapes = "eCube, eSphere, ePlane, eCylinder, eCone, eCapsule, eTorus, eQuad or eTriangle";
+            std::string shape = "eCube";
+            if (const auto it = inputs.find("shape"); it != inputs.end() && !it->second.value.IsNull()) {
+                if (!it->second.value.String()) return Fail(std::format("'shape' is {}", shapes));
+                shape = *it->second.value.String();
+            }
+            // eCube is "cube": the name of the shape, as the default meshes have it.
+            std::string name = shape.size() > 1 && shape[0] == 'e' ? shape.substr(1) : std::string();
+            if (!name.empty()) name[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[0])));
+            const auto data = ShapeData(name);
+            if (!data) return Fail(std::format("'{}' is no shape: {}", shape, shapes));
+            auto resource = MeshOf(*data);
+            if (!resource) return Fail(resource.error());
+            (*resource)->node = node.id;
+            out.outputs["out"].resource = std::move(*resource);
             auto layout = LayoutValue(Value(Value::List {
                 Value::Members { { "semantic", "POSITION" }, { "count", 3 } }, Value::Members { { "semantic", "NORMAL" }, { "count", 3 } },
                 Value::Members { { "semantic", "UV" }, { "count", 2 } } }));
@@ -2231,6 +2244,17 @@ namespace kgraph
                     if (layout && layout->pushSize) {
                         item.push = run.pushed.size();
                         run.pushed.insert(run.pushed.end(), bytes + layout->pushAt, bytes + layout->pushAt + layout->pushSize);
+                        if (!layout->modelAt.empty() || !layout->normalAt.empty()) {
+                            const kecs::Mat4 model = world->WorldMatrix(entity);
+                            for (const kor::u32 at : layout->modelAt) std::memcpy(run.pushed.data() + item.push + at, model.m.data(), 64);
+                            if (!layout->normalAt.empty()) {
+                                const kecs::Mat4 inverse = kecs::Inverse(model);
+                                kecs::Mat4 normal;
+                                for (int column = 0; column < 4; ++column)
+                                    for (int row = 0; row < 4; ++row) normal.At(column, row) = inverse.At(row, column);
+                                for (const kor::u32 at : layout->normalAt) std::memcpy(run.pushed.data() + item.push + at, normal.m.data(), 64);
+                            }
+                        }
                     }
                     run.items.push_back(std::move(item));
                 }
@@ -2544,7 +2568,8 @@ namespace kgraph
     std::shared_ptr<Resource> Runtime::ResourceOf(const std::string_view id, const std::string_view output) const
     {
         const auto it = _impl->built.find(id);
-        if (it == _impl->built.end()) return nullptr;
+        // A default mesh is there without a node of its own: `$cube`.
+        if (it == _impl->built.end()) return id.starts_with('$') ? _impl->DefaultMesh(id.substr(1)) : nullptr;
         const auto out = it->second.outputs.find(output);
         return out == it->second.outputs.end() ? nullptr : out->second.resource;
     }

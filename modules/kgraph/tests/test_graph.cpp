@@ -121,7 +121,7 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_EQ(port("Dispatch", "cover").editor, "parameter");
     EXPECT_EQ(port("VertexLayout", "attributes").editor, "attributes");
     EXPECT_EQ(port("Draw", "command").choices.size(), 9u);
-    EXPECT_EQ(port("Primitive", "shape").choices.size(), 3u);
+    EXPECT_EQ(port("Primitive", "shape").choices.size(), 9u);
 
     // A graphics pipeline is drawn one of two ways, and has the inputs of the one it is.
     const kgraph::NodeType* graphics = kgraph::FindType("GraphicsPipeline");
@@ -148,4 +148,78 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_FALSE(port("RayTracingPipeline", "raygen.module").optional);
     EXPECT_TRUE(port("RayTracingPipeline", "miss[].module").repeatable);
     EXPECT_TRUE(port("RayTracingPipeline", "hitGroup[].closestHit.module").repeatable);
+}
+
+// ---- the default meshes ---------------------------------------------------------------------------------------------
+
+#include <cmath>
+#include <kgraph/meshes.h>
+
+namespace {
+    struct Bounds { float low[3] { 1e9f, 1e9f, 1e9f }, high[3] { -1e9f, -1e9f, -1e9f }; };
+    Bounds BoundsOf(const kgraph::MeshData& mesh)
+    {
+        Bounds bounds;
+        for (const auto& vertex : mesh.vertices)
+            for (int axis = 0; axis < 3; ++axis) {
+                bounds.low[axis] = std::min(bounds.low[axis], vertex.position[axis]);
+                bounds.high[axis] = std::max(bounds.high[axis], vertex.position[axis]);
+            }
+        return bounds;
+    }
+}
+
+// Each default mesh is a closed, outward-facing shape of the size it says: every triangle faces the way its
+// corners' normals point, which is what lighting and back-face culling both go by.
+TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
+    EXPECT_EQ(kgraph::DefaultMeshNames(), (std::vector<std::string> { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus" }));
+    for (const char* name : { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus", "quad", "triangle" }) {
+        const auto mesh = kgraph::ShapeData(name);
+        ASSERT_TRUE(mesh.has_value()) << name;
+        ASSERT_FALSE(mesh->indices.empty()) << name;
+        ASSERT_EQ(mesh->indices.size() % 3, 0u) << name;
+        for (const auto& vertex : mesh->vertices) {
+            const float length = std::sqrt(vertex.normal[0] * vertex.normal[0] + vertex.normal[1] * vertex.normal[1] + vertex.normal[2] * vertex.normal[2]);
+            ASSERT_NEAR(length, 1.f, 1e-3f) << name << ": a normal is one long";
+        }
+        std::size_t facing = 0, flat = 0;
+        for (std::size_t i = 0; i < mesh->indices.size(); i += 3) {
+            ASSERT_LT(mesh->indices[i], mesh->vertices.size()) << name;
+            const auto& a = mesh->vertices[mesh->indices[i]];
+            const auto& b = mesh->vertices[mesh->indices[i + 1]];
+            const auto& c = mesh->vertices[mesh->indices[i + 2]];
+            float ab[3], ac[3], sum[3];
+            for (int axis = 0; axis < 3; ++axis) {
+                ab[axis] = b.position[axis] - a.position[axis];
+                ac[axis] = c.position[axis] - a.position[axis];
+                sum[axis] = a.normal[axis] + b.normal[axis] + c.normal[axis];
+            }
+            const float cross[3] { ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0] };
+            const float area = std::sqrt(cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+            if (area < 1e-9f) { ++flat; continue; }   // at a pole, where a band comes to a point
+            ASSERT_GT(cross[0] * sum[0] + cross[1] * sum[1] + cross[2] * sum[2], 0.f) << name << ": triangle " << i / 3 << " faces in";
+            ++facing;
+        }
+        EXPECT_GT(facing, flat) << name;
+    }
+
+    const auto within = [](const char* name, const float x, const float y, const float z) {
+        const Bounds bounds = BoundsOf(*kgraph::ShapeData(name));
+        const float half[3] { x, y, z };
+        for (int axis = 0; axis < 3; ++axis) {
+            EXPECT_NEAR(bounds.high[axis], half[axis], 1e-3f) << name << ", axis " << axis;
+            EXPECT_NEAR(bounds.low[axis], -half[axis], 1e-3f) << name << ", axis " << axis;
+        }
+    };
+    within("cube", 0.5f, 0.5f, 0.5f);
+    within("sphere", 0.5f, 0.5f, 0.5f);
+    within("plane", 0.5f, 0.f, 0.5f);
+    within("cylinder", 0.5f, 0.5f, 0.5f);
+    within("cone", 0.5f, 0.5f, 0.5f);
+    within("capsule", 0.25f, 0.5f, 0.25f);
+    within("torus", 0.5f, 0.15f, 0.5f);
+    EXPECT_EQ(kgraph::ShapeData("cube")->vertices.size(), 24u);
+    EXPECT_EQ(kgraph::ShapeData("sphere")->indices.size(), 40u * 80u * 6u);
+    EXPECT_FALSE(kgraph::ShapeData("blob").has_value());
+    EXPECT_EQ(kgraph::DefaultMeshId("cube"), "$cube");
 }

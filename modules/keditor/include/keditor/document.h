@@ -24,7 +24,10 @@ namespace kor { class FrameGraph; }
 
 namespace keditor
 {
-    /** @brief What an entity is called, in the outliner and in a file. The component "Name". */
+    /**
+     * @brief What an entity was called in a scene saved before a name was the world's own: the component "Name".
+     *        Known only so that such a file still reads; a name it holds is given to the world, and it is taken off.
+     */
     struct Label {
         std::string text;
     };
@@ -91,13 +94,23 @@ namespace keditor
 
         // ---- entities -----------------------------------------------------------------------------------------
 
-        /** @brief A new entity so called. */
-        kecs::Entity CreateEntity(std::string_view name = "Entity");
+        /** @brief A new entity so called: last under @p parent, or at the top. */
+        kecs::Entity CreateEntity(std::string_view name = "Entity", kecs::Entity parent = kecs::NullEntity);
+        /** @brief Takes an entity away, and everything under it. */
         bool DestroyEntity(kecs::Entity entity);
-        /** @brief Every entity, in the order they were made. */
+        /** @brief Every entity, parents before their children. */
         [[nodiscard]] std::vector<kecs::Entity> Entities() const;
         [[nodiscard]] std::string NameOf(kecs::Entity entity) const;
         bool Rename(kecs::Entity entity, std::string name);
+        /**
+         * @brief Moves @p entity under @p parent (to the top, for NullEntity), at @p index among what is there (last
+         *        when below 0). It stays where it is in the world. False when it would go under itself.
+         */
+        bool SetParent(kecs::Entity entity, kecs::Entity parent, int index = -1);
+        /** @brief Where an entity is, how it is turned (Euler angles, in degrees) and how big, relative to what it is under. */
+        bool SetPosition(kecs::Entity entity, const kecs::Vec3& position);
+        bool SetRotation(kecs::Entity entity, const kecs::Vec3& degrees);
+        bool SetScale(kecs::Entity entity, const kecs::Vec3& scale);
 
         /** @brief A tag: a component with nothing in it, for a node's `with` and `without`. The one so named, when there is one. */
         kecs::ComponentId AddTag(std::string_view name);

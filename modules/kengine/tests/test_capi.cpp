@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
+
 #include <cstring>
 #include <string>
 #include <vector>
@@ -129,6 +131,44 @@ TEST_F(CApiTest, EntitiesAndComponentsByHandle) {
     const KecsEntity child = kecs_create(world);
     EXPECT_TRUE(kecs_set_parent(world, child, lamp));
     EXPECT_EQ(kecs_parent(world, child).index, lamp.index);
+
+    // A name, a place in the hierarchy and a transform: every entity's, and the world's own.
+    EXPECT_EQ(kecs_child_count(world, lamp), 1u);
+    EXPECT_EQ(kecs_child(world, lamp, 0).index, child.index);
+    EXPECT_EQ(kecs_child(world, lamp, 1).index, KECS_NULL_INDEX);
+    const KecsEntity none { KECS_NULL_INDEX, 0 };
+    EXPECT_EQ(kecs_child_count(world, none), 2u) << "at the top: the lamp, and the bare one";
+    kengine_entity_set_name(doc, child, "Shade");
+    EXPECT_EQ(kecs_find(world, "Shade").index, child.index);
+    EXPECT_EQ(kecs_find(world, "Nobody").index, KECS_NULL_INDEX);
+    const float there[3] { 10, 0, 0 }, here[3] { 1, 2, 3 }, twice[3] { 2, 2, 2 };
+    EXPECT_TRUE(kecs_set_position(world, lamp, there));
+    EXPECT_TRUE(kecs_set_scale(world, lamp, twice));
+    EXPECT_TRUE(kecs_set_position(world, child, here));
+    float read[3] {}, matrix[16] {};
+    EXPECT_TRUE(kecs_position(world, child, read));
+    EXPECT_EQ(read[1], 2.f);
+    EXPECT_TRUE(kecs_scale(world, child, read));
+    EXPECT_EQ(read[0], 1.f) << "its own scale";
+    EXPECT_TRUE(kecs_world_matrix(world, child, matrix));
+    EXPECT_FLOAT_EQ(matrix[12], 12.f) << "twice as far out as its own place, from where its parent is";
+    EXPECT_FLOAT_EQ(matrix[0], 2.f) << "and twice as big";
+    EXPECT_TRUE(kecs_local_matrix(world, child, matrix));
+    EXPECT_FLOAT_EQ(matrix[12], 1.f);
+    EXPECT_TRUE(kecs_set_parent_at(world, child, none, 0, true));
+    EXPECT_EQ(kecs_child(world, none, 0).index, child.index) << "first at the top, as asked";
+    EXPECT_TRUE(kecs_position(world, child, read));
+    EXPECT_FLOAT_EQ(read[0], 12.f) << "where it was in the world";
+    EXPECT_TRUE(kecs_set_parent_at(world, child, lamp, -1, false));
+    EXPECT_TRUE(kecs_world_matrix(world, child, matrix));
+    EXPECT_FLOAT_EQ(matrix[12], 34.f) << "its own numbers kept, under the parent again";
+    const float identity[16] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    EXPECT_TRUE(kecs_set_world_matrix(world, child, identity));
+    EXPECT_TRUE(kecs_position(world, child, read));
+    EXPECT_FLOAT_EQ(read[0], -5.f) << "at the middle of the world: half way back, in its parent's terms";
+    EXPECT_FALSE(kecs_position(world, none, read));
+    EXPECT_TRUE(kecs_set_position(world, lamp, std::array<float, 3> {}.data()));
+    EXPECT_TRUE(kecs_set_scale(world, lamp, std::array<float, 3> { 1, 1, 1 }.data()));
 
     // A query: how many, then which.
     EXPECT_EQ(kecs_query(world, &lit, 1, nullptr, 0, false, nullptr, 0), 1u);

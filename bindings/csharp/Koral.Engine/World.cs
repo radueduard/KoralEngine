@@ -48,8 +48,44 @@ public sealed unsafe class World
     public int EntityCount => (int)Native.kecs_entity_count(Handle);
     public string NameOf(Entity entity) => Native.Text(Native.kengine_entity_name(Document, entity));
     public bool Rename(Entity entity, string name) => Native.kengine_entity_set_name(Document, entity, name);
-    public bool SetParent(Entity child, Entity parent) => Native.kecs_set_parent(Handle, child, parent);
+    /// <summary>
+    /// Puts <paramref name="child"/> under <paramref name="parent"/> (<see cref="Entity.Null"/>: at the top), at
+    /// <paramref name="index"/> among what is there (last, when below 0). It stays where it is in the world unless
+    /// <paramref name="keepWorldTransform"/> is false.
+    /// </summary>
+    public bool SetParent(Entity child, Entity parent, int index = -1, bool keepWorldTransform = true) =>
+        Native.kecs_set_parent_at(Handle, child, parent, index, keepWorldTransform);
     public Entity ParentOf(Entity entity) => Native.kecs_parent(Handle, entity);
+    /// <summary>The entities directly under one, in order.</summary>
+    public Entity[] ChildrenOf(Entity entity)
+    {
+        var children = new Entity[(int)Native.kecs_child_count(Handle, entity)];
+        for (var i = 0; i < children.Length; i++) children[i] = Native.kecs_child(Handle, entity, (nuint)i);
+        return children;
+    }
+    /// <summary>The entities at the top of the hierarchy, in order.</summary>
+    public Entity[] Roots => ChildrenOf(Entity.Null);
+    /// <summary>The first entity so named, parents before their children; <see cref="Entity.Null"/> when there is none.</summary>
+    public Entity Find(string name) => Native.kecs_find(Handle, name);
+
+    // ---- transforms -------------------------------------------------------------------------------------------
+    //
+    // Every entity has one, relative to what it is under. It is the world's own, and no component.
+
+    /// <summary>Where an entity is, relative to what it is under.</summary>
+    public unsafe Vec3 PositionOf(Entity entity) { Vec3 value = default; Native.kecs_position(Handle, entity, &value); return value; }
+    /// <summary>How it is turned: Euler angles, in degrees — about X, about Y, about Z.</summary>
+    public unsafe Vec3 RotationOf(Entity entity) { Vec3 value = default; Native.kecs_rotation(Handle, entity, &value); return value; }
+    public unsafe Vec3 ScaleOf(Entity entity) { var value = new Vec3(1f, 1f, 1f); Native.kecs_scale(Handle, entity, &value); return value; }
+    public unsafe bool SetPosition(Entity entity, Vec3 position) => Native.kecs_set_position(Handle, entity, &position);
+    public unsafe bool SetRotation(Entity entity, Vec3 degrees) => Native.kecs_set_rotation(Handle, entity, &degrees);
+    public unsafe bool SetScale(Entity entity, Vec3 scale) => Native.kecs_set_scale(Handle, entity, &scale);
+    /// <summary>Its own transform, as a matrix.</summary>
+    public unsafe Mat4 LocalMatrix(Entity entity) { var value = Mat4.Identity; Native.kecs_local_matrix(Handle, entity, &value); return value; }
+    /// <summary>Where it is in the world: the transforms of everything above it, and its own.</summary>
+    public unsafe Mat4 WorldMatrix(Entity entity) { var value = Mat4.Identity; Native.kecs_world_matrix(Handle, entity, &value); return value; }
+    /// <summary>Places it in the world, by changing its own transform.</summary>
+    public unsafe bool SetWorldMatrix(Entity entity, Mat4 matrix) => Native.kecs_set_world_matrix(Handle, entity, &matrix);
 
     // ---- components, by name --------------------------------------------------------------------------------
 

@@ -102,7 +102,7 @@ TEST(Hierarchy, PutsEntitiesUnderOthersAndKeepsBothEndsRight) {
 
     EXPECT_TRUE(world.SetParent(b, kecs::NullEntity));
     EXPECT_TRUE(world.ParentOf(b).IsNull());
-    EXPECT_FALSE(world.Has<kecs::Parent>(b));
+    EXPECT_EQ(world.Roots(), (std::vector<Entity> { root, b })) << "at the top again, after what was there";
     EXPECT_EQ(world.ChildrenOf(root), std::vector<Entity> { a });
     EXPECT_EQ(world.ParentOf(leaf), b) << "what was under it stays under it";
 }
@@ -150,4 +150,109 @@ TEST(Observers, HearOfComponentsComingAndGoing) {
     EXPECT_EQ(p.x, 4);
     EXPECT_EQ(&p, world.Get<Position>(c));
     EXPECT_TRUE(world.Has<Velocity>(c));
+}
+
+namespace {
+    void ExpectNear(const kecs::Vec3& a, const kecs::Vec3& b, const char* what)
+    {
+        EXPECT_NEAR(a.x, b.x, 1e-3f) << what;
+        EXPECT_NEAR(a.y, b.y, 1e-3f) << what;
+        EXPECT_NEAR(a.z, b.z, 1e-3f) << what;
+    }
+    kecs::Vec3 PlaceOf(const kecs::Mat4& m) { return { m.At(3, 0), m.At(3, 1), m.At(3, 2) }; }
+}
+
+// A name, an order and a depth: every entity has them, and they are no components of it.
+TEST(Hierarchy, EveryEntityHasANameAndAPlaceInOrder) {
+    World world;
+    const Entity root = world.Create(), a = world.Create(), b = world.Create(), c = world.Create();
+    EXPECT_EQ(world.NameOf(root), "Entity");
+    EXPECT_TRUE(world.ComponentsOf(root).empty()) << "none of it is a component";
+    world.Rename(root, "Root");
+    world.Rename(b, "Second");
+    EXPECT_EQ(world.FindEntity("Second"), b);
+    EXPECT_TRUE(world.FindEntity("Nobody").IsNull());
+
+    world.SetParent(a, root);
+    world.SetParent(b, root);
+    world.SetParent(c, root, 0);
+    EXPECT_EQ(world.ChildrenOf(root), (std::vector<Entity> { c, a, b })) << "put first, where it was asked to go";
+    world.SetParent(c, root, 3);
+    EXPECT_EQ(world.ChildrenOf(root), (std::vector<Entity> { a, b, c })) << "moved later among the same: its own place does not count";
+    world.SetParent(b, a);
+    EXPECT_EQ(world.All(), (std::vector<Entity> { root, a, b, c })) << "parents before their children";
+    EXPECT_EQ(world.DepthOf(root), 0u);
+    EXPECT_EQ(world.DepthOf(b), 2u);
+    EXPECT_TRUE(world.IsAncestor(root, b));
+    EXPECT_FALSE(world.IsAncestor(b, root));
+    EXPECT_FALSE(world.IsAncestor(c, b));
+    EXPECT_EQ(world.Roots(), std::vector<Entity> { root });
+
+    // A place given back is a new entity's from the start.
+    world.Destroy(a);
+    const Entity again = world.Create();
+    EXPECT_EQ(world.NameOf(again), "Entity");
+    EXPECT_TRUE(world.ParentOf(again).IsNull());
+    EXPECT_TRUE(world.ChildrenOf(again).empty());
+    EXPECT_EQ(world.NameOf(a), "") << "what is gone has no name";
+}
+
+// Where an entity is in the world is where everything above it is, and then its own place.
+TEST(Transform, AnEntityIsPlacedRelativeToWhatItIsUnder) {
+    World world;
+    const Entity parent = world.Create(), child = world.Create();
+    ExpectNear(world.ScaleOf(child), { 1, 1, 1 }, "a scale of one, to begin with");
+    EXPECT_EQ(world.WorldMatrix(child), kecs::Mat4 {});
+
+    world.SetParent(child, parent);
+    world.SetPosition(parent, { 10, 0, 0 });
+    world.SetPosition(child, { 1, 0, 0 });
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 11, 0, 0 }, "moved with its parent");
+    ExpectNear(PlaceOf(world.LocalMatrix(child)), { 1, 0, 0 }, "its own");
+
+    // Turned a quarter about Y, +X goes to -Z; scaled, twice as far.
+    world.SetRotation(parent, { 0, 90, 0 });
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 10, 0, -1 }, "turned with its parent");
+    world.SetScale(parent, { 2, 2, 2 });
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 10, 0, -2 }, "and scaled with it");
+
+    // Taken out from under it, it stays where it is: its own transform makes up for the parent's.
+    world.SetParent(child, kecs::NullEntity);
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 10, 0, -2 }, "kept where it was");
+    ExpectNear(world.PositionOf(child), { 10, 0, -2 }, "its own place is now the world's");
+    EXPECT_NEAR(world.RotationOf(child).y, 90.f, 0.05f) << "turned as its parent was (a quarter turn is where the angle is least exact)";
+    ExpectNear(world.ScaleOf(child), { 2, 2, 2 }, "and as big");
+    // Or goes where the same numbers put it under the new one, when asked.
+    world.SetParent(child, parent, -1, false);
+    ExpectNear(world.PositionOf(child), { 10, 0, -2 }, "its own numbers as they were");
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 10 - 4, 0, -20 }, "so somewhere else in the world");
+
+    // Placed in the world: only the parts asked for change.
+    world.SetRotation(child, { 0, 0, 30 });
+    kecs::Mat4 there;
+    there.At(3, 0) = 3; there.At(3, 1) = 4; there.At(3, 2) = 5;
+    world.SetWorldMatrix(child, there, true, false, false);
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 3, 4, 5 }, "where it was put");
+    ExpectNear(world.RotationOf(child), { 0, 0, 30 }, "turned as it was");
+
+    const std::uint64_t before = world.SceneVersion();
+    world.SetPosition(child, world.PositionOf(child));
+    EXPECT_EQ(world.SceneVersion(), before) << "nothing changed";
+    world.SetPosition(child, { 0, 0, 0 });
+    EXPECT_GT(world.SceneVersion(), before);
+}
+
+// Angles go to a matrix and come back the same.
+TEST(Transform, ComposedIsDecomposedToWhatItWas) {
+    const kecs::Vec3 position { 1, -2, 3 }, rotation { 20, -35, 50 }, scale { 2, 0.5f, 3 };
+    kecs::Vec3 p, r, s;
+    ASSERT_TRUE(kecs::Decompose(kecs::Compose(position, rotation, scale), p, r, s));
+    ExpectNear(p, position, "position");
+    ExpectNear(r, rotation, "rotation");
+    ExpectNear(s, scale, "scale");
+    const kecs::Mat4 m = kecs::Compose(position, rotation, scale);
+    const kecs::Mat4 one = m * kecs::Inverse(m);
+    for (int column = 0; column < 4; ++column)
+        for (int row = 0; row < 4; ++row) EXPECT_NEAR(one.At(column, row), column == row ? 1.f : 0.f, 1e-4f);
+    EXPECT_FALSE(kecs::Decompose(kecs::Compose({}, {}, { 1, 0, 1 }), p, r, s)) << "flat along an axis: nothing says how it is turned";
 }

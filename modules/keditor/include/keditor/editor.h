@@ -72,6 +72,9 @@ namespace keditor
         kecs::Entity selectedEntity = kecs::NullEntity; ///< The entity it shows.
         void Select(std::string node) { selectedNode = std::move(node); selectedEntity = kecs::NullEntity; ++_changes; }
         void Select(const kecs::Entity entity) { selectedEntity = entity; selectedNode.clear(); ++_changes; }
+        /** @brief Whether what is under @p entity is folded away in the outliner. Open, to begin with. */
+        [[nodiscard]] bool Folded(const kecs::Entity entity) const { return _folded.contains(entity); }
+        void Fold(const kecs::Entity entity, const bool folded) { if (folded) _folded.insert(entity); else _folded.erase(entity); ++_changes; }
 
         /** @brief The last thing done, for the foot of the window; and whether it went wrong. */
         [[nodiscard]] const std::string& Status() const { return _status; }
@@ -94,6 +97,7 @@ namespace keditor
         bool _failed = false;
         std::uint64_t _changes = 0;
         std::map<std::string, std::set<std::string>> _asked;
+        std::set<kecs::Entity> _folded;
         bool _wantsNodes = false;
     };
 

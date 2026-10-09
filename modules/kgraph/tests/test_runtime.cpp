@@ -279,7 +279,7 @@ TEST_F(RuntimeTest, APrimitiveIsAMeshWithItsLayout) {
     graph.Add("plain", "Primitive");
     graph.Add("blob", "Primitive").Set("shape", "eBlob");
     runtime.Set(graph);
-    EXPECT_NE(runtime.Status("blob")->error.find("eQuad, eCube or eTriangle"), std::string::npos) << runtime.Status("blob")->error;
+    EXPECT_NE(runtime.Status("blob")->error.find("eCube, eSphere, ePlane"), std::string::npos) << runtime.Status("blob")->error;
 
     const auto vertices = [&](const char* id) { return koral_mesh_vertex_count(runtime.ResourceOf(id)->handle); };
     const auto indices = [&](const char* id) { uint32_t count = 0; koral_mesh_index_count(runtime.ResourceOf(id)->handle, &count); return count; };
@@ -290,7 +290,7 @@ TEST_F(RuntimeTest, APrimitiveIsAMeshWithItsLayout) {
     EXPECT_EQ(vertices("cube"), 24u) << "a face has corners of its own: its normal is its own";
     EXPECT_EQ(indices("cube"), 36u);
     EXPECT_EQ(vertices("triangle"), 3u);
-    EXPECT_EQ(vertices("plain"), 4u) << "a quad, when it is not said";
+    EXPECT_EQ(vertices("plain"), 24u) << "a cube, when it is not said";
 
     // What a pipeline that draws it is built against: position, normal and texture coordinate, 32 bytes a vertex.
     const kgraph::Value layout = runtime.ValueOf("cube", "layout");

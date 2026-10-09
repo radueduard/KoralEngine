@@ -34,6 +34,10 @@ namespace {
         world.SetParent(a, root);
         world.SetParent(b, a);
         world.Mutable<Named>(root)->target = c;
+        world.Rename(root, "The \"root\"");
+        world.SetPosition(a, { 1, 2.5f, -3 });
+        world.SetRotation(a, { 0, 45, 0 });
+        world.SetScale(b, { 2, 2, 2 });
     }
 }
 
@@ -49,7 +53,8 @@ TEST(Serialize, AWorldComesBackAsItWas) {
     ASSERT_TRUE(loaded.ok) << loaded.error;
     EXPECT_TRUE(loaded.problems.empty()) << loaded.problems.front();
     ASSERT_EQ(loaded.entities.size(), 4u);
-    const Entity root = loaded.entities[0], a = loaded.entities[1], b = loaded.entities[2], c = loaded.entities[3];
+    // In the hierarchy's order: parents before their children.
+    const Entity root = loaded.entities[0], c = loaded.entities[1], a = loaded.entities[2], b = loaded.entities[3];
 
     EXPECT_EQ(other.Get<Named>(root)->name, "root \"quoted\"\n");
     EXPECT_EQ(other.Get<Named>(root)->weight, 0.1);
@@ -71,6 +76,12 @@ TEST(Serialize, AWorldComesBackAsItWas) {
 
     EXPECT_EQ(other.ChildrenOf(root), (std::vector<Entity> { c, a })) << "in the order they were under it";
     EXPECT_EQ(other.ParentOf(b), a);
+    EXPECT_EQ(other.NameOf(root), "The \"root\"");
+    EXPECT_EQ(other.NameOf(c), "Entity");
+    EXPECT_EQ(other.PositionOf(a), (kecs::Vec3 { 1, 2.5f, -3 })) << "where it was, relative to its parent";
+    EXPECT_EQ(other.RotationOf(a), (kecs::Vec3 { 0, 45, 0 }));
+    EXPECT_EQ(other.ScaleOf(b), (kecs::Vec3 { 2, 2, 2 }));
+    EXPECT_EQ(other.ScaleOf(a), (kecs::Vec3 { 1, 1, 1 }));
 
     EXPECT_EQ(kecs::Save(other).json, saved.json) << "saved again, it is the same file";
 }
@@ -85,7 +96,7 @@ TEST(Serialize, ATypeThatOwnsSomethingMustBeKnownToTheWorld) {
     EXPECT_NE(loaded.problems[0].find("Named"), std::string::npos) << loaded.problems[0];
     EXPECT_EQ(other.Find("Named"), kecs::NoComponent);
     EXPECT_NE(other.Find("Position"), kecs::NoComponent) << "plain types are made from the file";
-    EXPECT_EQ(static_cast<const float*>(other.Get(loaded.entities[1], other.Find("Position")))[0], 1.5f);
+    EXPECT_EQ(static_cast<const float*>(other.Get(loaded.entities[2], other.Find("Position")))[0], 1.5f);
 }
 
 TEST(Serialize, AFieldThatIsNotWhatItWasIsLeftAtItsDefault) {
@@ -192,5 +203,5 @@ TEST(Serialize, AddsToWhatTheWorldHolds) {
     const kecs::Loaded loaded = kecs::Load(world, json);
     ASSERT_TRUE(loaded.ok);
     EXPECT_EQ(world.EntityCount(), 8u);
-    EXPECT_EQ(world.Get<Named>(loaded.entities[3])->target, loaded.entities[1]) << "references are among what was loaded";
+    EXPECT_EQ(world.Get<Named>(loaded.entities[1])->target, loaded.entities[2]) << "references are among what was loaded";
 }

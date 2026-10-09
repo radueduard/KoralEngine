@@ -55,6 +55,7 @@ namespace shadow
         Set(doc, "shadow target", "depthStencil.depth", "1");
 
         Node(doc, "Primitive", "square", 0, 300);
+        Set(doc, "square", "shape", "\"eQuad\"");
         // A pipeline names its shaders: the module each is in, and the entry point.
         Node(doc, "GraphicsPipeline", "shadow", 400, 300);
         Set(doc, "shadow", "vertex.module", "\"shadow\"");

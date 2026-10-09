@@ -590,6 +590,58 @@ TEST_F(EditorTest, ATriangleIsDrawnWithNodesAndNoMesh) {
     EXPECT_TRUE(Shows("eBack"));
 }
 
+// The outliner is the hierarchy: an entity under another shows under it, folds away with it, and moves with it.
+// Where each is, is in the inspector, and is no component.
+TEST_F(EditorTest, EntitiesAreATreeEachWithATransform) {
+    Open();
+    const kecs::Entity ship = Doc().CreateEntity("Ship");
+    const kecs::Entity turret = Doc().CreateEntity("Turret", ship);
+    const kecs::Entity barrel = Doc().CreateEntity("Barrel", turret);
+    const kecs::Entity rock = Doc().CreateEntity("Rock");
+    EXPECT_EQ(Doc().Entities(), (std::vector<kecs::Entity> { ship, turret, barrel, rock })) << "parents before their children";
+    for (const char* name : { "Ship", "Turret", "Barrel", "Rock" }) EXPECT_TRUE(Shows(name)) << name;
+
+    // Folded, what is under it is out of the way.
+    Session().Fold(ship, true);
+    EXPECT_FALSE(Shows("Turret"));
+    EXPECT_TRUE(Shows("Rock"));
+    Session().Fold(ship, false);
+    EXPECT_TRUE(Shows("Barrel"));
+
+    // Its transform, in the inspector; a child is placed relative to its parent.
+    Doc().SetPosition(ship, { 10, 0, 0 });
+    Doc().SetPosition(turret, { 0, 2, 0 });
+    Doc().SetRotation(turret, { 0, 45, 0 });
+    Session().Select(turret);
+    for (const char* row : { "Position", "Rotation", "Scale", "Under 'Ship'." }) EXPECT_TRUE(Shows(row)) << row;
+    EXPECT_TRUE(Shows("45.00"));
+    EXPECT_TRUE(Doc().ComponentsOf(turret).empty()) << "none of it is a component";
+    const kecs::Mat4 world = Doc().World().WorldMatrix(turret);
+    EXPECT_NEAR(world.At(3, 0), 10.f, 1e-4f);
+    EXPECT_NEAR(world.At(3, 1), 2.f, 1e-4f);
+
+    // Moved to the top, it stays where it is in the world; and nothing goes under what is under it.
+    EXPECT_FALSE(Doc().SetParent(ship, barrel));
+    EXPECT_TRUE(Doc().SetParent(turret, kecs::NullEntity));
+    EXPECT_NEAR(Doc().World().PositionOf(turret).x, 10.f, 1e-4f);
+    EXPECT_FALSE(Shows("Under 'Ship'."));
+    EXPECT_EQ(Doc().World().ParentOf(barrel), turret) << "what was under it went with it";
+    EXPECT_TRUE(Doc().SetParent(turret, ship, 0));
+
+    // A Mesh is one of the default meshes, without a node for any.
+    Doc().AddComponent(barrel, "Mesh");
+    std::string error;
+    EXPECT_TRUE(Doc().SetField(barrel, "Mesh", "mesh", kgraph::Value("$cylinder"), &error)) << error;
+    Session().Select(barrel);
+    EXPECT_TRUE(Shows("$cylinder"));
+    Sheet("tree");
+
+    // Deleted, what is under it goes too.
+    Doc().DestroyEntity(ship);
+    EXPECT_EQ(Doc().Entities(), std::vector<kecs::Entity> { rock });
+    EXPECT_FALSE(Shows("Barrel"));
+}
+
 TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {
     const auto first = [](const std::string_view typed) {
         const auto found = keditor::FindNodeTypes(typed);

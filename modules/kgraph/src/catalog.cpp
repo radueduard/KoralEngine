@@ -117,7 +117,7 @@ namespace kgraph
                 { "Component", { { "index", 0 } } },
                 { "Clamp", { { "min", 0 }, { "max", 1 } } }, { "Lerp", { { "t", 0.5 } } }, { "Smoothstep", { { "edge0", 0 }, { "edge1", 1 } } },
                 { "Step", { { "edge", 0.5 } } }, { "Pow", { { "b", 2 } } },
-                { "Primitive", { { "shape", "eQuad" } } },
+                { "Primitive", { { "shape", "eCube" } } },
                 { "VertexLayout", { { "attributes", L { M { { "semantic", "POSITION" }, { "type", "eFloat" }, { "count", 3 } } } } } },
                 { "Clear", { { "color", L { 0, 0, 0, 1 } } } },
                 { "Dispatch", { { "groups.x", 1 }, { "groups.y", 1 }, { "groups.z", 1 },
@@ -141,7 +141,7 @@ namespace kgraph
                 { "Image", "texture render target picture attachment" }, { "ImageView", "texture view mip layer slice" },
                 { "Buffer", "data uniform storage array memory" }, { "BufferView", "texel buffer view" },
                 { "Sampler", "filter texture sampling wrap" }, { "Framebuffer", "render target attachments output" },
-                { "Mesh", "geometry vertices indices model" }, { "Primitive", "quad cube triangle square box mesh geometry shape" },
+                { "Mesh", "geometry vertices indices model" }, { "Primitive", "cube sphere plane cylinder cone capsule torus quad triangle square box ball mesh geometry shape default" },
                 { "AccelerationStructure", "ray tracing bvh blas tlas" },
                 { "ComputePipeline", "compute shader kernel gpu program" }, { "GraphicsPipeline", "vertex fragment mesh shader material render program" },
                 { "RayTracingPipeline", "ray tracing shader raygen hit miss" },
@@ -282,10 +282,11 @@ namespace kgraph
             // ---- the screen, and a node by name -------------------------------------------------------------------
             types.push_back({ "Screen", "Resources", {}, { ResourcePort("out", "Image") }, "The scene's window: what a pass writes to show something.", nullptr });
             types.push_back({ "Primitive", "Resources",
-                              { chosen({ "shape", PortKind::eValue, "string", false, "eQuad (a unit square facing +z), eCube (a unit cube) or eTriangle. Each is centred on the origin.", nullptr },
-                                       { "eQuad", "eCube", "eTriangle" }) },
+                              { chosen({ "shape", PortKind::eValue, "string", false,
+                                         "eCube, eSphere, ePlane (facing up), eCylinder, eCone, eCapsule and eTorus, each about a unit across; eQuad (a unit square facing +z) and eTriangle. All are centred on the origin.", nullptr },
+                                       { "eCube", "eSphere", "ePlane", "eCylinder", "eCone", "eCapsule", "eTorus", "eQuad", "eTriangle" }) },
                               { ResourcePort("out", "Mesh"), { "layout", PortKind::eValue, "struct KoralVertexLayout", false, "Its vertices: POSITION, NORMAL and UV. What a pipeline that draws it takes as vertex.layout.", nullptr } },
-                              "A mesh of a simple shape, with positions, normals and texture coordinates.", nullptr });
+                              "A mesh of a simple shape, with positions, normals and texture coordinates. The same shapes are there for any entity's Mesh without a node, as the default meshes.", nullptr });
             types.push_back({ "Reference", "Resources", { hinted({ "node", PortKind::eValue, "string", false, "The id of the node it stands for.", nullptr }, "node") },
                               { ResourcePort("out", "Resource") },
                               "Another node's output, by the node's id: a resource made elsewhere in the graph, without a wire across it.", nullptr });

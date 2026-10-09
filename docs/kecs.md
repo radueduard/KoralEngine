@@ -28,7 +28,7 @@ world.Add(entity, id, &values);          // a copy of 12 bytes; with no value, z
   given the description, so types generated at run time can share functions and read their shape from
   `context`.
 - A size of zero is a **tag**.
-- A type is named after itself (`"Position"`, `"kecs::Parent"`) unless `kecs::Name<T>` is specialised.
+- A type is named after itself (`"Position"`, `"game::Health"`) unless `kecs::Name<T>` is specialised.
   The name is what a type will be saved and matched across a reload by.
 
 ## Entities and components
@@ -81,10 +81,37 @@ commands.Apply();
 
 `commands.Create()` gives an entity that can be referred to at once and exists from `Apply` on.
 
-## Hierarchy and observers
+## Names, the hierarchy and transforms
 
-- `SetParent(child, parent)`, `ParentOf`, `ChildrenOf`. It keeps both ends right and refuses to put an
-  entity under itself. Destroying an entity destroys what is under it.
+Every entity has a name, a place in a hierarchy and a transform relative to what it is under. They are the
+world's own, not components: nothing lists, adds or removes them, no query asks for them, and changing one
+moves no entity to another archetype.
+
+| | |
+|---|---|
+| `NameOf(e)`, `Rename(e, name)`, `FindEntity(name)` | "Entity" until renamed. `FindEntity` is the first so called, parents before children. |
+| `SetParent(child, parent, index = -1, keepWorldTransform = true)` | Under `parent`, or at the top for `NullEntity`; at `index` among what is there, last when below 0. Refuses to put an entity under itself. |
+| `ParentOf`, `ChildrenOf`, `Roots()`, `All()` | In order. `All()` is every entity, parents before their children. |
+| `DepthOf(e)`, `IsAncestor(above, e)` | |
+| `PositionOf`, `RotationOf`, `ScaleOf` and `SetPosition`, `SetRotation`, `SetScale` | Relative to the parent. Rotation is Euler angles in degrees: about X, about Y, about Z. |
+| `LocalMatrix(e)`, `WorldMatrix(e)` | The world matrix is the parents' transforms and its own. It is worked out when asked for and kept until the entity or something above it moves. |
+| `SetWorldMatrix(e, m, position, rotation, scale)` | Places it in the world by changing its own transform: only the parts asked for. |
+| `SceneVersion()` | Goes up when any of this changes. |
+
+With `keepWorldTransform`, an entity moved to another parent stays where it is in the world: its own
+position, rotation and scale are changed to make up for the new parent's. Destroying an entity destroys
+what is under it. Setting a transform is allowed while a query runs; `SetParent` is not (queue it in a
+`Commands`).
+
+`<kecs/transform.h>` has the arithmetic: `kecs::Vec3`, and `kecs::Mat4` (sixteen floats, column after
+column), with `Compose`, `Decompose`, `Inverse` and `*`. kecs stands on its own, so these are its own;
+angles compose the way the framework's math composes them.
+
+A saved world has each entity's name, its children in order, and its position, rotation and scale where
+they aren't the defaults. Entities are written parents first.
+
+## Observers
+
 - `OnAdd(id, f)` runs after an entity is given a component (not when one is replaced). `OnRemove(id, f)`
   runs before it loses one, including when the entity is destroyed.
 

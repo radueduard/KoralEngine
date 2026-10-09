@@ -59,6 +59,31 @@ class ShadowGateTest {
             fun dark(x: Int, y: Int) = red(x, y) in 31..79
             fun lit(x: Int, y: Int) = red(x, y) > 200
 
+            // Every entity has a name, a place in a hierarchy and a transform: the world's own, and no components.
+            run {
+                val car = world.create("Car")
+                val wheel = world.create("Wheel")
+                assertTrue(world.setParent(wheel, car), "an entity goes under another")
+                assertEquals(car, world.parentOf(wheel))
+                assertEquals(listOf(wheel), world.childrenOf(car))
+                assertTrue(car in world.roots && wheel !in world.roots)
+                assertEquals(wheel, world.find("Wheel"))
+                world.setPosition(car, koral.Vec3(10f, 0f, 0f))
+                world.setPosition(wheel, koral.Vec3(1f, 2f, 0f))
+                world.setRotation(wheel, koral.Vec3(0f, 30f, 0f))
+                assertEquals(koral.Vec3(1f, 2f, 0f), world.positionOf(wheel))
+                assertEquals(koral.Vec3(0f, 30f, 0f), world.rotationOf(wheel))
+                assertEquals(koral.Vec3(1f, 1f, 1f), world.scaleOf(wheel))
+                assertEquals(11f, world.worldMatrix(wheel)[3, 0], 1e-4f, "where its parent is, and then where it is")
+                assertEquals(1f, world.localMatrix(wheel)[3, 0], 1e-4f)
+                assertTrue(world.setParent(wheel, Entity.Null))
+                assertEquals(11f, world.positionOf(wheel).x, 1e-4f, "it stays where it was in the world")
+                assertTrue(world.setWorldMatrix(wheel, koral.Mat4.Identity))
+                assertEquals(0f, world.positionOf(wheel).x, 1e-4f)
+                world.destroy(car)
+                world.destroy(wheel)
+            }
+
             install("A")
             val host = ScriptHost(world, classes)
             assertTrue(host.load(), "the scripts load: ${host.errors}")

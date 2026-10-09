@@ -343,7 +343,14 @@ namespace kecs
         record.alive = true;
         record.archetype = nullptr;
         ++_alive;
-        return { index, record.generation };
+        if (_nodes.size() <= index) _nodes.resize(index + 1);
+        _nodes[index] = Node {};
+        _nodes[index].name = "Entity";
+        const Entity entity { index, record.generation };
+        _nodes[index].rootSlot = static_cast<std::uint32_t>(_roots.size());
+        _roots.push_back(entity);
+        ++_sceneVersion;
+        return entity;
     }
 
     void World::Place(const Entity entity)
@@ -371,15 +378,13 @@ namespace kecs
         if (!RecordOf(entity)) return false;
 
         // Everything under it goes first; the list is copied, since each one takes itself out of it.
-        if (_children != NoComponent)
-            if (const auto* children = static_cast<const Children*>(Get(entity, _children))) {
-                const std::vector<Entity> under = children->entities;
-                for (const Entity child : under) Destroy(child);
-            }
+        for (const Entity child : std::vector(_nodes[entity.index].children)) Destroy(child);
         // And it leaves what it was under.
-        if (_parent != NoComponent)
-            if (const auto* parent = static_cast<const Parent*>(Get(entity, _parent)))
-                if (auto* siblings = static_cast<Children*>(const_cast<void*>(Get(parent->entity, _children)))) std::erase(siblings->entities, entity);
+        Detach(entity);
+        _roots[_nodes[entity.index].rootSlot] = NullEntity;   // Detach left it at the top
+        ++_rootHoles;
+        if (_rootHoles > 64 && _rootHoles > _roots.size() / 2) CompactRoots();
+        ++_sceneVersion;
 
         Record* record = RecordOf(entity);
         if (record->archetype) {
@@ -591,42 +596,227 @@ namespace kecs
 
     // ---- the hierarchy ----------------------------------------------------------------------------------------------
 
-    bool World::SetParent(const Entity child, const Entity parent)
+    World::Node* World::NodeOf(const Entity entity) const { return RecordOf(entity) ? &_nodes[entity.index] : nullptr; }
+
+    const std::string& World::NameOf(const Entity entity) const
+    {
+        static const std::string none;
+        const Node* node = NodeOf(entity);
+        return node ? node->name : none;
+    }
+
+    bool World::Rename(const Entity entity, std::string name)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        if (node->name != name) { node->name = std::move(name); ++_sceneVersion; }
+        return true;
+    }
+
+    Entity World::FindEntity(const std::string_view name) const
+    {
+        for (const Entity entity : All())
+            if (_nodes[entity.index].name == name) return entity;
+        return NullEntity;
+    }
+
+    const std::vector<Entity>& World::Roots() const
+    {
+        CompactRoots();
+        return _roots;
+    }
+
+    void World::CompactRoots() const
+    {
+        if (_rootHoles == 0) return;
+        std::erase(_roots, NullEntity);
+        for (std::size_t i = 0; i < _roots.size(); ++i) _nodes[_roots[i].index].rootSlot = static_cast<std::uint32_t>(i);
+        _rootHoles = 0;
+    }
+
+    /** Takes an entity out from under what it is under, and leaves it at the top: last there. */
+    void World::Detach(const Entity entity)
+    {
+        Node& node = _nodes[entity.index];
+        if (node.parent.IsNull()) return;
+        if (Node* above = NodeOf(node.parent)) std::erase(above->children, entity);
+        node.parent = NullEntity;
+        node.rootSlot = static_cast<std::uint32_t>(_roots.size());
+        _roots.push_back(entity);
+    }
+
+    /** Puts an entity that is at the top under @p parent, or elsewhere at the top. */
+    void World::Attach(const Entity entity, const Entity parent, const int index)
+    {
+        Node& node = _nodes[entity.index];
+        // Out of the top first: a hole where it was, which costs nothing however many there are.
+        _roots[node.rootSlot] = NullEntity;
+        ++_rootHoles;
+        if (parent.IsNull()) {
+            if (index >= 0) {
+                CompactRoots();
+                if (static_cast<std::size_t>(index) < _roots.size()) {
+                    _roots.insert(_roots.begin() + index, entity);
+                    for (std::size_t i = static_cast<std::size_t>(index); i < _roots.size(); ++i) _nodes[_roots[i].index].rootSlot = static_cast<std::uint32_t>(i);
+                } else {
+                    node.rootSlot = static_cast<std::uint32_t>(_roots.size());
+                    _roots.push_back(entity);
+                }
+            } else {
+                node.rootSlot = static_cast<std::uint32_t>(_roots.size());
+                _roots.push_back(entity);
+            }
+        } else {
+            std::vector<Entity>& siblings = _nodes[parent.index].children;
+            if (index >= 0 && static_cast<std::size_t>(index) <= siblings.size()) siblings.insert(siblings.begin() + index, entity);
+            else siblings.push_back(entity);
+        }
+        node.parent = parent;
+        SetDepth(entity, parent.IsNull() ? 0 : _nodes[parent.index].depth + 1);
+        MarkDirty(entity);
+        // Holes are not left to pile up past what is there.
+        if (_rootHoles > 64 && _rootHoles > _roots.size() / 2) CompactRoots();
+    }
+
+    void World::SetDepth(const Entity entity, const std::uint32_t depth)
+    {
+        _nodes[entity.index].depth = depth;
+        for (const Entity child : _nodes[entity.index].children) SetDepth(child, depth + 1);
+    }
+
+    bool World::SetParent(const Entity child, const Entity parent, int index, const bool keepWorldTransform)
     {
         RequireStill("SetParent");
         if (!Alive(child) || (!parent.IsNull() && !Alive(parent)) || child == parent) return false;
-        if (_parent == NoComponent) { _parent = Id<Parent>(); _children = Id<Children>(); }
         // Not under something that is under it.
-        for (Entity at = parent; !at.IsNull(); at = ParentOf(at))
-            if (at == child) return false;
+        if (!parent.IsNull() && IsAncestor(child, parent)) return false;
 
-        if (const Entity old = ParentOf(child); !old.IsNull()) {
-            if (old == parent) return true;
-            if (auto* siblings = static_cast<Children*>(const_cast<void*>(Get(old, _children)))) std::erase(siblings->entities, child);
+        const Mat4 world = keepWorldTransform ? WorldMatrix(child) : Mat4 {};
+        const Entity from = _nodes[child.index].parent;
+        // Moving later among the same siblings: its own place, taken out first, shifts the ones after it.
+        if (from == parent && index >= 0) {
+            const auto& siblings = from.IsNull() ? Roots() : _nodes[from.index].children;
+            if (std::ranges::find(siblings, child) - siblings.begin() < index) --index;
         }
-        if (parent.IsNull()) {
-            Remove(child, _parent);
-            return true;
-        }
-        Add<Parent>(child, Parent { parent });
-        if (!Has(parent, _children)) Add<Children>(parent, Children {});
-        static_cast<Children*>(const_cast<void*>(Get(parent, _children)))->entities.push_back(child);
-        MarkChanged(parent, _children);
+        Detach(child);
+        Attach(child, parent, index);
+        if (keepWorldTransform && from != parent) SetWorldMatrix(child, world);
+        ++_sceneVersion;
         return true;
     }
 
     Entity World::ParentOf(const Entity entity) const
     {
-        if (_parent == NoComponent) return NullEntity;
-        const auto* parent = static_cast<const Parent*>(Get(entity, _parent));
-        return parent ? parent->entity : NullEntity;
+        const Node* node = NodeOf(entity);
+        return node ? node->parent : NullEntity;
     }
 
     const std::vector<Entity>& World::ChildrenOf(const Entity entity) const
     {
-        if (_children == NoComponent) return NoChildren;
-        const auto* children = static_cast<const Children*>(Get(entity, _children));
-        return children ? children->entities : NoChildren;
+        const Node* node = NodeOf(entity);
+        return node ? node->children : NoChildren;
+    }
+
+    std::vector<Entity> World::All() const
+    {
+        std::vector<Entity> all;
+        all.reserve(_alive);
+        const auto walk = [&](const auto& self, const Entity entity) -> void {
+            all.push_back(entity);
+            for (const Entity child : _nodes[entity.index].children) self(self, child);
+        };
+        for (const Entity root : Roots()) walk(walk, root);
+        return all;
+    }
+
+    std::uint32_t World::DepthOf(const Entity entity) const
+    {
+        const Node* node = NodeOf(entity);
+        return node ? node->depth : 0;
+    }
+
+    bool World::IsAncestor(const Entity ancestor, const Entity entity) const
+    {
+        const Node* top = NodeOf(ancestor);
+        const Node* node = NodeOf(entity);
+        if (!top || !node) return false;
+        // Nothing shallower than it, or as deep, can be under it.
+        for (Entity at = node->parent; !at.IsNull() && _nodes[at.index].depth >= top->depth; at = _nodes[at.index].parent)
+            if (at == ancestor) return true;
+        return false;
+    }
+
+    // ---- transforms -------------------------------------------------------------------------------------------------
+
+    Vec3 World::PositionOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->position : Vec3 {}; }
+    Vec3 World::RotationOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->rotation : Vec3 {}; }
+    Vec3 World::ScaleOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->scale : Vec3 { 1.f, 1.f, 1.f }; }
+
+    bool World::SetPosition(const Entity entity, const Vec3& position)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        if (node->position != position) { node->position = position; MarkDirty(entity); ++_sceneVersion; }
+        return true;
+    }
+
+    bool World::SetRotation(const Entity entity, const Vec3& degrees)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        if (node->rotation != degrees) { node->rotation = degrees; MarkDirty(entity); ++_sceneVersion; }
+        return true;
+    }
+
+    bool World::SetScale(const Entity entity, const Vec3& scale)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        if (node->scale != scale) { node->scale = scale; MarkDirty(entity); ++_sceneVersion; }
+        return true;
+    }
+
+    Mat4 World::LocalMatrix(const Entity entity) const
+    {
+        const Node* node = NodeOf(entity);
+        return node ? Compose(node->position, node->rotation, node->scale) : Mat4 {};
+    }
+
+    const Mat4& World::WorldOf(const Entity entity) const
+    {
+        Node& node = _nodes[entity.index];
+        if (node.dirty) {
+            const Mat4 local = Compose(node.position, node.rotation, node.scale);
+            node.world = node.parent.IsNull() ? local : WorldOf(node.parent) * local;
+            node.dirty = false;
+        }
+        return node.world;
+    }
+
+    Mat4 World::WorldMatrix(const Entity entity) const { return NodeOf(entity) ? WorldOf(entity) : Mat4 {}; }
+
+    bool World::SetWorldMatrix(const Entity entity, const Mat4& matrix, const bool position, const bool rotation, const bool scale)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        const Mat4 local = node->parent.IsNull() ? matrix : Inverse(WorldOf(node->parent)) * matrix;
+        Vec3 p, r, s;
+        if (!Decompose(local, p, r, s)) return false;
+        if (position) node->position = p;
+        if (rotation) node->rotation = r;
+        if (scale) node->scale = s;
+        MarkDirty(entity);
+        ++_sceneVersion;
+        return true;
+    }
+
+    void World::MarkDirty(const Entity entity) const
+    {
+        Node& node = _nodes[entity.index];
+        // A stale node's descendants are stale already: one is made fresh only after everything above it.
+        if (node.dirty) return;
+        node.dirty = true;
+        for (const Entity child : node.children) MarkDirty(child);
     }
 
     // ---- observers --------------------------------------------------------------------------------------------------

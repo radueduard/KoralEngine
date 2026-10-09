@@ -702,14 +702,41 @@ namespace keditor
 
             // ---- the outliner -----------------------------------------------------------------------------------
 
+            /** An entity in the outliner, and under it — further in — everything that is under it. */
+            kui::Widget EntityRow(const kecs::Entity entity)
+            {
+                const auto& children = Doc().World().ChildrenOf(entity);
+                std::vector<kui::Widget> under;
+                if (!_session->Folded(entity))
+                    for (const kecs::Entity child : children) under.push_back(EntityRow(child));
+                kui::Widget node = kui::TreeNode(Doc().NameOf(entity), !_session->Folded(entity), [this, entity](const bool open) { _session->Fold(entity, !open); },
+                                                 std::move(under), kui::TreeNodeOptions {}.SetLeaf(children.empty()).SetSelected(entity == _session->selectedEntity)
+                                                     .OnTap([this, entity] { _session->Select(entity); }));
+                // Picked up and dropped on another, it goes under it: where it is in the world stays as it was.
+                node = kui::Draggable({ "entity", entity }, std::move(node));
+                node = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("entity").OnDrop([this, entity](const kui::DragData& dragged, kor::Vec2) {
+                    if (const auto* moved = dragged.As<kecs::Entity>(); moved && !Doc().SetParent(*moved, entity) && *moved != entity)
+                        _session->Say(std::format("'{}' is above '{}': it cannot go under it", Doc().NameOf(*moved), Doc().NameOf(entity)), true);
+                }), std::move(node));
+                std::vector<kui::MenuItem> menu;
+                menu.push_back({ "New entity under it", [this, entity] { _session->Fold(entity, false); _session->Select(Doc().CreateEntity("Entity", entity)); } });
+                if (!Doc().World().ParentOf(entity).IsNull()) menu.push_back({ "Move to the top", [this, entity] { Doc().SetParent(entity, kecs::NullEntity); } });
+                menu.push_back({ .separator = true });
+                menu.push_back({ "Delete, with what is under it", [this, entity] { Doc().DestroyEntity(entity); _session->Select(kecs::NullEntity); } });
+                return kui::ContextMenu(std::move(menu), std::move(node)).Key(std::format("entity {}.{}", entity.index, entity.generation));
+            }
+
+            /** The world's entities as a tree: picked by pressing, folded by their arrows, moved under one another by dragging. */
             kui::Widget Outliner()
             {
                 std::vector<kui::Widget> rows;
                 rows.push_back(Small("+ Entity", [this] { _session->Select(Doc().CreateEntity()); }));
-                for (const kecs::Entity entity : Doc().Entities())
-                    rows.push_back(kui::Selectable(Doc().NameOf(entity), entity == _session->selectedEntity, [this, entity] { _session->Select(entity); }));
+                for (const kecs::Entity entity : Doc().World().Roots()) rows.push_back(EntityRow(entity));
                 if (rows.size() == 1) rows.push_back(kgui::Muted("No entities yet."));
-                return Panel(std::move(rows));
+                // Dropped on the panel itself, past the tree, an entity goes to the top.
+                return kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("entity").OnDrop([this](const kui::DragData& dragged, kor::Vec2) {
+                    if (const auto* moved = dragged.As<kecs::Entity>()) Doc().SetParent(*moved, kecs::NullEntity);
+                }), Panel(std::move(rows)));
             }
 
             // ---- the inspector ----------------------------------------------------------------------------------
@@ -914,6 +941,18 @@ namespace keditor
                 const std::string name = doc.NameOf(entity);
                 rows.push_back(kgui::Labeled("Name", kui::TextField(kui::TextFieldOptions { .text = name,
                     .onSubmitted = [this, entity](const std::string& typed) { Doc().Rename(entity, typed); } }).Key("name=" + name), LabelWidth));
+
+                // Where it is, relative to what it is under: every entity has that, and it is no component.
+                const kecs::World& world = doc.World();
+                const auto three = [&](const char* label, const kecs::Vec3 value, const float speed, const char* what, auto set) {
+                    rows.push_back(kui::Tooltip(what, kgui::Labeled(label, kgui::DragFloats({ value.x, value.y, value.z }, [this, entity, set](const std::vector<float>& v) {
+                        (Doc().*set)(entity, kecs::Vec3 { v[0], v[1], v[2] });
+                    }, speed, 2), LabelWidth)));
+                };
+                if (const kecs::Entity parent = world.ParentOf(entity); !parent.IsNull()) rows.push_back(kgui::Muted(std::format("Under '{}'.", doc.NameOf(parent))));
+                three("Position", world.PositionOf(entity), 0.01f, "Where it is, relative to what it is under.", &Document::SetPosition);
+                three("Rotation", world.RotationOf(entity), 0.5f, "How it is turned, in degrees: about X, about Y, about Z.", &Document::SetRotation);
+                three("Scale", world.ScaleOf(entity), 0.01f, "How big it is, each way.", &Document::SetScale);
 
                 const auto has = doc.ComponentsOf(entity);
                 for (const auto& component : has) {

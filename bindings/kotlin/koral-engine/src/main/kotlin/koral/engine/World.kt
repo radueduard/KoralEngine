@@ -3,11 +3,14 @@ package koral.engine
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.SegmentAllocator
+import java.lang.foreign.ValueLayout.JAVA_FLOAT
 import java.lang.foreign.ValueLayout.JAVA_INT
 import koral.Buffer
 import koral.Image
+import koral.Mat4
 import koral.Resource
 import koral.Scene
+import koral.Vec3
 import koral.resourceFromHandle
 
 /** An entity: a number, and which use of that number it is. Nothing until a [World] is asked about it. */
@@ -57,10 +60,62 @@ class World internal constructor(internal val document: MemorySegment) {
     fun nameOf(entity: Entity): String = native { a -> Native.text(Native.kengine_entity_name.invokeExact(document, Native.entity(a, entity)) as MemorySegment) }
     fun rename(entity: Entity, name: String): Boolean =
         native { a -> Native.kengine_entity_set_name.invokeExact(document, Native.entity(a, entity), a.allocateFrom(name)) as Boolean }
-    fun setParent(child: Entity, parent: Entity): Boolean =
-        native { a -> Native.kecs_set_parent.invokeExact(handle, Native.entity(a, child), Native.entity(a, parent)) as Boolean }
+    /**
+     * Puts [child] under [parent] ([Entity.Null]: at the top), at [index] among what is there (last, when below 0).
+     * It stays where it is in the world unless [keepWorldTransform] is false.
+     */
+    fun setParent(child: Entity, parent: Entity, index: Int = -1, keepWorldTransform: Boolean = true): Boolean = native { a ->
+        Native.kecs_set_parent_at.invokeExact(handle, Native.entity(a, child), Native.entity(a, parent), index, keepWorldTransform) as Boolean
+    }
     fun parentOf(entity: Entity): Entity =
         native { a -> Native.entity(Native.kecs_parent.invokeExact(a as SegmentAllocator, handle, Native.entity(a, entity)) as MemorySegment) }
+    /** The entities directly under one, in order. */
+    fun childrenOf(entity: Entity): List<Entity> = native { a ->
+        val count = (Native.kecs_child_count.invokeExact(handle, Native.entity(a, entity)) as Long).toInt()
+        List(count) { Native.entity(Native.kecs_child.invokeExact(a as SegmentAllocator, handle, Native.entity(a, entity), it.toLong()) as MemorySegment) }
+    }
+    /** The entities at the top of the hierarchy, in order. */
+    val roots: List<Entity> get() = childrenOf(Entity.Null)
+    /** The first entity so named, parents before their children; [Entity.Null] when there is none. */
+    fun find(name: String): Entity =
+        native { a -> Native.entity(Native.kecs_find.invokeExact(a as SegmentAllocator, handle, a.allocateFrom(name)) as MemorySegment) }
+
+    // ---- transforms -----------------------------------------------------------------------------------------
+    //
+    // Every entity has one, relative to what it is under. It is the world's own, and no component.
+
+    private fun three(read: java.lang.invoke.MethodHandle, entity: Entity, otherwise: Vec3): Vec3 = native { a ->
+        val out = a.allocate(12, 4)
+        if (read.invokeExact(handle, Native.entity(a, entity), out) as Boolean) Vec3(out.get(JAVA_FLOAT, 0), out.get(JAVA_FLOAT, 4), out.get(JAVA_FLOAT, 8)) else otherwise
+    }
+    private fun setThree(write: java.lang.invoke.MethodHandle, entity: Entity, value: Vec3): Boolean = native { a ->
+        val given = a.allocate(12, 4)
+        given.set(JAVA_FLOAT, 0, value.x); given.set(JAVA_FLOAT, 4, value.y); given.set(JAVA_FLOAT, 8, value.z)
+        write.invokeExact(handle, Native.entity(a, entity), given) as Boolean
+    }
+    private fun sixteen(read: java.lang.invoke.MethodHandle, entity: Entity): Mat4 = native { a ->
+        val out = a.allocate(64, 4)
+        if (read.invokeExact(handle, Native.entity(a, entity), out) as Boolean) Mat4(FloatArray(16) { out.get(JAVA_FLOAT, it * 4L) }) else Mat4.Identity
+    }
+
+    /** Where an entity is, relative to what it is under. */
+    fun positionOf(entity: Entity): Vec3 = three(Native.kecs_position, entity, Vec3.Zero)
+    /** How it is turned: Euler angles, in degrees — about X, about Y, about Z. */
+    fun rotationOf(entity: Entity): Vec3 = three(Native.kecs_rotation, entity, Vec3.Zero)
+    fun scaleOf(entity: Entity): Vec3 = three(Native.kecs_scale, entity, Vec3(1f, 1f, 1f))
+    fun setPosition(entity: Entity, position: Vec3): Boolean = setThree(Native.kecs_set_position, entity, position)
+    fun setRotation(entity: Entity, degrees: Vec3): Boolean = setThree(Native.kecs_set_rotation, entity, degrees)
+    fun setScale(entity: Entity, scale: Vec3): Boolean = setThree(Native.kecs_set_scale, entity, scale)
+    /** Its own transform, as a matrix. */
+    fun localMatrix(entity: Entity): Mat4 = sixteen(Native.kecs_local_matrix, entity)
+    /** Where it is in the world: the transforms of everything above it, and its own. */
+    fun worldMatrix(entity: Entity): Mat4 = sixteen(Native.kecs_world_matrix, entity)
+    /** Places it in the world, by changing its own transform. */
+    fun setWorldMatrix(entity: Entity, matrix: Mat4): Boolean = native { a ->
+        val given = a.allocate(64, 4)
+        for (i in 0 until 16) given.set(JAVA_FLOAT, i * 4L, matrix[i / 4, i % 4])
+        Native.kecs_set_world_matrix.invokeExact(handle, Native.entity(a, entity), given) as Boolean
+    }
 
     // ---- components, by name --------------------------------------------------------------------------------
 

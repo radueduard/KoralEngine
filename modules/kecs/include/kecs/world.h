@@ -32,6 +32,7 @@
 #include <unordered_map>
 
 #include "component.h"
+#include "transform.h"
 
 namespace kecs
 {
@@ -317,16 +318,56 @@ namespace kecs
          */
         Tick AdvanceTick() { return ++_tick; }
 
-        // ---- the hierarchy --------------------------------------------------------------------------------
+        // ---- names, the hierarchy and transforms --------------------------------------------------------
+        //
+        // Every entity has a name, a place in a hierarchy and a transform relative to what it is under. They are
+        // the world's own and not components: nothing lists, adds or removes them, no query asks for them, and
+        // changing them moves no entity to another archetype.
+
+        /** @brief What @p entity is called: "Entity" until it is renamed. Empty for one that is not alive. */
+        [[nodiscard]] const std::string& NameOf(Entity entity) const;
+        bool Rename(Entity entity, std::string name);
+        /** @brief The first entity so called, parents before their children; NullEntity when there is none. */
+        [[nodiscard]] Entity FindEntity(std::string_view name) const;
 
         /**
-         * @brief Puts @p child under @p parent, or under nothing (NullEntity). False when either is not alive, or
-         *        when it would put an entity under itself.
+         * @brief Puts @p child under @p parent, or at the top (NullEntity): at @p index among what is there (last,
+         *        when below 0 or past the end). With @p keepWorldTransform it stays where it is in the world, its
+         *        own transform changed to make up for the new parent's. False when either is not alive, or when it
+         *        would put an entity under itself.
          */
-        bool SetParent(Entity child, Entity parent);
+        bool SetParent(Entity child, Entity parent, int index = -1, bool keepWorldTransform = true);
         [[nodiscard]] Entity ParentOf(Entity entity) const;
-        /** @brief The entities directly under @p entity, in the order they were put there. */
+        /** @brief The entities directly under @p entity, in order. */
         [[nodiscard]] const std::vector<Entity>& ChildrenOf(Entity entity) const;
+        /** @brief The entities at the top of the hierarchy, in order. */
+        [[nodiscard]] const std::vector<Entity>& Roots() const;
+        /** @brief Every entity, parents before their children. */
+        [[nodiscard]] std::vector<Entity> All() const;
+        /** @brief How far down the hierarchy @p entity is: 0 at the top. */
+        [[nodiscard]] std::uint32_t DepthOf(Entity entity) const;
+        /** @brief Whether @p ancestor is above @p entity, however far. */
+        [[nodiscard]] bool IsAncestor(Entity ancestor, Entity entity) const;
+
+        /** @brief Where @p entity is, relative to what it is under. */
+        [[nodiscard]] Vec3 PositionOf(Entity entity) const;
+        /** @brief How it is turned, relative to what it is under: Euler angles, in degrees. */
+        [[nodiscard]] Vec3 RotationOf(Entity entity) const;
+        [[nodiscard]] Vec3 ScaleOf(Entity entity) const;
+        bool SetPosition(Entity entity, const Vec3& position);
+        bool SetRotation(Entity entity, const Vec3& degrees);
+        bool SetScale(Entity entity, const Vec3& scale);
+        /** @brief Its own transform as a matrix. */
+        [[nodiscard]] Mat4 LocalMatrix(Entity entity) const;
+        /** @brief Where it is in the world: the transforms of everything above it, and its own. Worked out when asked for, and kept until something above it or it moves. */
+        [[nodiscard]] Mat4 WorldMatrix(Entity entity) const;
+        /**
+         * @brief Places @p entity at @p matrix in the world by changing its own transform: only the parts asked
+         *        for, so that moving a thing does not also round its rotation off.
+         */
+        bool SetWorldMatrix(Entity entity, const Mat4& matrix, bool position = true, bool rotation = true, bool scale = true);
+        /** @brief Goes up whenever an entity is made, destroyed, renamed, moved in the hierarchy or transformed. */
+        [[nodiscard]] std::uint64_t SceneVersion() const { return _sceneVersion; }
 
         // ---- observers ------------------------------------------------------------------------------------
 
@@ -391,16 +432,31 @@ namespace kecs
         std::vector<std::vector<std::function<void(World&, Entity)>>> _onAdd, _onRemove;
         Tick _tick = 1;
         int _iterating = 0;
-        ComponentId _parent = NoComponent, _children = NoComponent;
-    };
 
-    /** @brief What an entity is under, in the hierarchy. Set through World::SetParent, which keeps both ends right. */
-    struct Parent {
-        Entity entity;
-    };
-    /** @brief What is under an entity. Kept by World::SetParent. */
-    struct Children {
-        std::vector<Entity> entities;
+        /** What is fundamental to an entity, kept here rather than as components: a place an entity index. */
+        struct Node {
+            std::string name;
+            Entity parent;
+            std::vector<Entity> children;
+            std::uint32_t depth = 0;
+            Vec3 position, rotation, scale { 1.f, 1.f, 1.f };
+            Mat4 world;
+            bool dirty = true;      ///< world is stale; then so is every descendant's
+            std::uint32_t rootSlot = 0;     ///< Where it is in _roots, while it is at the top.
+        };
+        /** Takes the places of roots that are gone out of _roots: left there as they go, so that going is quick. */
+        void CompactRoots() const;
+        [[nodiscard]] Node* NodeOf(Entity entity) const;
+        void Detach(Entity entity);
+        void Attach(Entity entity, Entity parent, int index);
+        void SetDepth(Entity entity, std::uint32_t depth);
+        void MarkDirty(Entity entity) const;
+        [[nodiscard]] const Mat4& WorldOf(Entity entity) const;
+
+        mutable std::vector<Node> _nodes;
+        mutable std::vector<Entity> _roots;     ///< In order, with a NullEntity where one has gone since it was last compacted.
+        mutable std::size_t _rootHoles = 0;
+        std::uint64_t _sceneVersion = 0;
     };
 
     /**

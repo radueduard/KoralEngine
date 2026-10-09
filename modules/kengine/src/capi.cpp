@@ -178,6 +178,69 @@ KecsEntity kecs_parent(KecsWorld* world, const KecsEntity entity)
     return Guarded([&] { return Of(World(world).ParentOf(Of(entity))); }, KecsEntity { KECS_NULL_INDEX, 0 });
 }
 
+bool kecs_set_parent_at(KecsWorld* world, const KecsEntity child, const KecsEntity parent, const int32_t index, const bool keep_world_transform)
+{
+    return Guarded([&] { return World(world).SetParent(Of(child), Of(parent), index, keep_world_transform); }, false);
+}
+size_t kecs_child_count(KecsWorld* world, const KecsEntity entity)
+{
+    return Guarded([&] { const kecs::Entity e = Of(entity); return e.IsNull() ? World(world).Roots().size() : World(world).ChildrenOf(e).size(); }, size_t { 0 });
+}
+KecsEntity kecs_child(KecsWorld* world, const KecsEntity entity, const size_t index)
+{
+    return Guarded([&] {
+        const kecs::Entity e = Of(entity);
+        const auto& under = e.IsNull() ? World(world).Roots() : World(world).ChildrenOf(e);
+        return index < under.size() ? Of(under[index]) : KecsEntity { KECS_NULL_INDEX, 0 };
+    }, KecsEntity { KECS_NULL_INDEX, 0 });
+}
+KecsEntity kecs_find(KecsWorld* world, const char* name)
+{
+    return Guarded([&] { return Of(World(world).FindEntity(Text(name))); }, KecsEntity { KECS_NULL_INDEX, 0 });
+}
+
+namespace {
+    bool Three(KecsWorld* world, const KecsEntity entity, float out[3], kecs::Vec3 (kecs::World::*read)(kecs::Entity) const)
+    {
+        return Guarded([&] {
+            if (!out || !World(world).Alive(Of(entity))) return false;
+            const kecs::Vec3 value = (World(world).*read)(Of(entity));
+            out[0] = value.x; out[1] = value.y; out[2] = value.z;
+            return true;
+        }, false);
+    }
+    bool SetThree(KecsWorld* world, const KecsEntity entity, const float value[3], bool (kecs::World::*write)(kecs::Entity, const kecs::Vec3&))
+    {
+        return Guarded([&] { return value && (World(world).*write)(Of(entity), kecs::Vec3 { value[0], value[1], value[2] }); }, false);
+    }
+    bool Sixteen(KecsWorld* world, const KecsEntity entity, float out[16], kecs::Mat4 (kecs::World::*read)(kecs::Entity) const)
+    {
+        return Guarded([&] {
+            if (!out || !World(world).Alive(Of(entity))) return false;
+            const kecs::Mat4 value = (World(world).*read)(Of(entity));
+            std::copy(value.m.begin(), value.m.end(), out);
+            return true;
+        }, false);
+    }
+}
+bool kecs_position(KecsWorld* world, const KecsEntity entity, float out[3]) { return Three(world, entity, out, &kecs::World::PositionOf); }
+bool kecs_rotation(KecsWorld* world, const KecsEntity entity, float out[3]) { return Three(world, entity, out, &kecs::World::RotationOf); }
+bool kecs_scale(KecsWorld* world, const KecsEntity entity, float out[3]) { return Three(world, entity, out, &kecs::World::ScaleOf); }
+bool kecs_set_position(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetPosition); }
+bool kecs_set_rotation(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetRotation); }
+bool kecs_set_scale(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetScale); }
+bool kecs_local_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::LocalMatrix); }
+bool kecs_world_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::WorldMatrix); }
+bool kecs_set_world_matrix(KecsWorld* world, const KecsEntity entity, const float matrix[16])
+{
+    return Guarded([&] {
+        if (!matrix) return false;
+        kecs::Mat4 value;
+        std::copy(matrix, matrix + 16, value.m.begin());
+        return World(world).SetWorldMatrix(Of(entity), value);
+    }, false);
+}
+
 KecsEntity kengine_entity_create(KengineDocument* document, const char* name)
 {
     return Guarded([&] { return Of(Doc(document).CreateEntity(name && *name ? name : "Entity")); }, KecsEntity { KECS_NULL_INDEX, 0 });

@@ -60,9 +60,10 @@ the editor will build its node list and its nodes from.
 - **VertexLayout** describes a mesh's vertices: a list of `{ "semantic": "POSITION", "type": "eFloat",
   "count": 3 }`, packed in the order given. Its output goes to a pipeline's `vertexShader.layout` and to a
   Mesh node's `vertexLayout`.
-- **Primitive** is a mesh of a simple shape (`eQuad`, `eCube` or `eTriangle`, centred on the origin) with
-  positions, normals and texture coordinates. Its second output, `layout`, is what a pipeline that draws
-  it takes as `vertexShader.layout`.
+- **Primitive** is a mesh of a simple shape, centred on the origin and about a unit across: `eCube`,
+  `eSphere`, `ePlane` (facing up), `eCylinder`, `eCone`, `eCapsule`, `eTorus`, and `eQuad` (facing +z) and
+  `eTriangle`. Each has positions, normals and texture coordinates, and faces outward. Its second output,
+  `layout`, is what a pipeline that draws it takes as `vertex.layout`.
 - **Screen** is the scene's window. **Reference** stands for another node by id, for a resource used far
   from where it is made.
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
@@ -147,6 +148,11 @@ generates a component for it in the world, named after the pipeline's node:
 - a field for each push constant, by the name the shader gives it (type `f32`, `i32`, `u32`, `vec2` to
   `vec4`, `ivec`, `uvec`, `mat4`, and `bytes<N>` for anything else).
 
+Where the entity is, is not one of those fields. A push constant that is a `float4x4` named `model` (or
+`world`) is filled each frame with the entity's world matrix: its own transform under those of everything
+it is under (see [kecs](kecs.md)). One named `normalMatrix` gets its inverse, transposed. In Slang,
+`mul(float4(position, 1.0), object.model)`.
+
 `runtime.ComponentOf(id)` returns the component, or `NoComponent` for a pipeline with everything wired and
 no push constants, which runs once. `<kgraph/entities.h>` is how code fills one:
 
@@ -161,6 +167,15 @@ world.Add<kgraph::Mesh>(entity, { kgraph::MakeResource(std::move(mesh)) });   //
 ```
 
 Resources are shared and counted: an image lives while a node or a component holds it.
+
+### Default meshes
+
+An entity's `kgraph::Mesh` can hold one of the default meshes without the graph having a node for it:
+`runtime.ResourceOf("$cube")`, and likewise `$sphere`, `$plane`, `$cylinder`, `$cone`, `$capsule` and
+`$torus` (`kgraph::DefaultMeshNames()`, `kgraph::DefaultMeshId(name)`). Each is made the first time it is
+asked for, and is saved by that id. They are the Primitive node's shapes, laid out the same way, so a
+pipeline that takes a Primitive's `layout` draws them. `<kgraph/meshes.h>` also gives the shapes as plain
+numbers (`ShapeData`), for code that wants the vertices.
 
 ### Dispatch and Draw
 
