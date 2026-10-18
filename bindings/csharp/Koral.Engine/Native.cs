@@ -79,10 +79,16 @@ internal static unsafe partial class Native
     public static string LastError() => Text(kengine_last_error());
 
     [LibraryImport(Lib)] public static partial byte* kengine_last_error();
+    [LibraryImport(Lib)] public static partial byte* kengine_package_directory();
+    /// <summary>Where the engine's own package is: the scripts every project has, the scene's Camera and lights among them.</summary>
+    public static string PackageDirectory() => Text(kengine_package_directory());
 
     [LibraryImport(Lib)] public static partial IntPtr kengine_document(IntPtr graph);
     [LibraryImport(Lib)] public static partial IntPtr kengine_document_world(IntPtr document);
+    [LibraryImport(Lib)] public static partial IntPtr kengine_script_input(IntPtr document);
+    [LibraryImport(Lib)] public static partial IntPtr kengine_debug(IntPtr document);
     [LibraryImport(Lib)] public static partial byte* kengine_document_json(IntPtr document);
+    [LibraryImport(Lib)] public static partial byte* kengine_project_directory(IntPtr document);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_document_save(IntPtr document, string path);
 
@@ -119,6 +125,21 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_scale(IntPtr world, Entity entity, Vec3* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_position(IntPtr world, Entity entity, Vec3* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_rotation(IntPtr world, Entity entity, Vec3* value);
+    [LibraryImport(Lib)] public static partial nuint kecs_positions(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_rotations(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_scales(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_set_positions(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_set_rotations(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_set_scales(IntPtr world, Entity* entities, nuint count, Vec3* values);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_orientation(IntPtr world, Entity entity, Quat* value);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_orientation(IntPtr world, Entity entity, Quat* value);
+    [LibraryImport(Lib)] public static partial nuint kecs_orientations(IntPtr world, Entity* entities, nuint count, Quat* values);
+    [LibraryImport(Lib)] public static partial nuint kecs_set_orientations(IntPtr world, Entity* entities, nuint count, Quat* values);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial uint kecs_field_width(IntPtr world, uint component, string field);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial nuint kecs_field_floats(IntPtr world, Entity* entities, nuint count, uint component, string field, float* values);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial nuint kecs_set_field_floats(IntPtr world, Entity* entities, nuint count, uint component, string field, float* values);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial nuint kecs_field_ints(IntPtr world, Entity* entities, nuint count, uint component, string field, int* values);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial nuint kecs_set_field_ints(IntPtr world, Entity* entities, nuint count, uint component, string field, int* values);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_scale(IntPtr world, Entity entity, Vec3* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_local_matrix(IntPtr world, Entity entity, Mat4* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_world_matrix(IntPtr world, Entity entity, Mat4* value);
@@ -158,6 +179,28 @@ internal static unsafe partial class Native
     public static partial uint kengine_script_register(IntPtr document, string name, nuint size, nuint alignment, KecsField* fields, nuint fieldCount,
                                                        KengineScriptCallbacks* callbacks);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_script_unregister(IntPtr document, string name);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial byte* kengine_mesh_create(IntPtr document, string name, uint vertexCount, KengineAttribute* attributes, uint attributeCount,
+                                                    uint* indices, uint indexCount, string? buffers);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial byte* kengine_mesh_with_attributes(IntPtr document, string mesh, string name, KengineAttribute* attributes, uint attributeCount, string? buffers);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial byte* kengine_mesh_without_attributes(IntPtr document, string mesh, string name, string semantics);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial uint kengine_mesh_vertex_count(IntPtr document, string mesh);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial uint kengine_mesh_attribute_count(IntPtr document, string mesh);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_mesh_attribute(IntPtr document, string mesh, uint index, KengineAttribute* out_);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial nuint kengine_mesh_indices(IntPtr document, string mesh, uint* out_, nuint capacity);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineAttribute
+{
+    public byte* Semantic;
+    public uint Type;
+    public uint Count;
+    public void* Data;
 }
 
 /// <summary>Something the engine refused, with why.</summary>

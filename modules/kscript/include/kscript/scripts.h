@@ -44,6 +44,9 @@ namespace kscript
         std::size_t size = 0;                       ///< Of its data: plain bytes, copied as they are. 0 is a script with no fields.
         std::size_t alignment = 8;
         std::vector<kecs::FieldDescription> fields; ///< By name and type: what the inspector shows, a file holds and a reload keeps.
+        /// What a new one starts as, `size` bytes: what its source initialises its fields to. Empty, every field is zero —
+        /// or, for a type registered again without one, what it started as before, field by field.
+        std::vector<std::byte> initial;
         Callbacks callbacks;
     };
 
@@ -64,6 +67,12 @@ namespace kscript
          */
         kecs::ComponentId Register(ScriptType type, std::string* error = nullptr, kecs::Migration* migration = nullptr);
         /**
+         * @brief Makes @p type a component of the world, or gives the one so named its new shape, as Register does —
+         *        but as data only: nothing is called on it, and it is not Registered. What a script's source says of
+         *        its component, before anything runs the script. Registered later, it is the same component.
+         */
+        kecs::ComponentId Declare(ScriptType type, std::string* error = nullptr, kecs::Migration* migration = nullptr);
+        /**
          * @brief Stops calling anything on script type @p name: its code is going. The component type stays, and
          *        every entity keeps its data, for the type to be registered again. Nothing is told it was destroyed.
          */
@@ -78,7 +87,10 @@ namespace kscript
         /** @brief A frame: created, enabled, disabled and started where they are due, then update. */
         void Update(float delta);
         void LateUpdate(float delta);
-        /** @brief After the updates, before anything is drawn: prepare. */
+        /**
+         * @brief After the updates, before anything is drawn: prepare, on every one switched on. Called whether or not
+         *        the scene plays, so it creates, enables and starts nothing: a script is started by the first update.
+         */
         void Prepare();
         /** @brief Before the world goes: disabled and destroyed on everything, as if each were removed. */
         void Shutdown();
@@ -94,10 +106,12 @@ namespace kscript
             std::unordered_map<std::uint64_t, State> states;   // an entity that has it, once created was called
         };
 
+        kecs::ComponentId Add(ScriptType type, bool live, std::string* error, kecs::Migration* migration);
         /** Tells of what changed since it last looked: components made, switched on and off. Then the entities to run. */
         std::vector<kecs::Entity> Sync(Type& type);
         void Gone(Type& type, kecs::Entity entity);
-        template <typename F> void Each(F&& call);
+        /** Each entity of each type that @p has says has something to call, told of its life first (Sync): @p call on each. */
+        template <typename F, typename Has> void Each(F&& call, Has&& has);
 
         kecs::World& _world;
         std::vector<std::unique_ptr<Type>> _types;      // never erased: an observer of each is out there

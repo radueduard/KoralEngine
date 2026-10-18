@@ -2,7 +2,8 @@
 
 /**
  * @file transform.h
- * @brief The little arithmetic an entity's place in the world takes: a vector of three, and a matrix of four by four.
+ * @brief The little arithmetic an entity's place in the world takes: a vector of three, a quaternion, and a matrix of
+ *        four by four.
  *
  * kecs stands on its own, so these are its own: plain floats, laid out as everything else lays them out (a matrix
  * column after column, sixteen floats), to be copied into whatever math a program uses.
@@ -15,6 +16,12 @@ namespace kecs
     struct Vec3 {
         float x = 0.f, y = 0.f, z = 0.f;
         [[nodiscard]] bool operator==(const Vec3&) const = default;
+    };
+
+    /** @brief A rotation, as a unit quaternion: x, y, z, then w, as the framework lays one out. The identity, to begin with. */
+    struct Quat {
+        float x = 0.f, y = 0.f, z = 0.f, w = 1.f;
+        [[nodiscard]] bool operator==(const Quat&) const = default;
     };
 
     /** @brief A transform as a matrix, column after column: `m[column * 4 + row]`. The identity, to begin with. */
@@ -34,9 +41,21 @@ namespace kecs
      *        is Euler angles in degrees — about X, about Y, about Z.
      */
     [[nodiscard]] Mat4 Compose(const Vec3& position, const Vec3& rotationDegrees, const Vec3& scale);
+    /** @brief Compose, turned by a quaternion: one of length 0 is no turn. */
+    [[nodiscard]] Mat4 ComposeQuat(const Vec3& position, const Quat& rotation, const Vec3& scale);
+    /** @brief Compose for a quaternion already of length 1, which it does not make so: what a world composes with. */
+    [[nodiscard]] Mat4 ComposeUnit(const Vec3& position, const Quat& rotation, const Vec3& scale);
+    /** @brief Euler angles in degrees, about X, about Y, about Z, as a quaternion: what Compose turns by. */
+    [[nodiscard]] Quat ToQuat(const Vec3& rotationDegrees);
+    /** @brief A quaternion as Euler angles in degrees. Of two that turn alike, the same angles. */
+    [[nodiscard]] Vec3 ToEuler(const Quat& rotation);
+    /** @brief @p q at length 1; the identity for one of length 0. */
+    [[nodiscard]] Quat Normalize(const Quat& q);
     /**
      * @brief Splits a matrix back into what Compose took. A mirror is put in the X scale; shear is lost. False for
      *        one with no size along some axis, which says nothing of how it is turned.
      */
     bool Decompose(const Mat4& m, Vec3& position, Vec3& rotationDegrees, Vec3& scale);
+    /** @brief The same, with the rotation as a quaternion. */
+    bool Decompose(const Mat4& m, Vec3& position, Quat& rotation, Vec3& scale);
 }

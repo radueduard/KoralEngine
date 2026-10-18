@@ -7,6 +7,8 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(KORAL_ENGINE_BUILD_TESTS "Build the engine's tests" ON)
+# Where the editor offers to make a new project: the KORAL_ENGINE_PROJECTS environment variable says otherwise.
+set(KORAL_ENGINE_PROJECTS "/mnt/w/EngineProjects" CACHE PATH "The folder new projects are made in, unless another is picked")
 # Address and undefined-behaviour sanitizers, for the tests: -DKORAL_ENGINE_SANITIZE=ON.
 option(KORAL_ENGINE_SANITIZE "Build with ASan and UBSan" OFF)
 if(KORAL_ENGINE_SANITIZE AND NOT MSVC)
@@ -137,6 +139,10 @@ if(Koral_FOUND)
     target_link_libraries(koral-editor PRIVATE keditor)
     add_executable(koral-play apps/player/main.cpp)
     target_link_libraries(koral-play PRIVATE keditor)
+    # The project either opens when it is given none: Forward+, made with nodes (projects/forward-plus).
+    foreach(app koral-editor koral-play)
+        target_compile_definitions(${app} PRIVATE KORAL_ENGINE_DEFAULT_PROJECT="${CMAKE_SOURCE_DIR}/projects/forward-plus")
+    endforeach()
 else()
     message(STATUS "Koral not found (set CMAKE_PREFIX_PATH to an SDK): building kecs alone")
 endif()
@@ -149,6 +155,8 @@ if(TARGET keditor)
     target_compile_definitions(keditor PRIVATE
         KEDITOR_SDK="${KEDITOR_SDK_PATH}"
         KEDITOR_MAVEN="${CMAKE_BINARY_DIR}/maven"
+        KEDITOR_DOTNET="${CMAKE_BINARY_DIR}/dotnet"
+        KEDITOR_PROJECTS="${KORAL_ENGINE_PROJECTS}"
         KEDITOR_ENGINE_LIBRARY="$<TARGET_FILE:koral-engine>"
         KEDITOR_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}"
         KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin"

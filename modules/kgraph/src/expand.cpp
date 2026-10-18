@@ -1,0 +1,302 @@
+//
+// kgraph: a graph's loops, written out. @see expand.h
+//
+
+#include "expand.h"
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <functional>
+#include <ranges>
+#include <set>
+
+namespace kgraph
+{
+    std::string TurnId(const std::string_view id, const int turn) { return std::format("{} [{}]", id, turn); }
+
+    namespace {
+        const std::string* Text(const Node& node, const char* input)
+        {
+            const auto it = node.inputs.find(input);
+            const std::string* text = it == node.inputs.end() || it->second.link ? nullptr : it->second.value.String();
+            return text && !text->empty() ? text : nullptr;
+        }
+    }
+
+    Port FunctionPort(std::string name, const std::string_view kind, std::string doc)
+    {
+        Port port { std::move(name), PortKind::eValue, "value", false, std::move(doc), nullptr };
+        if (kind == "eEntities") port.type = "entities";
+        else if (kind == "eMesh" || kind == "eBuffer" || kind == "eImage" || kind == "eResource") {
+            port.kind = PortKind::eResource;
+            port.type = kind == "eMesh" ? "Mesh" : kind == "eBuffer" ? "Buffer" : kind == "eImage" ? "Image" : "Resource";
+        }
+        return port;
+    }
+
+    namespace {
+        bool IsEdge(const Node& node) { return node.type == "FunctionInput" || node.type == "FunctionOutput"; }
+
+        /** What an edge of a function stands for where it is: what its `value` is given, or — an input given nothing — its default. */
+        Input EdgeValue(const Node& node)
+        {
+            if (const auto value = node.inputs.find("value"); value != node.inputs.end() && (value->second.link || !value->second.value.IsNull())) return value->second;
+            if (node.type == "FunctionInput")
+                if (const auto initial = node.inputs.find("default"); initial != node.inputs.end()) return Input { initial->second.value, std::nullopt };
+            return {};
+        }
+
+        /**
+         * The graph with its calls written out: each Function node the nodes of what it calls, `<call>/<node>`, in the
+         * call's pass; what is wired to a FunctionInput of it, what the call is given there; and what is wired from the
+         * call, what its FunctionOutput is wired from. A function opened in place — its edges in the graph itself —
+         * has them stand for what they are given in the same way.
+         */
+        Graph WriteCalls(const Graph& given, Expansion& out)
+        {
+            Graph graph;
+            graph.passes = given.passes;
+            graph.meshImports = given.meshImports;
+            graph.nodes = given.nodes;
+            // What each edge stands for, by its id: a wire to it is a wire to that.
+            std::map<std::string, Input, std::less<>> stands;
+            for (const auto& node : graph.nodes)
+                if (IsEdge(node)) { stands[node.id] = EdgeValue(node); out.aliases[node.id] = stands[node.id]; }
+            for (int depth = 0;; ++depth) {
+                std::vector<Node> calls;
+                for (const auto& node : graph.nodes) if (node.type == "Function") calls.push_back(node);
+                if (calls.empty()) break;
+                std::erase_if(graph.nodes, [](const Node& node) { return node.type == "Function"; });
+                if (depth >= 8) {
+                    for (const auto& call : calls) out.errors[call.id] = "its function calls itself, further than eight deep: a function cannot have itself in it";
+                    break;
+                }
+                for (const Node& call : calls) {
+                    const std::string* name = Text(call, "function");
+                    const auto found = name ? given.functions.find(*name) : given.functions.end();
+                    if (!name) { out.errors[call.id] = "'function' is which function it calls: one of the project's functions"; continue; }
+                    if (found == given.functions.end() || !found->second) { out.errors[call.id] = std::format("there is no function '{}' among the project's functions", *name); continue; }
+                    const Graph& function = *found->second;
+                    const std::string prefix = call.id + "/";
+                    Expansion::Call& record = out.calls[call.id];
+                    record.function = *name;
+                    // Its edges, in the order they are on its page: top to bottom, then left to right.
+                    std::vector<const Node*> ins, outs;
+                    for (const auto& node : function.nodes) {
+                        if (node.type == "FunctionInput") ins.push_back(&node);
+                        if (node.type == "FunctionOutput") outs.push_back(&node);
+                    }
+                    const auto byPlace = [](const Node* a, const Node* b) { return a->y != b->y ? a->y < b->y : a->x < b->x; };
+                    std::ranges::stable_sort(ins, byPlace);
+                    std::ranges::stable_sort(outs, byPlace);
+                    const auto portName = [](const Node& edge) { const std::string* named = Text(edge, "name"); return named ? *named : edge.id; };
+                    for (const Node* edge : ins) {
+                        const std::string port = portName(*edge);
+                        const std::string* kind = Text(*edge, "kind");
+                        record.inputs.push_back(FunctionPort(port, kind ? *kind : "eValue"));
+                        // What the call is given there: a wire, a value typed on it — or the input's default.
+                        const auto on = call.inputs.find(port);
+                        stands[prefix + edge->id] = on != call.inputs.end() && (on->second.link || !on->second.value.IsNull()) ? on->second : EdgeValue(*edge);
+                    }
+                    for (const Node* edge : outs) {
+                        const std::string port = portName(*edge);
+                        record.outputs.push_back(port);
+                        Input value = EdgeValue(*edge);
+                        if (value.link) value.link->node = prefix + value.link->node;
+                        stands[prefix + edge->id] = value;
+                        record.gives[port] = Link { prefix + edge->id, "out" };
+                    }
+                    for (const auto& node : function.nodes) {
+                        if (IsEdge(node)) continue;
+                        Node made = node;
+                        made.id = prefix + node.id;
+                        made.pass = call.pass;
+                        for (auto& input : made.inputs | std::views::values)
+                            if (input.link) input.link->node = prefix + input.link->node;
+                        if (made.type == "Reference")
+                            if (auto target = made.inputs.find("node"); target != made.inputs.end() && target->second.value.String())
+                                target->second.value = Value(prefix + *target->second.value.String());
+                        record.nodes.push_back(made.id);
+                        graph.nodes.push_back(std::move(made));
+                    }
+                    // What was wired from the call is wired from what its outputs are.
+                    for (auto& node : graph.nodes)
+                        for (auto it = node.inputs.begin(); it != node.inputs.end();) {
+                            if (!it->second.link || it->second.link->node != call.id) { ++it; continue; }
+                            const auto gives = record.gives.find(it->second.link->output);
+                            if (gives == record.gives.end()) {
+                                out.errors[call.id] = std::format("'{}' is wired from its '{}', and its function has no such output", node.id, it->second.link->output);
+                                it = node.inputs.erase(it);
+                                continue;
+                            }
+                            it->second.link = gives->second;
+                            ++it;
+                        }
+                }
+                // A call given what another of this round gives: the other was not in the graph to be wired again when it
+                // was written out — it was waiting its turn — so what it is given is what that one's output stands for.
+                for (auto& [edge, input] : stands) {
+                    if (!input.link || std::ranges::none_of(calls, [&](const Node& call) { return call.id == input.link->node; })) continue;
+                    const auto record = out.calls.find(input.link->node);
+                    if (record == out.calls.end()) continue;    // it could not be written out: it said why
+                    const auto gives = record->second.gives.find(input.link->output);
+                    if (gives == record->second.gives.end()) {
+                        out.errors[edge.substr(0, edge.rfind('/'))] = std::format("it is given '{}' of '{}', and that function has no such output", input.link->output, input.link->node);
+                        input = {};
+                        continue;
+                    }
+                    input.link = gives->second;
+                }
+            }
+            // Each wire to an edge is a wire to what the edge stands for — through as many as there are between.
+            const auto follow = [&](Input input) {
+                for (int hops = 0; hops < 64 && input.link && stands.contains(input.link->node); ++hops) input = stands.at(input.link->node);
+                return input;
+            };
+            for (auto& node : graph.nodes)
+                for (auto it = node.inputs.begin(); it != node.inputs.end();) {
+                    if (it->second.link && stands.contains(it->second.link->node)) {
+                        it->second = follow(it->second);
+                        if (!it->second.link && it->second.value.IsNull()) { it = node.inputs.erase(it); continue; }
+                    }
+                    ++it;
+                }
+            std::erase_if(graph.nodes, IsEdge);
+            for (auto& record : out.calls | std::views::values)
+                for (auto& link : record.gives | std::views::values) {
+                    const Input written = follow(Input { {}, link });
+                    link = written.link ? *written.link : Link { {}, {} };
+                }
+            for (auto& [id, value] : out.aliases) value = follow(value);
+            return graph;
+        }
+    }
+
+    Expansion Expand(const Graph& given)
+    {
+        Expansion out;
+        // The calls first: what a function holds may be a loop, and a call may be in one.
+        const Graph written = WriteCalls(given, out);
+        out.graph.passes = written.passes;
+        out.graph.meshImports = written.meshImports;
+
+        // The loops: a Repeat, and how many turns it has.
+        std::map<std::string, int, std::less<>> loops;
+        for (const auto& node : written.nodes) {
+            if (node.type != "Repeat") continue;
+            const auto count = node.inputs.find("count");
+            const double* turns = count == node.inputs.end() || count->second.link ? nullptr : count->second.value.Number();
+            if (!turns || *turns < 1 || *turns > 256 || std::floor(*turns) != *turns) {
+                out.errors[node.id] = count != node.inputs.end() && count->second.link ? "'count' is given on the node: how many turns there are is known before anything is worked out"
+                                                                                      : "'count' is how many turns it has: a whole number from 1 to 256";
+                loops[node.id] = 0;
+            } else {
+                loops[node.id] = static_cast<int>(*turns);
+            }
+        }
+
+        // Which loop each node is in: the Repeat it is wired from, through whatever is between. A Previous is in the
+        // loop of what it is the turn before of; an Element is in none for naming a node of one, which is its use.
+        std::map<std::string, std::string, std::less<>> loopOf;
+        std::set<std::string, std::less<>> visiting;
+        const std::function<std::string(const std::string&)> find = [&](const std::string& id) -> std::string {
+            if (const auto known = loopOf.find(id); known != loopOf.end()) return known->second;
+            const Node* node = written.Find(id);
+            if (!node || node->type == "Repeat" || !visiting.insert(id).second) return {};
+            std::set<std::string> in;
+            const auto through = [&](const std::string& other) {
+                if (loops.contains(other)) in.insert(other);
+                else if (std::string loop = find(other); !loop.empty()) in.insert(std::move(loop));
+            };
+            for (const auto& input : node->inputs | std::views::values)
+                if (input.link) through(input.link->node);
+            if (node->type == "Reference")
+                if (const std::string* target = Text(*node, "node")) through(*target);
+            if (node->type == "Previous")
+                if (const std::string* of = Text(*node, "of")) through(*of);
+            visiting.erase(id);
+            if (in.size() > 1) out.errors[id] = std::format("it is wired from two loops, '{}' and '{}': a node is in one", *in.begin(), *std::next(in.begin()));
+            return loopOf[id] = in.size() == 1 ? *in.begin() : std::string();
+        };
+        for (const auto& node : written.nodes) (void)find(node.id);
+
+        for (const auto& node : written.nodes) {
+            if (node.type == "Repeat" || out.errors.contains(node.id)) continue;
+            const std::string& loop = loopOf[node.id];
+            const int count = loop.empty() ? 1 : loops[loop];
+            for (int turn = 0; turn < count; ++turn) {
+                Node made = node;
+                if (!loop.empty()) {
+                    made.id = TurnId(node.id, turn);
+                    out.turns[node.id].push_back(made.id);
+                }
+                // What it is wired to of its loop is that turn's: the Repeat's numbers as they are on it, and the
+                // other nodes of the loop as they are on it.
+                for (auto& [name, input] : made.inputs) {
+                    if (!input.link) continue;
+                    if (input.link->node == loop) {
+                        const std::string& output = input.link->output;
+                        const Value value = output == "reverse" ? Value(count - 1 - turn) : output == "count" ? Value(count) : output == "first" ? Value(turn == 0)
+                                          : output == "last" ? Value(turn == count - 1) : Value(turn);
+                        input = Input { value, std::nullopt };
+                    } else if (!loop.empty() && loopOf[input.link->node] == loop) {
+                        input.link->node = TurnId(input.link->node, turn);
+                    }
+                }
+                const auto stands = [&](std::string target) {
+                    made.type = "Reference";
+                    made.inputs.clear();
+                    made.inputs["node"] = Input { Value(std::move(target)), std::nullopt };
+                };
+                if (node.type == "Reference") {
+                    if (const std::string* target = Text(node, "node"); target && !loop.empty() && loopOf[*target] == loop) stands(TurnId(*target, turn));
+                } else if (node.type == "Previous") {
+                    const std::string* of = Text(node, "of");
+                    const std::string* first = Text(node, "first");
+                    if (!of || loop.empty()) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made the turn before"; break; }
+                    if (turn > 0) stands(TurnId(*of, turn - 1));
+                    else if (first) stands(*first);
+                    else { out.errors[node.id] = "'first' is the node it is on the first turn, when there is no turn before"; break; }
+                } else if (node.type == "Element") {
+                    const std::string* of = Text(node, "of");
+                    // Of a call: of the node its output comes from — the first, or the one `output` names.
+                    std::string ofCall;
+                    if (of && !written.Find(*of))
+                        if (const auto call = out.calls.find(*of); call != out.calls.end() && !call->second.outputs.empty()) {
+                            const std::string* named = Text(node, "output");
+                            const std::string& output = named ? *named : call->second.outputs.front();
+                            const auto gives = call->second.gives.find(output);
+                            if (gives == call->second.gives.end()) { out.errors[node.id] = std::format("'{}' calls a function with no output '{}'", *of, output); break; }
+                            if (gives->second.output != "out") {
+                                out.errors[node.id] = std::format("'{}' of '{}' is '{}' of what is in it: take the Element of a node of the loop whose 'out' it is", output, *of, gives->second.output);
+                                break;
+                            }
+                            ofCall = gives->second.node;
+                            of = &ofCall;
+                        }
+                    if (!of || !written.Find(*of)) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made on one turn"; break; }
+                    const std::string& theirs = loopOf[*of];
+                    if (theirs.empty()) { stands(*of); out.graph.nodes.push_back(std::move(made)); continue; }
+                    const int turns = loops[theirs];
+                    const auto index = made.inputs.find("index");
+                    const double* which = index == made.inputs.end() ? nullptr : index->second.value.Number();
+                    if (index != made.inputs.end() && (index->second.link || (!which && !index->second.value.IsNull()))) {
+                        out.errors[node.id] = "'index' is a turn's number: given on the node, or wired straight from a Repeat";
+                        break;
+                    }
+                    const int at = which ? static_cast<int>(std::llround(*which)) : turns - 1;
+                    if (at < 0 || at >= turns) { out.errors[node.id] = std::format("'{}' has {} turns, from 0: there is no turn {}", theirs, turns, at); break; }
+                    stands(TurnId(*of, at));
+                }
+                out.graph.nodes.push_back(std::move(made));
+            }
+        }
+        // A node that could not be written out takes its turns with it.
+        for (const auto& id : out.errors | std::views::keys) {
+            std::erase_if(out.graph.nodes, [&](const Node& node) { return node.id == id || node.id.starts_with(id + " ["); });
+            out.turns.erase(id);
+        }
+        return out;
+    }
+}

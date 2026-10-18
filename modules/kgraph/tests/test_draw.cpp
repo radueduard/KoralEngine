@@ -66,7 +66,7 @@ TEST_F(DrawTest, ATriangleIsDrawnWithoutAMesh) {
     graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
     Run(graph);
     ASSERT_TRUE(scene->runtime->Ok());
-    EXPECT_EQ(scene->runtime->ReportOf("draw"), nullptr) << "it runs once: there are no entities to it";
+    EXPECT_EQ(scene->runtime->ReportOf("draw"), nullptr) << "it draws once: nothing it is given follows a ForEach";
     EXPECT_TRUE(Green(3, 3)) << "above the diagonal, the triangle";
     EXPECT_TRUE(Black(28, 28)) << "below it, what the framebuffer was cleared to";
 
@@ -81,11 +81,26 @@ TEST_F(DrawTest, ATriangleIsDrawnWithoutAMesh) {
     EXPECT_TRUE(Black(3, 3));
     EXPECT_TRUE(Green(28, 28));
 
-    // There are no entities for it to be narrowed to.
+    // Which entities is a ForEach's to say, not a Draw's.
     graph.Find("draw")->Set("with", Value::List { "Lit" });
     scene->runtime->Set(graph);
     ASSERT_FALSE(scene->runtime->Status("draw")->ok);
-    EXPECT_NE(scene->runtime->Status("draw")->error.find("draws once"), std::string::npos) << scene->runtime->Status("draw")->error;
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("a ForEach's now"), std::string::npos) << scene->runtime->Status("draw")->error;
+}
+
+// A setting given in part has the rest as its inputs start: a depth attachment given only its view is cleared to 1,
+// the farthest, so that what is drawn with a depth test passes it — not to the builder's zero, which nothing passes.
+TEST_F(DrawTest, ADepthAttachmentGivenOnlyItsViewClearsToTheFarthest) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("depth", "Image").Set("format", "eD32_SFLOAT").Set("extent", Value::List { Size, Size }).Set("usage", Value::List { "eDepthStencilAttachment" });
+    graph.Find("target")->Wire("depthStencil.view", "depth");
+    Triangles(graph);
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 3)) << "the triangle passed the depth test";
+    EXPECT_TRUE(Black(28, 28));
 }
 
 // What the pipeline leaves to the draw is the draw's to say: where it draws, and what it clears to.
@@ -121,7 +136,7 @@ TEST_F(DrawTest, ADrawSaysWhereItDrawsAndWhatItClearsTo) {
     EXPECT_NE(scene->runtime->Status("draw")->error.find("'cullMode' is one of eNone, eFront, eBack, eFrontAndBack"), std::string::npos) << scene->runtime->Status("draw")->error;
 }
 
-// One mesh wired to the draw, rather than each entity's.
+// One mesh wired to the draw: one draw of it.
 TEST_F(DrawTest, AMeshWiredInIsDrawnOnce) {
     kgraph::Graph graph = Canvas();
     graph.Add("square", "Primitive").Set("shape", "eQuad");
@@ -136,11 +151,11 @@ TEST_F(DrawTest, AMeshWiredInIsDrawnOnce) {
     EXPECT_GT(middle.y, 247);
     EXPECT_TRUE(Black(1, 1));
 
-    // Without the mesh it is each entity's, and here there is no world of them.
+    // Without a mesh there is nothing for a vertex shader that reads vertices to read: it says what to wire.
     graph.Find("draw")->inputs.erase("mesh");
     scene->runtime->Set(graph);
     ASSERT_FALSE(scene->runtime->Status("draw")->ok);
-    EXPECT_NE(scene->runtime->Status("draw")->error.find("each entity"), std::string::npos) << scene->runtime->Status("draw")->error;
+    EXPECT_NE(scene->runtime->Status("draw")->error.find("wire it a 'mesh'"), std::string::npos) << scene->runtime->Status("draw")->error;
 }
 
 // What to draw, and how many groups to run, read from a buffer a compute shader wrote.

@@ -36,15 +36,6 @@ namespace kgraph
         return projection;
     }
 
-    void RegisterSceneComponents(kecs::World& world)
-    {
-        (void)world.Id<Camera>();
-        (void)world.Id<DirectionalLight>();
-        (void)world.Id<PointLight>();
-        (void)world.Id<SpotLight>();
-        (void)world.Id<Sky>();
-    }
-
     View ViewOf(const kecs::World& world, const kecs::Entity entity)
     {
         View view;
@@ -52,19 +43,23 @@ namespace kgraph
         kor::Quat rotation;
         if (kor::Decompose(ToKor(world.WorldMatrix(entity)), position, rotation, scale))
             view.view = kor::Inverse(kor::Compose(position, rotation, kor::Vec3(1.f)));
-        if (const Camera* camera = world.Get<Camera>(entity)) {
-            view.fieldOfView = camera->fieldOfView * Radians;
-            view.near = camera->near;
-            view.far = std::max(camera->far, camera->near + 0.001f);
+        // Its lens: whichever of its components says how wide it sees.
+        for (const kecs::ComponentId id : world.ComponentsOf(entity)) {
+            const kecs::ComponentDescription& type = world.Describe(id);
+            const auto* bytes = static_cast<const std::byte*>(world.Get(entity, id));
+            const auto number = [&](const char* name, const float otherwise) {
+                const kecs::FieldDescription* field = type.FindField(name);
+                if (!bytes || !field || field->type != "f32") return otherwise;
+                float v = otherwise;
+                std::memcpy(&v, bytes + field->offset, 4);
+                return v;
+            };
+            if (!type.FindField("fieldOfView")) continue;
+            view.fieldOfView = number("fieldOfView", 60.f) * Radians;
+            view.near = std::max(number("near", 0.1f), 0.0001f);
+            view.far = std::max(number("far", 100.f), view.near + 0.001f);
+            break;
         }
         return view;
-    }
-
-    kecs::Entity FirstCamera(kecs::World& world)
-    {
-        const kecs::ComponentId id = world.Id<Camera>();
-        for (const kecs::Entity entity : world.All())
-            if (world.Has(entity, id) && world.IsEnabled(entity, id)) return entity;
-        return kecs::NullEntity;
     }
 }

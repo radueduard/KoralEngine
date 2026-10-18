@@ -13,7 +13,7 @@ struct RasterInfo {
     float3 normal;
 };
 
-// One block of push constants both stages read. `model` and `entityId` are the engine's to give: where the entity
+// One block of push constants both stages read. `model` is the engine's to give: where the entity
 // is in the world, and which entity it is. The rest is the entity's own — the fields of the component this
 // pipeline's node makes, which is what makes an entity drawn:
 //   albedo     its colour, as picked: what it is under white light
@@ -26,14 +26,8 @@ struct DrawData {
     float metallic;
     float3 emission;
     float roughness;
-    uint entityId;                     // which entity this is: what picking and the outline read
 };
 [[vk::push_constant]] ConstantBuffer<DrawData> draw;
-
-struct Output {
-    float4 color : SV_Target0;
-    uint id : SV_Target1;
-};
 
 [shader("vertex")]
 RasterInfo vertex(Vertex vertex)
@@ -84,7 +78,7 @@ float3 reflected(float facing, float3 straightOn)
 }
 
 [shader("fragment")]
-Output fragment(RasterInfo raster)
+float4 fragment(RasterInfo raster) : SV_Target
 {
     float3 albedo = toLinear(draw.albedo);
     float metallic = saturate(draw.metallic);
@@ -129,8 +123,5 @@ Output fragment(RasterInfo raster)
     }
     lit += toLinear(draw.emission);
 
-    Output output;
-    output.color = float4(present(lit), 1.0);
-    output.id = draw.entityId;
-    return output;
+    return float4(present(lit), 1.0);
 }

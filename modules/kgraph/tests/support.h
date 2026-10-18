@@ -12,12 +12,14 @@
 #include <commandBuffer.h>
 #include <context.h>
 #include <frameGraph.h>
+#include <log.h>
 #include <scene.h>
 #include <scheduler.h>
 #include <shader.h>
 
 #include <kecs/kecs.h>
 #include <kgraph/runtime.h>
+#include <kscript/declarations.h>
 
 namespace support
 {
@@ -28,6 +30,13 @@ namespace support
     const std::string& Reason();
     /** One frame, finished. */
     void Frame();
+    /**
+     * Gives @p entity component @p component — the engine's package's, a script's: one known by name — with the fields
+     * @p fields says, each as its numbers. Those not said start as the component's source says.
+     */
+    void Give(kecs::World& world, kecs::Entity entity, std::string_view component, std::initializer_list<std::pair<std::string_view, std::vector<float>>> fields = {});
+    /** A field of an entity's component, as its numbers: a float, or a vector's. */
+    std::vector<float> FieldOf(const kecs::World& world, kecs::Entity entity, std::string_view component, std::string_view field);
 
     /** Copies the screen where the test can read it: after whatever wrote it. */
     class ReadScreen final : public kor::RenderPass {
@@ -47,6 +56,7 @@ namespace support
         static inline bool withWorld = false;
 
         void Initialize() override {
+            for (const auto& problem : kscript::DeclarePackage(scripts)) kor::log::Error("{}", problem);    // the scene's Camera, its lights
             readback = kor::Buffer::RawBuilder{}.SetRawSize(Size * Size * 4).SetUsage(kor::Buffer::Usage::eTransferDst)
                 .SetType(kor::Buffer::Type::eReadback).Build();
             runtime = std::make_unique<kgraph::Runtime>(Graph(), withWorld ? &world : nullptr);
@@ -61,6 +71,7 @@ namespace support
             return names;
         }
         kecs::World world;      // before the runtime, which is gone first
+        kscript::Scripts scripts { world };
         std::unique_ptr<kgraph::Runtime> runtime;
         kor::Resource<kor::Buffer> readback;
     };

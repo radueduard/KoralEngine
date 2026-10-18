@@ -10,6 +10,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -33,6 +34,22 @@ namespace keditor
      */
     struct Label {
         std::string text;
+    };
+
+    /**
+     * @brief On the entity over a prefab's instance: which prefab — its file, from the project's folder — and what of
+     *        it this instance has made its own (Document::OverridesOf), a key a line.
+     */
+    struct PrefabLink {
+        std::string prefab;
+        std::string overrides;
+        /// Placed by another prefab — this instance one of the entities of the instance it is under: which part of that
+        /// one's prefab it is. -1 for one placed by hand.
+        std::int32_t outer = -1;
+    };
+    /** @brief On every entity of a prefab's instance, the one over it too: which entity of the prefab it is. */
+    struct PrefabPart {
+        std::int32_t part = 0;
     };
 
     class Document {
@@ -98,16 +115,81 @@ namespace keditor
         /** @brief Puts a node in a pass; in none, for an empty name. */
         bool SetNodePass(std::string_view node, std::string_view pass);
         /**
+         * @brief Puts nodes @p ids in @p pass — one that is not there yet is made, last — as one edit, and wires them
+         *        as passes are wired: what they take from an earlier pass, and what a later one takes of them, through
+         *        a Reference in the pass that takes it (one there already, or a new one); what is now in one pass
+         *        with them, straight. A Reference left standing for a node of its own pass goes. False when none is a node.
+         */
+        bool MoveNodesToPass(const std::vector<std::string>& ids, std::string_view pass);
+        /**
          * @brief Brings what node @p node makes into @p pass: a Reference to it there, which is wired from as the
          *        node itself would be. The Reference's id; empty when there is no such node.
          */
         std::string Import(std::string_view node, std::string_view pass, double x, double y);
+        /**
+         * @brief Makes the buffer a pipeline's shaders expect of one of its parameters: a ShaderBuffer node laid out
+         *        as the shader declares that buffer — an input for each field of its struct, to wire the data to —
+         *        beside the pipeline, in its pass, and wired to the parameter. `frame`, of a pipeline whose shader
+         *        has `ConstantBuffer<FrameData> frame`, is a node with FrameData's fields.
+         * @param parameter The parameter, by the name the shader gives it, with or without `param.` before it.
+         * @return The node's id; empty, with @p error saying why, when the pipeline names no shader that declares
+         *         such a buffer.
+         */
+        std::string MakeBufferFor(std::string_view pipeline, std::string_view parameter, std::string* error = nullptr);
+        /**
+         * @brief Sets where @p node 's input @p input is set: on the node (`kgraph::Placement::eNode`), or in the
+         *        inspector — what its type says, or otherwise. One its type has wired only stays so: false.
+         */
+        bool SetPlacement(std::string_view node, std::string_view input, kgraph::Placement where);
+        /**
+         * @brief Makes the node that sets up @p node 's wired-only input @p input (its port's companion: a VertexLayout
+         *        for a pipeline's `vertex.layout`), beside it on its page, and wires it in.
+         * @return The new node's id; empty, with @p error saying why, when the input has no companion.
+         */
+        std::string MakeCompanion(std::string_view node, std::string_view input, std::string* error = nullptr);
         /** @brief The nodes of the passes before @p pass, and of none: what there is for it to import, by id. */
         [[nodiscard]] std::vector<std::string> Importable(std::string_view pass) const;
         /** @brief Takes nodes out, with every wire to them. */
         void RemoveNodes(const std::vector<std::string>& ids);
         void MoveNodes(const std::vector<std::string>& ids, double dx, double dy);
         bool SetTitle(std::string_view node, std::string title);
+        /**
+         * @brief How a model file's meshes are read: which attributes are left out (not held at all) and which buffers
+         *        the rest are put in. @p file is the file as its meshes' names have it: `sponza.gltf` of
+         *        `@sponza.gltf#3`. The default is no entry. An edit of the graph like any: taken back, and saved with
+         *        the scene; the file is read again, and every entity holding its meshes holds the new ones.
+         */
+        void SetMeshImport(const std::string& file, kgraph::MeshImport import);
+        [[nodiscard]] kgraph::MeshImport MeshImportOf(std::string_view file) const;
+        /**
+         * @brief Puts copies of @p nodes — of this graph, or as they were copied from one — into the graph, the
+         *        top-left of them all at (@p x, @p y): each by a name of its own, wired among themselves as they
+         *        were, and to whatever else they were wired from that this graph still has.
+         * @param pass The pass they go into; null, each stays in its own. Into another pass than the copied ones were
+         *             of, they are wired as MoveNodesToPass wires: what they take of other passes, through References.
+         * @return The copies' ids, in the order of @p nodes.
+         */
+        std::vector<std::string> PasteNodes(std::vector<kgraph::Node> nodes, double x, double y, const std::string* pass = nullptr);
+        /** @brief Copies of nodes @p ids beside them, (@p dx, @p dy) away. @see PasteNodes */
+        std::vector<std::string> DuplicateNodes(const std::vector<std::string>& ids, double dx = 40, double dy = 40);
+        /** @brief Puts each node where @p where says, in one go. */
+        void PlaceNodes(const std::map<std::string, std::pair<double, double>>& where);
+        /**
+         * @brief Where each node is when every node is seen at once: a layout of its own, not its pass's page. Until a
+         *        node is put somewhere there, it is where it is on its page, the passes' pages side by side in the
+         *        order they are drawn (what is of no pass first) so that none is over another.
+         */
+        [[nodiscard]] std::map<std::string, std::pair<double, double>> OverviewPlaces() const;
+        /** @brief Puts each node where @p where says when every node is seen at once; the rest stay where they are seen. */
+        void PlaceInOverview(const std::map<std::string, std::pair<double, double>>& where);
+        /** @brief Moves nodes @p ids by (@p dx, @p dy) where every node is seen at once. */
+        void MoveInOverview(const std::vector<std::string>& ids, double dx, double dy);
+        /**
+         * @brief While true, a node made is made where every node is seen at once: where it is put is where it is
+         *        there (and, at first, on its page). The graph panel says so while it shows every node.
+         */
+        void MakeInOverview(const bool overview) { _makeInOverview = overview; }
+        [[nodiscard]] bool MakesInOverview() const { return _makeInOverview; }
         /** @brief Sets input @p input of @p node to a value, in place of whatever it was. False when there is no such node. */
         bool SetInput(std::string_view node, std::string_view input, kgraph::Value value);
         /** @brief Wires input @p input of @p node to another node's output, in place of whatever it was. */
@@ -180,6 +262,92 @@ namespace keditor
         /** @brief @p name, or with a number after it when one of @p siblings has it: "Cube", "Cube 2". */
         [[nodiscard]] static std::string UniqueName(const std::string& name, const std::vector<std::string>& siblings);
 
+        // ---- functions -------------------------------------------------------------------------------------------
+        //
+        // A function is nodes as one, kept in the project — `functions/<name>.kfunc` — and called by Function nodes:
+        // each call is written out into its nodes before the graph runs, in the call's pass. FunctionInput and
+        // FunctionOutput nodes are its edges: a port of every call each, top to bottom as they are on its page.
+
+        /** @brief Where the project's functions are: its `functions` folder. Empty for a scene in no project. */
+        [[nodiscard]] std::filesystem::path FunctionsDirectory() const;
+        /** @brief The project's functions, by name. */
+        [[nodiscard]] std::vector<std::string> Functions() const;
+        /**
+         * @brief What a node can be made as besides the types there are: the runtime's, a node for each component —
+         *        and a call of each of the project's functions, by its name (or `<name> (function)`, where a type has it).
+         */
+        [[nodiscard]] std::vector<kgraph::Preset> Presets() const;
+        /**
+         * @brief Makes nodes @p ids a function called @p name — a file of the project's — and puts a call of it in their
+         *        place, as one edit. Each wire into them is an input of it, each wire out of them an output, named for
+         *        the port it went to or came from; the call is wired as they were. The call's id; empty, with @p error
+         *        saying why, when it cannot be made.
+         */
+        std::string MakeFunction(const std::vector<std::string>& ids, const std::string& name, std::string* error = nullptr);
+        /** @brief A function opened in place: the call it stands for, the function, and the pass its nodes are on. */
+        struct OpenedFunction {
+            kgraph::Node call;
+            std::string function, pass, prefix;
+        };
+        /**
+         * @brief Opens call @p call's function in place: its nodes on a page of their own — a pass after the call's —
+         *        each FunctionInput given what the call was given, and what was wired from the call wired from its
+         *        FunctionOutputs. What is done there is the function's. The page's pass; empty, with @p error saying why.
+         */
+        std::string OpenFunction(std::string_view call, std::string* error = nullptr);
+        /**
+         * @brief Closes the function opened: with @p keep, what its page holds now is written to its file — every call
+         *        of it follows — and the call is put back, wired as its page's edges were; without, as it was opened.
+         */
+        bool CloseFunction(bool keep, std::string* error = nullptr);
+        [[nodiscard]] const std::optional<OpenedFunction>& Opened() const { return _opened; }
+        /** @brief Call @p call written out into its nodes, in its place: no longer a call of its function. */
+        bool WriteOut(std::string_view call, std::string* error = nullptr);
+        /** @brief Reads the project's functions again: one changed outside, every call of it follows. */
+        void ReloadFunctions();
+
+        // ---- prefabs ---------------------------------------------------------------------------------------------
+        //
+        // A prefab is a file of entities (`prefabs/<name>.prefab`, in the project) that instances are made of. Each
+        // instance is made again from the prefab whenever the scene is opened, or the prefab changes (ApplyPrefab):
+        // all of it but what the instance has made its own — a field set, a component added or taken off, an
+        // entity under it taken away. Those are its overrides, kept with it, and Revert drops them. Where the
+        // instance is, what it is called and what it is under are always its own. Entities put under an instance's
+        // entities are its own as well. A prefab's instance under another's is part of the outer prefab once that is
+        // applied: the outer prefab names the inner one, and what the inner instance made its own.
+
+        /**
+         * @brief Writes @p entity and everything under it to @p file as a prefab, and makes it the prefab's first
+         *        instance. False, with @p error saying why, when the file cannot be written.
+         */
+        bool SaveAsPrefab(kecs::Entity entity, const std::filesystem::path& file, std::string* error = nullptr);
+        /** @brief Makes an instance of the prefab at @p file — a path from the project's folder, or a whole one — last under @p parent. */
+        kecs::Entity Instantiate(const std::filesystem::path& file, kecs::Entity parent = kecs::NullEntity, std::string* error = nullptr);
+        /** @brief The entity over the instance @p entity is of: itself, when it is that. NullEntity for one of no instance. */
+        [[nodiscard]] kecs::Entity PrefabRootOf(kecs::Entity entity) const;
+        /** @brief Which prefab an instance is of, as it names it: `prefabs/Crate.prefab`. Empty for no instance. */
+        [[nodiscard]] std::string PrefabOf(kecs::Entity root) const;
+        /** @brief What an instance has made its own, each as `<part>:<what>` — `3:position`, `0:lit.albedo`, `2:+Spin`, `4:-Mesh`, `5:gone`. */
+        [[nodiscard]] std::vector<std::string> OverridesOf(kecs::Entity root) const;
+        /** @brief Writes the instance as it is now to its prefab — overrides and all — and every other instance of it follows. */
+        bool ApplyPrefab(kecs::Entity root, std::string* error = nullptr);
+        /** @brief Drops what the instance made its own, and the entities put under it: it is as the prefab is again. */
+        bool RevertPrefab(kecs::Entity root, std::string* error = nullptr);
+        /** @brief Makes the instance an entity like any other: no prefab's, and nothing more made of one. */
+        bool Unlink(kecs::Entity root);
+        /**
+         * @brief Makes every instance of the prefab at @p file — of every prefab, when none is given — again as the
+         *        prefab is now, keeping what each has made its own. Load does it for the whole scene.
+         */
+        void UpdatePrefabs(const std::filesystem::path& file = {});
+        /**
+         * @brief Says that @p what of @p entity — `position`, `rotation`, `scale` — was changed by whoever changed it on
+         *        the world itself (the gizmo): a change to it, and the instance's own when it is part of one.
+         */
+        void Moved(kecs::Entity entity, std::string_view what);
+        /** @brief The project's folder: what a prefab's file is named from. Empty for a scene that is in none. */
+        [[nodiscard]] std::filesystem::path ProjectDirectory() const;
+
         /** @brief Every entity as it is now: what RestoreWorld puts back. The graph is no part of it. */
         [[nodiscard]] std::string WorldJson() const;
         /** @brief Takes every entity away and makes those @p json holds: a scene put back as it was before it played. */
@@ -191,12 +359,64 @@ namespace keditor
         [[nodiscard]] std::string ToJson() const;
         /** @brief Makes the scene what @p json holds. For a document with nothing in it yet. */
         bool FromJson(std::string_view json, std::string& error);
+        /**
+         * @brief Makes entities of what a model file holds — a glTF, an obj, an fbx: an entity for each thing in
+         *        it, placed as the file places it under one named for the file, each drawn part with its Mesh, and
+         *        the file's lights. Every component a pipeline of the graph makes that has an `albedo` is given to
+         *        each drawn entity and filled from its material, a field by name where there is one: `albedo`,
+         *        `metallic`, `roughness`, `emission`, `alphaCutoff`, and the pictures `albedoMap`, `normalMap`,
+         *        `roughnessMap` and `emissiveMap`. One with a cut-out has the tag `Masked`, and one drawn over what is
+         *        behind it — glass, a decal — the tag `Blended`.
+         *        The file is read off the frame: the entity over them all is there at once, and the rest is made
+         *        under it when the file is read (Reading() counts down to it).
+         * @return The entity over them all; NullEntity, with @p error saying why, when there is no such file.
+         */
+        kecs::Entity ImportModel(const std::filesystem::path& file, std::string* error = nullptr);
+        /**
+         * @brief How many files are still being read: models whose entities are yet to be made, and the meshes and
+         *        pictures entities already name. All of it is read off the frame; the scene runs meanwhile, and what
+         *        is drawn fills in as each arrives.
+         */
+        [[nodiscard]] std::size_t Reading() const { return _importing.size() + _runtime->Reading(); }
+        /**
+         * @brief Says that a script was handed the resource node @p node makes — to write into, as a graphics script
+         *        does. Another view of the graph (the editor's Game panel) shares those buffers rather than having its own.
+         */
+        void ScriptUses(std::string_view node) { _scriptResources.emplace(node); }
+        [[nodiscard]] const std::set<std::string>& ScriptResources() const { return _scriptResources; }
+        /** @brief Where files named without their whole path are: a project's `assets` folder. Load and Save say it from the scene's own place. */
+        void SetAssetDirectory(const std::filesystem::path& directory) { _runtime->SetAssetDirectory(directory); }
+
+        /**
+         * @brief Makes the components the scripts under @p folder declare known, as their sources declare them: what a
+         *        project's scripts are, whether or not anything runs them. Load does it for the scene's project.
+         */
+        void DeclareScripts(const std::filesystem::path& folder);
+
         bool Save(const std::filesystem::path& path, std::string& error);
         bool Load(const std::filesystem::path& path, std::string& error);
 
     private:
         void Changed() { ++_revision; }
         void Apply(kgraph::Graph graph);
+        bool _makeInOverview = false;
+        /** An instance's entity was changed: what, as an override of the prefab, kept on the instance. */
+        void Override(kecs::Entity entity, std::string_view what);
+        /** The instance under @p root made again from @p prefab (its file's "root"), keeping its overrides. */
+        void Rebuild(kecs::Entity root, const kgraph::Value& prefab);
+        /** The prefab an instance's entity is the root of, as a value: its entities, each with the "part" it is. */
+        [[nodiscard]] kgraph::Value WritePrefab(kecs::Entity root);
+        /** An override of @p part's @p what, kept on the instance @p root. */
+        void Keep(kecs::Entity root, int part, std::string_view what);
+        /** The instance's own entities, by which part of its prefab each is: not those of an instance under it, but such an instance itself. */
+        [[nodiscard]] std::map<int, kecs::Entity> PartsOf(kecs::Entity root) const;
+        int _rebuilding = 0;                        // instances being made again from their prefabs: nothing done to them is their own
+        /** Gives @p graph the functions its calls name, read from the project's files — those inside them as well. */
+        void WithFunctions(kgraph::Graph& graph);
+        std::map<std::string, std::pair<std::filesystem::file_time_type, std::shared_ptr<const kgraph::Graph>>> _functionFiles;
+        std::optional<OpenedFunction> _opened;
+        kgraph::Graph _beforeOpened;                // the graph as it was when the function was opened: what Close without keeping puts back
+        std::set<std::string> _scriptResources;     // the nodes whose resource a script was handed
 
         kecs::World _world;                         // before the runtime, which is gone first
         kscript::Scripts _scripts { _world };
@@ -205,6 +425,8 @@ namespace keditor
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
         std::vector<std::string> _notes;
+        void Imported(kecs::Entity root, const kgraph::Model& model);
+        std::vector<std::pair<std::filesystem::path, kecs::Entity>> _importing;     // a model being read, and the entity its things go under
         std::uint64_t _revision = 0, _saved = 0;
         std::uint64_t _reported = 0;
         std::size_t _reports = 0;       // a digest of every pass's report, as last seen
@@ -214,9 +436,26 @@ namespace keditor
     [[nodiscard]] bool Editable(std::string_view fieldType);
     /** @brief Whether a component field of this type holds a resource. */
     [[nodiscard]] bool HoldsResource(std::string_view fieldType);
+    /** @brief An entity as a field of the type "entity" is said to hold one: Document::Field gives it so, SetField takes it. Null for none. */
+    [[nodiscard]] kgraph::Value EntityValue(kecs::Entity entity);
+    /** @brief The entity such a value is; NullEntity for null, nothing for what is not one. */
+    [[nodiscard]] std::optional<kecs::Entity> EntityOfValue(const kgraph::Value& value);
 }
 
 template <> struct kecs::Name<keditor::Label> { static constexpr std::string_view value = "Name"; };
+template <> struct kecs::Name<keditor::PrefabLink> { static constexpr std::string_view value = "Prefab"; };
+template <> struct kecs::Name<keditor::PrefabPart> { static constexpr std::string_view value = "PrefabPart"; };
+template <> struct kecs::Fields<keditor::PrefabLink> {
+    static void Describe(kecs::FieldList<keditor::PrefabLink>& list)
+    {
+        list.Field("prefab", &keditor::PrefabLink::prefab);
+        list.Field("overrides", &keditor::PrefabLink::overrides);
+        list.Field("outer", &keditor::PrefabLink::outer);
+    }
+};
+template <> struct kecs::Fields<keditor::PrefabPart> {
+    static void Describe(kecs::FieldList<keditor::PrefabPart>& list) { list.Field("part", &keditor::PrefabPart::part); }
+};
 template <> struct kecs::Fields<keditor::Label> {
     static void Describe(kecs::FieldList<keditor::Label>& list) { list.Field("text", &keditor::Label::text); }
 };

@@ -9,6 +9,7 @@
 #include <fstream>
 
 #include <kgraph/meshes.h>
+#include <kscript/declarations.h>
 
 #include "standard_shaders.h"
 
@@ -20,7 +21,7 @@ namespace keditor
     {
         static const std::vector<std::pair<std::string, std::string>> shaders {
             { "engineCommon.slang", detail::EngineCommonSlang }, { "lit.slang", detail::LitSlang },
-            { "sky.slang", detail::SkySlang }, { "outline.slang", detail::OutlineSlang },
+            { "sky.slang", detail::SkySlang },
         };
         return shaders;
     }
@@ -145,6 +146,19 @@ namespace keditor
   }
 }
 )json" },
+            { "Fly Camera.json", R"json({
+  "template": "Fly Camera",
+  "icon": "videocam",
+  "description": "A camera flown with the mouse and the keys while the right button is held: W A S D, E and Q, Shift faster.",
+  "name": "Camera",
+  "position": [2, 1.5, 3],
+  "rotation": [-20, 34, 0],
+  "components": {
+    "Camera": { "fieldOfView": 60, "near": 0.1, "far": 100 },
+    "FlyCamera": { "speed": 4, "sensitivity": 0.12 }
+  }
+}
+)json" },
             { "Directional Light.json", R"json({
   "template": "Directional Light",
   "icon": "light_mode",
@@ -238,6 +252,7 @@ fun setting(name: String, variable: String): String =
 val koralSdk = setting("koral.sdk", "KORAL_SDK")
 val engineLibrary = setting("koral.engine.library", "KORAL_ENGINE_LIBRARY")
 val engineMaven = setting("koral.engine.maven", "KORAL_ENGINE_MAVEN")
+val enginePackage = setting("koral.engine.package", "KORAL_ENGINE_PACKAGE")
 
 repositories {
     maven(url = file("$koralSdk/share/Koral/maven"))    // Koral's own Kotlin libraries, as the SDK carries them
@@ -253,6 +268,7 @@ dependencies {
 kotlin {
     compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }
     sourceSets["main"].kotlin.srcDir("scripts")
+    sourceSets["main"].kotlin.srcDir("$enginePackage/scripts")      // the engine's own: the Camera, the lights, the Sky
 }
 java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25 }
 
@@ -278,7 +294,8 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         // This machine's: where things are here. Written each time, since it is not the project's to keep.
         std::string properties = "# Written by the Koral Engine editor: where this machine's Koral SDK, engine and JDK are. Not the project's to commit.\n";
         const char* sdk = std::getenv("KORAL_SDK");
-        properties += std::format("koral.sdk={}\nkoral.engine.library={}\nkoral.engine.maven={}\n", sdk && *sdk ? sdk : KEDITOR_SDK, KEDITOR_ENGINE_LIBRARY, KEDITOR_MAVEN);
+        properties += std::format("koral.sdk={}\nkoral.engine.library={}\nkoral.engine.maven={}\nkoral.engine.package={}\n", sdk && *sdk ? sdk : KEDITOR_SDK, KEDITOR_ENGINE_LIBRARY,
+                                  KEDITOR_MAVEN, kscript::PackageDirectory().generic_string());
         if (std::string_view(KEDITOR_JAVA_HOME).size() > 0) properties += std::format("org.gradle.java.home={}\n", KEDITOR_JAVA_HOME);
         properties += "org.gradle.jvmargs=-Xmx1g\n";
         write("gradle.properties", properties, true);
@@ -290,6 +307,63 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
             std::filesystem::create_directories((project / file).parent_path(), ignored);
             std::filesystem::copy_file(wrapper / file, project / file, ignored);
             written.emplace_back(file);
+        }
+        return written;
+    }
+
+    std::vector<std::string> WriteEditorSetup(const std::filesystem::path& project, const std::string& name)
+    {
+        std::vector<std::string> written;
+        std::error_code ignored;
+        const auto write = [&](const std::filesystem::path& file, const std::string& text, const bool always) {
+            const std::filesystem::path path = project / file;
+            if (!always && std::filesystem::exists(path, ignored)) return;
+            std::filesystem::create_directories(path.parent_path(), ignored);
+            std::ifstream in(path, std::ios::binary);
+            const std::string now((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (in && now == text) return;
+            std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+            written.push_back(file.generic_string());
+        };
+        // A shader imports the modules beside it, and the engine's (`import entity;`); a script is the project's, and
+        // the folders a build leaves are not.
+        write(".vscode/settings.json", std::string(R"json({
+  "files.associations": { "*.slang": "slang" },
+  "slang.additionalSearchPaths": ["${workspaceFolder}/shaders", ")json") + (kscript::PackageDirectory() / "shaders").generic_string() + R"json("],
+  "files.exclude": { "**/bin": true, "**/obj": true, "**/build": true, "**/.gradle": true, "**/.kotlin": true },
+  "dotnet.defaultSolution": "disable",
+  "java.import.gradle.enabled": true
+}
+)json", false);
+        write(".vscode/extensions.json", R"json({
+  "recommendations": ["shader-slang.slang-language-extension", "ms-dotnettools.csharp", "fwcd.kotlin"]
+}
+)json", false);
+        // The C# scripts as a project of their own: nothing builds it — a project's scripts are compiled when it runs
+        // — but it is what tells an editor which names there are. It names this machine's assemblies, so it is written
+        // again each time, and is not the project's to commit.
+        const std::filesystem::path assemblies = KEDITOR_DOTNET;
+        if (std::filesystem::exists(assemblies / "Koral.Engine.dll", ignored)) {
+            std::string references;
+            for (const char* assembly : { "Koral.Engine", "Koral" })
+                if (std::filesystem::exists(assemblies / (std::string(assembly) + ".dll"), ignored))
+                    references += std::format("    <Reference Include=\"{}\"><HintPath>{}</HintPath><Private>false</Private></Reference>\n", assembly,
+                                              (assemblies / (std::string(assembly) + ".dll")).generic_string());
+            write(std::filesystem::path(name + ".Scripts.csproj"), std::format(R"xml(<!-- Written by the Koral Engine editor, for an editor of code to know the engine's names by. Nothing builds it. -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="scripts/**/*.cs" />
+    <Compile Include="{}/scripts/*.cs" Link="koral/%(Filename)%(Extension)" />
+{}  </ItemGroup>
+</Project>
+)xml", (kscript::PackageDirectory()).generic_string(), references), true);
         }
         return written;
     }
@@ -327,39 +401,129 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         };
 
         // ---- frame: what every pass after it sees of the frame ------------------------------------------------
-        // The scene's camera, sky, sun and lights as values, and the two buffers of them the shaders read. A value
-        // is wired into its place in a buffer, in the order the shader's block declares it.
+        // The scene's camera, sky, sun and lights — components of the engine's package, each read by a ForEach of it —
+        // and the two buffers of them the shaders read. A value is wired into its place in a buffer, in the order the
+        // shader's block declares it; the lights are the shader's own struct, a buffer of each kind after the last.
         pass = "frame";
         doc.AddPass(pass);
         node("Screen", "screen", 40, 40);
-        node("Camera", "camera", 40, 180);
-        wire("screen", "camera", "extent", "size");
-        node("Sky", "sky values", 40, 460);
-        node("Sun", "sun", 40, 700);
-        node("Lights", "lights", 40, 860);
-        node("DataBuffer", "frame data", 420, 180);     // FrameData, in engineCommon.slang
+        const auto first = [&](const char* id, const char* component, const double y) {
+            node("Entity", id, 40, y);
+            set(id, "component", component);
+        };
+        // The camera: a view from where its entity is, towards a step along the way it faces, rolled as it is; and a
+        // lens of its field of view, near and far. What the scene is seen through: in the editor, the editor's view.
+        first("eye", "Camera", 180);
+        node("Add", "looking at", 280, 260);
+        wire("eye", "looking at", "a", "worldPosition");
+        wire("eye", "looking at", "b", "forward");
+        node("View", "camera", 480, 180);
+        wire("eye", "camera", "position", "worldPosition");
+        wire("looking at", "camera", "target");
+        wire("eye", "camera", "up", "up");
+        set("camera", "main", true);
+        node("Perspective", "lens", 680, 180);
+        set("lens", "main", true);
+        wire("eye", "lens", "fieldOfView", "field.fieldOfView");
+        wire("eye", "lens", "near", "field.near");
+        wire("eye", "lens", "far", "field.far");
+        wire("screen", "lens", "aspect", "aspect");
+        // The two as one: the projection after the view, and what undoes it.
+        node("MatrixMultiply", "seen", 680, 300);
+        wire("lens", "seen", "a");
+        wire("camera", "seen", "b");
+        node("MatrixInverse", "unseen", 680, 380);
+        wire("seen", "unseen", "a");
+        first("sky values", "Sky", 460);
+        const auto linear = [&](const char* id, const std::string& from, const char* output, const double x, const double y) {
+            node("Linear", id, x, y);
+            wire(from, id, "a", output);
+        };
+        linear("zenith", "sky values", "field.zenith", 280, 420);
+        linear("horizon", "sky values", "field.horizon", 280, 500);
+        linear("ground", "sky values", "field.ground", 280, 580);
+        // The cosine of the sun disc's radius: half its size, in radians.
+        node("Multiply", "sun radius", 280, 660);
+        wire("sky values", "sun radius", "a", "field.sunSize");
+        set("sun radius", "b", 0.5);
+        node("Radians", "sun radians", 480, 660);
+        wire("sun radius", "sun radians", "a");
+        node("Cos", "sun cosine", 680, 660);
+        wire("sun radians", "sun cosine", "a");
+        first("sun", "DirectionalLight", 760);
+        node("Negate", "towards the sun", 280, 760);
+        wire("sun", "towards the sun", "a", "forward");
+        // A light's colour as it shines: in linear terms, times how bright it is.
+        const auto shining = [&](const std::string& id, const std::string& from, const double x, const double y) {
+            linear((id + " linear").c_str(), from, "field.color", x, y);
+            node("Multiply", (id + " color").c_str(), x + 200, y);
+            wire(id + " linear", id + " color", "a");
+            wire(from, id + " color", "b", "field.intensity");
+        };
+        shining("sun", "sun", 280, 840);
+        node("DataBuffer", "frame data", 920, 340);     // FrameData, in engineCommon.slang
         const auto field = [&](const int index, const char* from, const char* output, const char* type = nullptr) {
             wire(from, "frame data", std::format("field[{}].value", index).c_str(), output);
             if (type) set("frame data", std::format("field[{}].type", index).c_str(), type);
         };
-        field(0, "camera", "viewProjection");
-        field(1, "camera", "inverseViewProjection");
+        field(0, "seen", "out");
+        field(1, "unseen", "out");
         field(2, "camera", "position", "eVec4");
-        field(3, "sky values", "zenith");               // rgb, and in its fourth place:
-        field(4, "sky values", "ambient");              //   how much light the sky gives all round
-        field(5, "sky values", "horizon");
-        field(6, "sky values", "sunCosine");            //   the cosine of the sun disc's radius
-        field(7, "sky values", "ground", "eVec4");
-        field(8, "sun", "direction");
+        field(3, "zenith", "out");                      // rgb, and in its fourth place:
+        field(4, "sky values", "field.ambient");        //   how much light the sky gives all round
+        field(5, "horizon", "out");
+        field(6, "sun cosine", "out");                  //   the cosine of the sun disc's radius
+        field(7, "ground", "out", "eVec4");
+        field(8, "towards the sun", "out");
         field(9, "sun", "present");                     //   1 when there is a sun
-        field(10, "sun", "color", "eVec4");
-        field(11, "lights", "count", "eUVec4");
-        node("DataBuffer", "light data", 420, 860);     // Light[], in engineCommon.slang
-        set("light data", "usage", "eStorage");
-        wire("lights", "light data", "field[0].value", "data");
-        node("Primitive", "shape", 420, 40);            // for how a default mesh's vertices are laid out
+        field(10, "sun color", "out", "eVec4");
 
-        // ---- scene: every entity with a Mesh and the lit shader's component -------------------------------------
+        // Every light, a kind after another: where it is and how far it reaches, the way it shines and its kind, its
+        // colour, and a spot's cone as the cosines of its angles.
+        const char* kinds[] { "DirectionalLight", "PointLight", "SpotLight" };
+        const char* ids[] { "suns", "lamps", "spots" };
+        std::string before;
+        for (int kind = 0; kind < 3; ++kind) {
+            const double y = 1000.0 + kind * 360.0;
+            const std::string each = ids[kind], data = kind == 2 ? std::string("light data") : each + " data";
+            node("ForEach", each.c_str(), 40, y);
+            set(each, "component", kinds[kind]);
+            shining(each, each, 280, y);
+            node("Append", (each + " position").c_str(), 280, y + 80);
+            wire(each, each + " position", "a", "worldPosition");
+            if (kind == 0) set(each + " position", "b", 0);
+            else wire(each, each + " position", "b", "field.range");
+            node("Append", (each + " direction").c_str(), 280, y + 160);
+            wire(each, each + " direction", "a", "forward");
+            set(each + " direction", "b", kind);
+            node("ShaderBuffer", data.c_str(), 920, y);  // Light[], in engineCommon.slang
+            set(data, "module", "lit");
+            set(data, "entry", "fragment");
+            set(data, "parameter", "lights");
+            wire(each + " position", data, "field.position");
+            wire(each + " direction", data, "field.direction");
+            wire(each + " color", data, "field.color");
+            if (kind == 2)
+                for (const char* angle : { "innerAngle", "outerAngle" }) {
+                    const std::string at = std::format("{} {}", each, angle);
+                    node("Radians", (at + " radians").c_str(), 480, y + 240 + (angle[0] == 'o' ? 60 : 0));
+                    wire(each, at + " radians", "a", std::format("field.{}", angle).c_str());
+                    node("Cos", (at + " cosine").c_str(), 680, y + 240 + (angle[0] == 'o' ? 60 : 0));
+                    wire(at + " radians", at + " cosine", "a");
+                }
+            if (kind == 2) {
+                node("Append", "spots cone", 880, y + 270);
+                wire("spots innerAngle cosine", "spots cone", "a");
+                wire("spots outerAngle cosine", "spots cone", "b");
+                wire("spots cone", data, "field.cone");
+            }
+            if (!before.empty()) wire(before, data, "after");
+            before = data;
+        }
+        field(11, "light data", "count", "eUVec4");
+        node("Primitive", "shape", 280, 40);            // for how a default mesh's vertices are laid out
+
+        // ---- scene: every entity with the lit shader's component and a Mesh, a draw each -----------------------------
         // Three pictures the size of the window: what is seen, how far each pixel of it is, and which entity it is.
         pass = "scene";
         doc.AddPass(pass);
@@ -376,23 +540,29 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
             wire(id, view, "image");
         };
         picture("color", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc", "eTransferDst" }, 40);
-        picture("ids", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" }, 200);
         picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" }, 360);
         target("scene target", "color view", "depth view", 760, 40);
         set("scene target", "color[0].clear", Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 1 } } } } });
-        wire("ids view", "scene target", "color[1].view");
-        set("scene target", "color[1].name", "ids");
-        set("scene target", "color[1].clear", Value::Members { { "scalarType", "UInt" }, { "components", 4 }, { "value", Value::Members { { "u", Value::List { 0, 0, 0, 0 } } } } });
-        // The pipeline's component is the shader's: what its push constants ask of each entity — an albedo, how
-        // metallic and how rough it is, what light it gives off.
+        // The pipeline is what every draw shares: the frame's values and the lights. What each draw has of its own —
+        // its mesh, where it is, an albedo, how metallic and how rough it is, what light it gives off — is wired to the
+        // Draw from a ForEach of the pipeline's component, which is the shader's push constants nothing else gives.
         node("GraphicsPipeline", "lit", 1020, 40);
         shaders("lit", "lit");
         wire(bring("shape", 760, 420), "lit", "vertex.layout", "layout");
         wire("scene target", "lit", "framebuffer");
         wire(bring("frame data", 760, 540), "lit", "param.frame");
         wire(bring("light data", 760, 660), "lit", "param.lights");
+        // Every entity; those with a Mesh and the pipeline's component; a draw of each, with its own.
+        node("Entities", "all", 1020, 260);
+        node("Filter", "drawn", 1020, 360);
+        wire("all", "drawn", "entities");
+        set("drawn", "with", Value::List { "Mesh", "lit" });
         node("Draw", "draw scene", 1300, 40);
         wire("lit", "draw scene", "pipeline");
+        wire("drawn", "draw scene", "mesh", "Mesh.mesh");
+        wire("drawn", "draw scene", "push.model", "matrix");
+        for (const char* field : { "albedo", "metallic", "roughness", "emission" })
+            wire("drawn", "draw scene", (std::string("push.") + field).c_str(), (std::string("lit.") + field).c_str());
 
         // ---- sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn -----------
         pass = "sky";
@@ -406,33 +576,6 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         node("Draw", "draw sky", 880, 40);
         wire("sky", "draw sky", "pipeline");
         set("draw sky", "load", true);
-
-        // ---- outline: a line round what is picked, from the image of which entity is where -----------------------
-        pass = "outline";
-        doc.AddPass(pass);
-        target("overlay target", bring("color view", 40, 40), {}, 320, 40);
-        node("GraphicsPipeline", "outline", 600, 40);
-        shaders("outline", "outline");
-        wire("overlay target", "outline", "framebuffer");
-        wire(bring("ids", 320, 240), "outline", "param.ids");
-        set("outline", "push.outlineColor", Value::List { 1, 0.55, 0.15, 1 });
-        set("outline", "push.thickness", 2);
-        set("outline", "depthStencilState", Value::Members { { "depthTestEnable", false }, { "depthWriteEnable", false } });
-        set("outline", "colorBlendState", Value::Members { { "attachments", Value::List { Value::Members {
-            { "blendEnable", true }, { "srcColorBlendFactor", "eSrcAlpha" }, { "dstColorBlendFactor", "eOneMinusSrcAlpha" }, { "colorBlendOp", "eAdd" },
-            { "srcAlphaBlendFactor", "eOne" }, { "dstAlphaBlendFactor", "eOneMinusSrcAlpha" }, { "alphaBlendOp", "eAdd" },
-            { "colorWriteMask", Value::List { "eR", "eG", "eB", "eA" } } } } } });
-        node("Draw", "draw outline", 880, 40);
-        wire("outline", "draw outline", "pipeline");
-        set("draw outline", "load", true);
-
-        // ---- editor: what an editor draws over the picture, and reads back of it ----------------------------------
-        pass = "editor";
-        doc.AddPass(pass);
-        node("DebugDraw", "helpers", 320, 40);
-        wire(bring("color", 40, 40), "helpers", "image");
-        node("Pick", "pick", 320, 200);
-        wire(bring("ids", 40, 200), "pick", "ids");
 
         // ---- show: the picture, in the window ----------------------------------------------------------------------
         pass = "show";

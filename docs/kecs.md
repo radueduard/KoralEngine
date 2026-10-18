@@ -94,6 +94,7 @@ moves no entity to another archetype.
 | `ParentOf`, `ChildrenOf`, `Roots()`, `All()` | In order. `All()` is every entity, parents before their children. |
 | `DepthOf(e)`, `IsAncestor(above, e)` | |
 | `PositionOf`, `RotationOf`, `ScaleOf` and `SetPosition`, `SetRotation`, `SetScale` | Relative to the parent. Rotation is Euler angles in degrees: about X, about Y, about Z. |
+| `OrientationOf`, `SetOrientation` | The rotation as a `kecs::Quat` (x, y, z, w), which is what the matrix is made with. Set as Euler angles, it is theirs; set as a quaternion, it is kept as given (made length 1) and `RotationOf` is worked out of it — so a body turned a step at a time is not rounded off through the angles. |
 | `LocalMatrix(e)`, `WorldMatrix(e)` | The world matrix is the parents' transforms and its own. It is worked out when asked for and kept until the entity or something above it moves. |
 | `SetWorldMatrix(e, m, position, rotation, scale)` | Places it in the world by changing its own transform: only the parts asked for. |
 | `SceneVersion()` | Goes up when any of this changes. |
@@ -103,12 +104,14 @@ position, rotation and scale are changed to make up for the new parent's. Destro
 what is under it. Setting a transform is allowed while a query runs; `SetParent` is not (queue it in a
 `Commands`).
 
-`<kecs/transform.h>` has the arithmetic: `kecs::Vec3`, and `kecs::Mat4` (sixteen floats, column after
-column), with `Compose`, `Decompose`, `Inverse` and `*`. kecs stands on its own, so these are its own;
+`<kecs/transform.h>` has the arithmetic: `kecs::Vec3`, `kecs::Quat` and `kecs::Mat4` (sixteen floats, column
+after column), with `Compose` (of Euler angles) and `ComposeQuat`, `Decompose` (to either), `ToQuat`, `ToEuler`,
+`Normalize`, `Inverse` and `*`. kecs stands on its own, so these are its own;
 angles compose the way the framework's math composes them.
 
 A saved world has each entity's name, its children in order, and its position, rotation and scale where
-they aren't the defaults. Entities are written parents first.
+they aren't the defaults. The rotation is saved as Euler angles, so a quaternion comes back as the same turn, to within
+rounding. Entities are written parents first.
 
 ## Observers
 

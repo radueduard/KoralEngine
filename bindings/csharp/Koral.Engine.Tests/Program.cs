@@ -28,6 +28,13 @@ var world = World.Of(scene) ?? throw new Exception("the Play scene has no world"
 void Frames(int count) { for (var i = 0; i < count; ++i) app.Frame(); }
 float Number(Entity entity, string component, string field) => float.Parse(world.FieldJson(entity, component, field), System.Globalization.CultureInfo.InvariantCulture);
 
+// ---- what a script that is steered reads: the keys of the scene's window -----------------------------------------
+scene.SceneInput.FeedKey(Key.eW, true);
+Frames(1);
+Check(world.Input.IsKeyPressed(Key.eW) || world.Input.IsKeyHeld(Key.eW), "a script reads the keys its scene is given");
+scene.SceneInput.FeedKey(Key.eW, false);
+Frames(1);
+
 // ---- a script is a component, and its methods are called on each entity that has it ----------------------------
 
 // What the editor's Assets, New script makes: as it is, it has to compile and to turn its entity.
@@ -98,8 +105,17 @@ Write("Watcher.cs", """
     """);
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
-Check(host.Scripts.Order().SequenceEqual(["Feeder", "Roller", "Spin", "Watcher"]), $"each is a script: {string.Join(", ", host.Scripts)}");
+// The project's, and the engine's package's: compiled with them, so that a script reads a light as it reads its own.
+Check(host.Scripts.Order().SequenceEqual(["Camera", "DirectionalLight", "Feeder", "PointLight", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
+      $"each is a script, the package's among them: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
+{
+    // Registered by the host, a package's component still starts as its source says: the engine read it first.
+    var lamp = world.Create("Lamp");
+    Check(world.Add(lamp, "PointLight"), "a point light is a component");
+    Check(world.FieldJson(lamp, "PointLight", "range") == "5", $"it starts as its source says: {world.FieldJson(lamp, "PointLight", "range")}");
+    world.Destroy(lamp);
+}
 
 var wheel = world.Create("Wheel");
 
@@ -143,6 +159,61 @@ Near(Number(wheel, "Spin", "Updates"), 3, "updated once a frame");
 Near(Number(wheel, "Spin", "Angle"), 16, "its data is the engine's: 10 + 3 * 2");
 Equal(world.FieldJson(wheel, "Spin", "Started"), "true", "started, before its first update");
 Equal(world.FieldJson(wheel, "Spin", "Axis").Replace(" ", ""), "[0,1,0]", "a vector field");
+// Set as whatever the field is: a vector, an entity, none.
+world.Set(wheel, "Spin", "Axis", new Vec3(1, 0.5f, 0));
+Equal(world.FieldJson(wheel, "Spin", "Axis").Replace(" ", ""), "[1,0.5,0]", "a vector, set whole");
+{
+    var hub = world.Create("Hub");
+    world.Set(wheel, "Spin", "Target", hub);
+    Check(world.FieldJson(wheel, "Spin", "Target").Replace(" ", "").Contains($"\"entity\":{hub.Index}"), $"an entity: {world.FieldJson(wheel, "Spin", "Target")}");
+    world.Set(wheel, "Spin", "Target", null);
+    Equal(world.FieldJson(wheel, "Spin", "Target").Replace(" ", ""), "null", "and none");
+    world.Destroy(hub);
+}
+{   // Many at once: a value an entity, in two calls whatever the number.
+    Entity[] many = [world.Create("Many 0"), world.Create("Many 1"), world.Create("Many 2")];
+    Equal(world.SetRotations(many, [new Vec3(0, 10, 0), new Vec3(0, 20, 0), new Vec3(0, 30, 0)]).ToString(), "3", "every one of them set");
+    Near(world.RotationOf(many[1]).Y, 20, "each its own");
+    var turned = new Vec3[3];
+    world.RotationsOf(many, turned);
+    Near(turned[2].Y, 30, "and read back in order");
+    world.Destroy(many[2]);
+    Equal(world.SetPositions(many, [new Vec3(1, 1, 1), new Vec3(1, 1, 1), new Vec3(1, 1, 1)]).ToString(), "2", "one that is gone is left out");
+    world.ScalesOf(many, turned);
+    Near(turned[2].X, 1, "and reads as nothing: a scale of one");
+    // Turned by quaternions: kept as given, made length 1, the angles worked out of them.
+    var h = MathF.Sqrt(0.5f);
+    Equal(world.SetOrientations(many, [new Quat(0, 1, 0, 1), new Quat(0, 0, 0, 1), new Quat(0, 0, 0, 1)]).ToString(), "2", "the two alive");
+    var quats = new Quat[3];
+    world.OrientationsOf(many, quats);
+    Near(quats[0].Y, h, "made length 1");
+    Near(quats[2].W, 1, "the identity, for one that is gone");
+    Check(MathF.Abs(world.RotationOf(many[0]).Y - 90) < 0.05f, "and the angles follow (a quarter turn about Y is where they are least exact)");
+    var drawn = world.Debug.LineCount;
+    world.Debug.Line(new Vec3(0, 0, 0), new Vec3(1, 0, 0));
+    Check(world.Debug.LineCount > drawn, "a script draws with the scene's debug lines");
+    Check(world.SetOrientation(many[1], new Quat(h, 0, 0, h)), "one at a time");
+    Near(world.OrientationOf(many[1]).X, h, "kept");
+    world.Destroy(many[0]);
+    world.Destroy(many[1]);
+}
+{   // A field of many at once, as numbers: a Vec3 is three an entity, a bool one.
+    Entity[] two = [wheel, world.Create("No Spin")];
+    Equal(world.FieldWidth("Spin", "Axis").ToString(), "3", "a Vec3 is three numbers");
+    Equal(world.FieldWidth("Spin", "Nothing").ToString(), "0", "a field there is not");
+    var before = new float[6];
+    world.FieldFloats(two, "Spin", "Axis", before);
+    Equal(world.SetFieldFloats(two, "Spin", "Axis", [1, 2, 3, 4, 5, 6]).ToString(), "1", "only the one with a Spin");
+    Equal(world.FieldJson(wheel, "Spin", "Axis").Replace(" ", ""), "[1,2,3]", "written where it is");
+    var axes = new float[6];
+    world.FieldFloats(two, "Spin", "Axis", axes);
+    Near(axes[4], 0, "nothing for one without it");
+    var started = new int[2];
+    world.FieldInts(two, "Spin", "Started", started);
+    Equal($"{started[0]},{started[1]}", "1,0", "a bool as 1 and 0");
+    world.SetFieldFloats(two, "Spin", "Axis", before);
+    world.Destroy(two[1]);
+}
 Check(world.ToJson().Contains("\"Spin\""), "and it is in the scene's file");
 
 // One script reading and writing another's, on another entity.
@@ -272,6 +343,28 @@ var laps = world.FieldJson(wheel, "Spin", "Laps");
 host.Dispose();
 Frames(2);
 Equal(world.FieldJson(wheel, "Spin", "Laps"), laps, "with the host gone nothing runs, and the data is still the scene's");
+
+// ---- a script's meshes, of attributes of its own ------------------------------------------------------------------
+
+{
+    var blade = world.Meshes.Create("blade", 3, [
+        MeshAttribute.Floats("POSITION", 3, [0, 0, 0, 1, 0, 0, 0, 1, 0]),
+        MeshAttribute.Floats("WIND", 1, [0f, 0.5f, 1f]),
+    ], [0, 1, 2], "POSITION; WIND");
+    Equal(blade, "$script/blade", "a script's mesh is named for it");
+    var grass = world.Create("Grass");
+    world.Meshes.Give(grass, blade);
+    Equal(world.FieldJson(grass, "Mesh", "mesh"), "\"$script/blade\"", "and given to an entity");
+    var read = world.Meshes.Read(blade);
+    Equal(read.VertexCount, 3, "read back: its vertices");
+    Near(read.Find("WIND")?.AsFloats()[2] ?? -1, 1f, "its own attribute");
+    var coloured = world.Meshes.WithAttributes("$cube", "coloured cube", [MeshAttribute.Floats("COLOR", 3, new float[world.Meshes.Read("$cube").VertexCount * 3])]);
+    Equal(world.Meshes.Read(coloured).Attributes.Count, 4, "a default mesh, with an attribute more");
+    Equal(world.Meshes.Read(world.Meshes.WithoutAttributes(coloured, "bare cube", "COLOR", "UV")).Attributes.Count, 2, "and fewer");
+    try { world.Meshes.Create("wrong", 3, [MeshAttribute.Floats("WIND", 1, [0f])]); Check(false, "a mesh without POSITION is refused"); }
+    catch (EngineException e) { Check(e.Message.Contains("WIND") || e.Message.Contains("POSITION"), $"and says why: {e.Message}"); }
+    Frames(2);
+}
 
 Console.WriteLine(failures == 0 ? "Koral.Engine: all checks passed" : $"Koral.Engine: {failures} checks FAILED");
 return failures == 0 ? 0 : 1;

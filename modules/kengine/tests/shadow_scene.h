@@ -66,8 +66,15 @@ namespace shadow
         Wire(doc, "shadow target", "shadow", "framebuffer");
         Set(doc, "shadow", "depthStencilState", "{\"depthTestEnable\": true, \"depthWriteEnable\": true, \"depthCompareOp\": \"eLess\", \"maxDepth\": 1}");
         Wire(doc, "light camera", "shadow", "param.light");
+        // A draw for each entity with the pipeline's component and a Mesh: its mesh, and its own scale and offset.
+        Node(doc, "ForEach", "casters", 600, 400);
+        Set(doc, "casters", "component", "\"shadow\"");
+        Set(doc, "casters", "with", "[\"Mesh\"]");
         Node(doc, "Draw", "cast", 600, 300);
         Wire(doc, "shadow", "cast", "pipeline");
+        Wire(doc, "casters", "cast", "mesh", "Mesh.mesh");
+        Wire(doc, "casters", "cast", "push.scale", "field.scale");
+        Wire(doc, "casters", "cast", "push.offset", "field.offset");
 
         // What is shown: the ground, lit or not.
         Node(doc, "Image", "canvas", 0, 600);
@@ -90,8 +97,14 @@ namespace shadow
         Wire(doc, "target", "lit", "framebuffer");
         Wire(doc, "light camera", "lit", "param.light");
         Wire(doc, "shadow view", "lit", "param.shadowMap");
+        Node(doc, "ForEach", "grounds", 600, 800);
+        Set(doc, "grounds", "component", "\"lit\"");
+        Set(doc, "grounds", "with", "[\"Mesh\"]");
         Node(doc, "Draw", "draw", 600, 700);
         Wire(doc, "lit", "draw", "pipeline");
+        Wire(doc, "grounds", "draw", "mesh", "Mesh.mesh");
+        Wire(doc, "grounds", "draw", "push.scale", "field.scale");
+        Wire(doc, "grounds", "draw", "push.offset", "field.offset");
 
         Node(doc, "Screen", "screen", 600, 600);
         Node(doc, "Blit", "show", 800, 600);

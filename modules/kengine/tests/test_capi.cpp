@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cmath>
 
 #include <cstring>
 #include <string>
@@ -110,6 +111,11 @@ namespace {
 }
 
 TEST_F(CApiTest, EntitiesAndComponentsByHandle) {
+    // Run on its own, the scene's scripts read its own window's keys and mouse.
+    EXPECT_EQ(reinterpret_cast<kor::Input*>(kengine_script_input(doc)), &scene->SceneInput());
+    // And draw their debug lines with the scene's.
+    EXPECT_EQ(reinterpret_cast<kor::DebugDraw*>(kengine_debug(doc)), &scene->SceneDebug());
+
     EXPECT_EQ(kecs_entity_count(world), 0u);
     const KecsEntity lamp = kengine_entity_create(doc, "Lamp");
     EXPECT_TRUE(kecs_alive(world, lamp));
@@ -167,6 +173,26 @@ TEST_F(CApiTest, EntitiesAndComponentsByHandle) {
     EXPECT_TRUE(kecs_position(world, child, read));
     EXPECT_FLOAT_EQ(read[0], -5.f) << "at the middle of the world: half way back, in its parent's terms";
     EXPECT_FALSE(kecs_position(world, none, read));
+
+    // Turned by a quaternion, x, y, z, w: kept as given, made length 1; many at once, four floats each.
+    const float quarter[4] { 0, 1, 0, 1 };
+    EXPECT_TRUE(kecs_set_orientation(world, lamp, quarter));
+    float turn[4] {};
+    EXPECT_TRUE(kecs_orientation(world, lamp, turn));
+    EXPECT_FLOAT_EQ(turn[1], std::sqrt(0.5f));
+    EXPECT_FLOAT_EQ(turn[3], std::sqrt(0.5f));
+    EXPECT_TRUE(kecs_rotation(world, lamp, read));
+    EXPECT_NEAR(read[1], 90.f, 0.05f) << "the angles worked out of it";
+    const KecsEntity both[3] { lamp, child, none };
+    const float turns[12] { 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0 };
+    EXPECT_EQ(kecs_set_orientations(world, both, 3, turns), 2u) << "the one that is not alive is left out";
+    float back[12] {};
+    EXPECT_EQ(kecs_orientations(world, both, 3, back), 2u);
+    EXPECT_FLOAT_EQ(back[3], 1.f) << "unturned";
+    EXPECT_FLOAT_EQ(back[4], 1.f) << "half a turn about X";
+    EXPECT_FLOAT_EQ(back[11], 1.f) << "the identity, for one not alive";
+    EXPECT_FALSE(kecs_orientation(world, none, turn));
+    EXPECT_TRUE(kecs_set_orientation(world, child, std::array<float, 4> { 0, 0, 0, 1 }.data()));
     EXPECT_TRUE(kecs_set_position(world, lamp, std::array<float, 3> {}.data()));
     EXPECT_TRUE(kecs_set_scale(world, lamp, std::array<float, 3> { 1, 1, 1 }.data()));
 
@@ -265,4 +291,60 @@ TEST_F(CApiTest, AScriptIsAComponentWithFunctionsCalledOnIt) {
     EXPECT_EQ(kengine_node_resource(doc, "nothing", nullptr), nullptr);
     EXPECT_EQ(kengine_document(nullptr), nullptr);
     EXPECT_EQ(kengine_script_register(doc, "", 4, 4, nullptr, 0, nullptr), KECS_NO_COMPONENT);
+}
+
+// A script's mesh, of attributes of its own, made through the C interface: given to an entity by its name, read back as
+// it was made, and copied with an attribute more, or fewer.
+TEST_F(CApiTest, AScriptMakesMeshesOfItsOwnAttributes) {
+    const float positions[] { 0, 0, 0, 1, 0, 0, 0, 1, 0 };
+    const float wind[] { 0.f, 0.5f, 1.f };
+    const uint32_t indices[] { 0, 1, 2 };
+    const KengineAttribute attributes[] {
+        { "POSITION", KENGINE_ATTRIBUTE_FLOAT, 3, positions },
+        { "WIND", KENGINE_ATTRIBUTE_FLOAT, 1, wind },
+    };
+    const char* made = kengine_mesh_create(doc, "blade", 3, attributes, 2, indices, 3, "POSITION; WIND");
+    ASSERT_NE(made, nullptr) << kengine_last_error();
+    EXPECT_STREQ(made, "$script/blade");
+    const std::string id = made;
+
+    const KecsEntity entity = kengine_entity_create(doc, "Grass");
+    kecs_add(world, entity, kecs_component_find(world, "Mesh"), nullptr);
+    ASSERT_TRUE(kengine_field_set_json(doc, entity, "Mesh", "mesh", ("\"" + id + "\"").c_str())) << kengine_last_error();
+    EXPECT_STREQ(kengine_field_json(doc, entity, "Mesh", "mesh"), ("\"" + id + "\"").c_str());
+
+    EXPECT_EQ(kengine_mesh_vertex_count(doc, id.c_str()), 3u);
+    ASSERT_EQ(kengine_mesh_attribute_count(doc, id.c_str()), 2u);
+    KengineAttribute read {};
+    ASSERT_TRUE(kengine_mesh_attribute(doc, id.c_str(), 1, &read)) << kengine_last_error();
+    EXPECT_STREQ(read.semantic, "WIND");
+    EXPECT_EQ(read.count, 1u);
+    EXPECT_EQ(static_cast<const float*>(read.data)[2], 1.f);
+    uint32_t back[3] {};
+    EXPECT_EQ(kengine_mesh_indices(doc, id.c_str(), back, 3), 3u);
+    EXPECT_EQ(back[2], 2u);
+
+    // The same, with a colour more: any mesh, a default one too.
+    const float colors[] { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+    const KengineAttribute color { "COLOR", KENGINE_ATTRIBUTE_FLOAT, 3, colors };
+    const char* coloured = kengine_mesh_with_attributes(doc, id.c_str(), "coloured blade", &color, 1, nullptr);
+    ASSERT_NE(coloured, nullptr) << kengine_last_error();
+    const std::string colouredId = coloured;
+    EXPECT_EQ(kengine_mesh_attribute_count(doc, colouredId.c_str()), 3u);
+    const char* bare = kengine_mesh_without_attributes(doc, colouredId.c_str(), "bare blade", "WIND COLOR");
+    ASSERT_NE(bare, nullptr) << kengine_last_error();
+    EXPECT_EQ(kengine_mesh_attribute_count(doc, bare), 1u);
+    std::vector<float> cubeWind(24 * 1, 0.25f);
+    const uint32_t cubeVertices = kengine_mesh_vertex_count(doc, "$cube");
+    ASSERT_GT(cubeVertices, 0u) << kengine_last_error();
+    cubeWind.resize(cubeVertices, 0.25f);
+    const KengineAttribute windy { "WIND", KENGINE_ATTRIBUTE_FLOAT, 1, cubeWind.data() };
+    ASSERT_NE(kengine_mesh_with_attributes(doc, "$cube", "windy cube", &windy, 1, "POSITION NORMAL UV; WIND"), nullptr) << kengine_last_error();
+    EXPECT_EQ(kengine_mesh_attribute_count(doc, "$script/windy cube"), 4u);
+
+    // What is no mesh is refused, and says why.
+    const KengineAttribute wrong { "WIND", KENGINE_ATTRIBUTE_FLOAT, 9, wind };
+    EXPECT_EQ(kengine_mesh_create(doc, "wrong", 3, &wrong, 1, nullptr, 0, nullptr), nullptr);
+    EXPECT_NE(std::string(kengine_last_error()).find("1 to 4"), std::string::npos) << kengine_last_error();
+    Frame();
 }

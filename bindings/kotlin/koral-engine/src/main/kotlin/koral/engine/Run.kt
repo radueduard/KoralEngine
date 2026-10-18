@@ -17,6 +17,9 @@ import koral.WindowSettings
  * `--classes <dir>` where the scripts' compiled classes are; and, to have a saved script built and loaded again,
  * `--sources <dir>` with `--compile <command>` (the command's words separated by spaces).
  */
+private fun ofThis(directory: Path?, folder: Path): Boolean =
+    directory == null || runCatching { Files.isSameFile(directory, folder) }.getOrDefault(directory.toAbsolutePath().normalize() == folder.normalize())
+
 fun run(args: Array<String>) {
     var project: Path? = null
     var edit = false
@@ -43,7 +46,7 @@ fun run(args: Array<String>) {
     App().use { app ->
         app.loadLibrary(EngineLibrary.path.toString())
         val title = folder.fileName.toString()
-        val scene = if (edit) app.open("Editor", WindowSettings(title = "Koral Engine: $title", width = 1600, height = 950), SceneArgs().with("project", folder))
+        val scene = if (edit) app.open("Editor", WindowSettings(title = "Koral Engine: $title", width = 1600, height = 950), SceneArgs().with("project", folder).with("scripts", folder))
                     else app.open("Play", WindowSettings(title = title), SceneArgs().with("project", folder))
         var world: World? = null
         var scripts: ScriptHost? = null
@@ -53,7 +56,9 @@ fun run(args: Array<String>) {
             if (world == null || !world.isCurrentFor(scene)) {
                 scripts?.close()
                 world = World.of(scene)
-                scripts = world?.let { ScriptHost(it, scriptClasses, sources, compile) }
+                // This project's scripts, in this project's scenes only: another the editor opened has scripts of its
+                // own, or none — and the editor hands one with scripts over to its own runner.
+                scripts = world?.takeIf { ofThis(it.projectDirectory, folder) }?.let { ScriptHost(it, scriptClasses, sources, compile) }
                 scripts?.load()
             }
             scripts?.poll()

@@ -355,9 +355,17 @@ namespace kecs
         [[nodiscard]] Vec3 PositionOf(Entity entity) const;
         /** @brief How it is turned, relative to what it is under: Euler angles, in degrees. */
         [[nodiscard]] Vec3 RotationOf(Entity entity) const;
+        /**
+         * @brief How it is turned, as a quaternion: what its matrix is made with. Set as Euler angles, it is theirs; set
+         *        as a quaternion, it is that one, and RotationOf is worked out of it, so nothing is lost going round
+         *        by the angles.
+         */
+        [[nodiscard]] Quat OrientationOf(Entity entity) const;
         [[nodiscard]] Vec3 ScaleOf(Entity entity) const;
         bool SetPosition(Entity entity, const Vec3& position);
         bool SetRotation(Entity entity, const Vec3& degrees);
+        /** @brief Turns it by @p rotation, made length 1 (the identity, for one of length 0). */
+        bool SetOrientation(Entity entity, const Quat& rotation);
         bool SetScale(Entity entity, const Vec3& scale);
         /** @brief Its own transform as a matrix. */
         [[nodiscard]] Mat4 LocalMatrix(Entity entity) const;
@@ -370,6 +378,14 @@ namespace kecs
         bool SetWorldMatrix(Entity entity, const Mat4& matrix, bool position = true, bool rotation = true, bool scale = true);
         /** @brief Goes up whenever an entity is made, destroyed, renamed, moved in the hierarchy or transformed. */
         [[nodiscard]] std::uint64_t SceneVersion() const { return _sceneVersion; }
+        /**
+         * @brief Goes up whenever which entities there are, what each has switched on, what each is called or where each
+         *        is in the hierarchy changes: not when one moves, nor when what a component holds does. A list of entities
+         *        made of those is still right while it stays the same.
+         */
+        [[nodiscard]] std::uint64_t StructureVersion() const { return _structureVersion; }
+        /** @brief Goes up whenever a component of type @p id is added, removed, switched, or marked changed (Mutable, MarkChanged). */
+        [[nodiscard]] std::uint64_t ChangesOf(ComponentId id) const { return id < _changesOf.size() ? _changesOf[id] : 0; }
 
         // ---- observers ------------------------------------------------------------------------------------
 
@@ -442,6 +458,7 @@ namespace kecs
             std::vector<Entity> children;
             std::uint32_t depth = 0;
             Vec3 position, rotation, scale { 1.f, 1.f, 1.f };
+            Quat orientation;       ///< what rotation turns by, or what it was worked out of
             Mat4 world;
             bool dirty = true;      ///< world is stale; then so is every descendant's
             std::uint32_t rootSlot = 0;     ///< Where it is in _roots, while it is at the top.
@@ -459,6 +476,10 @@ namespace kecs
         mutable std::vector<Entity> _roots;     ///< In order, with a NullEntity where one has gone since it was last compacted.
         mutable std::size_t _rootHoles = 0;
         std::uint64_t _sceneVersion = 0;
+        std::uint64_t _structureVersion = 0;
+        std::vector<std::uint64_t> _changesOf;      ///< A count a component type: ChangesOf.
+
+        void Changed(ComponentId id) { if (id >= _changesOf.size()) _changesOf.resize(id + 1, 0); ++_changesOf[id]; }
     };
 
     /**

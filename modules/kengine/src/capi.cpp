@@ -2,14 +2,21 @@
 
 #include <koral_engine.h>
 
+#include <cstring>
 #include <format>
+#include <optional>
+#include <set>
 #include <string>
+#include <type_traits>
+#include <vector>
 
 #include <frameGraph.h>
 
 #include <kecs/json.h>
 #include <keditor/document.h>
 #include <keditor/play.h>
+#include <kgraph/meshes.h>
+#include <kscript/declarations.h>
 
 namespace {
     thread_local std::string t_error;
@@ -62,6 +69,13 @@ namespace {
 
 const char* kengine_last_error(void) { return t_error.c_str(); }
 
+const char* kengine_package_directory(void)
+{
+    static thread_local std::string text;
+    text = kscript::PackageDirectory().generic_string();
+    return text.c_str();
+}
+
 // ---- a scene -----------------------------------------------------------------------------------------------------
 
 KengineDocument* kengine_document(KoralFrameGraph* graph)
@@ -81,10 +95,33 @@ const char* kengine_document_json(KengineDocument* document)
     return Guarded([&] { return Keep(Doc(document).ToJson()); }, static_cast<const char*>(nullptr));
 }
 
+const char* kengine_project_directory(KengineDocument* document)
+{
+    return Guarded([&] { return Keep(Doc(document).ProjectDirectory().string()); }, static_cast<const char*>(nullptr));
+}
+
 bool kengine_playing(KengineDocument* document)
 {
     return Guarded([&] { const auto* scene = keditor::PlayScene::Of(Doc(document)); return scene && scene->Playing(); }, false);
 }
+KoralInput* kengine_script_input(KengineDocument* document)
+{
+    return Guarded([&] {
+        auto* scene = keditor::PlayScene::Of(Doc(document));
+        // (A KoralInput is a kor::Input, as Koral's own C interface hands one over.)
+        return scene ? reinterpret_cast<KoralInput*>(const_cast<kor::Input*>(&scene->ScriptInput())) : nullptr;
+    }, static_cast<KoralInput*>(nullptr));
+}
+
+KoralDebugDraw* kengine_debug(KengineDocument* document)
+{
+    return Guarded([&] {
+        auto* scene = keditor::PlayScene::Of(Doc(document));
+        // (A KoralDebugDraw is a kor::DebugDraw, as Koral's own C interface hands one over.)
+        return scene ? reinterpret_cast<KoralDebugDraw*>(&scene->SceneDebug()) : nullptr;
+    }, static_cast<KoralDebugDraw*>(nullptr));
+}
+
 bool kengine_set_playing(KengineDocument* document, const bool playing)
 {
     return Guarded([&] {
@@ -143,6 +180,7 @@ KoralResource* kengine_node_resource(KengineDocument* document, const char* node
     return Guarded([&]() -> KoralResource* {
         const auto resource = Doc(document).Runtime().ResourceOf(Text(node), output && *output ? output : "out");
         if (!resource || !resource->handle) { Fail(std::format("node '{}' has made no resource", Text(node))); return nullptr; }
+        Doc(document).ScriptUses(Text(node));   // what it writes there reaches every view of the graph
         return koral_resource_borrow(resource->handle);
     }, static_cast<KoralResource*>(nullptr));
 }
@@ -227,6 +265,37 @@ namespace {
     {
         return Guarded([&] { return value && (World(world).*write)(Of(entity), kecs::Vec3 { value[0], value[1], value[2] }); }, false);
     }
+    std::size_t Threes(KecsWorld* world, const KecsEntity* entities, const std::size_t count, float* out,
+                       kecs::Vec3 (kecs::World::*read)(kecs::Entity) const, const kecs::Vec3 otherwise)
+    {
+        return Guarded([&] {
+            if (count && (!entities || !out)) return std::size_t { 0 };
+            kecs::World& w = World(world);
+            std::size_t alive = 0;
+            for (std::size_t i = 0; i < count; ++i) {
+                const kecs::Entity entity = Of(entities[i]);
+                const kecs::Vec3 value = w.Alive(entity) ? (++alive, (w.*read)(entity)) : otherwise;
+                out[i * 3] = value.x; out[i * 3 + 1] = value.y; out[i * 3 + 2] = value.z;
+            }
+            return alive;
+        }, std::size_t { 0 });
+    }
+    std::size_t SetThrees(KecsWorld* world, const KecsEntity* entities, const std::size_t count, const float* values,
+                          bool (kecs::World::*write)(kecs::Entity, const kecs::Vec3&))
+    {
+        return Guarded([&] {
+            if (count && (!entities || !values)) return std::size_t { 0 };
+            kecs::World& w = World(world);
+            std::size_t alive = 0;
+            for (std::size_t i = 0; i < count; ++i) {
+                const kecs::Entity entity = Of(entities[i]);
+                if (!w.Alive(entity)) continue;
+                (w.*write)(entity, kecs::Vec3 { values[i * 3], values[i * 3 + 1], values[i * 3 + 2] });
+                ++alive;
+            }
+            return alive;
+        }, std::size_t { 0 });
+    }
     bool Sixteen(KecsWorld* world, const KecsEntity entity, float out[16], kecs::Mat4 (kecs::World::*read)(kecs::Entity) const)
     {
         return Guarded([&] {
@@ -243,6 +312,54 @@ bool kecs_scale(KecsWorld* world, const KecsEntity entity, float out[3]) { retur
 bool kecs_set_position(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetPosition); }
 bool kecs_set_rotation(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetRotation); }
 bool kecs_set_scale(KecsWorld* world, const KecsEntity entity, const float value[3]) { return SetThree(world, entity, value, &kecs::World::SetScale); }
+size_t kecs_positions(KecsWorld* world, const KecsEntity* entities, const size_t count, float* out) { return Threes(world, entities, count, out, &kecs::World::PositionOf, {}); }
+size_t kecs_rotations(KecsWorld* world, const KecsEntity* entities, const size_t count, float* out) { return Threes(world, entities, count, out, &kecs::World::RotationOf, {}); }
+size_t kecs_scales(KecsWorld* world, const KecsEntity* entities, const size_t count, float* out) { return Threes(world, entities, count, out, &kecs::World::ScaleOf, { 1.f, 1.f, 1.f }); }
+size_t kecs_set_positions(KecsWorld* world, const KecsEntity* entities, const size_t count, const float* values) { return SetThrees(world, entities, count, values, &kecs::World::SetPosition); }
+size_t kecs_set_rotations(KecsWorld* world, const KecsEntity* entities, const size_t count, const float* values) { return SetThrees(world, entities, count, values, &kecs::World::SetRotation); }
+size_t kecs_set_scales(KecsWorld* world, const KecsEntity* entities, const size_t count, const float* values) { return SetThrees(world, entities, count, values, &kecs::World::SetScale); }
+bool kecs_orientation(KecsWorld* world, const KecsEntity entity, float out[4])
+{
+    return Guarded([&] {
+        if (!out || !World(world).Alive(Of(entity))) return false;
+        const kecs::Quat q = World(world).OrientationOf(Of(entity));
+        out[0] = q.x; out[1] = q.y; out[2] = q.z; out[3] = q.w;
+        return true;
+    }, false);
+}
+bool kecs_set_orientation(KecsWorld* world, const KecsEntity entity, const float value[4])
+{
+    return Guarded([&] { return value && World(world).SetOrientation(Of(entity), kecs::Quat { value[0], value[1], value[2], value[3] }); }, false);
+}
+size_t kecs_orientations(KecsWorld* world, const KecsEntity* entities, const size_t count, float* out)
+{
+    return Guarded([&] {
+        if (count && (!entities || !out)) return std::size_t { 0 };
+        kecs::World& w = World(world);
+        std::size_t alive = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const kecs::Entity entity = Of(entities[i]);
+            const kecs::Quat q = w.Alive(entity) ? (++alive, w.OrientationOf(entity)) : kecs::Quat {};
+            out[i * 4] = q.x; out[i * 4 + 1] = q.y; out[i * 4 + 2] = q.z; out[i * 4 + 3] = q.w;
+        }
+        return alive;
+    }, std::size_t { 0 });
+}
+size_t kecs_set_orientations(KecsWorld* world, const KecsEntity* entities, const size_t count, const float* values)
+{
+    return Guarded([&] {
+        if (count && (!entities || !values)) return std::size_t { 0 };
+        kecs::World& w = World(world);
+        std::size_t alive = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const kecs::Entity entity = Of(entities[i]);
+            if (!w.Alive(entity)) continue;
+            w.SetOrientation(entity, kecs::Quat { values[i * 4], values[i * 4 + 1], values[i * 4 + 2], values[i * 4 + 3] });
+            ++alive;
+        }
+        return alive;
+    }, std::size_t { 0 });
+}
 bool kecs_local_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::LocalMatrix); }
 bool kecs_world_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::WorldMatrix); }
 bool kecs_set_world_matrix(KecsWorld* world, const KecsEntity entity, const float matrix[16])
@@ -349,6 +466,82 @@ bool kecs_is_enabled(KecsWorld* world, const KecsEntity entity, const uint32_t c
 {
     return Guarded([&] { return component < World(world).ComponentCount() && World(world).IsEnabled(Of(entity), component); }, false);
 }
+namespace {
+    /** A field of numbers, as many entities' of it are moved at once: which, how many numbers it is, and of what kind. */
+    struct NumberField {
+        const kecs::FieldDescription* field = nullptr;
+        std::uint32_t width = 0;
+        bool floats = false, oneByte = false;       // a "bool" is a byte; every other kind is four a number
+    };
+    NumberField NumbersOfField(kecs::World& world, const std::uint32_t component, const char* name)
+    {
+        NumberField found;
+        if (!name || component >= world.ComponentCount()) return found;
+        const kecs::FieldDescription* field = world.Describe(component).FindField(name);
+        if (!field) return found;
+        static const std::set<std::string, std::less<>> floats { "f32", "vec2", "vec3", "vec4", "quat", "mat4" };
+        static const std::set<std::string, std::less<>> ints { "i32", "u32", "bool32", "ivec2", "ivec3", "ivec4", "uvec2", "uvec3", "uvec4" };
+        if (field->type == "bool") return { field, 1, false, true };
+        if (floats.contains(field->type)) return { field, static_cast<std::uint32_t>(field->size / 4), true, false };
+        if (ints.contains(field->type)) return { field, static_cast<std::uint32_t>(field->size / 4), false, false };
+        return found;
+    }
+
+    template <typename T>
+    std::size_t Fields(KecsWorld* world, const KecsEntity* entities, const std::size_t count, const std::uint32_t component, const char* name,
+                       T* numbers, const bool write)
+    {
+        return Guarded([&] {
+            kecs::World& w = World(world);
+            const NumberField found = NumbersOfField(w, component, name);
+            if (!found.field || found.floats != std::is_same_v<T, float> || (count && (!entities || !numbers))) return std::size_t { 0 };
+            std::size_t had = 0;
+            for (std::size_t i = 0; i < count; ++i) {
+                const kecs::Entity entity = Of(entities[i]);
+                T* at = numbers + i * found.width;
+                auto* bytes = w.Alive(entity) ? static_cast<std::byte*>(const_cast<void*>(std::as_const(w).Get(entity, component))) : nullptr;
+                if (!bytes) {
+                    if (!write) std::fill(at, at + found.width, T {});
+                    continue;
+                }
+                std::byte* field = bytes + found.field->offset;
+                if (found.oneByte) {
+                    if (write) *reinterpret_cast<bool*>(field) = *at != 0;
+                    else *at = *reinterpret_cast<const bool*>(field) ? 1 : 0;
+                } else if (write) {
+                    std::memcpy(field, at, found.width * sizeof(T));
+                } else {
+                    std::memcpy(at, field, found.width * sizeof(T));
+                }
+                if (write) w.MarkChanged(entity, component);
+                ++had;
+            }
+            return had;
+        }, std::size_t { 0 });
+    }
+}
+
+uint32_t kecs_field_width(KecsWorld* world, const uint32_t component, const char* field)
+{
+    return Guarded([&] { return NumbersOfField(World(world), component, field).width; }, 0u);
+}
+size_t kecs_field_floats(KecsWorld* world, const KecsEntity* entities, const size_t count, const uint32_t component, const char* field, float* out)
+{
+    return Fields(world, entities, count, component, field, out, false);
+}
+size_t kecs_set_field_floats(KecsWorld* world, const KecsEntity* entities, const size_t count, const uint32_t component, const char* field, const float* values)
+{
+    return Fields(world, entities, count, component, field, const_cast<float*>(values), true);
+}
+size_t kecs_field_ints(KecsWorld* world, const KecsEntity* entities, const size_t count, const uint32_t component, const char* field, int32_t* out)
+{
+    return Fields(world, entities, count, component, field, out, false);
+}
+size_t kecs_set_field_ints(KecsWorld* world, const KecsEntity* entities, const size_t count, const uint32_t component, const char* field, const int32_t* values)
+{
+    return Fields(world, entities, count, component, field, const_cast<int32_t*>(values), true);
+}
+
 bool kecs_mark_changed(KecsWorld* world, const KecsEntity entity, const uint32_t component)
 {
     return Guarded([&] { return component < World(world).ComponentCount() && World(world).MarkChanged(Of(entity), component); }, false);
@@ -401,7 +594,7 @@ bool kengine_field_set_json(KengineDocument* document, const KecsEntity entity, 
 namespace {
     // The C entity and kecs's are the same two numbers, and are passed the same way: the functions are handed over as they are.
     static_assert(sizeof(KecsEntity) == sizeof(kecs::Entity) && alignof(KecsEntity) == alignof(kecs::Entity));
-    template <typename To, typename From> To Same(From function) { return reinterpret_cast<To>(function); }
+    template <typename To, typename From> To Same(From function) { return reinterpret_cast<To>(reinterpret_cast<void (*)()>(function)); }
 }
 
 uint32_t kengine_script_register(KengineDocument* document, const char* name, const size_t size, const size_t alignment,
@@ -442,4 +635,147 @@ uint32_t kengine_script_register(KengineDocument* document, const char* name, co
 void kengine_script_unregister(KengineDocument* document, const char* name)
 {
     Guarded([&] { Doc(document).Scripts().Unregister(Text(name)); return 0; }, 0);
+}
+
+// ---- meshes ---------------------------------------------------------------------------------------------------------
+
+namespace {
+    /** "POSITION UV; NORMAL TANGENT": a buffer to each ';', semantics apart by spaces or commas. */
+    std::vector<std::vector<std::string>> Buffers(const char* text)
+    {
+        std::vector<std::vector<std::string>> buffers(1);
+        std::string word;
+        const auto end = [&] { if (!word.empty()) buffers.back().push_back(std::exchange(word, {})); };
+        for (const char* c = text ? text : ""; *c; ++c) {
+            if (*c == ';') { end(); buffers.emplace_back(); }
+            else if (*c == ' ' || *c == ',' || *c == '\t' || *c == '\n') end();
+            else word += *c;
+        }
+        end();
+        std::erase_if(buffers, [](const auto& buffer) { return buffer.empty(); });
+        return buffers;
+    }
+
+    kgraph::VertexAttribute AttributeOf(const KengineAttribute& given, const std::uint32_t vertices)
+    {
+        if (!given.semantic || !*given.semantic) throw std::invalid_argument("an attribute needs its semantic: what it is, as a shader asks for it");
+        if (given.type > KENGINE_ATTRIBUTE_UINT) throw std::invalid_argument(std::format("'{}' has no type {}: 0 float, 1 int, 2 uint", given.semantic, given.type));
+        if (given.count < 1 || given.count > 4) throw std::invalid_argument(std::format("'{}' has {} numbers a vertex: 1 to 4", given.semantic, given.count));
+        if (!given.data && vertices > 0) throw std::invalid_argument(std::format("'{}' has no numbers", given.semantic));
+        kgraph::VertexAttribute attribute { given.semantic, static_cast<kgraph::AttributeType>(given.type), given.count, {} };
+        attribute.words.resize(static_cast<std::size_t>(given.count) * vertices);
+        if (!attribute.words.empty()) std::memcpy(attribute.words.data(), given.data, attribute.words.size() * 4);
+        return attribute;
+    }
+
+    const char* Made(KengineDocument* document, const char* name, const kgraph::VertexData& data)
+    {
+        if (!name || !*name) throw std::invalid_argument("a mesh needs a name");
+        const std::string id = std::format("$script/{}", name);
+        std::string error;
+        if (!Doc(document).Runtime().MakeMesh(id, data, &error)) { Fail(error); return nullptr; }
+        return Keep(id);
+    }
+
+    /**
+     * The mesh last read back on this thread, while it is the mesh the id is: what each question about it is answered
+     * from. Which mesh it was is kept weakly: a thread's own outlives the device, and must hold nothing of it.
+     */
+    thread_local std::string t_read;
+    thread_local std::weak_ptr<kgraph::Resource> t_readHeld;
+    thread_local std::optional<kgraph::VertexData> t_readData;
+
+    const kgraph::VertexData* Read(KengineDocument* document, const char* mesh)
+    {
+        auto& runtime = Doc(document).Runtime();
+        auto held = runtime.ResourceOf(Text(mesh));
+        while (held && held->replacedBy) held = held->replacedBy;
+        if (!held) { Fail(std::format("'{}' is no mesh", Text(mesh))); return nullptr; }
+        if (t_read != Text(mesh) || t_readHeld.lock() != held || !t_readData) {
+            std::string error;
+            t_readData = runtime.ReadMesh(Text(mesh), &error);
+            t_read = Text(mesh);
+            t_readHeld = held;
+            if (!t_readData) { Fail(error); return nullptr; }
+        }
+        return &*t_readData;
+    }
+}
+
+const char* kengine_mesh_create(KengineDocument* document, const char* name, const uint32_t vertex_count, const KengineAttribute* attributes,
+                                const uint32_t attribute_count, const uint32_t* indices, const uint32_t index_count, const char* buffers)
+{
+    return Guarded([&]() -> const char* {
+        kgraph::VertexData data;
+        data.vertexCount = vertex_count;
+        for (std::uint32_t i = 0; i < attribute_count; ++i) data.attributes.push_back(AttributeOf(attributes[i], vertex_count));
+        if (indices) data.indices.assign(indices, indices + index_count);
+        data.buffers = Buffers(buffers);
+        return Made(document, name, data);
+    }, static_cast<const char*>(nullptr));
+}
+
+const char* kengine_mesh_with_attributes(KengineDocument* document, const char* mesh, const char* name, const KengineAttribute* attributes,
+                                         const uint32_t attribute_count, const char* buffers)
+{
+    return Guarded([&]() -> const char* {
+        const kgraph::VertexData* read = Read(document, mesh);
+        if (!read) return nullptr;
+        kgraph::VertexData data = *read;
+        for (std::uint32_t i = 0; i < attribute_count; ++i) {
+            kgraph::VertexAttribute attribute = AttributeOf(attributes[i], data.vertexCount);
+            if (auto* own = data.Find(attribute.semantic)) *own = std::move(attribute);
+            else data.attributes.push_back(std::move(attribute));
+        }
+        if (buffers) data.buffers = Buffers(buffers);
+        return Made(document, name, data);
+    }, static_cast<const char*>(nullptr));
+}
+
+const char* kengine_mesh_without_attributes(KengineDocument* document, const char* mesh, const char* name, const char* semantics)
+{
+    return Guarded([&]() -> const char* {
+        const kgraph::VertexData* read = Read(document, mesh);
+        if (!read) return nullptr;
+        kgraph::VertexData data = *read;
+        for (const auto& buffer : Buffers(semantics))
+            for (const auto& semantic : buffer) {
+                std::erase_if(data.attributes, [&](const kgraph::VertexAttribute& a) { return a.semantic == semantic; });
+                for (auto& group : data.buffers) std::erase(group, semantic);
+            }
+        std::erase_if(data.buffers, [](const auto& group) { return group.empty(); });
+        return Made(document, name, data);
+    }, static_cast<const char*>(nullptr));
+}
+
+uint32_t kengine_mesh_vertex_count(KengineDocument* document, const char* mesh)
+{
+    return Guarded([&]() -> uint32_t { const auto* read = Read(document, mesh); return read ? read->vertexCount : 0u; }, 0u);
+}
+
+uint32_t kengine_mesh_attribute_count(KengineDocument* document, const char* mesh)
+{
+    return Guarded([&]() -> uint32_t { const auto* read = Read(document, mesh); return read ? static_cast<uint32_t>(read->attributes.size()) : 0u; }, 0u);
+}
+
+bool kengine_mesh_attribute(KengineDocument* document, const char* mesh, const uint32_t index, KengineAttribute* out)
+{
+    return Guarded([&] {
+        const auto* read = Read(document, mesh);
+        if (!read || !out) return false;
+        if (index >= read->attributes.size()) { Fail(std::format("'{}' has {} attributes", Text(mesh), read->attributes.size())); return false; }
+        const auto& attribute = read->attributes[index];
+        *out = { attribute.semantic.c_str(), static_cast<uint32_t>(attribute.type), attribute.count, attribute.words.data() };
+        return true;
+    }, false);
+}
+
+size_t kengine_mesh_indices(KengineDocument* document, const char* mesh, uint32_t* out, const size_t capacity)
+{
+    return Guarded([&]() -> size_t {
+        const auto* read = Read(document, mesh);
+        if (!read) return 0;
+        if (out) std::memcpy(out, read->indices.data(), std::min(capacity, read->indices.size()) * 4);
+        return read->indices.size();
+    }, static_cast<size_t>(0));
 }

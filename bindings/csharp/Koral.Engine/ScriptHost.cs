@@ -165,17 +165,34 @@ public sealed unsafe class ScriptHost : IDisposable
         private uint _component = Native.NoComponent;
         private readonly HashSet<Script.Hook> _reported = [];
 
+        /// <summary>Whether <paramref name="type"/> does something of its own in the hook called <paramref name="name"/>.</summary>
+        private static bool Overrides(Type type, string name, params Type[] parameters)
+        {
+            var method = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, parameters, null);
+            return method is null || (method.DeclaringType != typeof(Script) && method.DeclaringType != typeof(GraphicsScript));
+        }
+
         public bool Register()
         {
             _self = GCHandle.Alloc(this);
+            // Only what the class does: a hook it leaves as Script has it is not called at all — for thousands of entities a
+            // frame, a call each into a function that does nothing. Destroyed as well when anything is: it is when an entity's
+            // object goes. A script that is only data — fields, and no hook — is called for nothing, and costs nothing a frame.
             var callbacks = new KengineScriptCallbacks
             {
                 User = GCHandle.ToIntPtr(_self),
-                Created = &OnCreated, Enabled = &OnEnabled, Started = &OnStarted,
-                FixedUpdate = &OnFixedUpdate, Update = &OnUpdate, LateUpdate = &OnLateUpdate,
-                Prepare = typeof(GraphicsScript).IsAssignableFrom(type) ? &OnPrepare : null,
-                Disabled = &OnDisabled, Destroyed = &OnDestroyed,
+                Created = Overrides(type, "OnCreated") ? &OnCreated : null,
+                Enabled = Overrides(type, "OnEnabled") ? &OnEnabled : null,
+                Started = Overrides(type, "Start") ? &OnStarted : null,
+                FixedUpdate = Overrides(type, "FixedUpdate", typeof(float)) ? &OnFixedUpdate : null,
+                Update = Overrides(type, "Update", typeof(float)) ? &OnUpdate : null,
+                LateUpdate = Overrides(type, "LateUpdate", typeof(float)) ? &OnLateUpdate : null,
+                Prepare = typeof(GraphicsScript).IsAssignableFrom(type) && Overrides(type, "Prepare") ? &OnPrepare : null,
+                Disabled = Overrides(type, "OnDisabled") ? &OnDisabled : null,
             };
+            if (Overrides(type, "OnDestroyed") || callbacks.Created != null || callbacks.Enabled != null || callbacks.Started != null || callbacks.FixedUpdate != null
+                || callbacks.Update != null || callbacks.LateUpdate != null || callbacks.Prepare != null || callbacks.Disabled != null)
+                callbacks.Destroyed = &OnDestroyed;
             var names = new List<IntPtr>();
             try
             {
@@ -270,11 +287,17 @@ public sealed unsafe class ScriptHost : IDisposable
     private static readonly string[] GlobalUsings =
         ["System", "System.Collections.Generic", "System.Linq", "System.Numerics", "Koral", "Koral.Engine"];
 
-    private IEnumerable<string> SourceFiles() =>
-        !System.IO.Directory.Exists(Directory) ? [] :
-        System.IO.Directory.EnumerateFiles(Directory, "*.cs", SearchOption.AllDirectories)
-            .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
-            .Order(StringComparer.Ordinal);
+    /// <summary>The project's scripts, and the engine's package's: the Camera, the lights and the Sky every project has.</summary>
+    private IEnumerable<string> SourceFiles()
+    {
+        var package = Path.Combine(Native.PackageDirectory(), "scripts");
+        var own = !System.IO.Directory.Exists(Directory) ? [] :
+            System.IO.Directory.EnumerateFiles(Directory, "*.cs", SearchOption.AllDirectories)
+                .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
+                .Order(StringComparer.Ordinal).ToList();
+        if (own.Count == 0 || !System.IO.Directory.Exists(package)) return own;     // no scripts: nothing to run, the package's data being the engine's already
+        return System.IO.Directory.EnumerateFiles(package, "*.cs").Order(StringComparer.Ordinal).Concat(own);
+    }
 
     private string Snapshot()
     {

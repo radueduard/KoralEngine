@@ -120,12 +120,15 @@ internal class ScriptLayout private constructor(type: Class<out Script>) {
         for (p in properties) {
             val at = p.offset.toLong()
             fun f(i: Int) = data.get(JAVA_FLOAT_UNALIGNED, at + i * 4L)
+            // Numbers as they are, not boxed: a property a script, a script an entity, every frame.
+            when (p.type) {
+                "f32" -> { p.field.setFloat(script, f(0)); continue }
+                "f64" -> { p.field.setDouble(script, data.get(JAVA_DOUBLE_UNALIGNED, at)); continue }
+                "i32" -> { p.field.setInt(script, data.get(JAVA_INT_UNALIGNED, at)); continue }
+                "i64" -> { p.field.setLong(script, data.get(JAVA_LONG_UNALIGNED, at)); continue }
+                "bool" -> { p.field.setBoolean(script, data.get(JAVA_BYTE, at) != 0.toByte()); continue }
+            }
             val value: Any = when (p.type) {
-                "f32" -> f(0)
-                "f64" -> data.get(JAVA_DOUBLE_UNALIGNED, at)
-                "i32" -> data.get(JAVA_INT_UNALIGNED, at)
-                "i64" -> data.get(JAVA_LONG_UNALIGNED, at)
-                "bool" -> data.get(JAVA_BYTE, at) != 0.toByte()
                 "vec2" -> Vec2(f(0), f(1))
                 "vec3" -> Vec3(f(0), f(1), f(2))
                 "vec4" -> Vec4(f(0), f(1), f(2), f(3))
@@ -142,6 +145,13 @@ internal class ScriptLayout private constructor(type: Class<out Script>) {
         for (p in properties) {
             val at = p.offset.toLong()
             fun f(i: Int, v: Float) = data.set(JAVA_FLOAT_UNALIGNED, at + i * 4L, v)
+            when (p.type) {
+                "f32" -> { f(0, p.field.getFloat(script)); continue }
+                "f64" -> { data.set(JAVA_DOUBLE_UNALIGNED, at, p.field.getDouble(script)); continue }
+                "i32" -> { data.set(JAVA_INT_UNALIGNED, at, p.field.getInt(script)); continue }
+                "i64" -> { data.set(JAVA_LONG_UNALIGNED, at, p.field.getLong(script)); continue }
+                "bool" -> { data.set(JAVA_BYTE, at, if (p.field.getBoolean(script)) 1 else 0); continue }
+            }
             when (val value = p.field.get(script)) {
                 is Float -> f(0, value)
                 is Double -> data.set(JAVA_DOUBLE_UNALIGNED, at, value)

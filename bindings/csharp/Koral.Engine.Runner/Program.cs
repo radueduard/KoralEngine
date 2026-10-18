@@ -34,7 +34,7 @@ try
     app.LoadLibrary(EngineLibrary.Path);
     var title = Path.GetFileName(project);
     var scene = edit
-        ? app.Open("Editor", new WindowSettings { Title = $"Koral Engine: {title}", Extent = new UVec2(1600, 950) }, new SceneArgs().Set("project", project))
+        ? app.Open("Editor", new WindowSettings { Title = $"Koral Engine: {title}", Extent = new UVec2(1600, 950) }, new SceneArgs().Set("project", project).Set("scripts", project))
         : app.Open("Play", new WindowSettings { Title = title }, new SceneArgs().Set("project", project));
 
     World? world = null;
@@ -47,7 +47,10 @@ try
         {
             scripts?.Dispose();
             world = World.Of(scene);
-            scripts = world is null ? null : new ScriptHost(world, Path.Combine(project, "scripts"));
+            // This project's scripts, in this project's scenes only: another the editor opened has scripts of its own, or none.
+            var of = world?.ProjectDirectory;
+            var ours = of is null || Path.GetFullPath(of).TrimEnd(Path.DirectorySeparatorChar) == Path.GetFullPath(project).TrimEnd(Path.DirectorySeparatorChar);
+            scripts = world is null || !ours ? null : new ScriptHost(world, Path.Combine(project, "scripts"));
             scripts?.Load();
         }
         scripts?.Poll();

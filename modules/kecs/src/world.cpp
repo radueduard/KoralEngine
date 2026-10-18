@@ -144,6 +144,8 @@ namespace kecs
     {
         RequireStill("Reshape");
         if (id >= _types.size()) throw std::logic_error("kecs: no component type has that id");
+        ++_structureVersion;
+        Changed(id);
         ComponentDescription& current = *_types[id];
         if (newer.name.empty()) newer.name = current.name;
         if (newer.alignment == 0) newer.alignment = 1;
@@ -263,6 +265,8 @@ namespace kecs
         const std::size_t row = archetype.entities.size();
         if (row == archetype.capacity) Reserve(archetype, std::max<std::size_t>(archetype.capacity * 2, 16));
         archetype.entities.push_back(entity);
+        ++_structureVersion;
+        for (const ComponentId id : archetype.ids) Changed(id);
         for (auto& column : archetype.columns) {
             column.added[row] = column.changed[row] = _tick;
             // The bit may be left from a row that was here before.
@@ -274,6 +278,8 @@ namespace kecs
     void World::SwapRemove(Archetype& archetype, const std::uint32_t row)
     {
         // What was at @p row has been moved out or destroyed already: the last row takes its place.
+        ++_structureVersion;
+        for (const ComponentId id : archetype.ids) Changed(id);
         const std::size_t last = archetype.entities.size() - 1;
         for (auto& column : archetype.columns) {
             const bool lastDisabled = column.Disabled(last);
@@ -437,6 +443,7 @@ namespace kecs
         const Record& record = _records[entity.index];
         Column& column = record.archetype->columns[static_cast<std::size_t>(record.archetype->ColumnOf(id))];
         column.changed[record.row] = _tick;
+        Changed(id);    // given again: what it holds is another thing now
         if (existed) return;
         column.added[record.row] = _tick;
         // Copied: an observer may register another.
@@ -507,7 +514,11 @@ namespace kecs
         if (!record || !record->archetype) return false;
         const int column = record->archetype->ColumnOf(id);
         if (column < 0) return false;
-        SetDisabled(record->archetype->columns[static_cast<std::size_t>(column)], record->row, !enabled);
+        auto& switched = record->archetype->columns[static_cast<std::size_t>(column)];
+        if (switched.Disabled(record->row) == !enabled) return true;
+        SetDisabled(switched, record->row, !enabled);
+        ++_structureVersion;
+        Changed(id);
         return true;
     }
 
@@ -526,6 +537,7 @@ namespace kecs
         const int column = record->archetype->ColumnOf(id);
         if (column < 0) return false;
         record->archetype->columns[static_cast<std::size_t>(column)].changed[record->row] = _tick;
+        Changed(id);
         return true;
     }
 
@@ -614,7 +626,7 @@ namespace kecs
     {
         Node* node = NodeOf(entity);
         if (!node) return false;
-        if (node->name != name) { node->name = std::move(name); ++_sceneVersion; }
+        if (node->name != name) { node->name = std::move(name); ++_sceneVersion; ++_structureVersion; }
         return true;
     }
 
@@ -645,6 +657,7 @@ namespace kecs
         Node& node = _nodes[entity.index];
         if (node.parent.IsNull()) return;
         if (Node* above = NodeOf(node.parent)) std::erase(above->children, entity);
+        ++_structureVersion;
         node.parent = NullEntity;
         node.rootSlot = static_cast<std::uint32_t>(_roots.size());
         _roots.push_back(entity);
@@ -654,6 +667,7 @@ namespace kecs
     void World::Attach(const Entity entity, const Entity parent, const int index)
     {
         Node& node = _nodes[entity.index];
+        ++_structureVersion;
         // Out of the top first: a hole where it was, which costs nothing however many there are.
         _roots[node.rootSlot] = NullEntity;
         ++_rootHoles;
@@ -755,6 +769,7 @@ namespace kecs
 
     Vec3 World::PositionOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->position : Vec3 {}; }
     Vec3 World::RotationOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->rotation : Vec3 {}; }
+    Quat World::OrientationOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->orientation : Quat {}; }
     Vec3 World::ScaleOf(const Entity entity) const { const Node* node = NodeOf(entity); return node ? node->scale : Vec3 { 1.f, 1.f, 1.f }; }
 
     bool World::SetPosition(const Entity entity, const Vec3& position)
@@ -769,7 +784,16 @@ namespace kecs
     {
         Node* node = NodeOf(entity);
         if (!node) return false;
-        if (node->rotation != degrees) { node->rotation = degrees; MarkDirty(entity); ++_sceneVersion; }
+        if (node->rotation != degrees) { node->rotation = degrees; node->orientation = ToQuat(degrees); MarkDirty(entity); ++_sceneVersion; }
+        return true;
+    }
+
+    bool World::SetOrientation(const Entity entity, const Quat& rotation)
+    {
+        Node* node = NodeOf(entity);
+        if (!node) return false;
+        const Quat q = Normalize(rotation);
+        if (node->orientation != q) { node->orientation = q; node->rotation = ToEuler(q); MarkDirty(entity); ++_sceneVersion; }
         return true;
     }
 
@@ -784,14 +808,14 @@ namespace kecs
     Mat4 World::LocalMatrix(const Entity entity) const
     {
         const Node* node = NodeOf(entity);
-        return node ? Compose(node->position, node->rotation, node->scale) : Mat4 {};
+        return node ? ComposeUnit(node->position, node->orientation, node->scale) : Mat4 {};
     }
 
     const Mat4& World::WorldOf(const Entity entity) const
     {
         Node& node = _nodes[entity.index];
         if (node.dirty) {
-            const Mat4 local = Compose(node.position, node.rotation, node.scale);
+            const Mat4 local = ComposeUnit(node.position, node.orientation, node.scale);
             node.world = node.parent.IsNull() ? local : WorldOf(node.parent) * local;
             node.dirty = false;
         }
@@ -805,10 +829,11 @@ namespace kecs
         Node* node = NodeOf(entity);
         if (!node) return false;
         const Mat4 local = node->parent.IsNull() ? matrix : Inverse(WorldOf(node->parent)) * matrix;
-        Vec3 p, r, s;
+        Vec3 p, s;
+        Quat r;
         if (!Decompose(local, p, r, s)) return false;
         if (position) node->position = p;
-        if (rotation) node->rotation = r;
+        if (rotation) { node->orientation = r; node->rotation = ToEuler(r); }
         if (scale) node->scale = s;
         MarkDirty(entity);
         ++_sceneVersion;

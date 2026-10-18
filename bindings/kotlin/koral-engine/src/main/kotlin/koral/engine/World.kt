@@ -6,13 +6,48 @@ import java.lang.foreign.SegmentAllocator
 import java.lang.foreign.ValueLayout.JAVA_FLOAT
 import java.lang.foreign.ValueLayout.JAVA_INT
 import koral.Buffer
+import koral.DebugDraw
 import koral.Image
 import koral.Input
 import koral.Mat4
+import koral.Quat
 import koral.Resource
 import koral.Scene
+import koral.Vec2
 import koral.Vec3
+import koral.Vec4
 import koral.resourceFromHandle
+
+/**
+ * Entities kept where the engine reads them, for the calls that do the same to many at once ([World.rotationsOf],
+ * [World.floatsOf]): made once, from a list, and given again each frame — not a list copied for the engine every
+ * time. With room beside them for the numbers those calls are given and give back through, as many as the most asked.
+ */
+class Entities private constructor(entities: Collection<Entity>) : AbstractList<Entity>() {
+    override val size: Int = entities.size
+    internal val segment: MemorySegment = Arena.ofAuto().allocate(Native.ENTITY, maxOf(size, 1).toLong())
+    private var room: MemorySegment = Arena.ofAuto().allocate(JAVA_FLOAT, maxOf(size * 3L, 1L))
+
+    /** Room for [numbers] of four bytes: the same each time, made bigger when asked for more. */
+    internal fun room(numbers: Long): MemorySegment {
+        if (room.byteSize() < numbers * 4) room = Arena.ofAuto().allocate(JAVA_FLOAT, numbers)
+        return room
+    }
+
+    init {
+        entities.forEachIndexed { i, entity ->
+            segment.set(JAVA_INT, i * 8L, entity.index)
+            segment.set(JAVA_INT, i * 8L + 4, entity.generation)
+        }
+    }
+
+    override fun get(index: Int): Entity = Native.entity(segment.asSlice(index * 8L, 8))
+
+    companion object {
+        fun of(entities: Collection<Entity>) = Entities(entities)
+        fun of(vararg entities: Entity) = Entities(entities.toList())
+    }
+}
 
 /** An entity: a number, and which use of that number it is. Nothing until a [World] is asked about it. */
 data class Entity(val index: Int, val generation: Int) {
@@ -47,16 +82,41 @@ class World internal constructor(internal val document: MemorySegment) {
     var playing: Boolean
         get() = Native.kengine_playing.invokeExact(document) as Boolean
         set(value) { val ignored = Native.kengine_set_playing.invokeExact(document, value) as Boolean }
-    /** The keys, the mouse and the gamepads of the scene's window: what a script that is steered reads. */
-    val input: Input get() = scene?.input ?: throw EngineException("this world was not found through a scene: it has no input")
+    /**
+     * The keys, the mouse and the gamepads a script that is steered reads: the scene's window's — or, in the editor, the
+     * Game panel's, which has them while the pointer is over it or it was the last clicked.
+     */
+    val input: Input get() {
+        val native = Native.kengine_script_input.invokeExact(document) as MemorySegment
+        if (native != MemorySegment.NULL) return Input.of(native)
+        return scene?.input ?: throw EngineException("this world was not found through a scene: it has no input")
+    }
+
+    /**
+     * The lines and shapes a script draws to see what it does — contacts, normals, bounds: the scene's, shown over the
+     * editor's view of it. Drawn in [Script.update] they last the frame; [Script.fixedUpdate] runs 0 to 8 times a frame,
+     * so what is to be seen every frame is drawn in update, or given a duration.
+     */
+    val debug: DebugDraw get() {
+        val native = Native.kengine_debug.invokeExact(document) as MemorySegment
+        if (native != MemorySegment.NULL) return DebugDraw.of(native)
+        return scene?.debug ?: throw EngineException("this world was not found through a scene: it has no debug lines")
+    }
+
+    /** The folder of the project the scene is of; null for one that is in none. */
+    val projectDirectory: java.nio.file.Path?
+        get() = Native.text(Native.kengine_project_directory.invokeExact(document) as MemorySegment).takeIf { it.isNotEmpty() }?.let { java.nio.file.Path.of(it) }
 
     /** Whether this is still the scene's: an editor that opens another project starts a new one. */
     fun isCurrentFor(scene: Scene): Boolean = (Native.kengine_document.invokeExact(scene.graph.nativeHandle) as MemorySegment) == document
 
-    private inline fun <R> native(body: (Arena) -> R): R = Arena.ofConfined().use(body)
-    private fun id(arena: Arena, component: String): Int = Native.kecs_component_find.invokeExact(handle, arena.allocateFrom(component)) as Int
-    private fun known(arena: Arena, component: String): Int =
+    private inline fun <R> native(body: (SegmentAllocator) -> R): R = Scratch.use(body)
+    private fun id(arena: SegmentAllocator, component: String): Int = Native.kecs_component_find.invokeExact(handle, arena.allocateFrom(component)) as Int
+    private fun known(arena: SegmentAllocator, component: String): Int =
         id(arena, component).also { if (it == Native.NO_COMPONENT) throw EngineException("there is no component '$component'") }
+
+    /** The scene's meshes: made of any attributes a script likes, read back, and given to entities. */
+    val meshes: Meshes by lazy { Meshes(this) }
 
     // ---- entities -------------------------------------------------------------------------------------------
 
@@ -117,10 +177,95 @@ class World internal constructor(internal val document: MemorySegment) {
     fun setPosition(entity: Entity, position: Vec3): Boolean = setThree(Native.kecs_set_position, entity, position)
     fun setRotation(entity: Entity, degrees: Vec3): Boolean = setThree(Native.kecs_set_rotation, entity, degrees)
     fun setScale(entity: Entity, scale: Vec3): Boolean = setThree(Native.kecs_set_scale, entity, scale)
+    /**
+     * How it is turned, as a quaternion: what its matrix is made with. Set as one, it is kept as given (made length 1)
+     * and [rotationOf] is worked out of it, so a rotation integrated a step at a time is not rounded off by the angles.
+     */
+    fun orientationOf(entity: Entity): Quat = native { a ->
+        val out = a.allocate(16, 4)
+        if (Native.kecs_orientation.invokeExact(handle, Native.entity(a, entity), out) as Boolean)
+            Quat(out.get(JAVA_FLOAT, 0), out.get(JAVA_FLOAT, 4), out.get(JAVA_FLOAT, 8), out.get(JAVA_FLOAT, 12)) else Quat()
+    }
+    fun setOrientation(entity: Entity, rotation: Quat): Boolean = native { a ->
+        val given = a.allocate(16, 4)
+        given.set(JAVA_FLOAT, 0, rotation.x); given.set(JAVA_FLOAT, 4, rotation.y); given.set(JAVA_FLOAT, 8, rotation.z); given.set(JAVA_FLOAT, 12, rotation.w)
+        Native.kecs_set_orientation.invokeExact(handle, Native.entity(a, entity), given) as Boolean
+    }
     /** Its own transform, as a matrix. */
     fun localMatrix(entity: Entity): Mat4 = sixteen(Native.kecs_local_matrix, entity)
     /** Where it is in the world: the transforms of everything above it, and its own. */
     fun worldMatrix(entity: Entity): Mat4 = sixteen(Native.kecs_world_matrix, entity)
+    // Of many at once: three floats an entity, one after another in the order of [entities] — what a script that
+    // moves thousands does in two calls a frame, not two an entity. Pass the array back in each frame: it is made only
+    // when it is not there or too small. One that is not alive reads as zeros (a scale as ones) and is not set.
+
+    private fun threes(read: java.lang.invoke.MethodHandle, entities: Entities, into: FloatArray?, width: Int = 3): FloatArray {
+        val out = if (into != null && into.size >= entities.size * width) into else FloatArray(entities.size * width)
+        val room = entities.room(entities.size.toLong() * width)
+        read.invokeExact(handle, entities.segment, entities.size.toLong(), room) as Long
+        MemorySegment.copy(room, JAVA_FLOAT, 0L, out, 0, entities.size * width)
+        return out
+    }
+    private fun setThrees(write: java.lang.invoke.MethodHandle, entities: Entities, values: FloatArray, width: Int = 3): Int {
+        require(values.size >= entities.size * width) { "$width floats an entity: ${entities.size * width} of them, not ${values.size}" }
+        val room = entities.room(entities.size.toLong() * width)
+        MemorySegment.copy(values, 0, room, JAVA_FLOAT, 0L, entities.size * width)
+        return (write.invokeExact(handle, entities.segment, entities.size.toLong(), room) as Long).toInt()
+    }
+    fun positionsOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_positions, entities, into)
+    fun rotationsOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_rotations, entities, into)
+    fun scalesOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_scales, entities, into)
+    /** How many were alive, and so set. */
+    fun setPositions(entities: Entities, values: FloatArray): Int = setThrees(Native.kecs_set_positions, entities, values)
+    fun setRotations(entities: Entities, values: FloatArray): Int = setThrees(Native.kecs_set_rotations, entities, values)
+    fun setScales(entities: Entities, values: FloatArray): Int = setThrees(Native.kecs_set_scales, entities, values)
+    /** Their quaternions, four floats an entity (x, y, z, w); one not alive reads as the identity. */
+    fun orientationsOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_orientations, entities, into, 4)
+    fun setOrientations(entities: Entities, values: FloatArray): Int = setThrees(Native.kecs_set_orientations, entities, values, 4)
+
+    // A field of a component, of many at once: its numbers, [fieldWidth] of them an entity — 1 for a Float, 3 for a
+    // Vec3, 16 for a Mat4 — one entity's after another. Floats for a field of them, Ints for one of whole numbers or
+    // true or false (1 and 0). One without the component reads as zeros and is not set; each setter says how many had it.
+
+    /** How many numbers [field] of [component] is an entity; 0 for one there is not, or not of numbers. */
+    fun fieldWidth(component: String, field: String): Int = native { a ->
+        val id = id(a, component)
+        if (id == Native.NO_COMPONENT) 0 else Native.kecs_field_width.invokeExact(handle, id, a.allocateFrom(field)) as Int
+    }
+    private fun fieldCall(entities: Entities, component: String, field: String, call: java.lang.invoke.MethodHandle, wide: (Int) -> Unit, move: (MemorySegment, Int) -> Unit): Long =
+        native { a ->
+            val id = known(a, component)
+            val width = Native.kecs_field_width.invokeExact(handle, id, a.allocateFrom(field)) as Int
+            if (width == 0) throw EngineException("'$component' has no field '$field' of numbers")
+            wide(width)
+            val room = entities.room(entities.size.toLong() * width)
+            move(room, width)
+            call.invokeExact(handle, entities.segment, entities.size.toLong(), id, a.allocateFrom(field), room) as Long
+        }
+    /** Pass the array back in each frame: it is made only when it is not there or too small. */
+    fun floatsOf(entities: Entities, component: String, field: String, into: FloatArray? = null): FloatArray {
+        var out = into ?: FloatArray(0)
+        var wide = 1
+        fieldCall(entities, component, field, Native.kecs_field_floats, { width -> wide = width; if (out.size < entities.size * width) out = FloatArray(entities.size * width) }) { _, _ -> }
+        MemorySegment.copy(entities.room(0), JAVA_FLOAT, 0L, out, 0, entities.size * wide)     // what the call left in the room
+        return out
+    }
+    fun setFloats(entities: Entities, component: String, field: String, values: FloatArray): Int =
+        fieldCall(entities, component, field, Native.kecs_set_field_floats, { width ->
+            require(values.size >= entities.size * width) { "$width numbers an entity: ${entities.size * width} of them, not ${values.size}" }
+        }) { room, width -> MemorySegment.copy(values, 0, room, JAVA_FLOAT, 0L, entities.size * width) }.toInt()
+    fun intsOf(entities: Entities, component: String, field: String, into: IntArray? = null): IntArray {
+        var out = into ?: IntArray(0)
+        var wide = 1
+        fieldCall(entities, component, field, Native.kecs_field_ints, { width -> wide = width; if (out.size < entities.size * width) out = IntArray(entities.size * width) }) { _, _ -> }
+        MemorySegment.copy(entities.room(0), JAVA_INT, 0L, out, 0, entities.size * wide)
+        return out
+    }
+    fun setInts(entities: Entities, component: String, field: String, values: IntArray): Int =
+        fieldCall(entities, component, field, Native.kecs_set_field_ints, { width ->
+            require(values.size >= entities.size * width) { "$width numbers an entity: ${entities.size * width} of them, not ${values.size}" }
+        }) { room, width -> MemorySegment.copy(values, 0, room, JAVA_INT, 0L, entities.size * width) }.toInt()
+
     /** Places it in the world, by changing its own transform. */
     fun setWorldMatrix(entity: Entity, matrix: Mat4): Boolean = native { a ->
         val given = a.allocate(64, 4)
@@ -176,15 +321,32 @@ class World internal constructor(internal val document: MemorySegment) {
         val ok = Native.kengine_field_set_json.invokeExact(document, Native.entity(a, entity), a.allocateFrom(component), a.allocateFrom(field), a.allocateFrom(json)) as Boolean
         if (!ok) throw EngineException(Native.lastError)
     }
-    /** Sets a number field. */
-    fun set(entity: Entity, component: String, field: String, value: Number) = setJson(entity, component, field, value.toString())
-    fun set(entity: Entity, component: String, field: String, value: Boolean) = setJson(entity, component, field, value.toString())
+    /**
+     * Sets a field to [value], whatever a field can be: a number, true or false, a [Vec2], [Vec3], [Vec4], [Quat] or
+     * [Mat4], an [Entity], a node's id for a resource (as [setResource]), or null for none.
+     */
+    fun set(entity: Entity, component: String, field: String, value: Any?) = setJson(entity, component, field, jsonOf(value))
     /** Sets a vector field, component by component. */
     fun setVector(entity: Entity, component: String, field: String, vararg values: Float) =
         setJson(entity, component, field, values.joinToString(",", "[", "]"))
     /** Gives a resource field the output of a node, by the node's id; or nothing, with null. */
     fun setResource(entity: Entity, component: String, field: String, node: String?) =
         setJson(entity, component, field, if (node == null) "null" else "\"" + node.replace("\\", "\\\\").replace("\"", "\\\"") + "\"")
+
+    /** A field's value as the engine reads it: what [fieldJson] gives back. */
+    private fun jsonOf(value: Any?): String = when (value) {
+        null -> "null"
+        is Number, is Boolean -> value.toString()
+        is Vec2 -> numbers(value.x, value.y)
+        is Vec3 -> numbers(value.x, value.y, value.z)
+        is Vec4 -> numbers(value.x, value.y, value.z, value.w)
+        is Quat -> numbers(value.x, value.y, value.z, value.w)
+        is Mat4 -> numbers(*FloatArray(16) { value[it / 4, it % 4] })     // as a script's Mat4 property is stored
+        is Entity -> if (value.isNull) "null" else "{\"entity\":${value.index},\"generation\":${value.generation}}"
+        is String -> "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+        else -> throw IllegalArgumentException("a field is a number, true or false, a vector, a Quat, a Mat4, an Entity or a node's id: not a ${value.javaClass.simpleName}")
+    }
+    private fun numbers(vararg values: Float) = values.joinToString(",", "[", "]")
 
     /**
      * What a script on [entity] holds now, as an object of its class: read, not kept. Null when the entity has none.
@@ -210,7 +372,7 @@ class World internal constructor(internal val document: MemorySegment) {
         true
     }
 
-    private fun dataOf(a: Arena, entity: Entity, layout: ScriptLayout): MemorySegment? {
+    private fun dataOf(a: SegmentAllocator, entity: Entity, layout: ScriptLayout): MemorySegment? {
         val id = id(a, layout.name)
         if (id == Native.NO_COMPONENT) return null
         val data = Native.kecs_get.invokeExact(handle, Native.entity(a, entity), id) as MemorySegment

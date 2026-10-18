@@ -172,7 +172,8 @@ base class is `Script` ("add a script to an entity"), and graphics scripts deriv
 
 ### Choosing entities: tags and disabled components
 
-A command node runs on the entities that have its pipeline's generated component. Tags narrow that down:
+A command node runs once an element of the ForEach its per-draw inputs are wired from: a ForEach of a component
+(`Mesh`, or the pipeline's generated one), and tags narrow that down:
 
 - **Tags** are components with no data. A node can require tags and exclude tags, for example "has
   `Visible`, not `Hidden`".

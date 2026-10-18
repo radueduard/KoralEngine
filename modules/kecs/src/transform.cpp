@@ -13,8 +13,6 @@ namespace kecs
     namespace {
         constexpr float Radians = 3.14159265358979323846f / 180.f;
 
-        struct Quat { float x, y, z, w; };
-
         Quat FromEuler(const Vec3& radians)
         {
             const float cx = std::cos(radians.x * 0.5f), cy = std::cos(radians.y * 0.5f), cz = std::cos(radians.z * 0.5f);
@@ -91,9 +89,26 @@ namespace kecs
         return out;
     }
 
-    Mat4 Compose(const Vec3& position, const Vec3& rotationDegrees, const Vec3& scale)
+    Quat ToQuat(const Vec3& rotationDegrees) { return FromEuler({ rotationDegrees.x * Radians, rotationDegrees.y * Radians, rotationDegrees.z * Radians }); }
+
+    Vec3 ToEuler(const Quat& rotation)
     {
-        const Quat q = FromEuler({ rotationDegrees.x * Radians, rotationDegrees.y * Radians, rotationDegrees.z * Radians });
+        const Vec3 radians = EulerAngles(Normalize(rotation));
+        return { radians.x / Radians, radians.y / Radians, radians.z / Radians };
+    }
+
+    Quat Normalize(const Quat& q)
+    {
+        const float size = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+        if (!(size > 0.f)) return {};
+        return { q.x / size, q.y / size, q.z / size, q.w / size };
+    }
+
+    Mat4 Compose(const Vec3& position, const Vec3& rotationDegrees, const Vec3& scale) { return ComposeUnit(position, ToQuat(rotationDegrees), scale); }
+    Mat4 ComposeQuat(const Vec3& position, const Quat& rotation, const Vec3& scale) { return ComposeUnit(position, Normalize(rotation), scale); }
+
+    Mat4 ComposeUnit(const Vec3& position, const Quat& q, const Vec3& scale)
+    {
         const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z, xz = q.x * q.z, xy = q.x * q.y, yz = q.y * q.z;
         const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
         Mat4 out;
@@ -105,6 +120,14 @@ namespace kecs
     }
 
     bool Decompose(const Mat4& m, Vec3& position, Vec3& rotationDegrees, Vec3& scale)
+    {
+        Quat q;
+        if (!Decompose(m, position, q, scale)) return false;
+        rotationDegrees = ToEuler(q);
+        return true;
+    }
+
+    bool Decompose(const Mat4& m, Vec3& position, Quat& rotation, Vec3& scale)
     {
         position = { m.At(3, 0), m.At(3, 1), m.At(3, 2) };
         float c[3][3];
@@ -120,11 +143,7 @@ namespace kecs
         if (c[0][0] * cross[0] + c[0][1] * cross[1] + c[0][2] * cross[2] < 0.f) { scale.x = -scale.x; length[0] = -length[0]; }
         for (int column = 0; column < 3; ++column)
             for (int row = 0; row < 3; ++row) c[column][row] /= length[column];
-        Quat q = FromColumns(c);
-        const float size = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
-        if (size > 0.f) { q.x /= size; q.y /= size; q.z /= size; q.w /= size; }
-        const Vec3 radians = EulerAngles(q);
-        rotationDegrees = { radians.x / Radians, radians.y / Radians, radians.z / Radians };
+        rotation = Normalize(FromColumns(c));
         return true;
     }
 }

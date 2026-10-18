@@ -15,11 +15,13 @@
  */
 
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "meshes.h"
 #include "value.h"
 
 namespace kgraph
@@ -46,6 +48,9 @@ namespace kgraph
         double x = 0, y = 0;                    ///< Where it is in the editor.
         /// The pass it is part of: a page of the graph, by name. Empty for one that is in none. @see Graph::passes
         std::string pass;
+        /// Where an input is set, where this node says otherwise than its type: "node" (a control on the node) or
+        /// "inspector", by the input's name. One its type has wired only is wired only, whatever this says. @see Placement
+        std::map<std::string, std::string> placed;
         bool operator==(const Node&) const = default;
 
         Node& Set(std::string input, Value value) { inputs[std::move(input)] = Input { std::move(value), std::nullopt }; return *this; }
@@ -65,6 +70,23 @@ namespace kgraph
          * goes from any node to any other, whichever passes they are in.
          */
         std::vector<std::string> passes;
+        /**
+         * How each model file the scene has meshes of is read, by the file as its meshes' names have it (`sponza.gltf`
+         * of `@sponza.gltf#3`): which attributes are left out, and how the rest are put in buffers. A file not here is
+         * read whole, in one buffer. Changed, the file is read again, and what held its meshes holds the new ones.
+         */
+        std::map<std::string, MeshImport> meshImports;
+        /**
+         * The functions its Function nodes call, by name: each a graph of its own, with FunctionInput and FunctionOutput
+         * nodes at its edges. Not saved with it: whoever has the graph says where they come from — a project's
+         * `functions` folder. Before it runs, each call is written out into the nodes of what it calls.
+         */
+        std::map<std::string, std::shared_ptr<const Graph>> functions;
+        /**
+         * Where each node is when every node is seen at once, by id: a layout of its own, apart from where it is on its
+         * pass's page (Node::x, y). A node not here is where its page has it, beside the other passes' (an editor's to say).
+         */
+        std::map<std::string, std::pair<double, double>> overview;
         bool operator==(const Graph&) const = default;
 
         [[nodiscard]] const Node* Find(std::string_view id) const;

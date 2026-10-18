@@ -22,6 +22,8 @@
 #include <log.h>
 
 #include <kgraph/runtime.h>
+#include <kmath/quaternion.h>
+#include <kmath/transform.h>
 
 #include "support.h"
 
@@ -172,17 +174,24 @@ TEST_F(RuntimeTest, ANodeThatFailsSaysWhyAndTheRestRuns) {
     EXPECT_NE(runtime.Status("ghost")->error.find("NoSuchType"), std::string::npos);
 }
 
-TEST_F(RuntimeTest, WhatIsNotWiredIsForEachEntityToSupply) {
+// What a pipeline's node leaves unwired is each draw's to give: an input of the Dispatch, not of the pipeline.
+TEST_F(RuntimeTest, WhatIsNotWiredIsTheDrawsToGive) {
     auto& runtime = *scene->runtime;
     kgraph::Graph graph = Load(FillGraph);
     graph.Find("pipeline")->inputs.erase("param.target");
     runtime.Set(graph);
     EXPECT_TRUE(runtime.Status("pipeline")->ok) << runtime.Status("pipeline")->error;
     EXPECT_EQ(runtime.PerEntityParameters("pipeline"), std::vector<std::string> { "target" });
-    // It would run for each entity that supplies it, and this runtime was given no world of them.
-    EXPECT_FALSE(runtime.Status("run")->ok);
-    EXPECT_NE(runtime.Status("run")->error.find("no world"), std::string::npos) << runtime.Status("run")->error;
-    EXPECT_EQ(runtime.ComponentOf("pipeline"), kecs::NoComponent);
+    EXPECT_FALSE(runtime.Status("run")->ok) << "given nothing for it";
+    EXPECT_NE(runtime.Status("run")->error.find("'param.target' is given nothing"), std::string::npos) << runtime.Status("run")->error;
+    EXPECT_EQ(runtime.ComponentOf("pipeline"), kecs::NoComponent) << "this runtime was given no world to hold one in";
+    const auto dispatch = runtime.PortsOf("run");
+    EXPECT_NE(std::ranges::find(dispatch, "param.target", &kgraph::Port::name), dispatch.end()) << "the Dispatch takes it";
+
+    // Wired on the Dispatch, it is that draw's, and it runs.
+    graph.Find("run")->Wire("param.target", "target");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
 
     // Its inputs, with those its shader gives it.
     std::vector<std::string> names;
@@ -457,6 +466,191 @@ TEST_F(RuntimeTest, ValuesAreWorkedOutByNodes) {
     EXPECT_NE(runtime.Status("cross")->error.find("do not go together"), std::string::npos) << runtime.Status("cross")->error;
     EXPECT_NE(runtime.Status("less")->error.find("numbers"), std::string::npos) << runtime.Status("less")->error;
     EXPECT_NE(runtime.Status("clamp")->error.find("'max' is not given"), std::string::npos) << runtime.Status("clamp")->error;
+}
+
+// The rest of what a shader's arithmetic has: inverse trigonometry, logarithms of other bases, ranges mapped, vectors
+// bounced and bent, and matrices made, taken apart and applied.
+TEST_F(RuntimeTest, MoreFunctionsAndMatricesAreWorkedOut) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    const auto node = [&](const char* id, const char* type) -> kgraph::Node& { return graph.Add(id, type); };
+    node("asin", "Asin").Set("a", 1);
+    node("acos", "Acos").Set("a", Value::List { 1, -1 });
+    node("atan", "Atan").Set("a", 1);
+    node("tanh", "Tanh").Set("a", 0);
+    node("exp2", "Exp2").Set("a", 10);
+    node("log2", "Log2").Set("a", 8);
+    node("log10", "Log10").Set("a", 1000);
+    node("rsqrt", "InverseSqrt").Set("a", 4);
+    node("trunc", "Trunc").Set("a", Value::List { -1.75, 1.75 });
+    node("rcp", "Reciprocal").Set("a", 4);
+    node("one minus", "OneMinus").Set("a", 0.25);
+    node("unlerp", "InverseLerp").Set("a", 10).Set("b", 20).Set("value", 15);
+    node("remap", "Remap").Set("value", 5).Set("fromMin", 0).Set("fromMax", 10).Set("toMin", 100).Set("toMax", 200);
+    node("mad", "MultiplyAdd").Set("a", 2).Set("b", 3).Set("c", 4);
+    node("pi", "Constant").Set("value", "ePi");
+    node("bounce", "Reflect").Set("incident", Value::List { 1, -1, 0 }).Set("normal", Value::List { 0, 1, 0 });
+    node("straight", "Refract").Set("incident", Value::List { 0, -1, 0 }).Set("normal", Value::List { 0, 1, 0 }).Set("eta", 0.75);
+    node("total", "Refract").Set("incident", Value::List { 0.8, -0.6, 0 }).Set("normal", Value::List { 0, 1, 0 }).Set("eta", 1.5);
+    node("along", "Project").Set("a", Value::List { 3, 4, 0 }).Set("onto", Value::List { 2, 0, 0 });
+    // An entity's matrix, made as the world makes it, moves a point as the world does.
+    node("placed", "MatrixCompose").Set("position", Value::List { 1, 2, 3 }).Set("rotation", Value::List { 0, 90, 0 }).Set("scale", 2);
+    node("moved", "TransformPoint").Wire("matrix", "placed").Set("point", Value::List { 1, 0, 0 });
+    node("turned", "TransformDirection").Wire("matrix", "placed").Set("direction", Value::List { 1, 0, 0 });
+    node("flipped", "MatrixTranspose").Wire("a", "placed");
+    node("volume", "MatrixDeterminant").Wire("a", "placed");
+    node("by hand", "MatrixMultiply").Wire("a", "moving").Wire("b", "turning");
+    node("moving", "MatrixTranslate").Set("offset", Value::List { 1, 2, 3 });
+    node("turning", "MatrixAxisAngle").Set("axis", Value::List { 0, 1, 0 }).Set("angle", 90);
+    node("growing", "MatrixScale").Set("scale", Value::List { 1, 2, 3 });
+    node("rotating", "MatrixRotate").Set("rotation", Value::List { 0, 90, 0 });
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto number = [&](const char* id) { const double* n = runtime.ValueOf(id).Number(); return n ? *n : -999.0; };
+    const auto near = [&](const char* id, const std::vector<double>& numbers, const double within = 1e-5) {
+        const Value value = runtime.ValueOf(id);
+        const auto* items = value.Items();
+        if (!items || items->size() != numbers.size()) return ::testing::AssertionFailure() << id << " is " << value.ToJson();
+        for (std::size_t i = 0; i < numbers.size(); ++i)
+            if (std::abs(*(*items)[i].Number() - numbers[i]) > within) return ::testing::AssertionFailure() << id << " is " << value.ToJson();
+        return ::testing::AssertionSuccess();
+    };
+    constexpr double Pi = 3.14159265358979323846;
+    EXPECT_NEAR(number("asin"), Pi / 2, 1e-9);
+    EXPECT_TRUE(near("acos", { 0, Pi }));
+    EXPECT_NEAR(number("atan"), Pi / 4, 1e-9);
+    EXPECT_EQ(number("tanh"), 0.0);
+    EXPECT_EQ(number("exp2"), 1024.0);
+    EXPECT_NEAR(number("log2"), 3.0, 1e-12);
+    EXPECT_NEAR(number("log10"), 3.0, 1e-12);
+    EXPECT_EQ(number("rsqrt"), 0.5);
+    EXPECT_TRUE(near("trunc", { -1, 1 })) << "towards zero, as Floor is not";
+    EXPECT_EQ(number("rcp"), 0.25);
+    EXPECT_EQ(number("one minus"), 0.75);
+    EXPECT_EQ(number("unlerp"), 0.5);
+    EXPECT_EQ(number("remap"), 150.0);
+    EXPECT_EQ(number("mad"), 10.0);
+    EXPECT_NEAR(number("pi"), Pi, 1e-12);
+    EXPECT_TRUE(near("bounce", { 1, 1, 0 }));
+    EXPECT_TRUE(near("straight", { 0, -1, 0 })) << "straight through, along the normal";
+    EXPECT_TRUE(near("total", { 0, 0, 0 })) << "all of it reflected: nothing goes through";
+    EXPECT_TRUE(near("along", { 3, 0, 0 }));
+    // A quarter turn round y takes +x to -z: scaled by two, then moved.
+    EXPECT_TRUE(near("moved", { 1, 2, 1 }));
+    EXPECT_TRUE(near("turned", { 0, 0, -2 }));
+    EXPECT_NEAR(number("volume"), 8.0, 1e-4) << "two each way";
+    EXPECT_EQ(runtime.ValueOf("flipped").Items()->at(1), runtime.ValueOf("placed").Items()->at(4)) << "a row made a column";
+    const kecs::Mat4 world = kecs::Compose({ 1, 2, 3 }, { 0, 90, 0 }, { 2, 2, 2 });
+    std::vector<double> expected(world.m.begin(), world.m.end());
+    EXPECT_TRUE(near("placed", expected)) << "as the world composes an entity's";
+    const kor::Mat4 byHand = kor::Compose(kor::Vec3(1, 2, 3), kor::Quat::AngleAxis(static_cast<float>(Pi / 2), kor::Vec3(0, 1, 0)), kor::Vec3(1.f));
+    std::vector<double> composed;
+    for (int i = 0; i < 16; ++i) composed.push_back(byHand[i / 4][i % 4]);
+    EXPECT_TRUE(near("by hand", composed));
+    EXPECT_TRUE(near("growing", { 1, 0, 0, 0, 0, 2, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1 }));
+    const kecs::Mat4 rotated = kecs::Compose({}, { 0, 90, 0 }, { 1, 1, 1 });
+    EXPECT_TRUE(near("rotating", std::vector<double>(rotated.m.begin(), rotated.m.end())));
+}
+
+// What a camera sees through is a lens of numbers: each as glm makes it, Y pointing down unless told not. None of them
+// knows of a camera, or of where it is seen from: a MatrixMultiply of a lens and a View is the two as one.
+TEST_F(RuntimeTest, LensesAreProjectionsOfNumbers) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("view", "View").Set("position", Value::List { 0, 0, 5 }).Set("target", Value::List { 0, 0, 0 });
+    graph.Add("perspective", "Perspective").Set("fieldOfView", 60).Set("aspect", 2).Set("near", 0.5).Set("far", 50);
+    graph.Add("seen", "MatrixMultiply").Wire("a", "perspective").Wire("b", "view");
+    graph.Add("unseen", "MatrixInverse").Wire("a", "seen");
+    graph.Add("screen", "Screen");
+    graph.Add("glm", "Perspective").Set("fieldOfView", 60).Wire("aspect", "screen", "aspect").Set("near", 0.5).Set("far", 50).Set("flipY", false);
+    graph.Add("endless", "Perspective").Set("far", 0);
+    graph.Add("reversed", "Perspective").Set("reversedZ", true).Set("near", 1).Set("far", 10);
+    graph.Add("box", "Orthographic").Set("size", 4).Set("aspect", 2).Set("near", 1).Set("far", 9).Set("flipY", false);
+    graph.Add("off centre", "Frustum").Set("left", -0.1).Set("right", 0.3).Set("bottom", -0.1).Set("top", 0.1).Set("near", 0.1).Set("far", 10).Set("flipY", false);
+    // A mirror at y = 0: what is below it is left out of what is seen.
+    graph.Add("plane", "TransformPlane").Wire("matrix", "view").Set("plane", Value::List { 0, 1, 0, 0 });     // the world's, as the view sees it
+    graph.Add("mirror", "Oblique").Wire("projection", "perspective").Wire("plane", "plane");
+    graph.Add("mirror seen", "MatrixMultiply").Wire("a", "mirror").Wire("b", "view");
+    graph.Add("front", "Paraboloid").Set("near", 1).Set("far", 11);
+    graph.Add("back", "Paraboloid").Set("hemisphere", "eBack");
+    graph.Add("back view", "MatrixMultiply").Wire("a", "back", "turn").Wire("b", "view");
+    graph.Add("face", "CubeFace").Set("face", 3);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto matrix = [&](const char* id, const char* output = "out") {
+        kor::Mat4 m(1.f);
+        const Value value = runtime.ValueOf(id, output);
+        if (const auto* items = value.Items(); items && items->size() == 16)
+            for (int i = 0; i < 16; ++i) m[i / 4][i % 4] = static_cast<float>(*(*items)[static_cast<std::size_t>(i)].Number());
+        else ADD_FAILURE() << id << "." << output << " is no matrix: " << value.ToJson();
+        return m;
+    };
+    const auto same = [](const kor::Mat4& a, const kor::Mat4& b) {
+        for (int i = 0; i < 16; ++i)
+            if (std::abs(a[i / 4][i % 4] - b[i / 4][i % 4]) > 1e-4f) return ::testing::AssertionFailure() << "differ at " << i << ": " << a[i / 4][i % 4] << " and " << b[i / 4][i % 4];
+        return ::testing::AssertionSuccess();
+    };
+    constexpr float Radians = 3.14159265358979323846f / 180.f;
+    const kor::Mat4 glm = kor::Perspective(60.f * Radians, 2.f, 0.5f, 50.f);
+    scene->runtime->SetScreenExtent({ 200, 100 });
+    scene->runtime->Set(graph);
+    EXPECT_EQ(runtime.ValueOf("screen", "aspect"), Value(2.0));
+    EXPECT_TRUE(same(matrix("glm"), glm)) << "the screen's aspect";
+    kor::Mat4 flipped = glm;
+    flipped[1][1] = -flipped[1][1];
+    EXPECT_TRUE(same(matrix("perspective"), flipped)) << "Y down, as the device has it";
+    const kor::Mat4 view = kor::LookAt(kor::Vec3(0, 0, 5), kor::Vec3(0));
+    EXPECT_TRUE(same(matrix("view"), view));
+    EXPECT_TRUE(same(matrix("seen"), flipped * view)) << "the projection after the view";
+    EXPECT_TRUE(same(matrix("unseen"), kor::Inverse(flipped * view)));
+    EXPECT_EQ(runtime.ValueOf("view", "forward"), Value(Value::List { 0, 0, -1 }));
+    EXPECT_EQ(runtime.ValueOf("view", "up"), Value(Value::List { 0, 1, 0 }));
+    EXPECT_EQ(runtime.ValueOf("view", "right"), Value(Value::List { 1, 0, 0 }));
+    EXPECT_EQ(runtime.ValueOf("endless", "far"), Value(0)) << "no far plane";
+    const auto depth = [&](const kor::Mat4& m, const float z) { const kor::Vec4 clip = m * kor::Vec4(0.f, 0.f, -z, 1.f); return clip.z / clip.w; };
+    EXPECT_NEAR(depth(matrix("endless"), 0.1f), 0.f, 1e-5);
+    EXPECT_GT(depth(matrix("endless"), 1e5f), 0.99f) << "depth reaches 1 only at no distance";
+    // Reversed: the near plane is at depth 1, the far one at 0.
+    const kor::Mat4 reversed = matrix("reversed");
+    EXPECT_NEAR(depth(reversed, 1.f), 1.f, 1e-5);
+    EXPECT_NEAR(depth(reversed, 10.f), 0.f, 1e-5);
+    EXPECT_TRUE(same(matrix("box"), kor::Orthographic(-4.f, 4.f, -2.f, 2.f, 1.f, 9.f))) << "as high as its size, as wide as that times the aspect";
+    EXPECT_TRUE(same(matrix("off centre"), kor::FrustumProjection(-0.1f, 0.3f, -0.1f, 0.1f, 0.1f, 10.f)));
+
+    // The mirror's plane is its near plane: a point on it at depth 0, one above it in front, one below it behind.
+    const kor::Mat4 mirror = matrix("mirror seen");
+    const auto at = [&](const kor::Vec3 p) { const kor::Vec4 clip = mirror * kor::Vec4(p.x, p.y, p.z, 1.f); return clip.z / clip.w; };
+    EXPECT_NEAR(at({ 0.3f, 0.f, -1.f }), 0.f, 1e-4);
+    EXPECT_GT(at({ 0.f, 0.5f, -1.f }), 0.f);
+    EXPECT_LT(at({ 0.f, -0.5f, -1.f }), 0.f);
+    for (int column = 0; column < 4; ++column) {      // x and y are as they were
+        EXPECT_FLOAT_EQ(matrix("mirror")[column][0], flipped[column][0]);
+        EXPECT_FLOAT_EQ(matrix("mirror")[column][1], flipped[column][1]);
+    }
+
+    const auto params = runtime.ValueOf("front", "params");
+    ASSERT_TRUE(params.Items() && params.Items()->size() == 4) << params.ToJson();
+    for (std::size_t i = 0; i < 4; ++i) EXPECT_NEAR(*params.Items()->at(i).Number(), (std::array { 1.0, 11.0, 0.1, 1.0 })[i], 1e-6) << i;
+    EXPECT_EQ(*runtime.ValueOf("back", "params").Items()->at(3).Number(), -1.0);
+    kor::Mat4 halfTurn(1.f);
+    halfTurn[0][0] = halfTurn[2][2] = -1.f;
+    EXPECT_TRUE(same(matrix("back", "turn"), halfTurn));
+    EXPECT_TRUE(same(matrix("back view"), halfTurn * view)) << "the back faces the other way";
+    EXPECT_EQ(runtime.ValueOf("face", "direction"), Value(Value::List { 0, -1, 0 }));
+    EXPECT_EQ(runtime.ValueOf("face", "up"), Value(Value::List { 0, 0, 1 }));
+
+    // What cannot be is said.
+    graph.Find("glm")->Set("far", 0.25);
+    graph.Find("box")->Set("left", 1).Set("right", 1);
+    graph.Find("face")->Set("face", 6);
+    graph.Find("perspective")->Wire("view", "view");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("perspective")->error.find("no lens's now"), std::string::npos) << runtime.Status("perspective")->error;
+    EXPECT_NE(runtime.Status("glm")->error.find("farther than 'near'"), std::string::npos) << runtime.Status("glm")->error;
+    EXPECT_NE(runtime.Status("box")->error.find("are to be apart"), std::string::npos) << runtime.Status("box")->error;
+    EXPECT_NE(runtime.Status("face")->error.find("from 0 to 5"), std::string::npos) << runtime.Status("face")->error;
 }
 
 // Everything about a node is there to be wired from: what the object it made says of itself, each value it was

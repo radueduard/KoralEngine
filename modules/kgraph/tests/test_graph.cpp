@@ -109,7 +109,20 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_FALSE(port("GraphicsPipeline", "fragment.module").optional);
     EXPECT_TRUE(port("GraphicsPipeline", "geometry.module").optional);
     EXPECT_FALSE(port("Dispatch", "pipeline").optional);
-    EXPECT_TRUE(port("Dispatch", "with").optional);
+    EXPECT_TRUE(port("ForEach", "with").optional);
+    // A ForEach is every one of them; one is an Entity node's. Which element it is, is there to be asked for.
+    const auto output = [](const char* type, const std::string_view name) {
+        const kgraph::NodeType* found = kgraph::FindType(type);
+        const auto it = std::ranges::find(found->outputs, name, &kgraph::Port::name);
+        return it == found->outputs.end() ? nullptr : &*it;
+    };
+    EXPECT_EQ(std::ranges::find(kgraph::FindType("ForEach")->inputs, "select", &kgraph::Port::name), kgraph::FindType("ForEach")->inputs.end());
+    ASSERT_NE(output("ForEach", "index"), nullptr);
+    EXPECT_TRUE(output("ForEach", "index")->optional) << "not shown until asked for";
+    EXPECT_TRUE(output("Filter", "index")->optional);
+    EXPECT_TRUE(port("Entity", "entity").optional) << "the first, when not given";
+    EXPECT_EQ(output("Entity", "index"), nullptr) << "one entity: no index, no count";
+    EXPECT_NE(output("Entity", "present"), nullptr);
     EXPECT_TRUE(port("Draw", "load").optional);
 
     // What kind of thing each is, for the control that sets it.
@@ -117,7 +130,7 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_EQ(port("ComputePipeline", "compute.module").editor, "module");
     EXPECT_EQ(port("ComputePipeline", "compute.entry").editor, "entry");
     EXPECT_EQ(port("Reference", "node").editor, "node");
-    EXPECT_EQ(port("Draw", "without").editor, "components");
+    EXPECT_EQ(port("ForEach", "without").editor, "components");
     EXPECT_EQ(port("Dispatch", "cover").editor, "parameter");
     EXPECT_EQ(port("VertexLayout", "attributes").editor, "attributes");
     EXPECT_EQ(port("Draw", "command").choices.size(), 9u);
@@ -222,4 +235,52 @@ TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
     EXPECT_EQ(kgraph::ShapeData("sphere")->indices.size(), 40u * 80u * 6u);
     EXPECT_FALSE(kgraph::ShapeData("blob").has_value());
     EXPECT_EQ(kgraph::DefaultMeshId("cube"), "$cube");
+}
+
+// Where an input is set: on the node (what is read there — a number of what works values out, a pass being on), in
+// the inspector (what takes room), or by a wire only (what only a node makes — a vertex layout, from a VertexLayout).
+// A node can move one of the first two to the other, and keeps that when it is saved.
+TEST(Catalog, SaysWhereEachInputIsSet) {
+    using kgraph::Placement;
+    const auto place = [](const char* type, const char* input) {
+        const auto* found = kgraph::FindType(type);
+        const auto port = std::ranges::find(found->inputs, input, &kgraph::Port::name);
+        EXPECT_NE(port, found->inputs.end()) << type << "." << input;
+        return port == found->inputs.end() ? kgraph::Port {} : *port;
+    };
+    EXPECT_EQ(place("Add", "a").place, Placement::eNode);
+    EXPECT_EQ(place("Add", "a").initial, Value(0)) << "an Add made is 0 + 0, shown on it";
+    EXPECT_EQ(place("Select", "condition").place, Placement::eNode);
+    EXPECT_EQ(place("Color", "color").place, Placement::eNode);
+    EXPECT_EQ(place("Repeat", "count").place, Placement::eNode);
+    EXPECT_EQ(place("Dispatch", "enabled").place, Placement::eInspector) << "a row on every pass would be in every graph's way";
+    EXPECT_EQ(place("View", "main").place, Placement::eNode);
+    EXPECT_EQ(place("View", "target").place, Placement::eNode);
+    EXPECT_EQ(place("Perspective", "fieldOfView").place, Placement::eNode);
+    EXPECT_EQ(place("Perspective", "main").place, Placement::eNode);
+    EXPECT_EQ(place("Filter", "entities").place, Placement::eWire);
+    EXPECT_EQ(place("ShadowCascades", "lambda").place, Placement::eInspector);
+    EXPECT_EQ(place("Image", "format").place, Placement::eInspector);
+    EXPECT_EQ(place("VertexLayout", "attributes").place, Placement::eInspector);
+    EXPECT_EQ(place("MatrixInverse", "a").place, Placement::eWire);
+    const auto layout = place("GraphicsPipeline", "vertex.layout");
+    EXPECT_EQ(layout.place, Placement::eWire);
+    EXPECT_EQ(layout.companion, "VertexLayout") << "what sets it up, for an editor to make";
+    EXPECT_EQ(place("Mesh", "vertexLayout").companion, "VertexLayout");
+
+    // A node says otherwise of what is not wired only, and keeps it.
+    Graph graph;
+    graph.Add("add", "Add").placed["a"] = "inspector";
+    graph.Add("image", "Image").placed["format"] = "node";
+    graph.Find("image")->placed["usage"] = "nowhere";      // read as nothing
+    graph.Add("pipeline", "GraphicsPipeline").placed["vertex.layout"] = "node";
+    EXPECT_EQ(kgraph::PlacementOf(place("Add", "a"), *graph.Find("add")), Placement::eInspector);
+    EXPECT_EQ(kgraph::PlacementOf(place("Image", "format"), *graph.Find("image")), Placement::eNode);
+    EXPECT_EQ(kgraph::PlacementOf(layout, *graph.Find("pipeline")), Placement::eWire) << "wired only, whatever the node says";
+    Graph loaded;
+    std::string error;
+    ASSERT_TRUE(Graph::FromJson(graph.ToJson(), loaded, error)) << error;
+    EXPECT_EQ(loaded.Find("add")->placed.at("a"), "inspector");
+    EXPECT_EQ(loaded.Find("image")->placed.at("format"), "node");
+    EXPECT_FALSE(loaded.Find("image")->placed.contains("usage"));
 }

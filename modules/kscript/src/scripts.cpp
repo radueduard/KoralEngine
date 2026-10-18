@@ -10,15 +10,37 @@ namespace kscript
     namespace {
         std::uint64_t KeyOf(const kecs::Entity entity) { return (std::uint64_t { entity.index } << 32) | entity.generation; }
 
-        // What marks a component type as a script's: nothing else constructs one with this.
-        void ConstructScript(void* at, const kecs::ComponentDescription& type) { std::memset(at, 0, type.size); }
+        // What marks a component type as a script's: nothing else constructs one with this. It starts as its source
+        // says (the description's context: its bytes), or as zeros.
+        void ConstructScript(void* at, const kecs::ComponentDescription& type)
+        {
+            std::memset(at, 0, type.size);
+            if (const auto* initial = static_cast<const std::vector<std::byte>*>(type.context.get()))
+                std::memcpy(at, initial->data(), std::min(initial->size(), type.size));
+        }
+
+        /** What a type registered again without a start of its own starts as: what each field of the same name and type did before. */
+        std::vector<std::byte> Carried(const kecs::ComponentDescription& before, const ScriptType& type)
+        {
+            const auto* was = static_cast<const std::vector<std::byte>*>(before.context.get());
+            if (!was || was->empty()) return {};
+            std::vector<std::byte> initial(std::max<std::size_t>(type.size, 1), std::byte { 0 });
+            bool any = false;
+            for (const auto& field : type.fields)
+                for (const auto& old : before.fields)
+                    if (old.SameAs(field) && old.offset + old.size <= was->size() && field.offset + field.size <= initial.size()) {
+                        std::memcpy(initial.data() + field.offset, was->data() + old.offset, field.size);
+                        any = true;
+                    }
+            return any ? initial : std::vector<std::byte> {};
+        }
     }
 
     Scripts::Scripts(kecs::World& world) : _world(world) {}
 
     Scripts::~Scripts() { *_alive = false; }
 
-    kecs::ComponentId Scripts::Register(ScriptType type, std::string* error, kecs::Migration* migration)
+    kecs::ComponentId Scripts::Add(ScriptType type, const bool live, std::string* error, kecs::Migration* migration)
     {
         kecs::ComponentDescription description;
         description.name = type.name;
@@ -27,6 +49,21 @@ namespace kscript
         description.alignment = std::max<std::size_t>(type.alignment, 1);
         description.construct = &ConstructScript;
         description.fields = type.fields;
+        if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent && type.initial.empty())
+            type.initial = Carried(_world.Describe(existing), type);
+        // An entity a field holds starts as none: all zeros would be the first entity there is.
+        for (const auto& field : type.fields) {
+            if (field.type != "entity" || field.size < sizeof(kecs::Entity)) continue;
+            if (type.initial.empty()) type.initial.assign(description.size, std::byte { 0 });
+            if (type.initial.size() < field.offset + sizeof(kecs::Entity)) continue;
+            std::byte* at = type.initial.data() + field.offset;
+            if (std::all_of(at, at + sizeof(kecs::Entity), [](const std::byte b) { return b == std::byte { 0 }; }))
+                std::memcpy(at, &kecs::NullEntity, sizeof(kecs::Entity));
+        }
+        if (!type.initial.empty()) {
+            type.initial.resize(description.size, std::byte { 0 });
+            description.context = std::make_shared<const std::vector<std::byte>>(type.initial);
+        }
 
         const auto known = std::ranges::find_if(_types, [&](const auto& t) { return t->description.name == type.name; });
         Type* entry = known == _types.end() ? nullptr : known->get();
@@ -42,8 +79,11 @@ namespace kscript
                 if (error) *error = std::format("there is a component named '{}' already, and it is not a script's", type.name);
                 return kecs::NoComponent;
             }
+            const auto* before = static_cast<const std::vector<std::byte>*>(now.context.get());
+            const auto* after = static_cast<const std::vector<std::byte>*>(description.context.get());
             const bool same = now.size == description.size && now.construct == &ConstructScript
-                && std::ranges::equal(now.fields, description.fields, [](const auto& a, const auto& b) { return a.SameAs(b) && a.offset == b.offset; });
+                && std::ranges::equal(now.fields, description.fields, [](const auto& a, const auto& b) { return a.SameAs(b) && a.offset == b.offset; })
+                && (before == after || (before && after && *before == *after));
             if (!same) {
                 try {
                     const kecs::Migration moved = _world.Reshape(id, std::move(description));
@@ -64,8 +104,21 @@ namespace kscript
             });
         }
         entry->description = std::move(type);
-        entry->live = true;
+        entry->live = live;
         return id;
+    }
+
+    kecs::ComponentId Scripts::Register(ScriptType type, std::string* error, kecs::Migration* migration) { return Add(std::move(type), true, error, migration); }
+
+    kecs::ComponentId Scripts::Declare(ScriptType type, std::string* error, kecs::Migration* migration)
+    {
+        // Declared over a script that runs: its functions stay, with the data's new shape.
+        if (const auto known = std::ranges::find_if(_types, [&](const auto& t) { return t->description.name == type.name && t->live; }); known != _types.end()) {
+            type.callbacks = (*known)->description.callbacks;
+            return Add(std::move(type), true, error, migration);
+        }
+        type.callbacks = {};
+        return Add(std::move(type), false, error, migration);
     }
 
     void Scripts::Unregister(const std::string_view name)
@@ -153,13 +206,13 @@ namespace kscript
         return running;
     }
 
-    template <typename F>
-    void Scripts::Each(F&& call)
+    template <typename F, typename Has>
+    void Scripts::Each(F&& call, Has&& has)
     {
         // By index: something called may register a type.
         for (std::size_t i = 0; i < _types.size(); ++i) {
             Type& type = *_types[i];
-            if (!type.live) continue;
+            if (!type.live || !has(type.description.callbacks)) continue;     // nothing of it to call: nobody is looked at
             for (const kecs::Entity entity : Sync(type)) {
                 if (!type.live) break;
                 const auto state = type.states.find(KeyOf(entity));
@@ -173,19 +226,41 @@ namespace kscript
 
     void Scripts::FixedUpdate(const float step)
     {
-        Each([step](const Callbacks& c, const kecs::Entity entity, void* data) { if (c.fixedUpdate) c.fixedUpdate(c.user, entity, data, step); });
+        Each([step](const Callbacks& c, const kecs::Entity entity, void* data) { c.fixedUpdate(c.user, entity, data, step); },
+             [](const Callbacks& c) { return c.fixedUpdate != nullptr; });
     }
     void Scripts::Update(const float delta)
     {
-        Each([delta](const Callbacks& c, const kecs::Entity entity, void* data) { if (c.update) c.update(c.user, entity, data, delta); });
+        // Every type with anything to be told, whether it updates or not: here is where each is told it was made, switched
+        // and started. One with nothing at all — a script that is only data — is not looked at.
+        Each([delta](const Callbacks& c, const kecs::Entity entity, void* data) { if (c.update) c.update(c.user, entity, data, delta); },
+             [](const Callbacks& c) { return c.created || c.enabled || c.started || c.fixedUpdate || c.update || c.lateUpdate || c.prepare || c.disabled || c.destroyed; });
     }
     void Scripts::LateUpdate(const float delta)
     {
-        Each([delta](const Callbacks& c, const kecs::Entity entity, void* data) { if (c.lateUpdate) c.lateUpdate(c.user, entity, data, delta); });
+        Each([delta](const Callbacks& c, const kecs::Entity entity, void* data) { c.lateUpdate(c.user, entity, data, delta); },
+             [](const Callbacks& c) { return c.lateUpdate != nullptr; });
     }
+    // Not a step of the game: it is called whether or not the scene plays (an editor's scene is drawn while it is
+    // edited), so nothing is created, enabled or started here — that is the updates' to do, once it plays.
     void Scripts::Prepare()
     {
-        Each([](const Callbacks& c, const kecs::Entity entity, void* data) { if (c.prepare) c.prepare(c.user, entity, data); });
+        for (std::size_t i = 0; i < _types.size(); ++i) {
+            Type& type = *_types[i];
+            if (!type.live || !type.description.callbacks.prepare) continue;
+            std::vector<kecs::Entity> entities;
+            kecs::QueryDescription query;
+            query.all = { type.id };
+            _world.Each(query, [&](const kecs::ChunkView& view) {
+                for (std::size_t row = 0; row < view.Count(); ++row) entities.push_back(view.EntityAt(row));
+            });
+            for (const kecs::Entity entity : entities) {
+                if (!type.live) break;
+                if (!_world.Alive(entity) || !_world.IsEnabled(entity, type.id)) continue;     // gone, or switched off, since
+                const Callbacks& c = type.description.callbacks;
+                if (void* bytes = const_cast<void*>(std::as_const(_world).Get(entity, type.id))) c.prepare(c.user, entity, bytes);
+            }
+        }
     }
 
     void Scripts::Shutdown()

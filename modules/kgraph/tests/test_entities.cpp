@@ -11,6 +11,8 @@
 #include <kgraph/scene.h>
 
 #include <array>
+#include <bit>
+#include <functional>
 #include <chrono>
 #include <filesystem>
 #include <format>
@@ -34,18 +36,23 @@ namespace {
     struct Lit {};
     struct Hidden {};
 
-    // Many entities, each with an image of its own. One compute node fills each entity's image with the entity's
-    // colour, over a backdrop the node wires for all of them; one graphics node draws each entity's image where the
-    // entity says. The passes are listed last first.
+    // Many entities, each with an image of its own. One compute pass fills each entity's image with the entity's
+    // colour, over a backdrop its pipeline wires for all of them; one graphics pass draws each entity's image where the
+    // entity says. Each runs once an element of a ForEach — of its pipeline's component, the values its draws take — and
+    // is wired what each element gives. The passes are listed last first.
     std::string SceneGraph(const std::string& stampModule = "stamp")
     {
         return std::format(R"json({{
       "kgraph": 1,
       "nodes": [
         {{ "id": "blit", "type": "Blit", "inputs": {{ "source": {{ "$link": ["canvas", "out"] }}, "destination": {{ "$link": ["screen", "out"] }} }} }},
-        {{ "id": "draw", "type": "Draw", "inputs": {{ "pipeline": {{ "$link": ["show", "out"] }}, "without": ["Hidden"] }} }},
+        {{ "id": "draw", "type": "Draw", "inputs": {{ "pipeline": {{ "$link": ["show", "out"] }}, "mesh": {{ "$link": ["shown", "Mesh.mesh"] }},
+            "param.source": {{ "$link": ["shown", "field.source"] }}, "push.offset": {{ "$link": ["shown", "field.offset"] }} }} }},
+        {{ "id": "shown", "type": "ForEach", "inputs": {{ "component": "show", "with": ["Mesh"], "without": ["Hidden"] }} }},
         {{ "id": "run", "type": "Dispatch", "inputs": {{
-            "pipeline": {{ "$link": ["stamp", "out"] }}, "cover": "target", "groupSize.x": 8, "groupSize.y": 8, "with": ["Lit"] }} }},
+            "pipeline": {{ "$link": ["stamp", "out"] }}, "cover": "target", "groupSize.x": 8, "groupSize.y": 8,
+            "param.target": {{ "$link": ["lit", "field.target"] }}, "push.tint": {{ "$link": ["lit", "field.tint"] }}, "push.gain": {{ "$link": ["lit", "field.gain"] }} }} }},
+        {{ "id": "lit", "type": "ForEach", "inputs": {{ "component": "stamp", "with": ["Lit"] }} }},
         {{ "id": "tint backdrop", "type": "Clear", "inputs": {{ "image": {{ "$link": ["backdrop", "out"] }}, "color": [0, 0, 0.25, 0] }} }},
         {{ "id": "screen", "type": "Screen", "inputs": {{}} }},
 
@@ -68,6 +75,23 @@ namespace {
       ]
     }})json", stampModule);
     }
+
+    /** Another view of a runtime's graph, over its world, in a scene of its own: Set again whenever the first is. */
+    class FollowScene final : public kor::Scene {
+    public:
+        static inline kgraph::Runtime* source = nullptr;
+        static inline kecs::World* world = nullptr;
+        void Initialize() override { runtime = std::make_unique<kgraph::Runtime>(Graph(), world, *source); }
+        void Update() override
+        {
+            if (source->Revision() != _seen) { _seen = source->Revision(); runtime->Set(source->Current()); }
+            runtime->Update();
+        }
+        void Shutdown() override { runtime.reset(); }
+        std::unique_ptr<kgraph::Runtime> runtime;
+    private:
+        std::uint64_t _seen = 0;
+    };
 
     class EntityTest : public ::testing::Test {
     protected:
@@ -108,14 +132,15 @@ namespace {
                         .attributes = { kor::VertexLayout::Attribute("POSITION", "", 0, 0, kor::ChannelType::eFloat, 3) } })
                     .Build());
             }
-            struct Vertex { kor::Vec4 color; kor::Vec3 position; };
-            const std::array<Vertex, 4> corners {};
+            // One that does not fit has no POSITION at all: what the vertex shader reads. (Laid out otherwise is no
+            // matter: a pipeline is made again for any layout that has what its shader reads.)
+            const std::array<kor::Vec4, 4> colors {};
             return kgraph::MakeResource(kor::Mesh::Builder()
-                .SetVertexBuffer(0, kor::Mesh::MakeBuffer(corners, kor::Buffer::Usage::eVertex))
+                .SetVertexBuffer(0, kor::Mesh::MakeBuffer(colors, kor::Buffer::Usage::eVertex))
                 .SetIndexBuffer(kor::Mesh::MakeBuffer(indices, kor::Buffer::Usage::eIndex))
                 .SetVertexLayout(kor::VertexLayout {
-                    .bindings = { kor::VertexInputBindingDescription(0, sizeof(Vertex)) },
-                    .attributes = { kor::VertexLayout::Attribute("POSITION", "", 0, offsetof(Vertex, position), kor::ChannelType::eFloat, 3) } })
+                    .bindings = { kor::VertexInputBindingDescription(0, sizeof(kor::Vec4)) },
+                    .attributes = { kor::VertexLayout::Attribute("COLOR", "", 0, 0, kor::ChannelType::eFloat, 4) } })
                 .Build());
         }
 
@@ -280,7 +305,7 @@ TEST_F(EntityTest, AnEntityThatCannotBeRunIsReportedAndPassedBy) {
     Load(SceneGraph());
     MakeFour();
     auto& world = scene->world;
-    // One with a mesh the pipeline's layout cannot read, one with no image to draw, one with no mesh at all.
+    // One with a mesh that has not what the vertex shader reads, one with no image to draw, one with no mesh at all.
     world.Add<kgraph::Mesh>(entities[0], { Square(false) });
     Parameters(world, entities[1], show).Set("source", nullptr);
     world.Add<kgraph::Mesh>(entities[2], {});
@@ -301,19 +326,23 @@ TEST_F(EntityTest, AnEntityThatCannotBeRunIsReportedAndPassedBy) {
     Frame();
     EXPECT_EQ(scene->runtime->ReportOf("draw")->ran, 0u);
 
-    // A tag nothing has, because nothing has made it yet: nobody, and it says so.
+    // A tag nothing has, because nothing has made it yet: nobody.
     kgraph::Graph graph = scene->runtime->Current();
-    graph.Find("run")->Set("with", kgraph::Value::List { "NeverHeardOf" });
+    graph.Find("lit")->Set("with", kgraph::Value::List { "NeverHeardOf" });
     scene->runtime->Set(graph);
     Frame();
     EXPECT_EQ(scene->runtime->ReportOf("run")->ran, 0u);
-    EXPECT_NE(scene->runtime->ReportOf("run")->why.find("NeverHeardOf"), std::string::npos);
 
-    // And mistakes in the node, which are the node's.
-    graph.Find("run")->Set("with", "Lit");
+    // And mistakes in the nodes, which are the nodes'.
+    graph.Find("lit")->Set("with", "Lit");
     scene->runtime->Set(graph);
-    EXPECT_NE(scene->runtime->Status("run")->error.find("list"), std::string::npos) << scene->runtime->Status("run")->error;
-    graph.Find("run")->Set("with", kgraph::Value::List { "Lit" }).Set("cover", "backdrops");
+    EXPECT_NE(scene->runtime->Status("lit")->error.find("list"), std::string::npos) << scene->runtime->Status("lit")->error;
+    graph.Find("lit")->Set("with", kgraph::Value::List { "Lit" });
+    graph.Find("run")->Set("with", kgraph::Value::List { "Lit" });
+    scene->runtime->Set(graph);
+    EXPECT_NE(scene->runtime->Status("run")->error.find("a ForEach's now"), std::string::npos) << scene->runtime->Status("run")->error;
+    graph.Find("run")->inputs.erase("with");
+    graph.Find("run")->Set("cover", "backdrops");
     scene->runtime->Set(graph);
     EXPECT_NE(scene->runtime->Status("run")->error.find("'backdrops' is not one"), std::string::npos) << scene->runtime->Status("run")->error;
     graph.Find("draw")->Set("command", "eDrawSideways");
@@ -321,18 +350,20 @@ TEST_F(EntityTest, AnEntityThatCannotBeRunIsReportedAndPassedBy) {
     EXPECT_NE(scene->runtime->Status("draw")->error.find("eDrawIndexed"), std::string::npos) << scene->runtime->Status("draw")->error;
 }
 
-TEST_F(EntityTest, WiringAParameterTakesItOffEveryEntity) {
+// A draw's parameter wired from elsewhere than its pipeline's component is no field of it: the component loses it, and
+// the entities keep the rest.
+TEST_F(EntityTest, WiringADrawsParameterFromElsewhereTakesItOffTheComponent) {
     Load(SceneGraph());
     MakeFour();
     Frame();
     Frame();
 
-    // The node now gives every entity the same image to draw: the field goes, and what the entities keep, they keep.
+    // The Draw now gives every entity the same image to draw: the field goes, and what the entities keep, they keep.
     kgraph::Graph graph = scene->runtime->Current();
     graph.Add("shared", "Image").Set("format", "eRGBA8_UNORM").Set("extent.x", 4).Set("extent.y", 4).Set("extent.z", 1)
         .Set("usage", kgraph::Value::List { "eSampled", "eTransferDst" });
     graph.Add("white", "Clear").Wire("image", "shared").Set("color", kgraph::Value::List { 1, 1, 1, 1 });
-    graph.Find("show")->Wire("param.source", "shared");
+    graph.Find("draw")->Wire("param.source", "shared");
     scene->runtime->Set(graph);
     for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
 
@@ -346,7 +377,18 @@ TEST_F(EntityTest, WiringAParameterTakesItOffEveryEntity) {
     EXPECT_EQ(Parameters(scene->world, entities[3], show).Get<kor::Vec2>("offset"), (kor::Vec2 { 0, 0 }));
     Frame();
     Frame();
-    for (int quarter = 0; quarter < 4; ++quarter) ExpectColor(Quarter(quarter), 255, 255, 255, "every entity, where it was, with the image the node wires");
+    for (int quarter = 0; quarter < 4; ++quarter) ExpectColor(Quarter(quarter), 255, 255, 255, "every entity, where it was, with the image the Draw is wired");
+
+    // Wired on the pipeline instead, it is the same for every draw, and the Draw is given it no more.
+    graph.Find("draw")->inputs.erase("param.source");
+    graph.Find("show")->Wire("param.source", "shared");
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    const auto ports = scene->runtime->PortsOf("draw");
+    EXPECT_EQ(std::ranges::find(ports, "param.source", &kgraph::Port::name), ports.end()) << "the pipeline has it: no draw's to give";
+    Frame();
+    Frame();
+    ExpectColor(Quarter(2), 255, 255, 255, "drawn with it all the same");
 }
 
 TEST_F(EntityTest, AShaderEditedKeepsWhatKeepsItsNameAndType) {
@@ -384,10 +426,9 @@ TEST_F(EntityTest, AShaderEditedKeepsWhatKeepsItsNameAndType) {
         reloaded = scene->world.Describe(stamp).FindField("strength") != nullptr;
     }
     ASSERT_TRUE(reloaded) << "the edit never reached the component";
-    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
 
     // On the node: the wire to a parameter the shader no longer has is taken off, and said to have been.
-    EXPECT_EQ(scene->runtime->TakeReset(), std::vector<std::string> { "stamp.param.backdrop" });
+    EXPECT_EQ(scene->runtime->TakeReset(), (std::vector<std::string> { "stamp.param.backdrop", "run.push.gain" })) << "and the Dispatch's to what it no longer has";
     EXPECT_FALSE(scene->runtime->Current().Find("stamp")->inputs.contains("param.backdrop"));
     EXPECT_TRUE(scene->runtime->TakeReset().empty());
 
@@ -406,9 +447,13 @@ TEST_F(EntityTest, AShaderEditedKeepsWhatKeepsItsNameAndType) {
     EXPECT_EQ(values.Get<float>("strength"), 0.f);
     EXPECT_EQ(values.ResourceAt("base"), nullptr);
 
-    // Nothing runs until they are: each entity is passed by, and why is said.
-    EXPECT_EQ(scene->runtime->ReportOf("run")->ran, 0u);
-    EXPECT_NE(scene->runtime->ReportOf("run")->why.find("'base' has nothing in it"), std::string::npos) << scene->runtime->ReportOf("run")->why;
+    // Nothing runs until the new parameter is wired: the Dispatch says so.
+    EXPECT_FALSE(scene->runtime->Status("run")->ok);
+    EXPECT_NE(scene->runtime->Status("run")->error.find("'param.base' is given nothing"), std::string::npos) << scene->runtime->Status("run")->error;
+    kgraph::Graph graph = scene->runtime->Current();
+    graph.Find("run")->Wire("param.base", "lit", "field.base").Wire("push.strength", "lit", "field.strength");
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
     const auto base = scene->runtime->ResourceOf("backdrop");
     for (const kecs::Entity entity : entities) Parameters(scene->world, entity, stamp).Set("base", base).Set("strength", 1.f);
     Parameters(scene->world, entities[0], stamp).Set("tint", kor::Vec4 { 0, 1, 0, 1 });
@@ -460,7 +505,10 @@ TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
     graph.Add("shape", "Primitive");   // only for its layout: the meshes drawn are the default ones
     graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
         .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
-    graph.Add("draw", "Draw").Wire("pipeline", "placed");
+    // Every entity with the pipeline's component and a Mesh: its mesh, where it is, and its colour, each wired.
+    graph.Add("drawn", "ForEach").Set("component", "placed").Set("with", Value::List { "Mesh" });
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "drawn", "Mesh.mesh").Wire("push.model", "drawn", "matrix")
+        .Wire("push.color", "drawn", "field.color");
     graph.Add("screen", "Screen");
     graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
     scene->runtime->Set(graph);
@@ -470,7 +518,7 @@ TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
     const kecs::ComponentId placed = scene->runtime->ComponentOf("placed");
     ASSERT_NE(placed, kecs::NoComponent);
     const auto& fields = scene->world.Describe(placed).fields;
-    EXPECT_EQ(fields.size(), 1u) << "the colour is the entity's; where it is, is not a field of anything";
+    EXPECT_EQ(fields.size(), 1u) << "the colour is the entity's; its model matrix is wired from where it is, and no field";
     EXPECT_EQ(fields.front().name, "color");
 
     const auto cube = scene->runtime->ResourceOf("$cube");
@@ -519,35 +567,176 @@ TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
     EXPECT_EQ(scene->Pixel(8, 24).x, 255);
 }
 
-// What a scene's components hold is there as values, which follow the world every frame: worked on by other nodes,
-// and packed into a buffer as a shader's block lays it out. Nothing is built again for it.
+// A draw is made of what it is wired: a ForEach of Mesh gives each entity's mesh and where it is, and anything worked
+// out of an element is that element's. With everything wired from elsewhere, the pipeline has no component at all.
+TEST_F(EntityTest, ADrawIsMadeOfWhateverEachElementIsWired) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive");
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("meshes", "ForEach").Set("component", "Mesh").Set("with", Value::List { "Lit" });
+    // The first red, the rest green: worked out of each element's index.
+    graph.Add("first", "Less").Wire("a", "meshes", "index").Set("b", 1);
+    graph.Add("tint", "Select").Wire("condition", "first").Set("a", Value::List { 1, 0, 0, 1 }).Set("b", Value::List { 0, 1, 0, 1 });
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "meshes", "field.mesh").Wire("push.model", "meshes", "matrix").Wire("push.color", "tint");
+    graph.Add("picked", "Selected");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ComponentOf("placed"), kecs::NoComponent) << "its draws take everything from elsewhere: nothing is left for a component of its own";
+    const auto drawPorts = runtime.PortsOf("draw");
+    for (const char* name : { "push.model", "push.color" }) EXPECT_NE(std::ranges::find(drawPorts, name, &kgraph::Port::name), drawPorts.end()) << name;
+    const auto pipelinePorts = runtime.PortsOf("placed");
+    EXPECT_EQ(std::ranges::find(pipelinePorts, "push.model", &kgraph::Port::name), pipelinePorts.end()) << "a push constant is a draw's, not the pipeline's";
+
+    kecs::World& world = scene->world;
+    const auto cube = runtime.ResourceOf("$cube");
+    const auto make = [&](const float x) {
+        const kecs::Entity made = world.Create();
+        world.SetPosition(made, { x, 0, 0 });
+        world.SetScale(made, { 0.5f, 0.5f, 0.5f });
+        world.Add<kgraph::Mesh>(made, { cube });
+        world.Add<Lit>(made);
+        return made;
+    };
+    const kecs::Entity left = make(-0.5f), right = make(0.5f);
+    world.Add<kgraph::Mesh>(world.Create(), { cube });     // not Lit: not drawn
+    Frame();
+    Frame();
+    ASSERT_EQ(runtime.ReportOf("draw")->ran, 2u) << runtime.ReportOf("draw")->why;
+    EXPECT_EQ(scene->Pixel(8, 16).x, 255) << "the first, red";
+    EXPECT_EQ(scene->Pixel(8, 16).y, 0);
+    EXPECT_EQ(scene->Pixel(24, 16).y, 255) << "the second, green";
+    EXPECT_EQ(scene->Pixel(24, 16).x, 0);
+    EXPECT_EQ(scene->Pixel(16, 16).y, 0) << "nothing between them";
+
+    // What a ForEach gives of the first element: its mesh as a resource, and its normal matrix.
+    EXPECT_EQ(runtime.ResourceOf("meshes", "field.mesh"), cube);
+    const Value normal = runtime.ValueOf("meshes", "normalMatrix");
+    ASSERT_TRUE(normal.Items() && normal.Items()->size() == 16u) << normal.ToJson();
+    EXPECT_NEAR(*normal.Items()->at(0).Number(), 2.0, 1e-5) << "a half scale's inverse, transposed, is twice";
+
+    // The one picked, as a number any draw can be given.
+    runtime.SetSelected(right);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("picked", "entityId"), Value(right.index + 1.0));
+    runtime.SetSelected(kecs::NullEntity);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("picked", "entityId"), Value(0));
+
+    // Moved: drawn where it is now, with nothing built again.
+    const auto builds = runtime.Status("draw")->builds;
+    world.SetPosition(left, { 0.5f, 0.5f, 0 });
+    world.Destroy(right);
+    Frame();
+    Frame();
+    EXPECT_EQ(scene->Pixel(8, 16).x, 0) << "gone from where it was";
+    EXPECT_EQ(scene->Pixel(24, 24).x, 255) << "the first, still red, where it is now";
+    EXPECT_EQ(runtime.Status("draw")->builds, builds);
+}
+
+// Every entity, then those a Filter keeps — with a Mesh and the pipeline's component, and of those, none Hidden — and
+// a draw of each: its mesh, where it is, and its colour, a field of the component the Filter keeps.
+TEST_F(EntityTest, EveryEntityIsFilteredThenDrawn) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive");
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "placed" });
+    graph.Add("shown", "Filter").Wire("entities", "meshes").Set("without", Value::List { "Hidden" }).Set("with", Value::List { "Mesh", "placed" });
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "shown", "Mesh.mesh").Wire("push.model", "shown", "matrix")
+        .Wire("push.color", "shown", "placed.color");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const kecs::ComponentId placed = runtime.ComponentOf("placed");
+    ASSERT_NE(placed, kecs::NoComponent);
+    ASSERT_EQ(scene->world.Describe(placed).fields.size(), 1u) << "its colour, wired from the Filter of it; where it is, from elsewhere";
+
+    kecs::World& world = scene->world;
+    const auto cube = runtime.ResourceOf("$cube");
+    const auto make = [&](const float x, const kor::Vec4 color) {
+        const kecs::Entity made = world.Create();
+        world.SetPosition(made, { x, 0, 0 });
+        world.SetScale(made, { 0.5f, 0.5f, 0.5f });
+        world.Add<kgraph::Mesh>(made, { cube });
+        world.Add(made, placed);
+        kgraph::Parameters(world, made, placed).Set("color", color);
+        return made;
+    };
+    make(-0.5f, { 1, 0, 0, 1 });
+    const kecs::Entity right = make(0.5f, { 0, 1, 0, 1 });
+    world.Create();                                         // nothing: not kept
+    world.Add<kgraph::Mesh>(world.Create(), { cube });      // a mesh and no colour: not kept
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("all", "count"), Value(static_cast<double>(world.All().size()))) << "every entity";
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(2));
+    ASSERT_EQ(runtime.ReportOf("draw")->ran, 2u) << runtime.ReportOf("draw")->why;
+    EXPECT_EQ(scene->Pixel(8, 16).x, 255) << "red, on the left";
+    EXPECT_EQ(scene->Pixel(24, 16).y, 255) << "green, on the right";
+
+    world.Add<Hidden>(right);
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ReportOf("draw")->ran, 1u) << "the second Filter keeps it no more";
+    EXPECT_EQ(scene->Pixel(24, 16).y, 0);
+    EXPECT_EQ(scene->Pixel(8, 16).x, 255);
+}
+
+// What a scene's components hold is there as values, which follow the world every frame: a ForEach of the
+// engine's package's components — the Camera, a light — worked on by other nodes, and packed into a buffer as a
+// shader's block lays it out. Nothing is built again for it, and nothing in the graph knows a camera from a light.
 TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     using kgraph::Value;
     kecs::World& world = scene->world;
     const kecs::Entity eye = world.Create(), lamp = world.Create();
     world.Rename(eye, "Eye");
-    world.Add<kgraph::Camera>(eye, { .fieldOfView = 90.f, .near = 0.5f, .far = 50.f });
+    support::Give(world, eye, "Camera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 50.f } } });
     world.SetPosition(eye, { 1, 2, 3 });
     world.Rename(lamp, "Lamp");
-    world.Add<kgraph::PointLight>(lamp, { .color = { 1, 1, 1 }, .intensity = 2.f, .range = 7.f });
+    support::Give(world, lamp, "PointLight", { { "color", { 1, 1, 1 } }, { "range", { 7.f } } });
     world.SetPosition(lamp, { 0, 4, 0 });
 
     kgraph::Graph graph;
     graph.passes = { "frame", "later" };
-    graph.Add("camera", "Camera").Set("extent", Value::List { 200, 100 });
-    graph.Add("sky", "Sky");
-    graph.Add("sun", "Sun");
-    graph.Add("lights", "Lights");
+    graph.Add("eye", "Entity").Set("component", "Camera");
+    graph.Add("looking at", "Add").Wire("a", "eye", "worldPosition").Wire("b", "eye", "forward");
+    graph.Add("camera", "View").Wire("position", "eye", "worldPosition").Wire("target", "looking at").Wire("up", "eye", "up").Set("main", true);
+    graph.Add("lens", "Perspective").Set("main", true).Wire("fieldOfView", "eye", "field.fieldOfView").Wire("near", "eye", "field.near")
+        .Wire("far", "eye", "field.far").Set("aspect", 2);
+    graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");
+    graph.Add("unseen", "MatrixInverse").Wire("a", "seen");
+    graph.Add("sky", "Entity").Set("component", "Sky");
+    graph.Add("zenith", "Linear").Wire("a", "sky", "field.zenith");
+    graph.Add("sun", "Entity").Set("component", "DirectionalLight");
+    graph.Add("lamps", "ForEach").Set("component", "PointLight");
+    graph.Add("place and reach", "Append").Wire("a", "lamps", "worldPosition").Wire("b", "lamps", "field.range");
+    graph.Add("lights", "Collect").Wire("value", "place and reach");
     graph.Add("far", "ComponentValue").Set("component", "Camera").Set("field", "far");
     graph.Add("twice as far", "Multiply").Wire("a", "far").Set("b", 2);
     graph.Add("where", "EntityTransform").Set("entity", "Lamp");
     graph.Add("placed", "Append").Wire("a", "camera", "position").Wire("b", "far");
-    graph.Add("back", "MatrixMultiply").Wire("a", "camera", "viewProjection").Wire("b", "camera", "inverseViewProjection");
+    graph.Add("back", "MatrixMultiply").Wire("a", "seen").Wire("b", "unseen");
     // A block as a shader declares it: a matrix, a float3 with a float after it in its fourth place, a uint4.
-    graph.Add("block", "DataBuffer").Wire("field[0].value", "camera", "viewProjection").Wire("field[1].value", "camera", "position")
+    graph.Add("block", "DataBuffer").Wire("field[0].value", "seen").Wire("field[1].value", "camera", "position")
         .Wire("field[2].value", "twice as far").Wire("field[3].value", "lights", "count").Set("field[3].type", "eUVec4");
-    graph.Add("array", "DataBuffer").Set("usage", "eStorage").Wire("field[0].value", "lights", "data");
-    graph.Add("taken", "Reference").Set("node", "camera");
+    graph.Add("taken", "Reference").Set("node", "lens");
     graph.Find("taken")->pass = "later";
     graph.Add("from afar", "Add").Wire("a", "taken", "far").Set("b", 1);
     scene->runtime->Set(graph);
@@ -555,35 +744,41 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     ASSERT_TRUE(scene->runtime->Ok());
     auto& runtime = *scene->runtime;
 
-    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 1, 2, 3 }));
-    EXPECT_EQ(runtime.ValueOf("camera", "fieldOfView"), Value(90));
+    const auto near = [](const Value& value, const std::vector<double>& numbers) {
+        const auto* items = value.Items();
+        if (!items || items->size() != numbers.size()) return false;
+        for (std::size_t i = 0; i < numbers.size(); ++i)
+            if (std::abs(*(*items)[i].Number() - numbers[i]) > 1e-4) return false;
+        return true;
+    };
+    EXPECT_TRUE(near(runtime.ValueOf("camera", "position"), { 1, 2, 3 })) << runtime.ValueOf("camera", "position").ToJson();
+    EXPECT_NEAR(*runtime.ValueOf("lens", "fieldOfView").Number(), 90, 1e-4);
+    EXPECT_EQ(runtime.ValueOf("lens", "far"), Value(50));
     EXPECT_EQ(runtime.ValueOf("far"), Value(50));
     EXPECT_EQ(runtime.ValueOf("twice as far"), Value(100));
-    EXPECT_EQ(runtime.ValueOf("placed"), Value(Value::List { 1, 2, 3, 50 }));
+    EXPECT_TRUE(near(runtime.ValueOf("placed"), { 1, 2, 3, 50 }));
     EXPECT_EQ(runtime.ValueOf("where", "worldPosition"), Value(Value::List { 0, 4, 0 }));
+    EXPECT_EQ(runtime.ValueOf("lights"), Value(Value::List { 0, 4, 0, 7 })) << "the lamp's place and its reach, collected";
     EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(1));
     EXPECT_EQ(runtime.ValueOf("sun", "present"), Value(0)) << "there is no directional light";
-    EXPECT_EQ(runtime.ValueOf("from afar"), Value(51)) << "through what another pass brought in";
+    EXPECT_EQ(runtime.ValueOf("sky", "present"), Value(0));
+    EXPECT_TRUE(near(runtime.ValueOf("zenith"), { std::pow(0.22, 2.2), std::pow(0.42, 2.2), std::pow(0.78, 2.2) }))
+        << "with no Sky, a Sky as the package's source starts it, in linear terms: " << runtime.ValueOf("zenith").ToJson();
+    EXPECT_NEAR(*runtime.ValueOf("from afar").Number(), 51, 1e-4) << "through what another pass brought in";
     const auto identity = *runtime.ValueOf("back").Items();
     for (std::size_t i = 0; i < 16; ++i) EXPECT_NEAR(*identity[i].Number(), i % 5 == 0 ? 1.0 : 0.0, 1e-3) << i;
-    const Value lightData = runtime.ValueOf("lights", "data");
-    const auto& light = *lightData.Items();
-    ASSERT_EQ(light.size(), 64u * 16u);
-    EXPECT_EQ(light[1], Value(4)) << "the lamp's height";
-    EXPECT_EQ(light[3], Value(7)) << "its range";
-    EXPECT_EQ(light[7], Value(1)) << "a point light";
-    EXPECT_EQ(light[8], Value(2)) << "its colour, times its intensity";
     EXPECT_EQ(runtime.ValueOf("block", "bytes"), Value(64 + 16 + 16)) << "a matrix; a float3 and the float in its fourth place; a uint4";
-    EXPECT_EQ(runtime.ValueOf("array", "bytes"), Value(64 * 64));
-    EXPECT_EQ(runtime.Aspect(), 2.f) << "the picture it is for is twice as wide as it is tall";
+    EXPECT_EQ(runtime.Aspect(), 2.f) << "the main view's picture is twice as wide as it is tall";
+    EXPECT_EQ(runtime.CurrentView().view, kgraph::ViewOf(world, eye).view) << "the main view is the scene's";
+    EXPECT_NEAR(runtime.CurrentView().far, 50.f, 1e-4) << "and its lens is the one wired from it";
 
     const auto bytes = [&](const char* node) { return kor::capi::BufferOf(runtime.ResourceOf(node)->handle)->Read<float>(); };
     Frame();
     {
         const auto block = bytes("block");
         ASSERT_GE(block.size(), 24u);
-        EXPECT_EQ(block[16], 1.f) << "the position, after the matrix";
-        EXPECT_EQ(block[18], 3.f);
+        EXPECT_NEAR(block[16], 1.f, 1e-5) << "the position, after the matrix";
+        EXPECT_NEAR(block[18], 3.f, 1e-5);
         EXPECT_EQ(block[19], 100.f) << "and the number, in the vector's fourth place";
         kor::u32 count = 0;
         std::memcpy(&count, &block[20], 4);
@@ -592,39 +787,153 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
 
     // The world changes: the values follow, and so does what is in the buffer. No node is built again.
     const auto builds = [&](const char* node) { return runtime.Status(node)->builds; };
-    const std::uint64_t before[] { builds("camera"), builds("block"), builds("twice as far"), builds("from afar") };
+    const std::uint64_t before[] { builds("lens"), builds("block"), builds("twice as far"), builds("from afar"), builds("lights") };
     world.SetPosition(eye, { 5, 6, 7 });
-    world.Mutable<kgraph::Camera>(eye)->far = 80.f;
+    support::Give(world, eye, "Camera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 80.f } } });
     world.Destroy(lamp);
     Frame();
     Frame();
-    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 5, 6, 7 }));
+    EXPECT_TRUE(near(runtime.ValueOf("camera", "position"), { 5, 6, 7 }));
     EXPECT_EQ(runtime.ValueOf("twice as far"), Value(160));
-    EXPECT_EQ(runtime.ValueOf("from afar"), Value(81));
+    EXPECT_NEAR(*runtime.ValueOf("from afar").Number(), 81, 1e-4);
     EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(0));
+    EXPECT_EQ(runtime.ValueOf("lights"), Value(Value::List {}));
     EXPECT_EQ(runtime.ValueOf("where", "present"), Value(0)) << "the lamp is gone";
     {
         const auto block = bytes("block");
-        EXPECT_EQ(block[16], 5.f);
+        EXPECT_NEAR(block[16], 5.f, 1e-5);
         EXPECT_EQ(block[19], 160.f);
     }
-    const std::uint64_t after[] { builds("camera"), builds("block"), builds("twice as far"), builds("from afar") };
-    for (int i = 0; i < 4; ++i) EXPECT_EQ(after[i], before[i]) << "a value changed where it was: nothing was built again";
+    const std::uint64_t after[] { builds("lens"), builds("block"), builds("twice as far"), builds("from afar"), builds("lights") };
+    for (int i = 0; i < 5; ++i) EXPECT_EQ(after[i], before[i]) << "a value changed where it was: nothing was built again";
 
-    // Whoever runs the graph can look from somewhere of its own: the camera is then that, and no entity.
+    // Whoever runs the graph can look from somewhere of its own: the main view is then that, and no entity's, and the
+    // Perspective wired from it has its lens.
     kgraph::View view;
     view.view = kor::LookAt(kor::Vec3(0, 0, 9), kor::Vec3(0));
+    view.fieldOfView = 0.5f;
+    view.far = 30.f;
     runtime.SetView(view);
     Frame();
-    EXPECT_EQ(runtime.ValueOf("camera", "position"), Value(Value::List { 0, 0, 9 }));
+    EXPECT_TRUE(near(runtime.ValueOf("camera", "position"), { 0, 0, 9 }));
+    EXPECT_NEAR(*runtime.ValueOf("lens", "fieldOfView").Number(), 0.5 * 180.0 / 3.14159265358979, 1e-3);
+    EXPECT_EQ(runtime.ValueOf("lens", "far"), Value(30));
+
+    // Another runtime that follows this one is another view of the same graph and the same world: seen from where it
+    // is told — the scene's camera, told nothing — while this one is seen from where it was told. What is in files and
+    // the default meshes are the first one's; what each node makes is each one's own.
+    FollowScene::source = &runtime;
+    FollowScene::world = &world;
+    auto* other = support::App()->OpenOffscreen<FollowScene>({ .title = "follows", .extent = { support::Size, support::Size } });
+    ASSERT_NE(other, nullptr);
+    Frame();
+    Frame();
+    kgraph::Runtime& follows = *other->runtime;
+    for (const auto& problem : follows.Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(near(follows.ValueOf("camera", "position"), { 5, 6, 7 })) << "the scene's camera: " << follows.ValueOf("camera", "position").ToJson();
+    EXPECT_EQ(follows.ValueOf("lens", "far"), Value(80));
+    EXPECT_TRUE(near(runtime.ValueOf("camera", "position"), { 0, 0, 9 })) << "and the first is still seen from where it was told";
+    EXPECT_EQ(follows.ResourceOf("$cube"), runtime.ResourceOf("$cube")) << "a default mesh is made once, by the first";
+    EXPECT_EQ(follows.ResourceOf("$white"), runtime.ResourceOf("$white"));
+    ASSERT_NE(follows.ResourceOf("block"), nullptr);
+    EXPECT_NE(follows.ResourceOf("block"), runtime.ResourceOf("block")) << "what a node makes is its own";
+    // The graph edited: the other follows it.
+    graph.Add("thrice as far", "Multiply").Wire("a", "far").Set("b", 3);
+    graph.Add("numbers", "Buffer").Set("instanceCount", 8).Set("usage", Value::List { "eStorage" });
+    runtime.Set(graph);
+    Frame();
+    Frame();
+    EXPECT_EQ(follows.ValueOf("thrice as far"), Value(240));
+    // A buffer something outside the graph writes into is shared, when it is said to be: the first's own, not another.
+    ASSERT_NE(follows.ResourceOf("numbers"), nullptr);
+    EXPECT_NE(follows.ResourceOf("numbers"), runtime.ResourceOf("numbers"));
+    follows.Share({ "numbers" });
+    Frame();
+    EXPECT_EQ(follows.ResourceOf("numbers"), runtime.ResourceOf("numbers")) << "the first's buffer";
+    graph.Find("numbers")->Set("instanceCount", 16);
+    runtime.Set(graph);
+    Frame();
+    Frame();
+    EXPECT_EQ(follows.ResourceOf("numbers"), runtime.ResourceOf("numbers")) << "and the one it made in its place, once it made another";
+    follows.Share({});
+    Frame();
+    EXPECT_NE(follows.ResourceOf("numbers"), runtime.ResourceOf("numbers")) << "not shared, its own again";
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "numbers"; });
+    support::App()->Close(*other);
+    Frame();
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "thrice as far"; });
+    runtime.Set(graph);
     runtime.SetView(std::nullopt);
+
+    // One by name, the first, and one there is not.
+    const kecs::Entity second = world.Create();
+    world.Rename(second, "Second");
+    support::Give(world, second, "Camera", { { "far", { 7.f } } });
+    graph.Find("eye")->Set("entity", "Second");
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("lens", "far"), Value(7));
+    EXPECT_EQ(runtime.EachOf("lens"), "") << "what is wired from one entity is no loop";
+    graph.Find("eye")->inputs.erase("entity");
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("lens", "far"), Value(80)) << "the first of them, in the hierarchy's order";
+    graph.Find("eye")->Set("entity", "Nobody");
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("eye", "present"), Value(0));
 
     // What a field is not, and what a block cannot be, is said.
     graph.Find("far")->Set("field", "nearness");
     graph.Find("block")->Set("field[2].type", "eBlob");
+    graph.Add("all lamps", "ForEach").Set("component", "PointLight").Set("select", "eFirst");
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("far")->error.find("'Camera' has no field 'nearness'"), std::string::npos) << runtime.Status("far")->error;
     EXPECT_FALSE(runtime.Status("block")->ok);
+    EXPECT_NE(runtime.Status("all lamps")->error.find("an Entity node is one"), std::string::npos) << runtime.Status("all lamps")->error;
+}
+
+// Every component of the world is offered as two nodes: a ForEach of it, and a buffer laid out as its element is.
+TEST_F(EntityTest, EachComponentIsOfferedAsANodeAndABuffer) {
+    using kgraph::Value;
+    const auto presets = scene->runtime->Presets();
+    const auto find = [&](const std::string_view name) { return std::ranges::find(presets, name, &kgraph::Preset::name); };
+    for (const char* name : { "Camera", "PointLight", "SpotLight", "DirectionalLight", "Sky" }) {
+        const auto each = find(name);
+        ASSERT_NE(each, presets.end()) << name;
+        EXPECT_EQ(each->type, "ForEach");
+        ASSERT_NE(find(std::string(name) + " Buffer"), presets.end()) << name;
+    }
+    const auto buffer = find("SpotLight Buffer");
+    EXPECT_EQ(buffer->type, "BufferBuilder");
+    const Value& layout = buffer->inputs.front().second;
+    ASSERT_TRUE(layout.Items());
+    std::vector<std::string> names;
+    for (const auto& field : *layout.Items()) names.push_back(*field.Find("name")->String());
+    EXPECT_EQ(names, (std::vector<std::string> { "color", "intensity", "range", "innerAngle", "outerAngle", "worldPosition", "forward", "matrix" }));
+
+    // A component made since — a script's — is offered as well, and the buffer of it is laid out as its ForEach's outputs
+    // are: each field wired from the output of its name.
+    kscript::ScriptType glow;
+    glow.name = "Glow";
+    glow.size = 4;
+    glow.alignment = 4;
+    glow.fields = { { "strength", "f32", 0, 4 } };
+    ASSERT_NE(scene->scripts.Declare(glow), kecs::NoComponent);
+    const auto now = scene->runtime->Presets();
+    const auto glowBuffer = std::ranges::find(now, "Glow Buffer", &kgraph::Preset::name);
+    ASSERT_NE(glowBuffer, now.end());
+    support::Give(scene->world, scene->world.Create(), "Glow", { { "strength", { 2.f } } });
+    kgraph::Graph graph;
+    graph.Add("glows", "ForEach").Set("component", "Glow");
+    auto& data = graph.Add("glow data", "BufferBuilder");
+    for (const auto& [input, value] : glowBuffer->inputs) data.Set(input, value);
+    data.Wire("field.strength", "glows", "field.strength");
+    for (const char* where : { "worldPosition", "forward", "matrix" }) data.Wire(std::string("field.") + where, "glows", where);
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(scene->runtime->ValueOf("glow data", "count"), Value(1));
+    EXPECT_EQ(scene->runtime->ValueOf("glow data", "stride"), Value(112)) << "a float, two float3s each on sixteen, and a matrix";
 }
 
 // A graph is in passes: each node on the page of one, the passes in the order they are drawn. Saved and read back,
@@ -691,4 +1000,505 @@ TEST_F(EntityTest, AWorldIsSavedAndLoadedWithItsPipelinesComponents) {
     EXPECT_EQ(values.ResourceAt("target"), scene->runtime->ResourceOf("backdrop")) << "found again by the node that makes it";
     EXPECT_EQ(Parameters(world, again, show).Get<kor::Vec2>("offset"), (kor::Vec2 { -1, 0.5f }));
     EXPECT_EQ(Parameters(world, again, show).ResourceAt("source"), nullptr) << "one made in code has no name to be found by";
+}
+
+namespace {
+    /** A square a unit across, about @p centre: two triangles, with what is asked of its vertices. */
+    kgraph::VertexData SquareData(const float centre, const bool normals, const std::vector<std::vector<std::string>>& buffers)
+    {
+        using kgraph::AttributeType;
+        kgraph::VertexData data;
+        data.vertexCount = 4;
+        const float corners[4][2] { { -0.25f, -0.25f }, { 0.25f, -0.25f }, { 0.25f, 0.25f }, { -0.25f, 0.25f } };
+        kgraph::VertexAttribute position { "POSITION", AttributeType::eFloat, 3, {} }, normal { "NORMAL", AttributeType::eFloat, 3, {} },
+            uv { "UV", AttributeType::eFloat, 2, {} }, wind { "WIND", AttributeType::eFloat, 1, {} };
+        for (int v = 0; v < 4; ++v) {
+            for (const float f : { corners[v][0] + centre, corners[v][1], 0.f }) position.words.push_back(std::bit_cast<std::uint32_t>(f));
+            for (const float f : { 0.f, 0.f, 1.f }) normal.words.push_back(std::bit_cast<std::uint32_t>(f));
+            for (const float f : { 0.f, 0.f }) uv.words.push_back(std::bit_cast<std::uint32_t>(f));
+            wind.words.push_back(std::bit_cast<std::uint32_t>(static_cast<float>(v) * 0.5f));
+        }
+        data.attributes = { std::move(wind), std::move(position), std::move(uv) };
+        if (normals) data.attributes.push_back(std::move(normal));
+        data.indices = { 0, 1, 2, 0, 2, 3 };
+        data.buffers = buffers;
+        return data;
+    }
+}
+
+// A pipeline draws every mesh that has what its vertex shader reads, however the mesh lays its vertices out: in other
+// buffers, with more besides. The pipeline is made again for each other layout. One that lacks what is read is passed
+// by, and says what it lacks. A script's mesh, of attributes of its own, is read back as it was made.
+TEST_F(EntityTest, AnyMeshThatHasWhatTheShaderReadsIsDrawn) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive");   // the layout it is made with: POSITION, NORMAL and UV, in one buffer
+    // Its vertex shader reads POSITION and NORMAL, by their semantics: what else a mesh has, and where, is no matter.
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placedNormal").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placedNormal").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("drawn", "ForEach").Set("component", "placed").Set("with", Value::List { "Mesh" });
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "drawn", "Mesh.mesh").Wire("push.model", "drawn", "matrix")
+        .Wire("push.color", "drawn", "field.color");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const kecs::ComponentId placed = runtime.ComponentOf("placed");
+    ASSERT_NE(placed, kecs::NoComponent);
+
+    // Left: a square laid out as the pipeline is. Right: one in two buffers, POSITION in the second, with WIND besides.
+    std::string error;
+    ASSERT_TRUE(runtime.MakeMesh("$script/plain", SquareData(-0.5f, true, {}), &error)) << error;
+    ASSERT_TRUE(runtime.MakeMesh("$script/windy", SquareData(0.5f, true, { { "WIND", "NORMAL", "UV" }, { "POSITION" } }), &error)) << error;
+    ASSERT_TRUE(runtime.MakeMesh("$script/flat", SquareData(0.f, false, {}), &error)) << error;
+    const auto windy = runtime.ResourceOf("$script/windy");
+    ASSERT_NE(windy, nullptr);
+    EXPECT_EQ(kor::capi::MeshOf(windy->handle)->Layout().bindings.size(), 2u) << "a vertex buffer for each group";
+
+    kecs::World& world = scene->world;
+    const auto entity = [&](const std::string& mesh, const kor::Vec4 color) {
+        const kecs::Entity made = world.Create();
+        world.Add<kgraph::Mesh>(made, { runtime.ResourceOf(mesh) });
+        world.Add(made, placed);
+        kgraph::Parameters(world, made, placed).Set("color", color);
+        return made;
+    };
+    entity("$script/plain", { 1, 0, 0, 1 });
+    entity("$script/windy", { 0, 1, 0, 1 });
+    entity("$script/flat", { 0, 0, 1, 1 });
+    Frame();
+    Frame();
+    const auto* report = runtime.ReportOf("draw");
+    ASSERT_NE(report, nullptr);
+    EXPECT_EQ(report->ran, 2u) << report->why;
+    EXPECT_EQ(report->skipped, 1u) << "the one with no NORMAL";
+    EXPECT_NE(report->why.find("has not what the vertex shader reads"), std::string::npos) << report->why;
+    EXPECT_EQ(scene->Pixel(8, 16).x, 255) << "the plain square, on the left";
+    EXPECT_EQ(scene->Pixel(24, 16).y, 255) << "the windy one, on the right, drawn with the pipeline made for its layout";
+    EXPECT_EQ(scene->Pixel(16, 16).z, 0) << "the flat one, passed by";
+
+    // Read back as it was made: every attribute, in the buffers it was put in.
+    const auto read = runtime.ReadMesh("$script/windy", &error);
+    ASSERT_TRUE(read) << error;
+    EXPECT_EQ(read->vertexCount, 4u);
+    const auto* wind = read->Find("WIND");
+    ASSERT_NE(wind, nullptr);
+    EXPECT_EQ(std::bit_cast<float>(wind->words[3]), 1.5f);
+    EXPECT_EQ(read->buffers, (std::vector<std::vector<std::string>> { { "WIND", "NORMAL", "UV" }, { "POSITION" } }));
+    EXPECT_EQ(read->indices, (std::vector<std::uint32_t> { 0, 1, 2, 0, 2, 3 }));
+    const auto cube = runtime.ReadMesh("$cube", &error);
+    ASSERT_TRUE(cube) << error;
+    EXPECT_NE(cube->Find("UV"), nullptr);
+
+    // Made again with NORMAL: what held the flat one holds the new one, and it is drawn.
+    ASSERT_TRUE(runtime.MakeMesh("$script/flat", SquareData(0.f, true, {}), &error)) << error;
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ReportOf("draw")->ran, 3u) << runtime.ReportOf("draw")->why;
+    EXPECT_EQ(scene->Pixel(16, 16).z, 255);
+
+    kgraph::VertexData wrong = SquareData(0.f, true, {});
+    wrong.attributes[1].words.pop_back();
+    EXPECT_FALSE(runtime.MakeMesh("$script/wrong", wrong, &error));
+    EXPECT_NE(error.find("POSITION"), std::string::npos) << error;
+}
+
+// A model's meshes are read with every attribute they have; the scene can leave some out — they are then not held at
+// all — and put the rest in buffers of its choosing. Changed, the file is read again, and what held its meshes follows.
+TEST_F(EntityTest, AModelsAttributesAreReadAsTheSceneSays) {
+    const auto file = std::filesystem::temp_directory_path() / "kgraph-import.obj";
+    std::ofstream(file) << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\nf 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n";
+    auto& runtime = *scene->runtime;
+    runtime.Set(kgraph::Graph {});
+    const std::string name = file.generic_string(), id = "@" + name + "#0";
+    const auto wait = [&](const std::function<bool()>& done) { for (int i = 0; i < 400 && !done(); ++i) Frame(); return done(); };
+    const auto held = runtime.ResourceOf(id);
+    ASSERT_NE(held, nullptr);
+    ASSERT_TRUE(wait([&] { const auto now = runtime.ResourceOf(id); return now && !now->pending; })) << "read";
+    std::string error;
+    auto read = runtime.ReadMesh(id, &error);
+    ASSERT_TRUE(read) << error;
+    for (const char* semantic : { "POSITION", "NORMAL", "UV" }) EXPECT_NE(read->Find(semantic), nullptr) << semantic;
+    EXPECT_TRUE(read->buffers.empty()) << "all in one buffer, by default";
+    const auto before = runtime.ResourceOf(id);
+
+    // UV left out, POSITION in a buffer of its own: read again so.
+    kgraph::Graph graph;
+    graph.meshImports[name] = { .leaveOut = { "UV" }, .buffers = { { "POSITION" } } };
+    runtime.Set(graph);
+    ASSERT_TRUE(wait([&] { return before->replacedBy != nullptr; })) << "read again";
+    read = runtime.ReadMesh(id, &error);
+    ASSERT_TRUE(read) << error;
+    EXPECT_EQ(read->Find("UV"), nullptr) << "not held at all";
+    EXPECT_NE(read->Find("NORMAL"), nullptr);
+    ASSERT_EQ(read->buffers.size(), 2u);
+    EXPECT_EQ(read->buffers[0], std::vector<std::string> { "POSITION" });
+    const auto now = runtime.ResourceOf(id);
+    const auto layout = kor::capi::MeshOf(now->source->handle)->Layout();
+    EXPECT_EQ(layout.bindings.size(), 2u);
+    EXPECT_TRUE(std::ranges::none_of(layout.attributes, [](const auto& a) { return a.semantic == "UV"; }));
+
+    // Saved with the graph, and read back.
+    kgraph::Graph again;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), again, error)) << error;
+    EXPECT_EQ(again.meshImports, graph.meshImports);
+    std::filesystem::remove(file);
+}
+
+// Many entities of a few meshes drawn by one indirect draw: a Filter groups them by their mesh, a MeshPack packs the
+// meshes as one, and an IndirectDraws writes a command for each mesh — its part of the pack, its group's instances.
+TEST_F(EntityTest, EntitiesGroupedByMeshAreDrawnByOneIndirectDraw) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube"), sphere = runtime.ResourceOf("$sphere");
+    ASSERT_TRUE(cube && sphere);
+    // Left to right: a red cube, a green sphere, a blue cube, a white sphere.
+    const std::array<std::pair<std::shared_ptr<kgraph::Resource>, std::vector<float>>, 4> made { {
+        { cube, { 1, 0, 0 } }, { sphere, { 0, 1, 0 } }, { cube, { 0, 0, 1 } }, { sphere, { 1, 1, 1 } } } };
+    std::vector<kecs::Entity> entities;
+    for (std::size_t i = 0; i < made.size(); ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { -0.75f + 0.5f * static_cast<float>(i), 0, 0 });
+        world.Add<kgraph::Mesh>(entity, { made[i].first });
+        support::Give(world, entity, "PointLight", { { "color", made[i].second } });
+        entities.push_back(entity);
+    }
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
+    graph.Add("place", "Append").Wire("a", "meshes", "worldPosition").Set("b", 0.4);
+    graph.Add("tint", "Append").Wire("a", "meshes", "PointLight.color").Set("b", 1);
+    graph.Add("instances", "BufferBuilder")
+        .Set("layout", Value::List { Value::Members { { "name", "place" }, { "type", "eVec4" } }, Value::Members { { "name", "color" }, { "type", "eVec4" } } })
+        .Wire("field.place", "place").Wire("field.color", "tint");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("drawer", "GraphicsPipeline").Set("vertex.module", "indirect").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "indirect").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "drawer").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.instances", "instances");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    // Grouped by mesh: the cubes, then the spheres, each group where its first one was.
+    EXPECT_EQ(runtime.ValueOf("meshes", "groupCount"), Value(2));
+    EXPECT_EQ(runtime.ValueOf("meshes", "groups"), Value(Value::List { Value::Members { { "first", 0 }, { "count", 2 } }, Value::Members { { "first", 2 }, { "count", 2 } } }));
+    EXPECT_EQ(runtime.ValueOf("pack", "count"), Value(2)) << "two meshes, packed once each";
+    const Value rangesValue = runtime.ValueOf("pack", "ranges");
+    const auto* ranges = rangesValue.Items();
+    ASSERT_TRUE(ranges && ranges->size() == 2) << rangesValue.ToJson();
+    const auto number = [&](const std::size_t mesh, const char* name) {
+        const Value* found = (*ranges)[mesh].Find(name);
+        return found && found->Number() ? *found->Number() : -1.0;
+    };
+    EXPECT_EQ(number(0, "firstIndex"), 0.0) << rangesValue.ToJson();
+    EXPECT_GT(number(1, "firstIndex"), 0.0) << "the sphere's indices after the cube's";
+    EXPECT_GT(number(1, "vertexOffset"), 0.0);
+    EXPECT_EQ(runtime.ValueOf("commands", "drawCount"), Value(2));
+    {
+        const auto words = kor::capi::BufferOf(runtime.ResourceOf("commands", "commands")->handle)->Read<std::uint32_t>();
+        ASSERT_GE(words.size(), 10u);
+        EXPECT_EQ(words[1], 2u) << "two cubes";
+        EXPECT_EQ(words[4], 0u) << "from the first instance";
+        EXPECT_EQ(words[6], 2u) << "two spheres";
+        EXPECT_EQ(words[9], 2u) << "after the cubes";
+        EXPECT_EQ(words[7], static_cast<std::uint32_t>(number(1, "firstIndex")));
+    }
+    // All four drawn by the one draw, each where it is and in its own colour.
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(4, { 255, 0, 0 })) << "the red cube";
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "the green sphere";
+    EXPECT_TRUE(is(20, { 0, 0, 255 })) << "the blue cube";
+    EXPECT_TRUE(is(28, { 255, 255, 255 })) << "the white sphere";
+    EXPECT_TRUE(is(8, { 0, 0, 0 })) << "and nothing between them";
+
+    // One given another mesh: grouped again, and the meshes packed again.
+    world.Get<kgraph::Mesh>(entities[1]) ? (void)(world.Mutable<kgraph::Mesh>(entities[1])->mesh = cube) : (void)0;
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(runtime.ValueOf("meshes", "groups"), Value(Value::List { Value::Members { { "first", 0 }, { "count", 3 } }, Value::Members { { "first", 3 }, { "count", 1 } } }));
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "a green cube now, where it was";
+    EXPECT_TRUE(is(28, { 255, 255, 255 }));
+
+    // What it holds, looked at: a command a mesh, by field — so that what is batched can be seen.
+    runtime.Watch("commands");
+    std::optional<kgraph::Peek> peek;
+    for (int i = 0; i < 8 && !(peek = runtime.Watched("commands")); ++i) Frame();
+    ASSERT_TRUE(peek) << runtime.WatchProblem("commands");
+    EXPECT_FALSE(peek->image);
+    EXPECT_EQ(peek->stride, 20u);
+    EXPECT_EQ(peek->count, 2u) << "one command a mesh";
+    std::vector<std::string> named;
+    for (const auto& field : peek->fields) named.push_back(field.name);
+    EXPECT_EQ(named, (std::vector<std::string> { "indexCount", "instanceCount", "firstIndex", "vertexOffset", "firstInstance" }));
+    const auto word = [&](const std::size_t at) { std::uint32_t v = 0; std::memcpy(&v, peek->bytes.data() + at, 4); return v; };
+    ASSERT_GE(peek->bytes.size(), 40u);
+    EXPECT_EQ(word(4), 3u) << "three cubes, in one command";
+    EXPECT_EQ(word(24), 1u) << "the sphere left, in another";
+    EXPECT_EQ(word(36), 3u) << "after the cubes";
+    runtime.Unwatch("commands");
+
+    // For a compute pass to count what it draws: every command starts at none, and nothing is drawn of itself.
+    graph.Find("commands")->Set("mode", "eGPU");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    ASSERT_TRUE(runtime.Status("commands")->ok) << runtime.Status("commands")->error;
+    EXPECT_NE(runtime.ResourceOf("commands", "visible"), nullptr) << "and room to say which instances it draws";
+    EXPECT_EQ(kor::capi::BufferOf(runtime.ResourceOf("commands", "commands")->handle)->Read<std::uint32_t>()[1], 0u);
+    EXPECT_TRUE(is(4, { 0, 0, 0 })) << "no cull ran: nothing counted, nothing drawn";
+
+    // Meshes whose vertices are not laid out alike are not one mesh, and it says so.
+    kgraph::VertexData flat;
+    flat.vertexCount = 3;
+    flat.attributes.push_back({ "POSITION", kgraph::AttributeType::eFloat, 3, { 0, 0, 0, 0x3f800000, 0, 0, 0, 0x3f800000, 0 } });
+    flat.indices = { 0, 1, 2 };
+    ASSERT_TRUE(runtime.MakeMesh("$script/flat", flat));
+    world.Mutable<kgraph::Mesh>(entities[3])->mesh = runtime.ResourceOf("$script/flat");
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NE(runtime.Status("pack")->error.find("not laid out alike"), std::string::npos) << runtime.Status("pack")->error;
+}
+
+// Nothing yet to draw — the scene's meshes made by a script once it plays — is no problem: the pack is an empty mesh,
+// the draw clears and draws nothing, and what comes later is drawn.
+TEST_F(EntityTest, AnIndirectDrawOfNothingYetClearsAndDrawsWhatComesLater) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
+    graph.Add("place", "Append").Wire("a", "meshes", "worldPosition").Set("b", 0.4);
+    graph.Add("tint", "Append").Wire("a", "meshes", "PointLight.color").Set("b", 1);
+    graph.Add("instances", "BufferBuilder")
+        .Set("layout", Value::List { Value::Members { { "name", "place" }, { "type", "eVec4" } }, Value::Members { { "name", "color" }, { "type", "eVec4" } } })
+        .Wire("field.place", "place").Wire("field.color", "tint");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("drawer", "GraphicsPipeline").Set("vertex.module", "indirect").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "indirect").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "drawer").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Set("clearColor", Value::List { 0, 0, 1, 1 })
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.instances", "instances");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok()) << "nothing to pack is nothing to draw, not a problem";
+    EXPECT_EQ(runtime.ValueOf("pack", "count"), Value(0));
+    EXPECT_EQ(runtime.ValueOf("commands", "drawCount"), Value(0));
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(16, { 0, 0, 255 })) << "cleared, and nothing drawn";
+
+    const kecs::Entity entity = world.Create();
+    world.SetPosition(entity, { -0.75f, 0, 0 });
+    world.Add<kgraph::Mesh>(entity, { runtime.ResourceOf("$cube") });
+    support::Give(world, entity, "PointLight", { { "color", { 1.f, 0.f, 0.f } } });
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("commands", "drawCount"), Value(1));
+    EXPECT_TRUE(is(4, { 255, 0, 0 })) << "the cube, once there is one";
+    EXPECT_TRUE(is(16, { 0, 0, 255 }));
+}
+
+// A buffer its shader marks [entity("PER_INSTANCE")] is the Draw's to make and fill: an element for each entity of the
+// Filter its MeshPack packs, where each is and which, and its own fields as a field of the pipeline's component.
+TEST_F(EntityTest, AShaderSaysWhatEachInstanceIsAndTheDrawFillsIt) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    std::vector<kecs::Entity> entities;
+    for (const float x : { -0.5f, 0.5f }) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, 0, 0.5f });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        entities.push_back(entity);
+    }
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    // Nothing given for its instances: the shader says what they are.
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    // Another Draw of the same, over the first: it would write the same into its buffer, so it has the first's.
+    graph.Add("again", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Set("load", true);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    ASSERT_NE(runtime.ResourceOf("draw", "instances"), nullptr) << "the Draw made its buffer of instances";
+    EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "one buffer for both";
+    {   // The same shader, another pipeline: its colour is another component's, so its buffer is its own.
+        kgraph::Graph other = graph;
+        other.Add("retinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+            .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+        other.Add("elsewhere", "Draw").Wire("pipeline", "retinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+            .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Set("load", true);
+        runtime.Set(other);
+        for (int i = 0; i < 3; ++i) Frame();
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        ASSERT_NE(runtime.ResourceOf("elsewhere", "instances"), nullptr);
+        EXPECT_NE(runtime.ResourceOf("elsewhere", "instances"), runtime.ResourceOf("draw", "instances"));
+        EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances"));
+        runtime.Set(graph);
+        for (int i = 0; i < 3; ++i) Frame();
+    }
+
+    // What is not the entity's place nor which it is, is its own: the pipeline's component has it, and nothing else of the buffer.
+    const kecs::ComponentId tinted = world.Find("tinted");
+    ASSERT_NE(tinted, kecs::NoComponent) << "the pipeline's component";
+    std::vector<std::string> fields;
+    for (const auto& field : world.Describe(tinted).fields) fields.push_back(field.name);
+    EXPECT_EQ(fields, (std::vector<std::string> { "color" })) << "not the matrix, not the id, not the buffer";
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(8, { 0, 0, 0 })) << "an entity without the component is drawn with nothing of its own: black";
+    support::Give(world, entities[0], "tinted", { { "color", { 1, 0, 0, 1 } } });
+    support::Give(world, entities[1], "tinted", { { "color", { 0, 1, 0, 1 } } });
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(is(8, { 255, 0, 0 })) << "each where its matrix says, in its own colour";
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+    EXPECT_TRUE(is(16, { 0, 0, 0 })) << "and nothing between them";
+
+    // Moved, it is drawn where it is now: the buffer follows the world each frame.
+    world.SetPosition(entities[0], { 0, 0, 0.5f });
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(16, { 255, 0, 0 }));
+    EXPECT_TRUE(is(8, { 0, 0, 0 }));
+
+    // More than there is room for: another buffer, and the two still drawn as they are.
+    for (int i = 0; i < 80; ++i) {
+        const kecs::Entity far = world.Create();
+        world.SetPosition(far, { 5, 5, 0.5f });
+        world.Add<kgraph::Mesh>(far, { cube });
+    }
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(is(16, { 255, 0, 0 }));
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+    ASSERT_NE(runtime.ResourceOf("draw", "instances"), nullptr);
+    EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "outgrown, both have the one made in its place";
+}
+
+// A function is nodes as one: each call written out into them, given what the call is given and giving what they give.
+TEST_F(EntityTest, AFunctionsCallsAreItsNodesWrittenOut) {
+    using kgraph::Value;
+    kgraph::Runtime& runtime = *scene->runtime;
+    // Times three, plus what it is told to add: 1 when it is told nothing.
+    auto tripled = std::make_shared<kgraph::Graph>();
+    tripled->Add("x", "FunctionInput").Set("name", "x").Set("kind", "eValue");
+    tripled->Find("x")->y = 0;
+    tripled->Add("plus", "FunctionInput").Set("name", "plus").Set("default", 1);
+    tripled->Find("plus")->y = 100;
+    tripled->Add("times", "Multiply").Wire("a", "x").Set("b", 3);
+    tripled->Add("sum", "Add").Wire("a", "times").Wire("b", "plus");
+    tripled->Add("result", "FunctionOutput").Set("name", "result").Wire("value", "sum");
+    // One that calls the other: the entities a Filter keeps, counted, then tripled.
+    auto counted = std::make_shared<kgraph::Graph>();
+    counted->Add("of", "FunctionInput").Set("name", "of").Set("kind", "eEntities");
+    counted->Add("lit", "Filter").Wire("entities", "of").Set("with", Value::List { "PointLight" });
+    counted->Add("inner", "Function").Set("function", "tripled").Wire("x", "lit", "count");
+    counted->Add("count", "FunctionOutput").Set("name", "count").Wire("value", "inner", "result");
+
+    for (int i = 0; i < 2; ++i) support::Give(scene->world, scene->world.Create(), "PointLight", { { "range", { 3.f } } });
+    kgraph::Graph graph;
+    graph.functions = { { "tripled", tripled }, { "counted", counted } };
+    graph.Add("two", "Number").Set("value", 2);
+    graph.Add("a", "Function").Set("function", "tripled").Wire("x", "two");
+    graph.Add("b", "Function").Set("function", "tripled").Set("x", 10).Set("plus", 0);
+    graph.Add("both", "Add").Wire("a", "a", "result").Wire("b", "b", "result");
+    graph.Add("all", "Entities");
+    graph.Add("c", "Function").Set("function", "counted").Wire("of", "all");
+    graph.Add("nobody", "Function").Set("function", "missing");
+    graph.Add("self", "Function").Set("function", "itself");
+    auto itself = std::make_shared<kgraph::Graph>();
+    itself->Add("again", "Function").Set("function", "itself");
+    graph.functions["itself"] = itself;
+    runtime.Set(graph);
+    Frame();
+
+    EXPECT_EQ(runtime.ValueOf("a", "result"), Value(7)) << "2 * 3 + 1, its default";
+    EXPECT_EQ(runtime.ValueOf("b", "result"), Value(30)) << "10 * 3 + 0, as it was told";
+    EXPECT_EQ(runtime.ValueOf("both"), Value(37)) << "wired from like any node";
+    EXPECT_EQ(runtime.ValueOf("a/times"), Value(6)) << "its nodes are there, by the call's name";
+    EXPECT_TRUE(runtime.Status("a")->ok);
+    EXPECT_EQ(runtime.ValueOf("c", "count"), Value(7)) << "two lights, tripled, plus one: a call in a call, of entities from outside";
+    ASSERT_NE(runtime.Status("nobody"), nullptr);
+    EXPECT_NE(runtime.Status("nobody")->error.find("no function 'missing'"), std::string::npos) << runtime.Status("nobody")->error;
+    EXPECT_NE(runtime.Status("self")->error.find("calls itself"), std::string::npos) << runtime.Status("self")->error;
+
+    // Its ports are its function's edges, top to bottom; its output is what the node inside gives.
+    std::vector<std::string> ports;
+    for (const auto& port : runtime.PortsOf("a")) ports.push_back(port.name);
+    EXPECT_EQ(ports, (std::vector<std::string> { "function", "x", "plus" }));
+    const auto outputs = runtime.OutputsOf("a");
+    ASSERT_EQ(outputs.size(), 1u);
+    EXPECT_EQ(outputs[0].name, "result");
+    ASSERT_FALSE(runtime.OutputsOf("a/sum").empty());
+    EXPECT_EQ(outputs[0].type, runtime.OutputsOf("a/sum").front().type) << "as the Add inside gives it";
+    EXPECT_EQ(runtime.PortsOf("c")[1].type, "entities");
+
+    // A node inside that fails says so on the call, and which.
+    tripled->Find("times")->Set("b", "three");
+    graph.functions["tripled"] = std::make_shared<kgraph::Graph>(*tripled);
+    runtime.Set(graph);
+    Frame();
+    ASSERT_FALSE(runtime.Status("a")->ok);
+    EXPECT_TRUE(runtime.Status("a")->error.starts_with("times: ")) << runtime.Status("a")->error;
+
+    // A function opened in place: its edges in the graph itself stand for what they are given.
+    kgraph::Graph open;
+    open.Add("five", "Number").Set("value", 5);
+    open.Add("edge", "FunctionInput").Set("name", "x").Wire("value", "five");
+    open.Add("times", "Multiply").Wire("a", "edge").Set("b", 3);
+    open.Add("out", "FunctionOutput").Set("name", "result").Wire("value", "times");
+    open.Add("after", "Add").Wire("a", "out").Set("b", 1);
+    runtime.Set(open);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("after"), Value(16));
+    EXPECT_TRUE(runtime.Status("edge")->ok);
+    EXPECT_EQ(runtime.ValueOf("edge"), Value(5));
 }

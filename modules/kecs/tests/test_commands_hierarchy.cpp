@@ -1,5 +1,7 @@
 // Changes queued for after a query; the hierarchy; and observers of components coming and going.
 
+#include <cmath>
+
 #include <gtest/gtest.h>
 
 #include "types.h"
@@ -255,4 +257,112 @@ TEST(Transform, ComposedIsDecomposedToWhatItWas) {
     for (int column = 0; column < 4; ++column)
         for (int row = 0; row < 4; ++row) EXPECT_NEAR(one.At(column, row), column == row ? 1.f : 0.f, 1e-4f);
     EXPECT_FALSE(kecs::Decompose(kecs::Compose({}, {}, { 1, 0, 1 }), p, r, s)) << "flat along an axis: nothing says how it is turned";
+}
+
+// A rotation integrated a step at a time, as a body is turned by its angular velocity, is kept as the quaternion it was
+// given: going round by the Euler angles would round it off a little each step, and badly near a quarter turn about Y.
+TEST(Transform, AnEntityTurnedByAQuaternionKeepsIt) {
+    World world;
+    const Entity body = world.Create(), child = world.Create();
+    world.SetParent(child, body);
+    world.SetPosition(child, { 1, 0, 0 });
+    EXPECT_EQ(world.OrientationOf(body), kecs::Quat {}) << "unturned, to begin with";
+
+    // A quarter turn about Y, as Euler angles and as a quaternion, is the same turn.
+    const float half = std::sqrt(0.5f);
+    world.SetRotation(body, { 0, 90, 0 });
+    const kecs::Quat byAngles = world.OrientationOf(body);
+    EXPECT_NEAR(std::abs(byAngles.y), half, 1e-5f);
+    EXPECT_NEAR(std::abs(byAngles.w), half, 1e-5f);
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 0, 0, -1 }, "turned by the angles");
+
+    // Set as a quaternion — not of length 1 — it is that turn, made length 1, and the angles are worked out of it.
+    world.SetRotation(body, {});
+    world.SetOrientation(body, { 0, 2 * half, 0, 2 * half });
+    const kecs::Quat given = world.OrientationOf(body);
+    EXPECT_NEAR(given.y, half, 1e-6f);
+    EXPECT_NEAR(given.w, half, 1e-6f);
+    ExpectNear(PlaceOf(world.WorldMatrix(child)), { 0, 0, -1 }, "turned by the quaternion");
+    EXPECT_NEAR(world.RotationOf(body).y, 90.f, 0.05f) << "the angles follow";
+    world.SetOrientation(body, { 0, 0, 0, 0 });
+    EXPECT_EQ(world.OrientationOf(body), kecs::Quat {}) << "one of length 0 is no turn";
+
+    // Turned through the pole a step at a time: what is set is what is read back, made length 1 again and no more.
+    kecs::Quat q;
+    const float step = 0.01f;     // radians about X, then about Y, each step
+    for (int i = 0; i < 1000; ++i) {
+        const kecs::Quat about { std::sin(step / 2), std::sin(step / 2), 0, std::cos(step / 2) };
+        q = kecs::Normalize({ about.w * q.x + about.x * q.w + about.y * q.z - about.z * q.y,
+                              about.w * q.y - about.x * q.z + about.y * q.w + about.z * q.x,
+                              about.w * q.z + about.x * q.y - about.y * q.x + about.z * q.w,
+                              about.w * q.w - about.x * q.x - about.y * q.y - about.z * q.z });
+        world.SetOrientation(body, q);
+        const kecs::Quat back = world.OrientationOf(body);
+        ASSERT_NEAR(back.x, q.x, 1e-6f) << "step " << i;
+        ASSERT_NEAR(back.y, q.y, 1e-6f) << "step " << i;
+        ASSERT_NEAR(back.z, q.z, 1e-6f) << "step " << i;
+        ASSERT_NEAR(back.w, q.w, 1e-6f) << "step " << i;
+    }
+    // Its matrix is the quaternion's.
+    const kecs::Mat4 m = kecs::ComposeQuat({}, q, { 1, 1, 1 });
+    for (std::size_t i = 0; i < 16; ++i) EXPECT_NEAR(world.LocalMatrix(body).m[i], m.m[i], 1e-6f);
+
+    // Placed by a matrix, it takes the matrix's turn as a quaternion.
+    world.SetRotation(body, {});
+    world.SetWorldMatrix(body, kecs::ComposeQuat({ 1, 2, 3 }, kecs::Quat { 0, half, 0, half }, { 1, 1, 1 }));
+    const kecs::Quat placed = world.OrientationOf(body);
+    EXPECT_NEAR(std::abs(placed.y), half, 1e-5f);
+    EXPECT_NEAR(std::abs(placed.w), half, 1e-5f);
+    EXPECT_NEAR(world.RotationOf(body).y, 90.f, 0.05f);
+}
+
+// Euler angles go to a quaternion and back.
+TEST(Transform, AnglesAndQuaternionsAreTheSameTurn) {
+    const kecs::Vec3 angles { 20, -35, 50 };
+    ExpectNear(kecs::ToEuler(kecs::ToQuat(angles)), angles, "round trip");
+    const kecs::Mat4 byAngles = kecs::Compose({ 1, 2, 3 }, angles, { 2, 2, 2 }), byQuat = kecs::ComposeQuat({ 1, 2, 3 }, kecs::ToQuat(angles), { 2, 2, 2 });
+    for (std::size_t i = 0; i < 16; ++i) EXPECT_NEAR(byAngles.m[i], byQuat.m[i], 1e-6f);
+    kecs::Vec3 p, s;
+    kecs::Quat q;
+    ASSERT_TRUE(kecs::Decompose(byQuat, p, q, s));
+    const kecs::Quat expected = kecs::ToQuat(angles);
+    const float dot = q.x * expected.x + q.y * expected.y + q.z * expected.z + q.w * expected.w;
+    EXPECT_NEAR(std::abs(dot), 1.f, 1e-5f) << "the same turn, either sign";
+}
+
+// What a list of entities is made of changes the structure's version; moving, or writing what a component holds, does
+// not — and what is written is counted for that component alone.
+TEST(World, TheStructuresVersionIsWhatListsOfEntitiesAreMadeOf) {
+    kecs::World world;
+    const kecs::Entity a = world.Create(), b = world.Create();
+    world.Add<Position>(a);
+    const kecs::ComponentId position = world.Id<Position>(), velocity = world.Id<Velocity>();
+    const auto changes = [&] { return world.StructureVersion(); };
+
+    std::uint64_t before = changes();
+    world.SetPosition(a, { 1, 2, 3 });
+    world.SetRotation(a, { 0, 45, 0 });
+    EXPECT_EQ(changes(), before) << "moved: the same entities, the same components";
+    const std::uint64_t written = world.ChangesOf(position), other = world.ChangesOf(velocity);
+    world.Mutable<Position>(a)->x = 5;
+    EXPECT_EQ(changes(), before) << "what it holds is no part of the structure";
+    EXPECT_GT(world.ChangesOf(position), written) << "but it is counted as changed";
+    EXPECT_EQ(world.ChangesOf(velocity), other) << "for that component only";
+
+    const auto grows = [&](const char* what, const auto& change) {
+        const std::uint64_t was = changes();
+        change();
+        EXPECT_GT(changes(), was) << what;
+    };
+    grows("given a component", [&] { world.Add<Velocity>(b); });
+    grows("rid of one", [&] { world.Remove<Velocity>(b); });
+    grows("one switched off", [&] { world.SetEnabled<Position>(a, false); });
+    before = changes();
+    world.SetEnabled<Position>(a, false);
+    EXPECT_EQ(changes(), before) << "switched off again: nothing changed";
+    grows("and on", [&] { world.SetEnabled<Position>(a, true); });
+    grows("under another", [&] { world.SetParent(b, a); });
+    grows("renamed", [&] { world.Rename(b, "b"); });
+    grows("made", [&] { (void)world.Create(); });
+    grows("destroyed", [&] { world.Destroy(b); });
 }

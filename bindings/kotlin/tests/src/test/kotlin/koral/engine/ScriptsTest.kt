@@ -12,6 +12,7 @@ import kotlin.test.assertTrue
 import koral.App
 import koral.AppSettings
 import koral.OffscreenSettings
+import koral.Vec3
 import koral.WindowPlatform
 
 /** Scripts in Kotlin, on a running scene, with no display. One test: an application is one per process. */
@@ -52,6 +53,52 @@ class ScriptsTest {
             assertEquals("true", world.fieldJson(wheel, "Spin", "started"), "started, before its first update")
             assertEquals("[0,1,0]", world.fieldJson(wheel, "Spin", "axis").replace(" ", ""), "a vector property")
             assertEquals("null", world.fieldJson(wheel, "Spin", "mine"), "a private property is not the component's")
+            // Set as whatever the field is: a vector, an entity, none.
+            world.set(wheel, "Spin", "axis", Vec3(1f, 0.5f, 0f))
+            assertEquals("[1,0.5,0]", world.fieldJson(wheel, "Spin", "axis").replace(" ", ""), "a vector, set whole")
+            val hub = world.create("Hub")
+            world.set(wheel, "Spin", "target", hub)
+            assertTrue("\"entity\":${hub.index}" in world.fieldJson(wheel, "Spin", "target").replace(" ", ""), "an entity: ${world.fieldJson(wheel, "Spin", "target")}")
+            world.set(wheel, "Spin", "target", null)
+            assertEquals("null", world.fieldJson(wheel, "Spin", "target").replace(" ", ""), "and none")
+            world.destroy(hub)
+
+            // Many at once: three floats an entity, in two calls whatever the number.
+            val many = Entities.of(List(3) { world.create("Many $it") })
+            assertEquals(3, world.setRotations(many, floatArrayOf(0f, 10f, 0f, 0f, 20f, 0f, 0f, 30f, 0f)), "every one of them set")
+            assertEquals(20f, world.rotationOf(many[1]).y, "each its own")
+            val turned = world.rotationsOf(many)
+            assertEquals(listOf(10f, 20f, 30f), listOf(turned[1], turned[4], turned[7]), "and read back in order")
+            assertEquals(1f, world.scalesOf(many)[0], "a scale that was never set is one")
+            world.destroy(many[2])
+            assertEquals(2, world.setPositions(many, FloatArray(9) { 1f }), "one that is gone is left out")
+            assertEquals(0f, world.positionsOf(many, turned)[6], "and reads as nothing")
+            assertTrue(world.positionsOf(many, turned) === turned, "the array given back is the one passed in")
+            // Turned by quaternions, four floats an entity: kept as given, made length 1, the angles worked out of them.
+            val h = kotlin.math.sqrt(0.5f)
+            assertEquals(2, world.setOrientations(many, floatArrayOf(0f, 1f, 0f, 1f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f)), "the two alive")
+            val quats = world.orientationsOf(many)
+            assertEquals(h, quats[1], 1e-6f, "made length 1")
+            assertEquals(1f, quats[11], "the identity, for one that is gone")
+            assertEquals(90f, world.rotationOf(many[0]).y, 0.05f, "and the angles follow")
+            assertTrue(world.setOrientation(many[1], koral.Quat(h, 0f, 0f, h)))
+            assertEquals(h, world.orientationOf(many[1]).x, 1e-6f)
+            val drawn = world.debug.lineCount
+            world.debug.line(koral.Vec3(0f, 0f, 0f), koral.Vec3(1f, 0f, 0f))
+            assertTrue(world.debug.lineCount > drawn, "a script draws with the scene's debug lines")
+            many.take(2).forEach { world.destroy(it) }
+
+            // A field of many at once, as numbers: a Vec3 is three an entity, true or false one.
+            val two = Entities.of(wheel, world.create("No Spin"))
+            assertEquals(3, world.fieldWidth("Spin", "axis"))
+            assertEquals(0, world.fieldWidth("Spin", "nothing"), "a field there is not")
+            val axisBefore = world.floatsOf(two, "Spin", "axis")
+            assertEquals(1, world.setFloats(two, "Spin", "axis", floatArrayOf(1f, 2f, 3f, 4f, 5f, 6f)), "only the one with a Spin")
+            assertEquals("[1,2,3]", world.fieldJson(wheel, "Spin", "axis").replace(" ", ""), "written where it is")
+            assertEquals(listOf(1f, 2f, 3f, 0f, 0f, 0f), world.floatsOf(two, "Spin", "axis").toList(), "and nothing for one without it")
+            assertEquals(listOf(1, 0), world.intsOf(two, "Spin", "started").toList(), "true or false as 1 and 0")
+            world.setFloats(two, "Spin", "axis", axisBefore)
+            world.destroy(two[1])
             assertTrue("\"Spin\"" in world.toJson(), "and it is in the scene's file")
 
             // One script reading and writing another's, on another entity.
@@ -139,10 +186,13 @@ class ScriptsTest {
                 rm -rf "$classes"/*
                 if grep -q edited Scripts.kt; then cp -r "$b"/. "$classes"; else cp -r "$a"/. "$classes"; fi
             """.trimIndent())
-            val built = ScriptHost(world, classes, sources, listOf("sh", script.toString()))
+            // Run by its build, a project has the classes folder on its own classpath too, which keeps what it loaded once.
+            val classpath = java.net.URLClassLoader(arrayOf(classes.toUri().toURL()), ScriptHost::class.java.classLoader)
+            val built = ScriptHost(world, classes, sources, listOf("sh", script.toString()), classpath)
             built.pollInterval = 10
             built.settleTime = 60
             assertTrue(built.load(), "built and loaded: ${built.errors}")
+            classpath.loadClass("Spin")     // build A's, from now on the classpath's
             assertTrue("Watcher" in built.scripts, "the build as first written")
 
             fun save(text: String, until: () -> Boolean): Boolean {
@@ -157,11 +207,31 @@ class ScriptsTest {
             assertTrue(built.errors.isEmpty())
             val laps = number(wheel, "Spin", "laps")
             frames(1)
-            assertEquals(laps + 1, number(wheel, "Spin", "laps"), "and runs, with what the entity had")
+            assertEquals(laps + 1, number(wheel, "Spin", "laps"), "and runs, with what the entity had: the new build's, not the classpath's")
 
             built.close()
             frames(2)
             assertEquals(laps + 1, number(wheel, "Spin", "laps"), "with the host gone nothing runs, and the data is still the scene's")
+
+            // ---- a script's meshes, of attributes of its own -------------------------------------------------------
+            val blade = world.meshes.create("blade", 3, listOf(
+                MeshAttribute.floats("POSITION", 3, floatArrayOf(0f, 0f, 0f, 1f, 0f, 0f, 0f, 1f, 0f)),
+                MeshAttribute.floats("WIND", 1, floatArrayOf(0f, 0.5f, 1f)),
+            ), intArrayOf(0, 1, 2), "POSITION; WIND")
+            assertEquals("\$script/blade", blade, "a script's mesh is named for it")
+            val grass = world.create("Grass")
+            world.meshes.give(grass, blade)
+            assertEquals("\"\$script/blade\"", world.fieldJson(grass, "Mesh", "mesh"), "and given to an entity")
+            val read = world.meshes.read(blade)
+            assertEquals(3, read.vertexCount)
+            assertEquals(1f, read.find("WIND")!!.asFloats()[2], "its own attribute, read back")
+            assertEquals(listOf(0, 1, 2), read.indices.toList())
+            val cube = world.meshes.read("\$cube")
+            val coloured = world.meshes.withAttributes("\$cube", "coloured cube", listOf(MeshAttribute.floats("COLOR", 3, FloatArray(cube.vertexCount * 3))))
+            assertEquals(4, world.meshes.read(coloured).attributes.size, "a default mesh, with an attribute more")
+            assertEquals(2, world.meshes.read(world.meshes.withoutAttributes(coloured, "bare cube", "COLOR", "UV")).attributes.size, "and fewer")
+            assertTrue(runCatching { world.meshes.create("wrong", 3, listOf(MeshAttribute.floats("WIND", 1, floatArrayOf(0f)))) }.isFailure, "no mesh is refused")
+            frames(2)
         }
     }
 }

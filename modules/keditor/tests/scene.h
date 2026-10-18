@@ -62,7 +62,13 @@ namespace scene
         doc.SetInput("run", "cover", "target");
         doc.SetInput("run", "groupSize.x", 8);
         doc.SetInput("run", "groupSize.y", 8);
-        doc.SetInput("run", "with", Value::List { "Lit" });
+        // It runs once for each Lit entity with the pipeline's component: what each has is wired to it.
+        doc.AddNode("ForEach", 400, 220, "lit");
+        doc.SetInput("lit", "component", "stamp");
+        doc.SetInput("lit", "with", Value::List { "Lit" });
+        doc.Connect("lit", "field.target", "run", "param.target");
+        doc.Connect("lit", "field.tint", "run", "push.tint");
+        doc.Connect("lit", "field.gain", "run", "push.gain");
 
         image("canvas", 32, { "eColorAttachment", "eTransferSrc" }, 0, 300);
         doc.AddNode("ImageView", 200, 300, "canvas view");
@@ -81,7 +87,13 @@ namespace scene
         doc.Connect("target", "out", "show", "framebuffer");
         doc.AddNode("Draw", 600, 460, "draw");
         doc.Connect("show", "out", "draw", "pipeline");
-        doc.SetInput("draw", "without", Value::List { "Hidden" });
+        doc.AddNode("ForEach", 600, 560, "shown");
+        doc.SetInput("shown", "component", "show");
+        doc.SetInput("shown", "with", Value::List { "Mesh" });
+        doc.SetInput("shown", "without", Value::List { "Hidden" });
+        doc.Connect("shown", "Mesh.mesh", "draw", "mesh");
+        doc.Connect("shown", "field.source", "draw", "param.source");
+        doc.Connect("shown", "field.offset", "draw", "push.offset");
 
         doc.AddNode("Screen", 600, 300, "screen");
         doc.AddNode("Blit", 800, 300, "blit");

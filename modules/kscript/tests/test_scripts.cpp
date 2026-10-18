@@ -92,6 +92,24 @@ TEST(Scripts, AComponentIsToldOfItsLifeInOrder) {
     EXPECT_TRUE(log.Take().empty());
 }
 
+TEST(Scripts, PrepareAloneStartsNothing) {
+    // An editor's scene is prepared and drawn every frame, played or not: what a script does as it starts waits for Play.
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    Log log;
+    const kecs::ComponentId mover = scripts.Register(MoverType(log));
+    const kecs::Entity entity = world.Create();
+    world.Add(entity, mover);
+    scripts.Prepare();
+    scripts.Prepare();
+    EXPECT_EQ(log.Take(), (Calls { "prepare 0", "prepare 0" }));
+    scripts.Update(1.f);
+    EXPECT_EQ(log.Take(), (Calls { "created 0", "enabled 0", "started 0", "update 0" })) << "the first update starts it";
+    world.SetEnabled(entity, mover, false);
+    scripts.Prepare();
+    EXPECT_TRUE(log.Take().empty()) << "one switched off is not prepared";
+}
+
 TEST(Scripts, OneMadeSwitchedOffIsNotStartedUntilItIsOn) {
     kecs::World world;
     kscript::Scripts scripts(world);

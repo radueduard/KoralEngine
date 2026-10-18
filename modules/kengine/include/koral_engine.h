@@ -49,6 +49,11 @@ typedef struct KecsEntity {
 
 /** Why the last call on this thread that failed did; empty when none has. */
 KENGINE_API const char* kengine_last_error(void);
+/**
+ * Where the engine's own package is: the folder whose `scripts` are every project's — the scene's Camera, its lights,
+ * its Sky — as C# and Kotlin sources. A host compiles them with a project's own scripts.
+ */
+KENGINE_API const char* kengine_package_directory(void);
 
 /* ---- a scene ------------------------------------------------------------------------------------------------- */
 
@@ -57,10 +62,24 @@ KENGINE_API KengineDocument* kengine_document(KoralFrameGraph* graph);
 KENGINE_API KecsWorld* kengine_document_world(KengineDocument* document);
 /** The scene as JSON, as it is saved. */
 KENGINE_API const char* kengine_document_json(KengineDocument* document);
+/** The folder of the project the scene is of; "" for a scene that is in none. A runner of a project's scripts runs them in its own only. */
+KENGINE_API const char* kengine_project_directory(KengineDocument* document);
 KENGINE_API bool kengine_document_save(KengineDocument* document, const char* path);
 /** Whether the scene plays: its scripts are updated. A scene run on its own does; one in an editor, when told to. */
 KENGINE_API bool kengine_playing(KengineDocument* document);
 KENGINE_API bool kengine_set_playing(KengineDocument* document, bool playing);
+/**
+ * The keys, the mouse and the gamepads the document's scripts read: its scene's window's — or, in an editor, the Game
+ * panel's, fed only while the pointer is over it or it was the last clicked. Null for a document no scene runs.
+ */
+KENGINE_API KoralInput* kengine_script_input(KengineDocument* document);
+/**
+ * The debug lines the document's scripts draw with (koral_debug_line and the rest): its scene's, shown over the
+ * editor's view of it, and by a DebugDraw node of its graph. Drawn in an update, they last that frame; a fixed update
+ * runs 0 to 8 times a frame, so what is to be seen every frame is drawn in update, or given a duration. Null for a
+ * document no scene runs.
+ */
+KENGINE_API KoralDebugDraw* kengine_debug(KengineDocument* document);
 
 /* ---- the graph ----------------------------------------------------------------------------------------------- */
 
@@ -120,6 +139,26 @@ KENGINE_API bool kecs_world_matrix(KecsWorld* world, KecsEntity entity, float ou
 /** Places it in the world, by changing its own transform. */
 KENGINE_API bool kecs_set_world_matrix(KecsWorld* world, KecsEntity entity, const float matrix[16]);
 
+/* The same, of many entities in one call: `count` of them, three floats each in `out` or `values`, one after another in
+   the order of `entities`. What one script does to thousands — a call each would cost more than the work does. An
+   entity that is not alive is left out: its three are written as zeros (a scale as ones), and set from nothing. Each
+   says how many were alive. */
+KENGINE_API size_t kecs_positions(KecsWorld* world, const KecsEntity* entities, size_t count, float* out);
+KENGINE_API size_t kecs_rotations(KecsWorld* world, const KecsEntity* entities, size_t count, float* out);
+KENGINE_API size_t kecs_scales(KecsWorld* world, const KecsEntity* entities, size_t count, float* out);
+KENGINE_API size_t kecs_set_positions(KecsWorld* world, const KecsEntity* entities, size_t count, const float* values);
+KENGINE_API size_t kecs_set_rotations(KecsWorld* world, const KecsEntity* entities, size_t count, const float* values);
+KENGINE_API size_t kecs_set_scales(KecsWorld* world, const KecsEntity* entities, size_t count, const float* values);
+
+/* How an entity is turned as a quaternion, four floats x, y, z, w: what its matrix is made with. Set as one, it is
+   kept as given (made length 1), and the Euler angles are worked out of it — so a rotation that is integrated a step
+   at a time is not rounded off through the angles. Of many, as above, four floats each; one not alive reads as the
+   identity. */
+KENGINE_API bool kecs_orientation(KecsWorld* world, KecsEntity entity, float out[4]);
+KENGINE_API bool kecs_set_orientation(KecsWorld* world, KecsEntity entity, const float value[4]);
+KENGINE_API size_t kecs_orientations(KecsWorld* world, const KecsEntity* entities, size_t count, float* out);
+KENGINE_API size_t kecs_set_orientations(KecsWorld* world, const KecsEntity* entities, size_t count, const float* values);
+
 /** An entity with a name, as the editor makes one. */
 KENGINE_API KecsEntity kengine_entity_create(KengineDocument* document, const char* name);
 KENGINE_API const char* kengine_entity_name(KengineDocument* document, KecsEntity entity);
@@ -155,6 +194,18 @@ KENGINE_API bool kecs_is_enabled(KecsWorld* world, KecsEntity entity, uint32_t c
 /** Says a component was written through kecs_get: what a query for changes goes by. */
 KENGINE_API bool kecs_mark_changed(KecsWorld* world, KecsEntity entity, uint32_t component);
 
+/* A field of a component, of many entities at once: its numbers, `width` of them an entity, one entity's after
+   another in the order of `entities`. Floats for a field of them ("f32", "vec2" to "vec4", "quat", "mat4"), whole
+   numbers for one of those ("i32", "u32", "bool", "bool32", "ivec" and "uvec"). An entity without the component reads
+   as zeros and is not set; what is set is marked changed. Each says how many had it — none, for a field there is not
+   or that is not of numbers of that kind. */
+/** How many numbers the field is an entity: 1 for an "f32", 3 for a "vec3", 16 for a "mat4"; 0 for a field there is not, or not of numbers. */
+KENGINE_API uint32_t kecs_field_width(KecsWorld* world, uint32_t component, const char* field);
+KENGINE_API size_t kecs_field_floats(KecsWorld* world, const KecsEntity* entities, size_t count, uint32_t component, const char* field, float* out);
+KENGINE_API size_t kecs_set_field_floats(KecsWorld* world, const KecsEntity* entities, size_t count, uint32_t component, const char* field, const float* values);
+KENGINE_API size_t kecs_field_ints(KecsWorld* world, const KecsEntity* entities, size_t count, uint32_t component, const char* field, int32_t* out);
+KENGINE_API size_t kecs_set_field_ints(KecsWorld* world, const KecsEntity* entities, size_t count, uint32_t component, const char* field, const int32_t* values);
+
 /**
  * The entities that have every component of @p all and none of @p none. Up to @p capacity are written to @p out;
  * the number there are is returned, so a call with no room says how much to make. Switched-off components count as
@@ -169,6 +220,51 @@ KENGINE_API size_t kecs_query(KecsWorld* world, const uint32_t* all, size_t all_
  */
 KENGINE_API const char* kengine_field_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field);
 KENGINE_API bool kengine_field_set_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field, const char* json);
+
+/* ---- meshes ------------------------------------------------------------------------------------------------- */
+
+/** What an attribute's numbers are. Each is four bytes. */
+enum { KENGINE_ATTRIBUTE_FLOAT = 0, KENGINE_ATTRIBUTE_INT = 1, KENGINE_ATTRIBUTE_UINT = 2 };
+
+/**
+ * One attribute of every vertex of a mesh: what it is, as a shader asks for it (POSITION, NORMAL, UV, TANGENT, or any
+ * name of a script's own: "WIND"), the type and count of its numbers, and the numbers: @p count of them a vertex, one
+ * vertex after another. Written by kengine_mesh_attribute, @p data is borrowed: good until the next mesh call on the
+ * same thread.
+ */
+typedef struct KengineAttribute {
+    const char* semantic;
+    uint32_t type;          /* KENGINE_ATTRIBUTE_* */
+    uint32_t count;         /* 1 to 4 */
+    const void* data;
+} KengineAttribute;
+
+/**
+ * Makes a mesh of @p vertex_count vertices, with these attributes (one of them POSITION, of floats) and these
+ * indices (none: drawn in the order of its vertices). @p buffers says which vertex buffer each attribute is in:
+ * "POSITION UV; NORMAL TANGENT" — a buffer to each ';' — with what none names in one more after them; null or empty,
+ * all in one. It is called `$script/<name>`, which is returned, and what an entity's Mesh holds to have it
+ * (kengine_field_set_json). One so named already is replaced: every entity that held it holds this one. Not saved
+ * with the scene: a script makes its meshes when it runs. Null when the data is no mesh, with why.
+ */
+KENGINE_API const char* kengine_mesh_create(KengineDocument* document, const char* name, uint32_t vertex_count, const KengineAttribute* attributes,
+                                            uint32_t attribute_count, const uint32_t* indices, uint32_t index_count, const char* buffers);
+/**
+ * A copy of @p mesh — any: `$cube`, `@model.gltf#3`, a script's — with these attributes added, or put in place of its
+ * own of the same semantic, called `$script/<name>`. @p buffers as for kengine_mesh_create; null keeps the mesh's,
+ * with what it did not have in one more. The mesh is read back from the device: the call waits for it.
+ */
+KENGINE_API const char* kengine_mesh_with_attributes(KengineDocument* document, const char* mesh, const char* name, const KengineAttribute* attributes,
+                                                     uint32_t attribute_count, const char* buffers);
+/** A copy of @p mesh without the attributes @p semantics names ("TANGENT BITANGENT"), called `$script/<name>`. */
+KENGINE_API const char* kengine_mesh_without_attributes(KengineDocument* document, const char* mesh, const char* name, const char* semantics);
+/** How many vertices a mesh has: 0, with why, for what is no mesh or is still being read. Reads it back from the device. */
+KENGINE_API uint32_t kengine_mesh_vertex_count(KengineDocument* document, const char* mesh);
+/** How many attributes it has; and the @p index th, its numbers read back (@see KengineAttribute). */
+KENGINE_API uint32_t kengine_mesh_attribute_count(KengineDocument* document, const char* mesh);
+KENGINE_API bool kengine_mesh_attribute(KengineDocument* document, const char* mesh, uint32_t index, KengineAttribute* out);
+/** Its indices: up to @p capacity written to @p out; how many there are returned. */
+KENGINE_API size_t kengine_mesh_indices(KengineDocument* document, const char* mesh, uint32_t* out, size_t capacity);
 
 /* ---- scripts ------------------------------------------------------------------------------------------------- */
 

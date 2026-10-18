@@ -23,6 +23,13 @@ namespace kor::builders { struct Description; struct Type; }
 
 namespace kgraph
 {
+    /** @brief Where an input is set. */
+    enum class Placement : std::uint8_t {
+        eInspector, ///< In the inspector: what takes room to set — a list, text, a choice of many, a struct.
+        eNode,      ///< On the node, a control in its row, while nothing is wired to it: a number, a colour, a box to tick.
+        eWire,      ///< Wired only, never typed: from a node that sets it up (Port::companion), or from what works one out.
+    };
+
     enum class PortKind : std::uint8_t {
         eValue,     ///< A Value: given on the node, or wired from a node that works one out.
         eResource,  ///< A GPU object: always wired, from the node that makes it.
@@ -47,6 +54,12 @@ namespace kgraph
         std::string editor;
         /// The setting of the node's `stages` input it belongs to ("eVertex", "eMesh"); empty when it is there whatever that is.
         std::string mode;
+        /// Where an input is set: on the node, in the inspector, or only by a wire. A node can move one of the first two
+        /// to the other (Node::placed); one wired only stays so.
+        Placement place = Placement::eInspector;
+        /// The node type that sets a wired-only input up — a VertexLayout, for a pipeline's `vertex.layout` — for an
+        /// editor to make one beside it, wired in. Empty when nothing in particular does.
+        std::string companion;
         /// What a node starts with for it, when it is one a node cannot do without; what it is when it is not given
         /// otherwise; and, for a struct, what the fields that are not given are. Null when there is nothing to say.
         Value initial;
@@ -63,6 +76,8 @@ namespace kgraph
         bool listed = true;
         /// Other words someone looking for it might type: "texture" for an Image, "mix" for a Lerp.
         std::string keywords;
+        /// What an editor draws in its title bar: a Material icon, by name ("image", "functions").
+        std::string icon;
     };
 
     struct Node;
@@ -76,6 +91,8 @@ namespace kgraph
      *        when it is not such an input. A node gives the whole or its parts, not both.
      */
     [[nodiscard]] std::vector<std::string> PartsOf(const NodeType& type, std::string_view whole);
+    /** @brief Where @p node 's input @p port is set: its type's placement, or the node's own, where it may say otherwise. */
+    [[nodiscard]] Placement PlacementOf(const Port& port, const Node& node);
     /** @brief What a graphics pipeline node's `stages` is: "eVertex" unless it says "eMesh". */
     [[nodiscard]] std::string StagesOf(const Node& node);
 

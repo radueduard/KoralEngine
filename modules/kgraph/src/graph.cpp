@@ -96,12 +96,40 @@ namespace kgraph
             for (std::size_t i = 0; i < passes.size(); ++i) out += std::format("{}{}", i ? ", " : "", json::Quote(passes[i]));
             out += "],";
         }
+        if (!meshImports.empty()) {
+            // How model files are read: each file's attributes left out, and its buffers.
+            out += "\n  \"meshImports\": {";
+            bool first = true;
+            for (const auto& [file, import] : meshImports) {
+                Value::List leaveOut(import.leaveOut.begin(), import.leaveOut.end()), buffers;
+                for (const auto& buffer : import.buffers) buffers.emplace_back(Value::List(buffer.begin(), buffer.end()));
+                out += std::format("{}\n    {}: {}", first ? "" : ",", json::Quote(file),
+                                   Value(Value::Members { { "leaveOut", Value(std::move(leaveOut)) }, { "buffers", Value(std::move(buffers)) } }).ToJson());
+                first = false;
+            }
+            out += "\n  },";
+        }
+        if (!overview.empty()) {
+            // Where each node is when every node is seen at once.
+            out += "\n  \"overview\": {";
+            bool first = true;
+            for (const auto& [id, at] : overview) {
+                out += std::format("{}\n    {}: {}", first ? "" : ",", json::Quote(id), Value(Value::List { at.first, at.second }).ToJson());
+                first = false;
+            }
+            out += "\n  },";
+        }
         out += "\n  \"nodes\": [";
         for (std::size_t i = 0; i < nodes.size(); ++i) {
             const Node& node = nodes[i];
             out += std::format("{}\n    {{\n      \"id\": {},\n      \"type\": {}", i ? "," : "", json::Quote(node.id), json::Quote(node.type));
             if (!node.title.empty()) out += std::format(",\n      \"title\": {}", json::Quote(node.title));
             if (!node.pass.empty()) out += std::format(",\n      \"pass\": {}", json::Quote(node.pass));
+            if (!node.placed.empty()) {
+                Value::Members placed;
+                for (const auto& [input, where] : node.placed) placed.emplace_back(input, Value(where));
+                out += std::format(",\n      \"placed\": {}", Value(std::move(placed)).ToJson());
+            }
             out += std::format(",\n      \"at\": {}", Value(Value::List { node.x, node.y }).ToJson());
             out += ",\n      \"inputs\": {";
             bool first = true;
@@ -147,6 +175,9 @@ namespace kgraph
             if (const json::Value* title = item.Find("title")) node.title = title->string;
             if (const json::Value* pass = item.Find("pass"); pass && pass->kind == json::Value::Kind::eString) node.pass = pass->string;
             if (const json::Value* at = item.Find("at"); at && at->items.size() == 2) { node.x = at->items[0].number; node.y = at->items[1].number; }
+            if (const json::Value* placed = item.Find("placed"); placed && placed->kind == json::Value::Kind::eObject)
+                for (const auto& [input, where] : placed->members)
+                    if (where.kind == json::Value::Kind::eString && (where.string == "node" || where.string == "inspector")) node.placed[input] = where.string;
             if (const json::Value* inputs = item.Find("inputs"))
                 for (const auto& [name, value] : inputs->members) {
                     const json::Value* link = value.kind == json::Value::Kind::eObject ? value.Find("$link") : nullptr;
@@ -154,6 +185,22 @@ namespace kgraph
                     else node.Set(name, Value::FromJson(value));
                 }
         }
+        if (const json::Value* overview = root.Find("overview"); overview && overview->kind == json::Value::Kind::eObject)
+            for (const auto& [id, at] : overview->members)
+                if (at.items.size() == 2) graph.overview[id] = { at.items[0].number, at.items[1].number };
+        if (const json::Value* imports = root.Find("meshImports"); imports && imports->kind == json::Value::Kind::eObject)
+            for (const auto& [file, entry] : imports->members) {
+                MeshImport import;
+                if (const json::Value* leave = entry.Find("leaveOut"))
+                    for (const auto& semantic : leave->items) if (semantic.kind == json::Value::Kind::eString) import.leaveOut.push_back(semantic.string);
+                if (const json::Value* buffers = entry.Find("buffers"))
+                    for (const auto& buffer : buffers->items) {
+                        std::vector<std::string> semantics;
+                        for (const auto& semantic : buffer.items) if (semantic.kind == json::Value::Kind::eString) semantics.push_back(semantic.string);
+                        if (!semantics.empty()) import.buffers.push_back(std::move(semantics));
+                    }
+                if (!import.Default()) graph.meshImports[file] = std::move(import);
+            }
         if (const json::Value* passes = root.Find("passes"))
             for (const auto& pass : passes->items)
                 if (pass.kind == json::Value::Kind::eString && std::ranges::find(graph.passes, pass.string) == graph.passes.end()) graph.passes.push_back(pass.string);

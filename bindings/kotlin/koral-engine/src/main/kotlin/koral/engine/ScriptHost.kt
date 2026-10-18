@@ -29,6 +29,7 @@ class ScriptHost(
     val classes: Path,
     val sources: Path? = null,
     val compile: List<String>? = null,
+    private val parent: ClassLoader = ScriptHost::class.java.classLoader,
 ) : AutoCloseable {
     private var loader: URLClassLoader? = null
     private val registered = LinkedHashMap<String, Registered>()
@@ -80,7 +81,7 @@ class ScriptHost(
                 return false
             }
         }
-        val next = URLClassLoader(arrayOf(classes.toUri().toURL()), ScriptHost::class.java.classLoader)
+        val next = ScriptLoader(classes, parent)
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
@@ -168,6 +169,18 @@ class ScriptHost(
         }
     }
 
+    /**
+     * The scripts' classes from [classes] first, and only the rest from [parent]. A project run by its build has that
+     * same folder on its own classpath: asked first, the parent would hand every reload the classes it loaded once.
+     */
+    private class ScriptLoader(classes: Path, parent: ClassLoader) : URLClassLoader(arrayOf(classes.toUri().toURL()), parent) {
+        override fun loadClass(name: String, resolve: Boolean): Class<*> = synchronized(getClassLoadingLock(name)) {
+            val type = findLoadedClass(name) ?: try { findClass(name) } catch (_: ClassNotFoundException) { super.loadClass(name, false) }
+            if (resolve) resolveClass(type)
+            type
+        }
+    }
+
     // ---- one script type, registered ---------------------------------------------------------------------------
 
     /** A script class as the engine has it: the functions it calls, and the object each entity's calls are made on. */
@@ -181,9 +194,13 @@ class ScriptHost(
             live[key] = this
             val callbacks = a.allocate(Native.CALLBACKS)
             callbacks.setAtIndex(ADDRESS, 0, MemorySegment.ofAddress(key))
-            val graphics = GraphicsScript::class.java.isAssignableFrom(type)
+            // Only what the class does: a hook it leaves as Script has it is not called at all — for thousands of entities a
+            // frame, a call each into a function that does nothing. Destroyed as well when anything is: it is when an entity's
+            // object goes. A script that is only data — fields, and no hook — is called for nothing, and costs nothing a frame.
+            val does = Hook.entries.filter { overrides(type, it) }
             Hook.entries.forEachIndexed { i, hook ->
-                callbacks.setAtIndex(ADDRESS, 1L + i, if (hook == Hook.Prepare && !graphics) MemorySegment.NULL else stubs[i])
+                val called = hook in does || (hook == Hook.Destroyed && does.isNotEmpty())
+                callbacks.setAtIndex(ADDRESS, 1L + i, if (called) stubs[i] else MemorySegment.NULL)
             }
             val fields = a.allocate(Native.FIELD, maxOf(layout.properties.size, 1).toLong())
             layout.properties.forEachIndexed { i, p ->
@@ -232,7 +249,7 @@ class ScriptHost(
             }
             // What it did may have moved its data, or taken it away: found again before anything is put back.
             if (hook == Hook.Destroyed) { instances.remove(entity); return }
-            Arena.ofConfined().use { a ->
+            Scratch.use { a ->
                 val now = Native.kecs_get.invokeExact(world.handle, Native.entity(a, entity), component) as MemorySegment
                 if (now == MemorySegment.NULL) instances.remove(entity)
                 else layout.store(script, now.reinterpret(maxOf(layout.size, 1).toLong()))
@@ -263,6 +280,24 @@ class ScriptHost(
 
     private companion object {
         var nextKey = 1L
+
+        /** Whether [type] does something of its own for [hook]: a function of that hook that is not Script's or GraphicsScript's. */
+        fun overrides(type: Class<*>, hook: Hook): Boolean {
+            val (name, timed) = when (hook) {
+                Hook.Created -> "onCreated" to false
+                Hook.Enabled -> "onEnabled" to false
+                Hook.Started -> "start" to false
+                Hook.FixedUpdate -> "fixedUpdate" to true
+                Hook.Update -> "update" to true
+                Hook.LateUpdate -> "lateUpdate" to true
+                Hook.Prepare -> "prepare" to false
+                Hook.Disabled -> "onDisabled" to false
+                Hook.Destroyed -> "onDestroyed" to false
+            }
+            if (hook == Hook.Prepare && !GraphicsScript::class.java.isAssignableFrom(type)) return false
+            val method = runCatching { if (timed) type.getMethod(name, Float::class.javaPrimitiveType) else type.getMethod(name) }.getOrNull() ?: return true
+            return method.declaringClass != Script::class.java && method.declaringClass != GraphicsScript::class.java
+        }
         val live = HashMap<Long, Registered>()
 
         /** One stub a hook, in the order the C struct has them, for as long as the program runs. */

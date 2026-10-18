@@ -28,6 +28,8 @@ public abstract class Script
     public Entity Entity { get; internal set; }
     /// <summary>The scene it is in: its entities, and the nodes of its graph.</summary>
     public World World { get; internal set; } = null!;
+    /// <summary>The keys, the mouse and the gamepads it is steered by: <c>Input.IsKeyHeld(Key.eW)</c>.</summary>
+    public Koral.Input Input => World.Input;
 
     /// <summary>It was added to the entity: once, switched on or off.</summary>
     protected virtual void OnCreated() { }
