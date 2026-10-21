@@ -3,7 +3,7 @@
 
 public sealed class PointLight : Script
 {
-    public Vec3 color = new(1f, 0.85f, 0.6f);
-    public float intensity = 2f;
-    public float range = 5f;
+    [Min(0f)] public Vec3 color = new(1f, 0.85f, 0.6f);
+    [Min(0f), Logarithmic] public float intensity = 2f;
+    [Min(0f), Logarithmic] public float range = 5f;
 }

@@ -340,11 +340,68 @@ TEST_F(CApiTest, AScriptMakesMeshesOfItsOwnAttributes) {
     cubeWind.resize(cubeVertices, 0.25f);
     const KengineAttribute windy { "WIND", KENGINE_ATTRIBUTE_FLOAT, 1, cubeWind.data() };
     ASSERT_NE(kengine_mesh_with_attributes(doc, "$cube", "windy cube", &windy, 1, "POSITION NORMAL UV; WIND"), nullptr) << kengine_last_error();
-    EXPECT_EQ(kengine_mesh_attribute_count(doc, "$script/windy cube"), 4u);
+    EXPECT_EQ(kengine_mesh_attribute_count(doc, "$script/windy cube"), 5u) << "the cube's position, normal, UV and tangent, and the wind";
 
     // What is no mesh is refused, and says why.
     const KengineAttribute wrong { "WIND", KENGINE_ATTRIBUTE_FLOAT, 9, wind };
     EXPECT_EQ(kengine_mesh_create(doc, "wrong", 3, &wrong, 1, nullptr, 0, nullptr), nullptr);
     EXPECT_NE(std::string(kengine_last_error()).find("1 to 4"), std::string::npos) << kengine_last_error();
     Frame();
+}
+
+// A script that makes resources, registered through the C interface: a Script node names it, and gives what it makes —
+// made as it says, filled by it, given the node's fields.
+TEST_F(CApiTest, AScriptMakesABufferAndFillsIt) {
+    static const KecsField fields[] { { "step", "f32", 0, 4 } };
+    static const KengineScriptResource resources[] {
+        { "table", "Buffer", R"({"instanceCount": 64, "usage": ["eStorage"]})" },     // bytes: sixteen floats
+        { "smooth", "Sampler", nullptr },
+    };
+    struct Filled { std::string name, kind; std::size_t count = 0, size = 0; float step = 0.f; int calls = 0; } filled;
+    const KengineResourceScriptCallbacks callbacks { &filled, [](void* user, const KengineContents* contents, const size_t count, const void* settings, const size_t) -> const char* {
+        auto& seen = *static_cast<Filled*>(user);
+        seen.count = count;
+        seen.name = contents[0].name;
+        seen.kind = contents[0].kind;
+        seen.size = contents[0].size;
+        std::memcpy(&seen.step, settings, 4);
+        ++seen.calls;
+        auto* numbers = static_cast<float*>(contents[0].bytes);
+        for (std::size_t i = 0; i < contents[0].size / 4; ++i) numbers[i] = static_cast<float>(i) * seen.step;
+        return nullptr;
+    } };
+    ASSERT_TRUE(kengine_resource_script_register(doc, "Ramp", 4, fields, 1, resources, 2, &callbacks)) << kengine_last_error();
+
+    ASSERT_STREQ(kengine_node_add(doc, "Script", "ramp", 0, 0), "ramp");
+    ASSERT_TRUE(kengine_node_set_input_json(doc, "ramp", "script", "\"Ramp\""));
+    ASSERT_TRUE(kengine_node_set_input_json(doc, "ramp", "field.step", "0.5"));
+    ASSERT_TRUE(kengine_node_ok(doc, "ramp")) << kengine_last_error();
+    EXPECT_EQ(filled.count, 1u) << "its buffer: a sampler holds nothing to fill";
+    EXPECT_EQ(filled.name, "table");
+    EXPECT_EQ(filled.kind, "Buffer");
+    EXPECT_EQ(filled.size, 16u * 4u);
+    EXPECT_FLOAT_EQ(filled.step, 0.5f) << "the field, as the node gives it";
+
+    Frame();
+    KoralResource* buffer = kengine_node_resource(doc, "ramp", "table");
+    ASSERT_NE(buffer, nullptr) << kengine_last_error();
+    float third = 0.f;
+    EXPECT_EQ(koral_buffer_read(buffer, &third, sizeof(float), 3 * sizeof(float)), 0) << koral_last_error();
+    koral_resource_release(buffer);
+    EXPECT_FLOAT_EQ(third, 1.5f);
+    KoralResource* sampler = kengine_node_resource(doc, "ramp", "smooth");
+    EXPECT_NE(sampler, nullptr) << "and its sampler, by its name";
+    if (sampler) koral_resource_release(sampler);
+
+    // Its code going: it is declared still, and the buffer is made with nothing in it, and says so.
+    kengine_resource_script_unregister(doc, "Ramp");
+    Frame();
+    EXPECT_TRUE(kengine_node_ok(doc, "ramp"));
+    const int before = filled.calls;
+    ASSERT_TRUE(kengine_resource_script_register(doc, "Ramp", 4, fields, 1, resources, 2, &callbacks));
+    Frame();
+    EXPECT_EQ(filled.calls, before + 1) << "back, it fills again";
+    static const KengineScriptResource odd { "lump", "Mesh", nullptr };
+    EXPECT_FALSE(kengine_resource_script_register(doc, "Odd", 0, nullptr, 0, &odd, 1, &callbacks));
+    EXPECT_NE(std::string(kengine_last_error()).find("Odd.lump is a 'Mesh'"), std::string::npos) << kengine_last_error();
 }

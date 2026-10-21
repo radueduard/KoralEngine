@@ -1,0 +1,2011 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "bodies",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "bodies",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "materials",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "materials",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "dt",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "dt",
+          "kind": "eValue",
+          "default": 0.016666666666666666
+        }
+      },
+      {
+        "id": "gravity",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {
+          "name": "gravity",
+          "kind": "eValue",
+          "default": [
+            0,
+            -9.81,
+            0
+          ]
+        }
+      },
+      {
+        "id": "cell",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          360
+        ],
+        "inputs": {
+          "name": "cell",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "ground",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          420
+        ],
+        "inputs": {
+          "name": "ground",
+          "kind": "eValue",
+          "default": -1e+31
+        }
+      },
+      {
+        "id": "shared",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          480
+        ],
+        "inputs": {
+          "name": "shared",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "idle",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          540
+        ],
+        "inputs": {
+          "name": "idle",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "sleepAfter",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          600
+        ],
+        "inputs": {
+          "name": "sleepAfter",
+          "kind": "eValue",
+          "default": 0.5
+        }
+      },
+      {
+        "id": "driven",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          660
+        ],
+        "inputs": {
+          "name": "driven",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "drivenCount",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          720
+        ],
+        "inputs": {
+          "name": "drivenCount",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "steps",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          780
+        ],
+        "inputs": {
+          "name": "steps",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "contactsEvery",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          840
+        ],
+        "inputs": {
+          "name": "contactsEvery",
+          "kind": "eValue",
+          "default": 2
+        }
+      },
+      {
+        "id": "h",
+        "type": "Divide",
+        "at": [
+          200,
+          840
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "b": 8
+        }
+      },
+      {
+        "id": "four",
+        "type": "Multiply",
+        "at": [
+          200,
+          900
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "sixteen",
+        "type": "Multiply",
+        "at": [
+          200,
+          960
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 16
+        }
+      },
+      {
+        "id": "table",
+        "type": "Max",
+        "at": [
+          200,
+          1020
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 512
+        }
+      },
+      {
+        "id": "tableBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          1080
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "table",
+              "out"
+            ]
+          },
+          "b": 8
+        }
+      },
+      {
+        "id": "beforeBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          1140
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 64
+        }
+      },
+      {
+        "id": "nextBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          1200
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 32
+        }
+      },
+      {
+        "id": "hitBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          1260
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 656
+        }
+      },
+      {
+        "id": "big words",
+        "type": "Add",
+        "at": [
+          200,
+          1320
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 1
+        }
+      },
+      {
+        "id": "bigBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          1380
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "big words",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "mesh groups",
+        "type": "Divide",
+        "at": [
+          200,
+          1440
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "keys buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1500
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "four",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "ids buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1560
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "four",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "homes buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1620
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "sixteen",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "starts buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1680
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "tableBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "ends buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1740
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "tableBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "before buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1800
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "beforeBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "next buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1860
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "nextBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "meshHits buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1920
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "hitBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "bigs buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1980
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bigBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "cacheBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          2010
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 2048
+        }
+      },
+      {
+        "id": "cache buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          2020
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "cacheBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Divide",
+        "at": [
+          200,
+          2040
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 64
+        }
+      },
+      {
+        "id": "g",
+        "type": "Split",
+        "at": [
+          200,
+          2100
+        ],
+        "inputs": {
+          "vector": {
+            "$link": [
+              "gravity",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "g4",
+        "type": "Vec4",
+        "at": [
+          200,
+          2160
+        ],
+        "inputs": {
+          "x": {
+            "$link": [
+              "g",
+              "x"
+            ]
+          },
+          "y": {
+            "$link": [
+              "g",
+              "y"
+            ]
+          },
+          "z": {
+            "$link": [
+              "g",
+              "z"
+            ]
+          }
+        }
+      },
+      {
+        "id": "drive",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2220
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "drive",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.driven": {
+            "$link": [
+              "driven",
+              "out"
+            ]
+          },
+          "param.bigs": {
+            "$link": [
+              "bigs buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run drive",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2280
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "drive",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          },
+          "push.driven": {
+            "$link": [
+              "drivenCount",
+              "out"
+            ]
+          },
+          "push.stepsThisFrame": {
+            "$link": [
+              "steps",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cellKeys",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2340
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "cellKeys",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.keys": {
+            "$link": [
+              "keys buffer",
+              "out"
+            ]
+          },
+          "param.ids": {
+            "$link": [
+              "ids buffer",
+              "out"
+            ]
+          },
+          "param.homes": {
+            "$link": [
+              "homes buffer",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.bigs": {
+            "$link": [
+              "bigs buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run cellKeys",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2400
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "cellKeys",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sort",
+        "type": "Function",
+        "at": [
+          400,
+          2460
+        ],
+        "inputs": {
+          "function": "RadixSort",
+          "keys": {
+            "$link": [
+              "keys buffer",
+              "out"
+            ]
+          },
+          "values": {
+            "$link": [
+              "ids buffer",
+              "out"
+            ]
+          },
+          "count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear starts",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2520
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear ends",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2580
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "ranges",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2640
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "ranges",
+          "param.keys": {
+            "$link": [
+              "sort",
+              "keys"
+            ]
+          },
+          "param.starts": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          },
+          "param.ends": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run ranges",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2700
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "ranges",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "substeps",
+        "type": "Repeat",
+        "at": [
+          400,
+          2760
+        ],
+        "inputs": {
+          "count": 8
+        }
+      },
+      {
+        "id": "turn",
+        "type": "Multiply",
+        "at": [
+          400,
+          2820
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "substeps",
+              "index"
+            ]
+          },
+          "b": 0
+        }
+      },
+      {
+        "id": "h this turn",
+        "type": "Add",
+        "at": [
+          400,
+          2880
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "h",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "turn",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "contacts every",
+        "type": "Mod",
+        "at": [
+          400,
+          2900
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "substeps",
+              "index"
+            ]
+          },
+          "b": {
+            "$link": [
+              "contactsEvery",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "contacts idle",
+        "type": "Max",
+        "at": [
+          400,
+          2930
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "contacts every",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "contacts h",
+        "type": "Multiply",
+        "at": [
+          400,
+          2920
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "contactsEvery",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "contacts",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2940
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "contacts",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.ids": {
+            "$link": [
+              "sort",
+              "values"
+            ]
+          },
+          "param.starts": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          },
+          "param.ends": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          },
+          "param.homes": {
+            "$link": [
+              "homes buffer",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.cached": {
+            "$link": [
+              "cache buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run contacts",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2940
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "contacts",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "mesh groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "contacts h",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "contacts idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "predict",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2940
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "predict",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.materials": {
+            "$link": [
+              "materials",
+              "out"
+            ]
+          },
+          "param.before": {
+            "$link": [
+              "before buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run predict",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3000
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "predict",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "meshContacts",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3060
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "meshContacts",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.meshHits": {
+            "$link": [
+              "meshHits buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run meshContacts",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3120
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "meshContacts",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "mesh groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "solve",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3180
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "solve",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.materials": {
+            "$link": [
+              "materials",
+              "out"
+            ]
+          },
+          "param.before": {
+            "$link": [
+              "before buffer",
+              "out"
+            ]
+          },
+          "param.next": {
+            "$link": [
+              "next buffer",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.meshHits": {
+            "$link": [
+              "meshHits buffer",
+              "out"
+            ]
+          },
+          "param.bigs": {
+            "$link": [
+              "bigs buffer",
+              "out"
+            ]
+          },
+          "param.cached": {
+            "$link": [
+              "cache buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run solve",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3240
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "solve",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "mesh groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "apply",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3300
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "apply",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.next": {
+            "$link": [
+              "next buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run apply",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3360
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "apply",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "meshTouching",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3420
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "meshTouching",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.meshHits": {
+            "$link": [
+              "meshHits buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run meshTouching",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3480
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "meshTouching",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "mesh groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "velocities",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3540
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "velocities",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.materials": {
+            "$link": [
+              "materials",
+              "out"
+            ]
+          },
+          "param.before": {
+            "$link": [
+              "before buffer",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          },
+          "param.meshHits": {
+            "$link": [
+              "meshHits buffer",
+              "out"
+            ]
+          },
+          "param.bigs": {
+            "$link": [
+              "bigs buffer",
+              "out"
+            ]
+          },
+          "param.cached": {
+            "$link": [
+              "cache buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run velocities",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3600
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "velocities",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "mesh groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h this turn",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "place",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3660
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "place",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run place",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3720
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "place",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.h": {
+            "$link": [
+              "h",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "g4",
+              "out"
+            ]
+          },
+          "push.sleepAfter": {
+            "$link": [
+              "sleepAfter",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "moved",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          3780
+        ],
+        "inputs": {
+          "name": "bodies",
+          "value": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

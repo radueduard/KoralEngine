@@ -1,0 +1,134 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "counter",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "counter",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "groupSize",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "groupSize",
+          "kind": "eValue",
+          "default": 64
+        }
+      },
+      {
+        "id": "offset",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "offset",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "args",
+        "type": "Buffer",
+        "at": [
+          200,
+          240
+        ],
+        "inputs": {
+          "instanceCount": 16,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "write",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          300
+        ],
+        "inputs": {
+          "compute.module": "koral_args",
+          "compute.entry": "computeMain",
+          "param.counter": {
+            "$link": [
+              "counter",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "args",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run",
+        "type": "Dispatch",
+        "at": [
+          500,
+          360
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "write",
+              "out"
+            ]
+          },
+          "groups.x": 1,
+          "push.groupSize": {
+            "$link": [
+              "groupSize",
+              "out"
+            ]
+          },
+          "push.offset": {
+            "$link": [
+              "offset",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          420
+        ],
+        "inputs": {
+          "name": "args",
+          "value": {
+            "$link": [
+              "args",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

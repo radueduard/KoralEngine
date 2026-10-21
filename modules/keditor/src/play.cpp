@@ -1,4 +1,5 @@
 #include <keditor/play.h>
+#include "physics.h"
 #include <keditor/project.h>
 
 #include <algorithm>
@@ -96,7 +97,24 @@ namespace keditor
 
     // A frame, in the order a script counts on: its updates, then what graphics scripts make for the passes, then the
     // passes readied with all of it.
-    void PlayScene::FixedUpdate() { if (_document && _playing) _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime())); }
+    void PlayScene::FixedUpdate()
+    {
+        if (!_document || !_playing) return;
+        _document->Scripts().FixedUpdate(static_cast<float>(Time::FixedDeltaTime()));
+        // The graph's fixed pages run on this frame: it has a step in it.
+        _document->Runtime().FixedStep(static_cast<float>(Time::FixedDeltaTime()));
+    }
+    void PlayScene::StepOnce()
+    {
+        if (!_document) return;
+        _document->Scripts().FixedUpdate(SceneTime().FixedDeltaTime());
+        _document->Runtime().FixedStep(SceneTime().FixedDeltaTime());
+    }
+    void PlayScene::Restart()
+    {
+        ++_restarts;
+        if (_document) _document->Runtime().RunSetupAgain();
+    }
     void PlayScene::Update()
     {
         _overlayBefore.reset();
@@ -112,6 +130,8 @@ namespace keditor
         _document->Scripts().Prepare();
         // What the graph is told of the frame: how big the window is, and whose debug shapes a DebugDraw node draws.
         _document->Runtime().SetScreenExtent(SceneWindow().Extent());
+        // How far the frame is between the last fixed step and the next: what is drawn between two steps' states.
+        _document->Runtime().SetFixedFraction(SceneTime().FixedStepFraction());
         // The editor's shapes are drawn by the editor's own passes, when there are any: not by a node of the scene's.
         _document->Runtime().SetDebugDraw(_overlay ? nullptr : &SceneDebug());
         _document->Update();
@@ -142,8 +162,14 @@ namespace keditor
         if (_edited) _overlay = std::make_unique<keditor::Overlay>(Graph(), _document->World());
         Scenes()[_document.get()] = this;
         RegisterFlyCamera(*this);
+        RegisterPhysics(*this);
     }
 
+    void GameScene::FixedUpdate()
+    {
+        // Its own runtime runs the same fixed pages, on the same steps, while the scene plays.
+        if (_runtime && _play.Playing()) _runtime->FixedStep(static_cast<float>(Time::FixedDeltaTime()));
+    }
     void GameScene::Update() { _before.reset(); }
 
     void GameScene::LateUpdate()
@@ -166,6 +192,7 @@ namespace keditor
             _seen = revision;
             _runtime->Set(document.Runtime().Current());
         }
+        if (_play.Restarts() != _restarts) { _restarts = _play.Restarts(); _runtime->RunSetupAgain(); }
         // What the scripts write into is the document's own buffer, here too: not one of this view's.
         _runtime->Share(document.ScriptResources());
         // Whatever the editor sees from, this sees from the scene's camera; and nothing is picked here.

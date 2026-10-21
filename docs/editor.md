@@ -30,9 +30,11 @@ the display's rate, and `--frames N` to stop after so many.
 
 | Panel | |
 |---|---|
-| **Graph** | The scene's pass graph, a page a pass: the passes are listed down its side. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
+| **Graph** | The scene's pass graph, a page a pass: the one picked in **Passes**. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
+| **Passes** | The graph's passes, under the Scene tree: pressed, a pass's page is shown in the Graph panel. See [Passes](#passes). |
+| **Here to use** | Beside the Assets panel: what the page shown can use of the passes before it, a picture each, to drag onto the page. See [Passes](#passes). |
 | **Scene** | The scene as it runs, sized to the panel. |
-| **Outliner** | The entities, as a tree, and a button that makes one. |
+| **Scene tree** | The entities, as a tree, and a button that makes one. Each is shown by what it is — a mesh, a light, a camera, a script's — and one with nothing of its own but what is under it by a group's mark. Right-clicked, an entity has a short menu: Rename, Duplicate, Delete; **Create under it ▸**, the objects there are, a submenu each for meshes, lights and cameras; how it is seen (framed, shown or hidden, moved to the top); and **Prefab ▸**, made one, or of an instance its prefab edited, applied, reverted or let go. Right-clicked where no entity is, it offers what can be made at the top. A submenu opens beside its menu as the pointer comes onto its line. |
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
 | **Problems** | Every node that failed and every pass that passed an entity by, with the reason. Click one to pick its node. |
 
@@ -57,42 +59,74 @@ The menus:
 
 ### Passes
 
-The graph is split into passes, listed down the side of the Graph panel in the order they are drawn, each
+The graph is split into passes, listed in the **Passes** panel in the order they are drawn, each
 with how many nodes it has (and how many are wrong, in red). Press one to see its page: the nodes it makes
 and runs, and nothing of any other pass. **Find a node**, at the top, goes to the first node whose name or
 kind has what is typed; Enter again goes on to the next.
+
+The passes are under a tab for each rate they run at (see [kgraph: How often a pass runs](kgraph.md#how-often-a-pass-runs)):
+**Every frame**; **Fixed step**, the passes run on the fixed step while the scene plays; and **Setup**, the passes made
+once. Setup's run first, then the fixed step's, then every frame's, each in their own order. The tab follows the page
+shown: going to a node of a setup page turns to Setup.
+
+A pass node's inspector shows what it **takes**, followed as it runs: its GPU time and the CPU's recording it.
 
 **Every node at once** shows the whole graph, laid out by itself: at first each pass's page beside the one
 before, in the order they are drawn, so that none is over another. Moving or arranging nodes there does not
 move them on their pages, and moving them on a page does not move them there. A node made there is where it
 was put. The layout is saved with the graph (`overview`).
 
-- **+** beside PASSES makes a new pass: type its name, then Enter (Escape calls it off). Drag a pass up or
-  down to draw it earlier or later; right-click it to move it, or to delete it (with its nodes, or keeping
-  them in no pass).
+- **+** beside the tab's heading makes a new pass of that tab: type its name, then Enter (Escape calls it off). Drag
+  a pass up or down to make it earlier or later among its tab's. Right-click it to move it, to make it run every frame, on
+  the fixed step or once as setup, or to delete it (with its nodes, or keeping them in no pass).
 - Under THIS PASS: the pass's name, to type over; **Create a node** makes a node in it (an image, a
   framebuffer, a pipeline, a pass node), as right-clicking its page or Control+Space does for every kind.
-- **Bring in from before** lists what the passes before this one made. Picking one puts a node on this page that
-  stands for it, greyed and labelled with where it is from, to wire from as if it were the thing itself.
+- The **Here to use** panel, beside Assets, is what the page shown can use: what the passes before it made, setup's
+  first, and what is in no pass, under the page each is on — a picture each, as the Assets panel shows files: an image
+  as it was last drawn, a mesh by itself, and what kind of thing anything else is. Its heading's button shows them as
+  a list instead. The pointer resting on one says what it holds (an image's size and format, a buffer's size) and what
+  wrote it before this page. Dragged onto the page, or pressed, it is brought in: a node on this page that stands for
+  it, a **Reference**, to wire from as if it were the thing itself. One brought in already is lit, and pressed is
+  picked. Values are under **VALUES**, opened by the arrow beside it. Its pictures are made while the panel is in
+  sight.
 - A node's inspector has a **Pass** line to move it to another page. Clicking a problem, or finding a node
   by name, turns to the page it is on.
+
+A Reference says, on its node, what it stands for and where that was made, what it holds, whether this page reads it,
+writes it or both, and what wrote it before this page. Its picture is of the image as this page begins. One of what setup
+made is marked in setup's colour. Picked, its inspector is of the thing itself: what is set there is set where it is
+made, and for every page that brings it in. **Go to where it is made** turns to that page. A page brings a thing in
+once, and a Reference that loses the last wire from it goes, since the drawer still has what it stood for.
 
 A node wired straight to one on another page, with nothing imported, shows that node greyed beside it.
 
 ### New shaders and scripts
 
-**Assets, New shader** asks for a name and a kind, and writes `shaders/<name>.slang`:
+**Assets, New shader** asks for a name, a kind and what it has, and writes `shaders/<name>.slang`. Each entry point is
+called as a pipeline looks for it when none is named — `vertexMain`, `fragmentMain`, `meshMain`, `closestHitMain` — so a
+pipeline node only has to name the module:
 
-| Kind | What it starts as |
-|---|---|
-| Compute | Fills an image wired to `param.target`, with a constant the node sets. For a ComputePipeline and a Dispatch. |
-| Mesh | Draws a mesh for each entity, with the frame's camera, its `model` matrix and one value of its own, `color`: push constants a Draw is wired from a ForEach. For a GraphicsPipeline and a Draw. It imports `engineCommon`, which is written beside it when not there. |
-| Fullscreen | One triangle over the picture, reading another picture at `param.source`. Needs no vertex layout and no mesh. |
+| Kind | What it is | What it can have |
+|---|---|---|
+| Vertex + fragment | Draws each entity's mesh, with the frame's camera, its `model` matrix and one value of its own, `color`: push constants a Draw is wired from a ForEach. For a GraphicsPipeline and a Draw. It imports `engineCommon`, which is written beside it when not there. | **Over the whole picture**: one triangle and no mesh, reading another picture at `param.source` — no vertex layout, no mesh. **Tessellation**: control and evaluation shaders, each triangle cut as fine as `constant.level`. **Geometry shader**: each triangle passed on. No **fragment shader**: only depth is drawn, for a shadow map or a depth prepass. |
+| Mesh + fragment | Mesh shaders, a triangle a group, and no vertex buffer. For a GraphicsPipeline drawn with eMesh. | **Task shader**: how many mesh shader groups there are, and what each is handed. No **fragment shader**: only depth. |
+| Compute | Fills an image wired to `param.target`, with a constant the node sets. For a ComputePipeline and a Dispatch. | |
+| Ray tracing | A ray generation shader that traces a ray for each pixel of `param.target` into the AccelerationStructure at `param.scene`, a miss shader, and a hit group of triangles. For a RayTracingPipeline (`raygen`, `miss[0]`, `hitGroup[0]`) and a TraceRays. | **Any hit shader**: every hit, and a ray let pass. **Intersection shader**: what is no triangles, a sphere in each box. |
+
+What this device cannot run is not offered: mesh shading and ray tracing where the GPU has neither, and tessellation and
+geometry shaders where it has not them (the graph asks for both, so a GPU that has them has them enabled). The dialog
+says why, in place of the choice.
 
 The name is the module a pipeline node then picks. **Assets, New script** writes `scripts/<Name>.cs` (or
 `.kt`): a class of that name with one field and an `Update`, which is a component of that name once the
-project runs with its scripts (see [scripts](scripts.md)). A name has to be one code can use, and not one a
-shader, a script or a component already has.
+project runs with its scripts (see [scripts](scripts.md)). Its kind can also be a **ResourceScript** of the project's
+language: a class that makes an image and a sampler, and fills the image's texels as it is made, run by a Script node
+(see [scripts: Scripts that make resources](scripts.md#scripts-that-make-resources)). A name has to be one code can
+use, and not one a shader, a script or a component already has.
+
+Each ResourceScript is among the nodes to add, by its name: a Script node of it, whose outputs are what it makes. Its
+inspector says what that is, picks another script, and has the script's fields and what each resource is made with as
+its inputs. Until something runs the script, what it makes is made with nothing in it, and its node says so.
 
 ### The standard scene
 
@@ -140,7 +174,8 @@ with nothing picked, no outline and no gizmo, and a click in it picks nothing. A
 FlyCamera, `input` in a Kotlin script) reads the Game panel's keys and mouse: while the pointer is over it, or it
 was the last thing clicked. It is a tab beside the Scene panel to begin with; dragged to a part of the middle of
 its own, the two are seen side by side. While it is not seen, nothing of it is drawn. A buffer a graphics script
-writes into is the same buffer in both views: what it writes is seen in each. **Pause** holds it. **Stop** puts every entity back as it was when Play was
+writes into is the same buffer in both views: what it writes is seen in each. **Pause** holds it. **Step** (beside Pause) takes one fixed step and pauses: the scripts' `fixedUpdate` and the graph's fixed
+pages, once — starting play first when it was not playing. **Stop** puts every entity back as it was when Play was
 pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
 plays.
 
@@ -159,17 +194,40 @@ three lights and a sky. The mesh objects name the standard graph's `lit` compone
 offered in any project, one made before an object was among them included; a file of the project's of the same
 name is what it says instead.
 
+### Default meshes and materials
+
+Every project's Assets panel has the editor's own, of no file: **Meshes/Primitives** holds the meshes there are
+without making any (`$cube`, `$sphere`, `$roundedBox`, `$wedge`, `$stairs`, `$teapot`... every one of
+[the default meshes](kgraph.md#default-meshes)), each pictured, dragged
+onto an entity's Mesh as any mesh is. Their inspector chooses their **tangents**, every default mesh alike: a `TANGENT` of
+four numbers (w the bitangent's side), a `TANGENT` and a `BITANGENT` of three, as a model's meshes have them, or
+neither — saved with the scene's graph, and undone as any change (see [Default meshes](kgraph.md#default-meshes)). **Materials/Defaults** holds materials (`material:Gold`, `material:Red plastic`,
+plastics, metals, wood, rubber, two that glow): dropped on an entity in the scene tree or the inspector, what draws it
+(`lit`, or any component with an `albedo`) is given its albedo, metallic, roughness and emission, and its pictures are
+set white; an entity drawn by nothing is given `lit` first. The table is `Session::DefaultMaterials()`.
+
 ### Prefabs
 
-A prefab is entities that instances are made of — and that the instances go on following. **Edit, Save as
-prefab** (or the outliner's right button) writes what is picked, and what is under it, to `prefabs/<name>.prefab`,
-and makes it the prefab's first instance. A prefab in the Assets panel is placed by dragging it into the scene
-panel or the outliner, at the top, or onto an entity, under it; pressed twice, it is placed at the top.
+A prefab is entities that instances are made of — and that the instances go on following. An entity **dragged from
+the scene tree into the Assets panel** is written, with what is under it, to `prefabs/<name>.prefab`, and is the prefab's
+first instance; so is one picked, with the inspector's **Save as prefab** (offered while it is part of no prefab), the
+Assets panel's **Create, Prefab of the picked entity**, **Edit, Save as prefab** or the scene tree's right button. The
+Assets panel then shows the prefab, picked.
+
+**A prefab is edited by itself**, as Unity's prefab mode does. The Assets panel's right button (or **+ Create**) has
+**Create prefab...**: named, a prefab of one empty entity is written to `prefabs/` and opened. A prefab pressed twice in
+the Assets panel, or **Edit prefab** on its menu or in its inspector, opens it. Open, the scene's entities are put aside
+— with what can be taken back of them — and the scene tree and the scene view have the prefab's alone, as entities like
+any; a bar over the scene tree names it, with **Save** (and Ctrl+S, while it is open) and **Back to the scene**. What is
+taken back there is the prefab's. Back to the scene, it is as it was — saved first when the prefab changed — and every
+instance of the prefab in it follows the prefab. A prefab is not played; opening another project or scene saves the
+prefab and goes back first. Its first entity at the top is the prefab: another beside it is no part of it. A prefab in the Assets panel is placed by dragging it into the scene
+panel or the scene tree, at the top, or onto an entity, under it; pressed twice, it is placed at the top.
 
 An instance is made again from its prefab whenever its scene is opened and whenever the prefab is applied, in all
 but what the instance made its own: a field set on it, its entities moved, turned or renamed, a component given it
 or taken off, one of its entities taken away. Those are kept with the instance; the inspector says how many, and
-the outliner marks an instance. Where the instance itself is, what it is called and what it is under are always its
+the scene tree marks an instance. Where the instance itself is, what it is called and what it is under are always its
 own, and so is what is put under its entities. In the inspector of an instance, or of any entity of one:
 
 - **Apply to the prefab** writes the instance as it is now to its prefab. Every instance of it in the scene follows
@@ -184,7 +242,7 @@ something of it was changed in that outer instance, which keeps it. A prefab wit
 made eight deep and no more. What one of a prefab's entities holds of another (a script's `Entity`
 field) is that entity in every instance; what it holds of an entity outside the prefab is left out.
 
-**+** over the outliner, and **Create** in the menu bar, offer them grouped by what each holds: an empty entity,
+**+** over the scene tree, and **Create** in the menu bar, offer them grouped by what each holds: an empty entity,
 then **Mesh**, **Light** and **Camera**, each a submenu that opens in place when pressed, then the rest (the sky,
 the project's own).
 
@@ -193,7 +251,7 @@ the scene's own (a camera, a light, the sky).
 
 ### Entities
 
-The outliner is the hierarchy. An arrow folds what is under an entity. Drag an entity onto another to put it
+The scene tree is the hierarchy. An arrow folds what is under an entity. Drag an entity onto another to put it
 under it, or onto the empty part of the panel to bring it to the top; it stays where it is in the world.
 Right-click one for a new entity under it, to move it to the top, or to delete it with everything under it.
 
@@ -208,25 +266,40 @@ A `Mesh` component's field lists the graph's mesh nodes and the default meshes (
 
 A new Draw needs only its pipeline. With a vertex shader that makes its own vertices (`SV_VertexID`), that
 is a whole picture: Image → ImageView → Framebuffer → GraphicsPipeline → Draw, and a Blit of the image to a
-Screen. No mesh, no vertex layout, no entity. Everything else a draw can say is under **Add input**: a mesh
+Screen. No mesh, no vertex layout, no entity. Everything else a draw can say is in its inspector, as it starts: a mesh
 to draw instead of the entities', how many vertices and instances, an indirect buffer, the viewport and
 scissor, what the framebuffer is cleared to, and the state the pipeline leaves open (culling, depth,
 stencil, line width).
 
 ### A node in the inspector
 
-A node shows the inputs it cannot do without and the ones it has been given. An Image shows its format,
-size and usage. **Add input** lists everything else it can take; one picked from it joins the inputs above,
-set to what it starts as. `x` takes an input back to nothing given, and off the node again when
-it was one it can do without.
+The inspector shows every input a node has, in the order its type lists them: the ones it has been given with their
+names lit, the rest dimmed and showing what they start as — set one, and it is given. An input given in parts
+(`extent`, `groups`) is one line of its parts, and its `o` wires it whole instead. `x` takes an input back to nothing
+given. Under **What it gives** is every output it works out besides its inputs — an Image's `width`, `size` — each
+with what it is now and what it is wired to. On the node there are only the ports it needs and those asked for there:
+the pin beside an input moves it to the node or back, the port icon beside one that takes a resource puts a port for it
+on the node, and the output icon beside an input — or beside an output under What it gives — gives it as an output
+on the node, to wire what it is set to elsewhere. Taken off, an output's wires come off with it.
+
+What a node has many of is in parts (`Port::group`): those it cannot do without and a few more at the top, and the
+rest each under a heading that opens and closes — a Draw's *What is drawn*, *Indirect*, *Attachments*, *Viewport*,
+*Rasterization*, *Depth*, *Stencil*, *Blending*, *Culling*; a Sampler's *Filtering*, *Addressing*, *Level of detail*,
+*Comparison*; a pipeline's states, each of its own; a Script node's resources, each of its own. A part with something
+given in it, or something the node cannot do without, is open; the rest are closed, saying how many there are
+(*6, as they start*, *2 of 6 given*), until opened. What does nothing as the node is set is not there until it does
+(`Port::when`, `kgraph::Applies`): a draw of vertices has no indirect buffer's inputs, a draw with its stencil test off no
+stencil reference, a sampler no anisotropy while it is off. Its part says what it leaves out, and why — *4 more for
+indirect draws* — and an input given before stays, to be taken back.
 
 Each input has the control for what it is:
 
 | Input | Control |
 |---|---|
-| A number, or the parts of one thing (`extent`, `groups`) | A number to drag, or one line of them under the thing's name. |
+| A number, or the parts of one thing (`extent`, `groups`) | A number to drag, or one line of them under the thing's name, kept within what the input takes (`Port::min`, `Port::max`): dragged or typed, an extent is never 0, a field of view never past 179. A view's first level and layer, and how many of each, are within what the image it is of has — a Script node's views' as well. A whole number is dragged a unit at a time; a size, a distance or a count that may be thousands, by so much of what it is (`Port::logarithmic`). A field of a struct — a stencil's mask, a depth range — is kept as `kgraph::LimitsOf` says. |
 | True or false | A box to tick. |
 | An enumeration, or one of a few names (`stages`, `command`, `shape`) | A list of the names. |
+| A view's swizzle (an ImageView's `componentMapping`) | Under its name: a list for each of red, green, blue and alpha — Identity, Zero, One, or a channel of the image. |
 | Flags | A tick for each. |
 | A colour (a Clear's `color`, an attachment's `clear`) | A swatch that opens a colour picker. |
 | A shader module | The project's `.slang` files, by name. |
@@ -253,8 +326,8 @@ An input is set in one of three places, as its node type says (see [kgraph](kgra
   layout, a Mesh's — **Make a VertexLayout** makes the node that sets it up beside this one, wired in.
 
 The pin beside an input in the inspector moves it between the node and the inspector, for this node; it is saved
-with the graph. An input that takes a resource is a port on the node, and so is one added from **Add input**: wire
-it on the graph. A value set only in the inspector (a number, a vector, a colour) can be wired too: the small `o`
+with the graph. An input that takes a resource and that the node cannot do without is a port on the node, and so is
+one put there with its port icon: wire it on the graph, or choose what to wire from in the inspector. A value set only in the inspector (a number, a vector, a colour) can be wired too: the small `o`
 beside it makes it a port.
 
 A **VertexLayout** node draws what it makes: a strip for each buffer the vertices are in, its attributes along it
@@ -275,7 +348,10 @@ called, so give it one.
 
 Its name, then each component with its fields. A field that holds a resource is a list of the nodes whose
 output fits. A `vec3` or `vec4` whose name says it is a colour (`color`, `tint`, `albedo`) gets a colour
-picker. The tick beside a component's name switches it off without removing it. **Add** lists the
+picker. A number is kept within what its field says (a script's `[Range]`, `[Min]`; an unsigned one at 0 or more),
+dragged or typed, and dragged by so much of what it is where its script says `[Logarithmic]`: a light's intensity and
+range, a camera's near and far. The transform's rotation goes round from −180 to 180 degrees; its scale is dragged by
+so much of its size. The tick beside a component's name switches it off without removing it. **Add** lists the
 components the entity doesn't have yet: each pipeline's (what its draws take from each entity), `Mesh`, and the
 scene's tags. **New tag** makes a tag and gives it to the entity.
 
@@ -309,8 +385,8 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 ## Not yet
 
 - **The Hub** doesn't know engine projects. They open and run from the editor and from `koral-play`.
-- **What was asked for with Add input and not set is forgotten** when the editor closes: only inputs that
-  were given are in the file.
+- **A port or an output put on a node and not wired is forgotten** when the editor closes: only inputs that
+  were given, and wires, are in the file.
 - **A node can't be renamed** after it is made: its name is what wires, files and components know it by. What it
   is called on the graph — its title — is set in the inspector.
 - **One scene a project** in the interface. `project.json` can list more, and `koral-play` takes a scene
@@ -318,7 +394,7 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 - **An entity's own image or buffer** has to come from a node. Nothing in the editor makes a resource per
   entity.
 - **Entities aren't reordered among their siblings** by dragging: a drop puts one last under what it is
-  dropped on. An entity is renamed in the inspector, not in the outliner.
+  dropped on. An entity is renamed in the inspector, not in the scene tree.
 - **A component the shader makes starts at zero**: a new `lit` is black and polished until its fields are
   set. The objects set them. Objects have no icons.
 - **The scene view's toolbar is words**, and a menu line that is on is marked with a `*`.
@@ -337,8 +413,10 @@ node itself, in the graph, and the rest in the inspector:
 
 - **An image, as a picture**, whatever its format. *As suits it* shows a colour as it is and stretches a depth, a
   count or anything of one channel to its range; the other ways are *As it is*, *Stretched to its range*, and one
-  channel alone. Under it are its format and size and what its values run from and to. An image with depth has a
-  slice to choose.
+  channel alone. Under it are its format and size and what its values run from and to. An image with smaller levels
+  has its **level** to choose, an array its **layer**, and one with depth its slice; and its picture is drawn
+  **Linear** — blended between texels — or **Nearest**, each texel a square, as a height map's cells are told apart. A
+  node that makes several — a Script node — has which of them to look at, **Of**; the first image, to begin with.
 - **A buffer, as numbers**: an element a line with each field by the name the shader gives it, for a ShaderBuffer;
   otherwise its words, eight a line.
 
@@ -355,7 +433,7 @@ the same, for code: a node's id, or a file's (`@wall.png`, `@model.gltf#3`, `$sp
 
 - **An image** at any **level** and **layer** (a cube's six named), and any slice of one with depth, each copied out
   as it is chosen. Shown as suits it, as it is, stretched, or one channel; its red, green, blue and alpha each on and
-  off (alpha with colours lays them over a checkerboard). The wheel zooms about the pointer, a drag moves it, **Fit**
+  off (alpha with colours lays them over a checkerboard); drawn **Linear** or **Nearest** as it is zoomed. The wheel zooms about the pointer, a drag moves it, **Fit**
   and **1:1** put it back; near enough, the lines between texels are drawn. What the texel under the pointer holds
   is said under it — each channel's value and, for a normalised format, what is stored (`R 0.5 (128)`).
   Beside it: its format, type, size, levels, layers, samples, usage and memory; its **histogram**, a curve a channel,
@@ -379,7 +457,14 @@ the same, for code: a node's id, or a file's (`@wall.png`, `@model.gltf#3`, `$sp
 
 ## Importing a model
 
-**File > Import model...** makes entities of a glTF, obj or fbx (`Document::ImportModel`): an entity for each
+**Import a model or a picture...** (the Assets menu, or the Assets panel's Create) brings a file into the project and
+nothing into the scene (`Session::ImportAsset`): a picture is copied to `assets/textures`, a model to a folder of its own
+in `assets/models`, with the files it names beside it — a glTF's buffers and pictures, an OBJ's materials and the pictures
+they name — so that the copy is read as the file was. One of the project's already is only picked. Either is then in the
+Assets panel, picked, in its folder.
+
+A model is put in the scene by dragging it onto the scene or the scene tree, or with its **Import into the scene...**: that
+makes entities of it (`Document::ImportModel`): an entity for each
 thing in the file under one named for the file, placed as the file places them, with the file's lights. Each
 drawn part has its Mesh (`@model.gltf#3`), and every component a pipeline of the graph makes that has an
 `albedo` field, filled from the part's material a field by name: `albedo`, `metallic`, `roughness`, `emission`,
@@ -389,8 +474,8 @@ decal — `Blended`. The meshes and pictures stay in their files, and are found 
 opened. All of it is read off the frame: the entity named for the file is there at once, its things are made
 under it when the file is read, and their pictures come in after.
 
-**Before it is imported, it is asked about.** Whichever way it is imported — File, Import model; *Import into the
-scene...* in the model's inspector or its menu; dropped on the scene or the outliner — a dialog lists what its
+**Before it is put in the scene, it is asked about.** Whichever way it is put there — *Import into the
+scene...* in the model's inspector or its menu; dropped on the scene or the scene tree — a dialog lists what its
 meshes have (the file is read for it off the frame, and nothing of it made), each attribute read or left out and
 in which buffer, with the same presets as below; **Import** reads it so, the first time. What is left out is never
 read at all. At first it shows how the scene reads the file already, or everything in one buffer.
@@ -515,7 +600,7 @@ or the environment variable of that name — which is made if it is not there.
 ## What is wrong, where it is mended
 
 An entity a pass could not run for — a picture field with nothing in it, a mesh that does not fit — is marked in
-the outliner, and its inspector says which pass and why, whether or not it is in sight. The status bar counts the
+the scene tree, and its inspector says which pass and why, whether or not it is in sight. The status bar counts the
 files still being read.
 
 A problem that has something plain to be done about it says what, under what is wrong: a field with nothing in
@@ -551,9 +636,15 @@ that again after the panels have been moved.
 - **Copy, paste and duplicate** keep the wires among what is copied, and the wires from the rest of the graph.
   A copy has a name of its own (`draw forward 2`); pasted, it goes on the page that is shown.
 - **Arrange this page** (the graph's menu, or Graph in the menu bar) puts the page's nodes in columns, each after
-  what it is wired from and as near what it is wired to as that leaves it, ordered down each column by what feeds
-  them. It comes out shaped as the panel is: a column taller than that leaves is wrapped into more beside it,
-  and nodes wired to nothing go in rows underneath, as wide as the rest. Ctrl+Z puts them back.
+  what it is wired from and as near what it is wired to as that leaves it, and down each column in the order that
+  crosses the fewest wires it can find: each column ordered by where what it is wired to is on either side — a wire
+  across several columns counted in each it passes — sweep after sweep, then nodes side by side swapped while that
+  crosses fewer, and all of it begun again from other orders, the best kept. It comes out shaped nearly as the panel
+  is: a column taller than that leaves is wrapped into more beside it, at the height, of those that shape it so, whose
+  wires cross least; and nodes wired to nothing go in rows underneath, as wide as the rest. Each loop's frame is a block of its own: its
+  nodes are put in order by themselves, and the block among the rest as one node, so that a frame holds its loop's nodes
+  and nothing else, and no two loops' frames are over each other. A node is of one loop: one that runs once a turn of a
+  Repeat and once an element of a ForEach (a shadow's draw) is in the Repeat's. Ctrl+Z puts them back.
   `keditor::ArrangeNodes` is the same, for code.
 - **A wire has the colour of what it carries**: an image's is teal, a buffer's amber, a sampler's violet, a
   pipeline's orange, a mesh's green, a number's blue. The wires of what is picked stand out from the rest.
@@ -579,7 +670,7 @@ Not yet, in the Assets panel: a file is not renamed or moved from it (the scene 
 would lose it); a scene is listed, and not opened from there. The grid shows the first 160 pictures of what
 it lists — textures, and meshes once theirs are drawn — and the rest by their kind.
 
-## The outliner, the inspector, and what is carried between panels
+## The scene tree, the inspector, and what is carried between panels
 
 **Functions** are nodes as one, kept in the project (`functions/<name>.kfunc`) and called wherever they are
 wanted. Pick nodes and **Make a function of them...**: they become the function, and one node calls it where they
@@ -598,7 +689,7 @@ parts as are made: a panel held over the left or right edge of any part becomes 
 of it (`kui::DockArea::eCenter` with the part's number, from the left), and dropped on a part's title or its
 centre it is a tab there. A part that loses its last panel is gone, and the others share its room.
 
-**The outliner** shows each entity by what it is — a camera, a sun, a light, a mesh, data, a group, or nothing
+**The scene tree** shows each entity by what it is — a camera, a sun, a light, a mesh, data, a group, or nothing
 yet — with its name, how many are under it while it is shut, a warning when a pass could not run for it (why is
 what the pointer over it says), and an eye that shows and hides it with what is under it.
 
@@ -612,7 +703,7 @@ what the pointer over it says), and an eye that shows and hides it with what is 
   component of its name. A model dropped on the tree's own ground, or on the scene, is imported.
 
 **The inspector**, for an entity: what it is and its name, its eye, and a button that frames it; **Under**, what
-it is under — chosen among the entities it can go under, or an entity dropped there from the outliner; **Run
+it is under — chosen among the entities it can go under, or an entity dropped there from the scene tree; **Run
 by**, the passes' nodes that run for it, each to go to; its transform, with Reset; then each component, with its
 kind said beside it (run by a pipeline, what is drawn, a light, data, a tag), an arrow that shuts it, and for a
 pipeline's a button that goes to the pipeline.
@@ -627,15 +718,15 @@ pipeline's a button that goes to the pipeline.
   Dropped anywhere else on an entity's inspector, a script is the component it makes, a mesh or a texture is given
   to it as **Add** does, and a prefab is an instance under it.
 - A field that holds an entity (a script's `Entity`) is a list of the scene's entities, each under what it is under,
-  and takes an entity dragged onto it from the outliner.
+  and takes an entity dragged onto it from the scene tree.
 - **Add** lists the components the entity has not, a pipeline's first, then data, then tags, each said for what it is.
 - A node's input that takes a resource has a list of the nodes that give one of its kind — of its page, in no
   pass, or made before it, and never one wired from the node itself. Choosing one of another pass brings it in.
-- A Reference's node is one of what the passes before it made; a loop's `of` is a node of a loop; a ForEach's
+- A loop's `of` is a node of a loop (a Reference's is what the drawer brought in, and its inspector the thing itself); a ForEach's
   entity is one that has its component.
 - An image's format is one its use allows: a depth format for what is drawn into as depth; none that is depth or
   packed for what is drawn into or written by a shader.
-- **Add input** offers an input that is given whole or in parts once, whole.
+- An input given whole or in parts is one line of its parts in the inspector, and wired whole from there.
 
 **A texture or a shader dropped on the graph** from the Assets panel is the node it makes, there: an ImageFile, or
 a pipeline of the shader's entry points (a compute one when it has a compute entry point).

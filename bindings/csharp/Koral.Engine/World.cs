@@ -312,8 +312,8 @@ public sealed unsafe class World
     /// </summary>
     public T? Resource<T>(string node, string output = "out") where T : Resource =>
         Koral.Resource.Wrap<T>(Native.kengine_node_resource(Document, node, output));
-    public Buffer? Buffer(string node) => Resource<Buffer>(node);
-    public Image? Image(string node) => Resource<Image>(node);
+    public Buffer? Buffer(string node, string output = "out") => Resource<Buffer>(node, output);
+    public Image? Image(string node, string output = "out") => Resource<Image>(node, output);
 
     /// <summary>Adds a node, as the editor does. The id it got.</summary>
     public string AddNode(string type, string? id = null, double x = 0, double y = 0)

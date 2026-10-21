@@ -83,6 +83,26 @@ Write("Feeder.cs", """
         }
     }
     """);
+Write("Ramp.cs", """
+    // Makes a buffer of a number each, a step apart, an image a step brighter a row, a view of it and a sampler. A
+    // Script node of the graph runs it, with its fields, and gives what it makes.
+    public sealed class Ramp : ResourceScript
+    {
+        public float Step = 1;
+        public Buffer Table = new(instanceCount: 32, usage: "eStorage");
+        public Image Rows = new(format: "eR32_SFLOAT", width: 4, height: 8, usage: "eSampled | eTransferSrc | eTransferDst");
+        public ImageView RowsView = new(image: nameof(Rows));
+        public Sampler Nearest = new(minFilter: "eNearest", magFilter: "eNearest");
+        protected override void Init()
+        {
+            var numbers = Table.As<float>();
+            for (var i = 0; i < numbers.Length; ++i) numbers[i] = i * Step;
+            var texels = Rows.As<float>();
+            for (var y = 0; y < Rows.Height; ++y)
+                for (var x = 0; x < Rows.Width; ++x) texels[y * Rows.Width + x] = y * Step;
+        }
+    }
+    """);
 Write("Watcher.cs", """
     // Reads the Spin of the first entity that has one, and sets it turning from 100: once.
     public sealed class Watcher : Script
@@ -249,6 +269,23 @@ Near(written[0], 21, "what Prepare wrote is in the node's buffer");
 Near(written[1], 42, "all of it");
 Check(Number(source, "Feeder", "Prepared") >= 2, "once a frame");
 
+// ---- a script fills a resource as it is made ----------------------------------------------------------------------
+
+Check(host.ResourceScripts.SequenceEqual(["Ramp"]), $"a script that makes resources is one: {string.Join(", ", host.ResourceScripts)}");
+Check(!world.HasComponentType("Ramp"), "and no component");
+world.AddNode("Script", "ramp");
+world.SetInput("ramp", "script", "\"Ramp\"");
+world.SetInput("ramp", "field.Step", "0.25");
+Check(world.NodeOk("ramp", out why), $"what it makes is made: {why}");
+Frames(1);
+var ramp = world.Buffer("ramp", "Table")!.Read<float>(8);
+Near(ramp[3], 0.75f, "with what the script filled it with, given the node's field");
+Check(world.Image("ramp", "Rows") is not null, "its image, an output by its name");
+Check(world.Resource<Resource>("ramp", "RowsView") is not null && world.Resource<Resource>("ramp", "Nearest") is not null, "and its view and its sampler");
+world.SetInput("ramp", "field.Step", "2");
+Frames(2);
+Near(world.Buffer("ramp", "Table")!.Read<float>(8)[3], 6, "a field changed: made and filled again");
+
 // ---- edited while it runs: the code is new, the data is the entity's -------------------------------------------
 
 Write("Spin.cs", """
@@ -359,8 +396,8 @@ Equal(world.FieldJson(wheel, "Spin", "Laps"), laps, "with the host gone nothing 
     Equal(read.VertexCount, 3, "read back: its vertices");
     Near(read.Find("WIND")?.AsFloats()[2] ?? -1, 1f, "its own attribute");
     var coloured = world.Meshes.WithAttributes("$cube", "coloured cube", [MeshAttribute.Floats("COLOR", 3, new float[world.Meshes.Read("$cube").VertexCount * 3])]);
-    Equal(world.Meshes.Read(coloured).Attributes.Count, 4, "a default mesh, with an attribute more");
-    Equal(world.Meshes.Read(world.Meshes.WithoutAttributes(coloured, "bare cube", "COLOR", "UV")).Attributes.Count, 2, "and fewer");
+    Equal(world.Meshes.Read(coloured).Attributes.Count, 5, "a default mesh (position, normal, UV, tangent), with an attribute more");
+    Equal(world.Meshes.Read(world.Meshes.WithoutAttributes(coloured, "bare cube", "COLOR", "UV")).Attributes.Count, 3, "and fewer");
     try { world.Meshes.Create("wrong", 3, [MeshAttribute.Floats("WIND", 1, [0f])]); Check(false, "a mesh without POSITION is refused"); }
     catch (EngineException e) { Check(e.Message.Contains("WIND") || e.Message.Contains("POSITION"), $"and says why: {e.Message}"); }
     Frames(2);

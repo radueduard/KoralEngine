@@ -18,7 +18,7 @@ namespace kgraph
     kor::Mat4 ToKor(const kecs::Mat4& matrix)
     {
         kor::Mat4 out(1.f);
-        std::memcpy(&out, matrix.m.data(), 64);
+        std::memcpy(static_cast<void*>(&out), matrix.m.data(), 64);     // sixteen floats, a column after another, as both hold them
         return out;
     }
 

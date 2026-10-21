@@ -1,0 +1,266 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "flags",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "flags",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "values",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "values",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 256
+        }
+      },
+      {
+        "id": "bytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "offsets",
+        "type": "Buffer",
+        "at": [
+          200,
+          300
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "kept",
+        "type": "Buffer",
+        "at": [
+          200,
+          360
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "copy",
+        "type": "CopyBuffer",
+        "at": [
+          300,
+          420
+        ],
+        "inputs": {
+          "source": {
+            "$link": [
+              "flags",
+              "out"
+            ]
+          },
+          "destination": {
+            "$link": [
+              "offsets",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "where",
+        "type": "Function",
+        "at": [
+          300,
+          480
+        ],
+        "inputs": {
+          "function": "Scan",
+          "values": {
+            "$link": [
+              "offsets",
+              "out"
+            ]
+          },
+          "count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "keep",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          540
+        ],
+        "inputs": {
+          "compute.module": "koral_compact",
+          "compute.entry": "computeMain",
+          "param.flags": {
+            "$link": [
+              "flags",
+              "out"
+            ]
+          },
+          "param.offsets": {
+            "$link": [
+              "where",
+              "values"
+            ]
+          },
+          "param.values": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          },
+          "param.kept": {
+            "$link": [
+              "kept",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run",
+        "type": "Dispatch",
+        "at": [
+          500,
+          600
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "keep",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Divide",
+        "at": [
+          200,
+          660
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "out",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          720
+        ],
+        "inputs": {
+          "name": "kept",
+          "value": {
+            "$link": [
+              "kept",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "many",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          780
+        ],
+        "inputs": {
+          "name": "count",
+          "value": {
+            "$link": [
+              "where",
+              "total"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

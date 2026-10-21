@@ -26,6 +26,7 @@
 #include <kmath/vector.h>
 #include <optional>
 #include <set>
+#include <span>
 #include <map>
 #include <memory>
 #include <string>
@@ -73,6 +74,9 @@ namespace kgraph
         std::uint32_t firstIndex = 0, indexCount = 0;
         std::int32_t vertexOffset = 0;
         std::uint32_t vertexCount = 0;      ///< A part's: how many of the whole's vertices, from vertexOffset, are its.
+        /// A mesh's (one of numbers, not a part): its vertex buffers, one for each binding, and its index buffer last when
+        /// it has one — each a resource of its own, which a compute shader can read (eStorage). @see the MeshBuffers node
+        std::vector<std::shared_ptr<Resource>> buffers;
 
         Resource() = default;
         Resource(const Resource&) = delete;
@@ -84,12 +88,12 @@ namespace kgraph
      * @brief A node an editor offers for one of the world's components, made of a node type there is: `PointLight`, a
      *        ForEach of it; `PointLight Buffer`, a BufferBuilder laid out as an element of that ForEach is. Nothing of
      *        it is written in the engine: there is one for every component with a number or vector field — the
-     *        engine's package's, a project's scripts', a pipeline's.
+     *        engine's package's, a project's scripts', a pipeline's — and a Script node for each ResourceScript.
      */
     struct Preset {
         std::string name;           ///< What it is offered as, and the title a node made from it has.
         std::string type;           ///< The node type it is: "ForEach", "BufferBuilder".
-        std::string component;      ///< The component it is of.
+        std::string component;      ///< The component it is of. Empty for a Script node of a ResourceScript.
         std::string doc;
         std::vector<std::pair<std::string, Value>> inputs;  ///< What the node is given to start with.
     };
@@ -97,8 +101,53 @@ namespace kgraph
     /** @brief How a node fared when the graph was last set. */
     struct NodeStatus {
         bool ok = false;
-        std::string error;          ///< Why not, when not ok.
+        std::string error {};          ///< Why not, when not ok.
         std::uint64_t builds = 0;   ///< How many times it has been built: unchanged by a Set that changed nothing of it.
+        std::string note {};           ///< Something said of it while it is ok: what it waits for — a script nothing runs yet.
+    };
+
+    /** @brief What a resource script fills: one of its resources as it was made, and its contents, to be written. */
+    struct Contents {
+        std::string name;               ///< The resource, as the script declares it: the field it is.
+        std::string node;               ///< The Script node it is of.
+        std::string kind;               ///< "Image" or "Buffer".
+        std::string format;             ///< An image's, by name: "eRGBA8_UNORM".
+        kor::UVec3 extent { 1, 1, 1 };  ///< An image's, of its first level.
+        std::uint32_t layers = 1;       ///< An image's array layers.
+        std::uint32_t texelBytes = 0;   ///< An image's: the bytes of one texel. @see TexelLayoutOf
+        /// What to fill, zeros to begin with. An image's first level — a layer after another, a row after another, a texel
+        /// after another, from the top left — its smaller levels made from it. A buffer's every byte.
+        std::span<std::byte> bytes;
+    };
+
+    /**
+     * @brief One of the resources a resource script makes: an output of the Script node that runs it, by its name. It is
+     *        made as a node of its kind would be, of what the script's source gives it, and of what the Script node is
+     *        given for it as `<name>.<input>`.
+     */
+    struct ScriptResource {
+        std::string name;               ///< The field it is: the output, and what the node's inputs for it start with.
+        std::string kind;               ///< The node type it is made as: "Image", "Buffer", "ImageView", "Sampler" — any builder's.
+        /// What the source makes it with, by its kind's inputs: `format`, `extent`, `usage`. One that takes a resource —
+        /// an ImageView's `image` — names another of the script's resources.
+        std::vector<std::pair<std::string, Value>> settings;
+    };
+
+    /**
+     * @brief A script that makes resources and fills them on the CPU: Images, Buffers, views of them, Samplers — what its
+     *        source declares — the images' texels and the buffers' bytes written by it as they are made. A Script node
+     *        names one, and gives each of its resources as an output. @see Runtime::SetResourceScript
+     */
+    struct ResourceScript {
+        std::string name;               ///< Its class: what a Script node names it by.
+        std::vector<ScriptResource> resources;          ///< What it makes, in the order it declares them.
+        std::vector<kecs::FieldDescription> fields;     ///< Its settings: a `field.<name>` input of the Script node each.
+        std::vector<std::byte> initial; ///< What its settings are when a node gives none, as its source says. Empty: zeros.
+        std::size_t size = 0;           ///< Of its settings' bytes.
+        /// Fills @p contents — each of its Images and Buffers, by name — given @p settings: its fields' bytes, as `fields`
+        /// lays them out. Empty when it did, or why it could not. Null for a script declared, that nothing runs: what it
+        /// makes is made as it is, empty, and the node says so.
+        std::function<std::string(std::span<Contents> contents, std::span<const std::byte> settings)> fill;
     };
 
     /** @brief What a pass that runs for each entity did, the last frame it was readied for. */
@@ -109,6 +158,14 @@ namespace kgraph
         /// Which entities it could not run for, and why each: the first few hundred of them.
         std::vector<std::pair<kecs::Entity, std::string>> passedBy;
         std::string why;            ///< Why the first of those: a parameter with nothing in it, a mesh that does not fit.
+    };
+
+    /** @brief A pass node's use of a resource: which node, on which page, and whether it reads it, writes it or both. */
+    struct PassUse {
+        std::string node;           ///< As it runs: a node of a loop is each of its turns, `down [0]`.
+        std::string pass;           ///< The page it is on.
+        bool read = false, write = false;
+        bool operator==(const PassUse&) const = default;
     };
 
     /** @brief What a node made, copied out where it can be looked at: an image's texels, or a buffer's bytes. */
@@ -271,6 +328,8 @@ namespace kgraph
          *        are not all copied on the same one. Changing how often builds nothing again. 1: every frame.
          */
         void WatchEvery(std::string_view id, std::uint32_t frames);
+        /** @brief Watches node @p id 's @p output, rather than the one it is shown by otherwise: another of a Script node's. */
+        void WatchOutput(std::string_view id, std::string output);
         void Unwatch(std::string_view id);
         /** @brief What a watched node held a frame or two ago; nothing when it is not watched, or not copied yet. */
         [[nodiscard]] std::optional<Peek> Watched(std::string_view id) const;
@@ -292,6 +351,29 @@ namespace kgraph
         void Share(const std::set<std::string>& nodes);
         /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
         void SetSelected(kecs::Entity entity);
+        /**
+         * @brief A fixed step has been taken, of @p seconds: called by whoever runs the scene, once for each (a scene's
+         *        FixedUpdate, while it plays). A frame with one or more in it runs the passes of the fixed pages; one with
+         *        none rests them. @see Graph::fixed
+         */
+        void FixedStep(float seconds);
+        /** @brief What a pass node costs, averaged over recent frames: its GPU time (a few frames late), and the CPU's. */
+        struct Timing {
+            double gpuMs = 0.0, recordMs = 0.0, prepareMs = 0.0;
+            bool gpuMeasured = false;
+            std::uint32_t runs = 0;     ///< How many passes of the frame graph it is: one, or one for each fixed step a frame can run.
+        };
+        /** @brief Each pass node's Timing, by its id: a fixed page's every step's added together. */
+        [[nodiscard]] std::map<std::string, Timing, std::less<>> Timings() const;
+        /** @brief How far the frame being made is from the last fixed step to the next, 0 to 1: a FixedStep's `alpha`. */
+        void SetFixedFraction(float fraction);
+        /** @brief How many fixed steps the frame being made has in it: what its fixed pages are run for. */
+        [[nodiscard]] std::uint32_t FixedSteps() const;
+        /**
+         * @brief Runs the setup pages again on the next frame, as if built again: what a scene that starts or stops
+         *        playing asks, so that what setup made — a simulation's starting state — starts from the world as it is.
+         */
+        void RunSetupAgain();
         /** @brief How big the scene's window is, each frame: what a Screen node gives as its extent. Sized by it, an image follows the window. */
         void SetScreenExtent(kor::UVec2 extent);
         /** @brief Where a DebugDraw node's shapes come from: the scene's. Null, the default, draws none. */
@@ -322,10 +404,17 @@ namespace kgraph
          *        the same way, with no node for it: `$cube`, `$sphere` (kgraph::DefaultMeshId), made when first asked for.
          *        So are three pictures of one texel — `$white`, `$black`, `$normal` — and what is in a file: `@wall.png`
          *        is that picture, and `@model.gltf#3` the fourth mesh of that model. @see assets.h
+         *        No @p output is the one the node is looked at by: ShownOutput.
          */
-        [[nodiscard]] std::shared_ptr<Resource> ResourceOf(std::string_view id, std::string_view output = "out") const;
+        [[nodiscard]] std::shared_ptr<Resource> ResourceOf(std::string_view id, std::string_view output = {}) const;
         /** @brief The same, as the image it is; empty when it is not one. */
-        [[nodiscard]] kor::ResourceRef<const kor::Image> ImageOf(std::string_view id, std::string_view output = "out") const;
+        [[nodiscard]] kor::ResourceRef<const kor::Image> ImageOf(std::string_view id, std::string_view output = {}) const;
+        /**
+         * @brief Which of node @p id 's outputs it is looked at by — watched, shown on it, made a thumbnail of: the one
+         *        WatchOutput says, when it has it; otherwise `out`; and for a node that has none, a Script node, its first
+         *        image, or its first resource.
+         */
+        [[nodiscard]] std::string ShownOutput(std::string_view id) const;
         /** @brief What node @p id 's @p output is, when it is a value; null otherwise. */
         [[nodiscard]] Value ValueOf(std::string_view id, std::string_view output = "out") const;
 
@@ -365,6 +454,22 @@ namespace kgraph
          */
         [[nodiscard]] const PassReport* ReportOf(std::string_view id) const;
         /**
+         * @brief The pass nodes that use what node @p id made — an image or a buffer, or a view of one, which is a use
+         *        of what it views — in the order of their pages, and in a page the order of the graph: so what wrote it
+         *        before a page is what comes before it here. Uses through what entities hold are not among them.
+         */
+        [[nodiscard]] std::vector<PassUse> UsesOf(std::string_view id, std::string_view output = "out") const;
+        /**
+         * @brief Makes @p script one a Script node can name, or puts it in the place of the one so named: what a script's
+         *        source declares, then what runs it, then the same again when it is edited. Whatever it filled is made and
+         *        filled again, the next frame.
+         */
+        void SetResourceScript(ResourceScript script);
+        /** @brief Forgets a resource script: a Script node that names it says there is none. */
+        void RemoveResourceScript(std::string_view name);
+        /** @brief The resource scripts a Script node can name, by name: of the runtime it follows, for one that follows another. */
+        [[nodiscard]] std::vector<ResourceScript> ResourceScripts() const;
+        /**
          * @brief The inputs taken off pipeline nodes because an edited shader no longer has them, or has them as
          *        another kind: "node.input", in the order it happened. Current() no longer has them. Emptied by the call.
          */
@@ -373,6 +478,7 @@ namespace kgraph
     private:
         struct Impl;
         void Run();
+        void WriteBack();
         std::unique_ptr<Impl> _impl;
         Graph _graph;
         Graph _running;     // the graph with its loops written out: what is evaluated

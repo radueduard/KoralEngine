@@ -199,7 +199,7 @@ the plan:
 
 ### E5: The editor
 
-- The node editor (F5) over the scene's graph, an inspector for nodes and entities, an outliner, and the
+- The node editor (F5) over the scene's graph, an inspector for nodes and entities, an scene tree, and the
   scene's view (an offscreen scene in a panel), all on koral-ui.
 - Editing is live: a change to the graph, a node, an entity or a shader shows in the next frame.
 - Projects open, save (JSON) and run from the editor and from the Hub.
@@ -210,11 +210,11 @@ the plan:
 [editor.md](editor.md). The gate is `DocumentTest.ASceneBuiltFromNothingIsSavedAndRunsTheSameFromItsFile`:
 E4's scene made one edit at a time through the same calls the panels make, saved, and run again from the
 file by the scene `koral-play` runs, with the same picture to the pixel. The interface is tested offscreen
-(what it shows, and clicks on the outliner, a node and the add-node dialog) and was looked at as rendered.
+(what it shows, and clicks on the scene tree, a node and the add-node dialog) and was looked at as rendered.
 8 tests, clean under validation and sync validation. What differs from the plan:
 
 - **The Hub is not done.** Projects open, save and run from the editor and from `koral-play` only.
-- No undo, no copy and paste, no renaming a node, a flat outliner, one scene a project in the interface.
+- No undo, no copy and paste, no renaming a node, a flat scene tree, one scene a project in the interface.
 - kgraph gained a Primitive node, since a graph could not make a mesh with vertices in it.
 - The framework gained `kor::log::Quiet`, so a half-made node failing after each edit isn't logged.
 

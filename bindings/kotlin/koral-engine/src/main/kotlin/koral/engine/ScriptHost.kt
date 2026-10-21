@@ -4,6 +4,7 @@ import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout.ADDRESS
 import java.lang.foreign.ValueLayout.JAVA_INT
+import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.lang.invoke.MethodHandles
 import java.net.URLClassLoader
 import java.nio.file.Files
@@ -33,6 +34,7 @@ class ScriptHost(
 ) : AutoCloseable {
     private var loader: URLClassLoader? = null
     private val registered = LinkedHashMap<String, Registered>()
+    private val resources = LinkedHashMap<String, RegisteredResource>()
     private var snapshot = ""
     private var pending = ""
     private var pendingSince = 0L
@@ -40,6 +42,8 @@ class ScriptHost(
 
     /** The scripts there are now, by name. */
     val scripts: Set<String> get() = registered.keys
+    /** The scripts that make resources there are now, by name: what the graph's Script nodes can name. */
+    val resourceScripts: Set<String> get() = resources.keys
     /** How many times the scripts have been loaded. */
     var generation = 0
         private set
@@ -85,9 +89,8 @@ class ScriptHost(
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
-                @Suppress("UNCHECKED_CAST")
-                if (Script::class.java.isAssignableFrom(type) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
-                    && type.constructors.any { it.parameterCount == 0 }) type as Class<out Script> else null
+                if ((Script::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
+                    && type.constructors.any { it.parameterCount == 0 }) type else null
             }.sortedBy { it.name }
         } catch (e: LinkageError) {
             return refuse(next, "the classes could not be loaded: $e")
@@ -102,13 +105,27 @@ class ScriptHost(
         }
 
         // The code that is going stops being called before it goes. Its data stays where it is.
-        val gone = registered.keys - layouts.map { it.second.name }.toSet()
+        val gone = (registered.keys + resources.keys) - layouts.map { it.second.name }.toSet()
         registered.values.forEach { it.unregister() }
         registered.clear()
+        resources.values.forEach { it.unregister() }
+        resources.clear()
 
         val failed = mutableListOf<String>()
         for ((type, layout) in layouts) {
-            val script = Registered(world, type, layout)
+            // One that makes resources is a Script node's to run, and no component.
+            if (ResourceScript::class.java.isAssignableFrom(type)) {
+                val resource = RegisteredResource(world, type, layout)
+                val why = try {
+                    if (resource.register()) null else Native.lastError
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    "making one threw ${e.targetException.javaClass.simpleName}: ${e.targetException.message}"
+                }
+                if (why == null) resources[layout.name] = resource else failed += "${layout.name}: $why"
+                continue
+            }
+            @Suppress("UNCHECKED_CAST")
+            val script = Registered(world, type as Class<out Script>, layout)
             if (script.register()) registered[layout.name] = script else failed += "${layout.name}: ${Native.lastError}"
         }
         loader?.let { ScriptLayout.forget(it); it.close() }
@@ -116,7 +133,7 @@ class ScriptHost(
         ++generation
         errors = failed
         failed.forEach { Log.error("[scripts] $it") }
-        Log.info("[scripts] loaded: " + (if (registered.isEmpty()) "none" else registered.keys.sorted().joinToString(", "))
+        Log.info("[scripts] loaded: " + (if (registered.isEmpty() && resources.isEmpty()) "none" else (registered.keys + resources.keys).sorted().joinToString(", "))
                  + (if (gone.isNotEmpty()) " (gone: ${gone.joinToString(", ")})" else ""))
         return true
     }
@@ -132,6 +149,8 @@ class ScriptHost(
     override fun close() {
         registered.values.forEach { it.unregister() }
         registered.clear()
+        resources.values.forEach { it.unregister() }
+        resources.clear()
         loader?.let { ScriptLayout.forget(it); it.close() }
         loader = null
     }
@@ -257,6 +276,125 @@ class ScriptHost(
         }
     }
 
+    // ---- one script that makes resources, registered -----------------------------------------------------------
+
+    /**
+     * A script class that makes resources, as the engine has it: an object made each time it fills what it makes, given
+     * the Script node's settings, so that nothing one node's were filled with is left over for the next.
+     */
+    internal class RegisteredResource(private val world: World, private val type: Class<*>, val layout: ScriptLayout) {
+        private val key = nextKey++
+        private var said: Arena? = null     // why the last fill could not be: the engine reads it before the next
+
+        /** The fields of what it makes, in the order they are written. */
+        private val made: List<java.lang.reflect.Field> = generateSequence<Class<*>>(type) { it.superclass }.takeWhile { it != ResourceScript::class.java }
+            .toList().reversed().flatMap { c -> c.declaredFields.filter { ResourceScript.Resource::class.java.isAssignableFrom(it.type) && !java.lang.reflect.Modifier.isStatic(it.modifiers) } }
+            .onEach { it.isAccessible = true }
+
+        /** What a resource is made with, as JSON: flags given as `"eSampled | eStorage"` a list of them. */
+        private fun json(resource: ResourceScript.Resource): String {
+            fun text(t: String) = "\"" + t.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+            return resource.settings.joinToString(", ", "{", "}") { (input, value) ->
+                "${text(input)}: " + when (value) {
+                    is String -> if ('|' in value) value.split('|').map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ", "[", "]") { text(it) } else text(value)
+                    is Boolean, is Number -> value.toString()
+                    else -> text(value.toString())
+                }
+            }
+        }
+
+        fun register(): Boolean = Arena.ofConfined().use { a ->
+            val callbacks = a.allocate(Native.RESOURCE_CALLBACKS)
+            callbacks.setAtIndex(ADDRESS, 0, MemorySegment.ofAddress(key))
+            callbacks.setAtIndex(ADDRESS, 1, fillStub)
+            val fields = a.allocate(Native.FIELD, maxOf(layout.properties.size, 1).toLong())
+            layout.properties.forEachIndexed { i, p ->
+                val at = i * Native.FIELD.byteSize()
+                fields.set(ADDRESS, at, a.allocateFrom(p.field.name))
+                fields.set(ADDRESS, at + 8, a.allocateFrom(p.type))
+                fields.set(JAVA_INT, at + 16, p.offset)
+                fields.set(JAVA_INT, at + 20, p.size)
+            }
+            // What it makes, as an object of it makes them: each as its property's initialiser says.
+            val sample = type.getDeclaredConstructor().newInstance()
+            val resources = a.allocate(Native.SCRIPT_RESOURCE, maxOf(made.size, 1).toLong())
+            made.forEachIndexed { i, field ->
+                val resource = field.get(sample) as ResourceScript.Resource
+                val at = i * Native.SCRIPT_RESOURCE.byteSize()
+                resources.set(ADDRESS, at, a.allocateFrom(field.name))
+                resources.set(ADDRESS, at + 8, a.allocateFrom(resource.kind))
+                resources.set(ADDRESS, at + 16, a.allocateFrom(json(resource)))
+            }
+            resourcesLive[key] = this
+            val ok = Native.kengine_resource_script_register.invokeExact(world.document, a.allocateFrom(layout.name), layout.size.toLong(),
+                                                                         fields, layout.properties.size.toLong(), resources, made.size.toLong(), callbacks) as Boolean
+            if (!ok) resourcesLive.remove(key)
+            ok
+        }
+
+        fun unregister() {
+            Arena.ofConfined().use { a ->
+                Native.kengine_resource_script_unregister.invokeExact(world.document, a.allocateFrom(layout.name))
+                Unit
+            }
+            resourcesLive.remove(key)
+            said?.close()
+            said = null
+        }
+
+        fun fill(contents: MemorySegment, count: Long, settings: MemorySegment, size: Long): MemorySegment {
+            said?.close()
+            said = null
+            val all = contents.reinterpret(Native.CONTENTS.byteSize() * count)
+            val node = if (count > 0) Native.text(all.get(ADDRESS, 8)) else ""
+            val filled = mutableListOf<ResourceScript.Filled>()
+            return try {
+                val script = type.getDeclaredConstructor().newInstance() as ResourceScript
+                script.world = world
+                if (size >= layout.size) layout.load(script, settings.reinterpret(maxOf(layout.size, 1).toLong()))
+                for (field in made) (field.get(script) as ResourceScript.Resource).name = field.name
+                // Each of its images and buffers, as it was made, to be written.
+                for (i in 0 until count) {
+                    val c = all.asSlice(i * Native.CONTENTS.byteSize(), Native.CONTENTS.byteSize())
+                    val name = Native.text(c.get(ADDRESS, 0))
+                    val resource = made.firstOrNull { it.name == name }?.get(script) as? ResourceScript.Filled ?: continue
+                    resource.data = c.get(ADDRESS, 56).reinterpret(c.get(JAVA_LONG, 64)).asByteBuffer().order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    if (resource is ResourceScript.Image) {
+                        resource.format = Native.text(c.get(ADDRESS, 24))
+                        resource.width = c.get(JAVA_INT, 32)
+                        resource.height = c.get(JAVA_INT, 36)
+                        resource.depth = c.get(JAVA_INT, 40)
+                        resource.layers = c.get(JAVA_INT, 44)
+                        resource.texelBytes = c.get(JAVA_INT, 48)
+                    }
+                    filled += resource
+                }
+                script.init()
+                MemorySegment.NULL
+            } catch (e: Throwable) {
+                val thrown = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                Log.error("[scripts] ${layout.name}.init threw on $node: ${thrown.stackTraceToString()}")
+                val arena = Arena.ofShared().also { said = it }
+                arena.allocateFrom("it threw ${thrown.javaClass.simpleName}: ${thrown.message}")
+            } finally {
+                // What it was given is the engine's again: written to after this, it says so.
+                filled.forEach { it.data = null }
+            }
+        }
+    }
+
+    /** What the engine calls to fill what a script makes: one function for every such script, told apart by the number each registered with. */
+    internal object ResourceUpcalls {
+        @JvmStatic fun fill(user: MemorySegment, contents: MemorySegment, count: Long, settings: MemorySegment, size: Long): MemorySegment =
+            // Must not throw: the caller is C.
+            try {
+                resourcesLive[user.address()]?.fill(contents, count, settings, size) ?: MemorySegment.NULL
+            } catch (e: Throwable) {
+                runCatching { Log.error("[scripts] a fill failed: ${e.stackTraceToString()}") }
+                MemorySegment.NULL
+            }
+    }
+
     /** What the engine calls: nine functions for every script type, told apart by the number each registered with. */
     internal object Upcalls {
         private fun dispatch(hook: Hook, user: MemorySegment, entity: MemorySegment, data: MemorySegment, time: Float) {
@@ -299,6 +437,10 @@ class ScriptHost(
             return method.declaringClass != Script::class.java && method.declaringClass != GraphicsScript::class.java
         }
         val live = HashMap<Long, Registered>()
+        val resourcesLive = HashMap<Long, RegisteredResource>()
+        val fillStub: MemorySegment by lazy {
+            Koral.linker.upcallStub(MethodHandles.lookup().findStatic(ResourceUpcalls::class.java, "fill", Native.FILL.toMethodType()), Native.FILL, Arena.global())
+        }
 
         /** One stub a hook, in the order the C struct has them, for as long as the program runs. */
         val stubs: List<MemorySegment> by lazy {

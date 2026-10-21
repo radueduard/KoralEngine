@@ -567,6 +567,51 @@ TEST_F(EntityTest, AnEntityIsDrawnWhereItsTransformPutsIt) {
     EXPECT_EQ(scene->Pixel(8, 24).x, 255);
 }
 
+// A Filter of one entity alone, by its id: the picked one (a Selected node's `entityId`), drawn by itself, as an editor
+// draws what it outlines; none when nothing is picked.
+TEST_F(EntityTest, AFilterKeepsOneEntityByItsId) {
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive");
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("picked", "Selected");
+    graph.Add("all", "Entities");
+    graph.Add("chosen", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Wire("entityId", "picked", "entityId");
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "chosen", "Mesh.mesh").Wire("push.model", "chosen", "matrix")
+        .Set("push.color", Value::List { 0, 1, 0, 1 });
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+
+    kecs::World& world = scene->world;
+    const auto cube = runtime.ResourceOf("$cube");
+    const auto make = [&](const float x) {
+        const kecs::Entity made = world.Create();
+        world.SetPosition(made, { x, 0, 0 });
+        world.SetScale(made, { 0.5f, 0.5f, 0.5f });
+        world.Add<kgraph::Mesh>(made, { cube });
+        return made;
+    };
+    make(-0.5f);
+    const kecs::Entity right = make(0.5f);
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ReportOf("draw")->ran, 0u) << "nothing picked: none kept";
+    runtime.SetSelected(right);
+    Frame();
+    Frame();
+    EXPECT_EQ(runtime.ReportOf("draw")->ran, 1u) << "the picked one alone";
+    EXPECT_EQ(scene->Pixel(24, 16).y, 255) << "drawn";
+    EXPECT_EQ(scene->Pixel(8, 16).y, 0) << "and not the other";
+}
+
 // A draw is made of what it is wired: a ForEach of Mesh gives each entity's mesh and where it is, and anything worked
 // out of an element is that element's. With everything wired from elsewhere, the pipeline has no component at all.
 TEST_F(EntityTest, ADrawIsMadeOfWhateverEachElementIsWired) {
@@ -1501,4 +1546,26 @@ TEST_F(EntityTest, AFunctionsCallsAreItsNodesWrittenOut) {
     EXPECT_EQ(runtime.ValueOf("after"), Value(16));
     EXPECT_TRUE(runtime.Status("edge")->ok);
     EXPECT_EQ(runtime.ValueOf("edge"), Value(5));
+}
+
+// A buffer sized by a count of entities is made again when the count changes: what is wired from the world follows it,
+// and a resource made of it is made of it again.
+TEST_F(EntityTest, ABufferSizedByACountOfEntitiesIsMadeAgainWhenTheCountChanges) {
+    auto& world = scene->world;
+    for (int i = 0; i < 3; ++i) world.Add<Lit>(world.Create());
+    kgraph::Graph graph;
+    graph.Add("lit", "ForEach").Set("component", "Lit");
+    graph.Add("bodies", "Buffer").Set("usage", kgraph::Value::List { "eStorage" }).Wire("instanceCount", "lit", "count");
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    Frame();
+    EXPECT_EQ(scene->runtime->ValueOf("bodies", "instanceCount"), kgraph::Value(3));
+    const auto builds = scene->runtime->Status("bodies")->builds;
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(scene->runtime->Status("bodies")->builds, builds) << "nothing changed: not made again";
+
+    world.Add<Lit>(world.Create());
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(scene->runtime->ValueOf("bodies", "instanceCount"), kgraph::Value(4)) << "made again for four";
+    EXPECT_GT(scene->runtime->Status("bodies")->builds, builds);
 }

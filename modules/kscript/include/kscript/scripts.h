@@ -38,6 +38,18 @@ namespace kscript
         void (*destroyed)(void* user, kecs::Entity entity, void* data) = nullptr;   ///< It is about to go: removed, or its entity destroyed.
     };
 
+    /**
+     * @brief A resource a ResourceScript makes, as it says: a field of one of its resource types — `Image`, `Buffer`,
+     *        `ImageView`, `BufferView`, `Sampler` — and what it is made with.
+     */
+    struct DeclaredResource {
+        std::string name;           ///< The field: what the Script node's output, and its inputs for it, are called.
+        std::string kind;           ///< "Image", "Buffer", "ImageView", "BufferView", "Sampler".
+        /// What it is made with, by its node type's inputs — `format`, `extent.x`, `usage`, `image` — each as JSON:
+        /// `"eR32_SFLOAT"`, `256`, `["eSampled", "eStorage"]`, `"height"` (another of the script's resources).
+        std::vector<std::pair<std::string, std::string>> settings;
+    };
+
     /** @brief A script type: the component it is, and what is called on it. */
     struct ScriptType {
         std::string name;                           ///< The component's name: what it is saved and matched by.
@@ -48,6 +60,9 @@ namespace kscript
         /// or, for a type registered again without one, what it started as before, field by field.
         std::vector<std::byte> initial;
         Callbacks callbacks;
+        /// A ResourceScript: no component, but what a Script node of the graph runs — it makes resources and fills them.
+        bool makesResources = false;
+        std::vector<DeclaredResource> resources;    ///< A ResourceScript's, in the order it declares them.
     };
 
     class Scripts {

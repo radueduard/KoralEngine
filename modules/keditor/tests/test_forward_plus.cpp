@@ -231,9 +231,13 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         const auto start = std::chrono::steady_clock::now();
         for (int i = 0; i < frames || std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() < seconds; ++i) Frame();
     };
+    // Shown once what it waits for has come: a copy read back from the GPU, which the editor looks at four times a
+    // second — up to three seconds, a frame at a time, rather than at one moment that may be just before it.
     const auto shows = [&](const std::string_view text) {
+        const auto has = [&] { return std::ranges::any_of(kui::debug::Texts(editor->Interface()), [&](const std::string& shown) { return shown.find(text) != std::string::npos; }); };
         wait(30, 0.35);
-        return std::ranges::any_of(kui::debug::Texts(editor->Interface()), [&](const std::string& shown) { return shown.find(text) != std::string::npos; });
+        for (const auto start = std::chrono::steady_clock::now(); !has() && std::chrono::steady_clock::now() - start < std::chrono::seconds(3);) Frame();
+        return has();
     };
     editor->CurrentSession().Select(std::string("depth"));
     EXPECT_TRUE(shows("Look at what it holds"));
@@ -467,7 +471,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_GT(count(Kind::eMesh), 20);
         EXPECT_GT(count(Kind::eTexture), 20);
         const auto texture = std::ranges::find(assets, Kind::eTexture, &keditor::Session::Asset::kind);
-        const auto mesh = std::ranges::find(assets, Kind::eMesh, &keditor::Session::Asset::kind);
+        const auto mesh = std::ranges::find_if(assets, [](const auto& asset) { return asset.kind == Kind::eMesh && !asset.builtIn; });     // a model's
         ASSERT_NE(texture, assets.end());
         ASSERT_NE(mesh, assets.end());
         EXPECT_TRUE(session.AssetHeld(texture->id) != nullptr);

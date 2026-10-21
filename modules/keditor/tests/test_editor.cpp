@@ -49,6 +49,17 @@ namespace {
         }
         keditor::Session& Session() { return editor->CurrentSession(); }
         keditor::Document& Doc() { return Session().Doc(); }
+        /**
+         * Frames until nothing more arrives to be shown: the Assets panel's pictures of meshes, each a few frames apart,
+         * have all come — the interface is not built again for a dozen frames running.
+         */
+        void Settle() {
+            for (int frame = 0, still = 0; frame < 1000 && still < 12; ++frame) {
+                const auto before = Session().Version();
+                Frame();
+                still = Session().Version() == before ? still + 1 : 0;
+            }
+        }
         /** Whether the interface shows @p text anywhere, as the whole of something or part of it. */
         [[nodiscard]] bool Shows(const std::string_view text) {
             for (int i = 0; i < 4; ++i) Frame();
@@ -118,8 +129,11 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     EXPECT_TRUE(Shows("Runs for 4 entities."));
     for (const char* input : { "pipeline", "cover", "groupSize", "target", "tint" }) EXPECT_TRUE(Shows(input)) << input;
     EXPECT_FALSE(Shows("groupSize.x")) << "the parts of one thing are one line, under its name";
-    EXPECT_FALSE(Shows("indirectOffset")) << "what it can do without, and was not given, is not in the way";
-    EXPECT_TRUE(Shows("more it can be given")) << "and is there to be asked for";
+    EXPECT_TRUE(Shows("Indirect")) << "what it can do without is there too, in a part of its own";
+    Session().OpenSection("run", "Indirect", true);
+    EXPECT_TRUE(Shows("indirectOffset")) << "as it starts, opened";
+    EXPECT_FALSE(Doc().Graph().Find("run")->inputs.contains("indirectOffset")) << "shown, it is not given";
+    EXPECT_FALSE(Shows("more it can be given")) << "no menu of what else it takes: all of it is there";
     EXPECT_TRUE(Shows("from stamp")) << "what an input is wired to";
     EXPECT_TRUE(Shows("from lit")) << "and what each element gives it";
     Session().Select(std::string("lit"));
@@ -134,18 +148,15 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     EXPECT_TRUE(Shows("eRGBA8_UNORM")) << "an enumeration, by name";
     EXPECT_TRUE(Shows("eColorAttachment")) << "flags, each to tick";
     EXPECT_TRUE(Shows("extent")) << "its size, on one line";
-    EXPECT_FALSE(Shows("mipLevels")) << "an image is made with its format, size and usage: the rest is asked for";
-    Session().Show("canvas", "mipLevels");
-    EXPECT_TRUE(Shows("mipLevels"));
-    EXPECT_TRUE(Doc().Runtime().Ok()) << "asked for, it is shown: nothing is given until it is set";
-    EXPECT_FALSE(Doc().Graph().Find("canvas")->inputs.contains("mipLevels"));
-    Session().Hide("canvas", "mipLevels");
-    EXPECT_FALSE(Shows("mipLevels"));
+    EXPECT_TRUE(Shows("mipLevels")) << "an image is made with its format, size and usage, and the rest is there as it starts";
+    EXPECT_TRUE(Doc().Runtime().Ok());
+    EXPECT_FALSE(Doc().Graph().Find("canvas")->inputs.contains("mipLevels")) << "nothing is given until it is set";
 
     // A graphics pipeline is drawn one of two ways, and shows the inputs of the one it is.
     Session().Select(std::string("show"));
     for (const char* input : { "stages", "eVertex", "vertex.module", "vertex.layout", "fragment.entry", "framebuffer", "source" }) EXPECT_TRUE(Shows(input)) << input;
-    EXPECT_FALSE(Shows("geometry.module") || Shows("rasterizationState") || Shows("mesh.module"));
+    EXPECT_TRUE(Shows("geometry.module") && Shows("rasterizationState")) << "what it can do without, as it starts";
+    EXPECT_FALSE(Shows("mesh.module")) << "and nothing of the other way of drawing";
     const std::string drawn = Doc().AddNode("GraphicsPipeline", 900, 40, "drawn");
     Session().Select(drawn);
     EXPECT_TRUE(Shows("vertex.module"));
@@ -520,12 +531,14 @@ TEST_F(EditorTest, ANewNodeStartsAsSomethingThatWorksAndGivesWhatItIsMadeOf) {
     Doc().Connect(image, "out", clear, "image");
     EXPECT_TRUE(Doc().Runtime().Status(clear)->ok) << Doc().Runtime().Status(clear)->error;
 
-    // What it gives besides the image: asked for, it is on the node, and the inspector no longer offers it.
+    // What it gives besides the image: in the inspector, every one, with what it is now; put on the node when asked.
     Session().Select(image);
-    EXPECT_TRUE(Shows("Add output"));
-    EXPECT_FALSE(Shows("width")) << "none of it is in the way until it is wanted";
-    Session().Show(image, "out:width");
+    EXPECT_FALSE(Shows("Add output")) << "no menu of what it gives: all of it is there";
     EXPECT_TRUE(Shows("width"));
+    EXPECT_TRUE(Shows("What it gives"));
+    EXPECT_EQ(std::ranges::count(kui::debug::Texts(editor->Interface()), std::string("extent")), 1) << "its extent once: an input, given as an output from its own row";
+    Session().Show(image, "out:width");
+    EXPECT_TRUE(Session().Asked(image, "out:width"));
     // Wired from, it stays on the node without being asked for: the wire is in the file.
     const std::string half = Doc().AddNode("Divide", 300, 200);
     Doc().Connect(image, "size", half, "a");
@@ -542,23 +555,23 @@ TEST_F(EditorTest, OutputsComeOffAgainAndAnInputInPartsIsWiredWhole) {
     const std::string run = Doc().AddNode("Dispatch", 600, 40);
     const std::string over = Doc().AddNode("Divide", 300, 200);
 
-    // An output asked for is in the inspector, to be taken off; one wired from says so, and takes its wires with it.
+    // Every output is in the inspector: what it works out under What it gives, saying what it is wired to; one that is an
+    // input as it is set, from that input's row. Wired from, it takes its wires with it when it comes off.
     Session().Select(image);
-    EXPECT_FALSE(Shows("an output"));
-    Session().Show(image, "out:extent");
-    EXPECT_TRUE(Shows("an output: wire from it"));
+    EXPECT_TRUE(Shows("width"));
+    EXPECT_FALSE(Shows("wired to"));
+    Doc().Connect(image, "width", over, "b");
+    EXPECT_TRUE(Shows("wired to 1 input"));
     Doc().Connect(image, "extent", over, "a");
     Doc().Connect(image, "extent", run, "groupSize");
-    EXPECT_TRUE(Shows("an output, wired to 2 inputs"));
     EXPECT_EQ(Doc().DisconnectOutput(image, "extent"), 2u);
     EXPECT_FALSE(Doc().Graph().Find(over)->inputs.contains("a"));
     EXPECT_FALSE(Doc().Graph().Find(run)->inputs.contains("groupSize"));
-    EXPECT_TRUE(Shows("an output: wire from it")) << "still asked for";
-    Session().Hide(image, "out:extent");
-    EXPECT_FALSE(Shows("an output"));
     EXPECT_EQ(Doc().DisconnectOutput(image, "extent"), 0u);
+    EXPECT_EQ(Doc().DisconnectOutput(image, "width"), 1u);
+    EXPECT_FALSE(Shows("wired to"));
 
-    // The whole of an input in parts is one more it can be given; given, its parts are gone from the node and the panel.
+    // The whole of an input in parts is wired instead of them; given, its parts are gone from the node and the panel.
     Session().Select(run);
     Doc().SetInput(run, "groups.x", 4);
     EXPECT_TRUE(Shows("groups"));
@@ -626,12 +639,24 @@ TEST_F(EditorTest, ATriangleIsDrawnWithNodesAndNoMesh) {
     EXPECT_TRUE(Shows("Nothing is wrong."));
     EXPECT_EQ(Doc().Runtime().ReportOf(draw), nullptr) << "it draws once: nothing it is given follows a ForEach";
 
-    // The draw says the rest when asked: how many vertices, where, over what.
+    // The draw has the rest there as it starts, each in its part: how many vertices, where, over what. A part of nothing
+    // given is closed; what does nothing as it is set — an indirect draw's buffer — is not there, and it says so.
     Session().Select(draw);
-    EXPECT_TRUE(Shows("more it can be given"));
-    EXPECT_FALSE(Shows("vertexCount"));
-    Session().Show(draw, "vertexCount");
+    EXPECT_FALSE(Shows("more it can be given"));
+    EXPECT_TRUE(Shows("What is drawn"));
+    EXPECT_TRUE(Shows("6, as they start"));
+    EXPECT_FALSE(Shows("vertexCount")) << "closed";
+    Session().OpenSection(draw, "What is drawn", true);
     EXPECT_TRUE(Shows("vertexCount"));
+    EXPECT_FALSE(Doc().Graph().Find(draw)->inputs.contains("vertexCount"));
+    EXPECT_FALSE(Shows("indirectOffset"));
+    EXPECT_TRUE(Shows("4 more for indirect draws, 2 more for draws counted by a buffer")) << "what it leaves out, and why";
+    Doc().SetInput(draw, "command", "eDrawIndirect");
+    Session().OpenSection(draw, "Indirect", true);
+    EXPECT_TRUE(Shows("indirectOffset")) << "an indirect draw has its buffer's inputs";
+    EXPECT_FALSE(Shows("vertexCount")) << "and none of a draw of vertices'";
+    EXPECT_TRUE(Shows("for draws of vertices"));
+    Doc().SetInput(draw, "command", "eAuto");
     Doc().SetInput(draw, "scissor", kgraph::Value::List { 0, 0, 256, 512 });
     EXPECT_TRUE(Shows("scissor"));
     Sheet("triangle");
@@ -860,6 +885,17 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
         for (int i = 0; i < 16; ++i) EXPECT_NEAR(seen[i / 4][i % 4], own[i / 4][i % 4], 1e-5f) << i;
     }
     EXPECT_EQ(game->Runtime()->ResourceOf("$sphere"), Doc().Runtime().ResourceOf("$sphere")) << "the meshes are the scene's, not made again";
+    {   // Picked as it plays, the inspector follows what is done to it, a tenth of a second behind at most, built again
+        // on its own: the rest of the interface (the scene tree, with thousands of bodies) is not.
+        const kecs::Entity sphere = world.FindEntity("Sphere");
+        Session().Select(sphere);
+        Settle();
+        const auto version = Session().Version();
+        world.SetPosition(sphere, { 7.25f, 0.5f, 0.f });            // what a script, or physics, would do
+        std::this_thread::sleep_for(std::chrono::milliseconds(120));
+        EXPECT_TRUE(Shows("7.25")) << "the inspector shows where it is now";
+        EXPECT_EQ(Session().Version(), version) << "and nothing else was built again for it";
+    }
     world.SetRotation(world.FindEntity("Sphere"), { 0, 40, 0 });   // what a script would do as it plays
     Doc().SetField(world.FindEntity("Sphere"), "lit", "metallic", kgraph::Value(1));
     Session().Pause();
@@ -941,7 +977,8 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     Session().ShowPass("sky");
     EXPECT_TRUE(Shows("draw sky"));
     EXPECT_TRUE(Shows("sky target"));
-    EXPECT_FALSE(Shows("scene target"));
+    // The scene pass's framebuffer is among what this page can use, in its panel — and not on the page itself.
+    EXPECT_EQ(std::ranges::count(kui::debug::Texts(editor->Interface()), std::string("scene target")), 1);
     EXPECT_TRUE(Shows("ImageView, from scene")) << "what it took from an earlier pass says where from";
     EXPECT_TRUE(Shows("DataBuffer, from frame"));
     Sheet("pass");
@@ -1011,6 +1048,272 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     EXPECT_NE(saved.find("\"pass\": \"sky\""), std::string::npos);
 }
 
+// What is made once is a tab of its own: its passes come first, and stay first. What a page can use is in a drawer
+// beside it, by the page it was made on; brought in, it says what it is, what the page does with it and what was done
+// to it before, and goes again when the last wire from it does.
+TEST_F(EditorTest, SetupIsATabOfItsOwnAndWhatAPageCanUseIsBesideIt) {
+    const auto project = scene::MakeProject("setup");
+    keditor::WriteStandardShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+
+    // A setup pass is first, wherever it is asked to be, and the passes of every frame after it.
+    ASSERT_TRUE(Doc().AddPass("noise", -1, kgraph::PassRate::eSetup));
+    EXPECT_EQ(Doc().Passes().front(), "noise");
+    EXPECT_TRUE(Doc().IsSetup("noise"));
+    ASSERT_TRUE(Doc().AddPass("early", 0));
+    EXPECT_EQ(Doc().Passes()[1], "early") << "a pass of every frame is after setup's, though asked to be first";
+    EXPECT_TRUE(Doc().RemovePass("early"));
+    EXPECT_TRUE(Doc().MovePass("noise", 3));
+    EXPECT_EQ(Doc().Passes().front(), "noise") << "moved, it stays among setup's";
+    EXPECT_TRUE(Doc().MovePass("show", 0));
+    EXPECT_EQ(Doc().Passes()[1], "show") << "and one of every frame stays after them";
+    EXPECT_TRUE(Doc().MovePass("show", 4));
+
+    const std::string texture = Doc().AddNode("Image", 40, 40, "noise texture", "noise");
+    const std::string clear = Doc().AddNode("Clear", 320, 40, "noise clear", "noise");
+    ASSERT_TRUE(Doc().Connect(texture, "out", clear, "image"));
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    const auto importable = Doc().Importable("noise");
+    EXPECT_EQ(std::ranges::find(importable, "color"), importable.end()) << "setup comes before any frame: what a frame makes is not there yet";
+    EXPECT_TRUE(std::ranges::contains(Doc().Importable("show"), texture)) << "and what setup made is there for every frame";
+
+    // A tab each.
+    Session().ShowPass("noise");
+    EXPECT_TRUE(Shows("Setup  1"));
+    EXPECT_TRUE(Shows("MADE ONCE, BEFORE ANY FRAME"));
+    EXPECT_FALSE(Shows("PASSES, AS THEY ARE DRAWN")) << "the passes of every frame are under the other tab";
+    Session().ShowPass("show");
+    EXPECT_TRUE(Shows("PASSES, AS THEY ARE DRAWN"));
+
+    // In a panel of its own, what the page can use, by where it was made.
+    EXPECT_TRUE(Shows("WHAT SHOW CAN USE"));
+    EXPECT_TRUE(Shows("NOISE  ·  SETUP")) << "a heading a page, as the passes' list has";
+    EXPECT_TRUE(Shows("noise texture"));
+    // Each with its picture, as the Assets panel has its things: an image as it was last drawn, a mesh by itself.
+    for (int i = 0; i < 600 && !(Session().NodePicture(texture).Get() && Session().NodePicture("shape").Get()); ++i) {
+        Frame();
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));     // (the pictures are made a few a second)
+    }
+    EXPECT_TRUE(Session().NodePicture(texture).Get()) << "an image's picture";
+    EXPECT_TRUE(Session().NodePicture("shape").Get()) << "a mesh's picture";
+    EXPECT_FALSE(Session().NodePicture("frame data").Get()) << "a buffer has none: what kind of thing it is, instead";
+    Sheet("drawer");
+    Session().SetDrawerList(true);
+    EXPECT_TRUE(Shows("noise texture")) << "or a line each";
+    Sheet("drawer list");
+    Session().SetDrawerList(false);
+
+    // Brought in, it says what it is, that it is made once, what this page does with it, and what was done to it before.
+    const std::string brought = Doc().Import(texture, "show", 40, 400);
+    ASSERT_FALSE(brought.empty());
+    EXPECT_TRUE(Shows("Image, made once in noise  ·  512×512  ·  RGBA8_UNORM"));
+    EXPECT_TRUE(Shows("not used here yet"));
+    EXPECT_TRUE(Shows("After noise clear."));
+    const std::string shown = Doc().AddNode("Blit", 320, 400, "show noise", "show");
+    ASSERT_TRUE(Doc().Connect(brought, "out", shown, "source"));
+    ASSERT_TRUE(Doc().Connect("screen", "out", shown, "destination"));
+    EXPECT_TRUE(Doc().Runtime().Status(shown)->ok) << Doc().Runtime().Status(shown)->error;
+    EXPECT_TRUE(Shows("read here"));
+    EXPECT_EQ(Doc().Import(texture, "show", 90, 90), brought) << "once a page";
+
+    // Its inspector is the thing itself, said to be brought in.
+    Session().Select(brought);
+    Sheet("reference");
+    EXPECT_TRUE(Shows("Brought in: noise texture, made once, in setup's noise"));
+    EXPECT_TRUE(Shows("Go to where it is made"));
+    EXPECT_TRUE(Shows("format")) << "what is set where it is made, set here";
+
+    // The last wire from it gone, it goes.
+    EXPECT_TRUE(Doc().ClearInput(shown, "source"));
+    EXPECT_EQ(Doc().Graph().Find(brought), nullptr);
+    const std::string again = Doc().Import(texture, "show", 40, 400);
+    Doc().RemoveNodes({ shown });
+    EXPECT_NE(Doc().Graph().Find(again), nullptr) << "one never wired stays";
+
+    // Saved apart from the rest; and back to every frame, the first of them.
+    EXPECT_NE(Doc().ToJson().find("\"setup\": [\"noise\"]"), std::string::npos);
+    EXPECT_TRUE(Doc().SetPassRate("noise", kgraph::PassRate::eFrame));
+    EXPECT_FALSE(Doc().IsSetup("noise"));
+    EXPECT_EQ(Doc().Passes().front(), "noise");
+    EXPECT_TRUE(Doc().SetPassRate("frame", kgraph::PassRate::eSetup));
+    EXPECT_EQ(Doc().Passes().front(), "frame") << "made setup, it is the last of setup's: the only one";
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+}
+
+// A script that makes resources: written from the editor, read from its source for what it makes and its settings,
+// offered as a node of its own, and run by it — which says, until something runs the script, what it waits for.
+TEST_F(EditorTest, AScriptOfTheProjectsMakesResources) {
+    const auto project = scene::MakeProject("filled");
+    Open(project.directory);
+    ASSERT_TRUE(Session().NewScript("Checker", "C# ResourceScript")) << Session().Status();
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "scripts" / "Checker.cs"));
+    const auto scripts = Doc().ResourceScripts();
+    const auto checker = std::ranges::find(scripts, std::string("Checker"), &kgraph::ResourceScript::name);
+    ASSERT_NE(checker, scripts.end()) << "its source is read: a script a Script node can name";
+    ASSERT_EQ(checker->resources.size(), 2u) << "what it makes";
+    EXPECT_EQ(checker->resources[0].name, "Board");
+    EXPECT_EQ(checker->resources[0].kind, "Image");
+    EXPECT_EQ(checker->resources[1].kind, "Sampler");
+    EXPECT_FALSE(checker->fill) << "nothing runs it in an editor that runs no scripts";
+    EXPECT_EQ(Doc().World().Find("Checker"), kecs::NoComponent) << "and it is no component";
+    EXPECT_FALSE(Session().NewScript("Checker", "C# ResourceScript")) << "a name once";
+
+    // Offered among the nodes: a Script node of it, which gives what it makes.
+    const auto presets = Doc().Runtime().Presets();
+    const auto offered = std::ranges::find(presets, std::string("Checker"), &kgraph::Preset::name);
+    ASSERT_NE(offered, presets.end());
+    EXPECT_EQ(offered->type, "Script");
+    const std::string script = Doc().AddNode("Script", 40, 40, "checker");
+    Doc().SetInput(script, "script", "Checker");
+    ASSERT_TRUE(Doc().Runtime().Status(script)->ok) << Doc().Runtime().Status(script)->error;
+    EXPECT_TRUE(Shows("Checker fills what it makes when the project runs with its scripts"));
+    EXPECT_TRUE(std::ranges::contains(Doc().Runtime().PortsOf(script), std::string("field.Cells"), &kgraph::Port::name)) << "its field, an input";
+    EXPECT_TRUE(std::ranges::contains(Doc().Runtime().PortsOf(script), std::string("Board.format"), &kgraph::Port::name)) << "and what its image is made with";
+    EXPECT_TRUE(std::ranges::contains(Doc().Runtime().OutputsOf(script), std::string("Board"), &kgraph::Port::name)) << "its image, an output";
+    ASSERT_TRUE(Doc().Runtime().ImageOf(script, "Board").Get());
+    EXPECT_EQ(Doc().Runtime().ImageOf(script, "Board")->Extent().x, 256u) << "as its source makes it";
+    Session().Select(script);
+    EXPECT_TRUE(Shows("Checker makes Board (Image), Nearest (Sampler). Nothing runs it now"));
+
+    // Run, as a host runs it — saying nothing of what it makes: given what the source says its field starts as.
+    std::int32_t cells = 0;
+    std::vector<std::string> given;
+    kscript::ScriptType type;
+    type.name = "Checker";
+    type.makesResources = true;
+    type.size = 4;
+    type.fields = checker->fields;
+    Doc().RegisterResourceScript(type, [&](const std::span<kgraph::Contents> contents, const std::span<const std::byte> settings) -> std::string {
+        std::memcpy(&cells, settings.data(), 4);
+        given.clear();
+        for (auto& each : contents) { given.push_back(each.name); std::ranges::fill(each.bytes, std::byte { 0xFF }); }
+        return {};
+    });
+    EXPECT_FALSE(Shows("Checker fills what it makes when the project runs with its scripts")) << "it says so no more";
+    EXPECT_EQ(cells, 8) << "as its source starts it";
+    EXPECT_EQ(given, (std::vector<std::string> { "Board" })) << "what its source says it makes";
+    EXPECT_TRUE(Doc().Runtime().Status(script)->ok) << Doc().Runtime().Status(script)->error;
+}
+
+// An image looked at closely is looked at a level and a layer at a time, drawn blended or a texel a square; a view of
+// it has its swizzle chosen a channel at a time.
+TEST_F(EditorTest, AnImageIsLookedAtALevelAtATimeAndAViewIsSwizzled) {
+    Open();
+    const std::string heights = Doc().AddNode("Image", 40, 40, "heights");
+    Doc().SetInput(heights, "format", "eR32_SFLOAT");
+    Doc().SetInput(heights, "mipLevels", 4);
+    Doc().SetInput(heights, "extent.x", 64);
+    Doc().SetInput(heights, "extent.y", 64);
+    ASSERT_TRUE(Doc().Runtime().Status(heights)->ok) << Doc().Runtime().Status(heights)->error;
+    Session().Select(heights);
+    Session().Look(heights);
+    EXPECT_TRUE(Shows("Level 0  ·  64 × 64")) << "which level is looked at";
+    EXPECT_TRUE(Shows("Filtering"));
+    Sheet("look-level");
+    Session().lookMip = 2;
+    for (int i = 0; i < 12; ++i) Frame();
+    const auto peek = Doc().Runtime().Watched(heights);
+    ASSERT_TRUE(peek && peek->image) << Doc().Runtime().WatchProblem(heights);
+    EXPECT_EQ(peek->mip, 2u);
+    EXPECT_EQ(peek->extent.x, 16u) << "its third level";
+
+    const std::string view = Doc().AddNode("ImageView", 300, 40, "view");
+    ASSERT_TRUE(Doc().Connect(heights, "out", view, "image"));
+    Doc().SetInput(view, "componentMapping", kgraph::Value::List { "eR", "eR", "eR", "eOne" });     // a height, grey
+    Session().Select(view);
+    EXPECT_TRUE(Shows("One"));
+    Sheet("swizzle");
+    const auto texts = kui::debug::Texts(editor->Interface());
+    EXPECT_EQ(std::ranges::count(texts, std::string("One")), 1) << "a choice for each channel, said as what it gives: not JSON";
+    EXPECT_EQ(std::ranges::count(texts, std::string("R")), 4) << "three of red, and the label of the first";
+}
+
+// A number is dragged as what it is: a lens's near plane by so much of itself, shown finely enough to read; a typed
+// vector's components as its kind.
+TEST_F(EditorTest, NumbersAreDraggedAsWhatTheyAre) {
+    Open();
+    const std::string lens = Doc().AddNode("Perspective", 40, 40, "lens");
+    Doc().SetInput(lens, "near", 0.05);
+    const std::string place = Doc().AddNode("Vec3", 40, 300, "place");
+    const std::string cells = Doc().AddNode("UVec2", 300, 300, "cells");
+    Doc().SetInput(cells, "x", 16);
+    ASSERT_TRUE(Doc().Runtime().Status(place)->ok) << Doc().Runtime().Status(place)->error;
+    EXPECT_EQ(Doc().Runtime().ValueOf(cells), kgraph::Value(kgraph::Value::List { 16, 0 }));
+    Session().Select(lens);
+    EXPECT_TRUE(Shows("0.050")) << "a near plane with three decimals: dragged by so much of it, it is small";
+    Sheet("numbers");
+    EXPECT_TRUE(Shows("UVec2"));
+}
+
+// A new shader of every kind, with every choice this device can run, is one a pipeline names and is built from: vertices
+// and fragments, with tessellation and a geometry shader, or none; mesh shaders, with a task shader or none; compute; and
+// ray tracing's three, with an any hit shader and an intersection shader. Without a fragment shader, only depth is drawn.
+TEST_F(EditorTest, EveryKindOfShaderIsMadeAndBuilt) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "shader-kinds";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    Session().ShowPass("sky");
+    int made = 0;
+    const auto build = [&](const std::string& name, const std::string& kind, const keditor::Session::ShaderChoice& choice, const char* type,
+                           std::vector<std::pair<std::string, std::string>> settings) {
+        for (const auto& [option, asked] : { std::pair { "", true }, { "tessellation", choice.tessellation }, { "geometry", choice.geometry } })
+            if (asked && !keditor::Session::ShaderMissing(kind, option).empty()) return;     // what this GPU has not
+        ASSERT_TRUE(Session().NewShader(name, kind, choice)) << name << ": " << Session().Status();
+        const std::string pipeline = Doc().AddNode(type, 0, 0, name, "sky");
+        for (const auto& [input, value] : settings) {
+            if (input.starts_with("@")) Doc().Connect(value, "out", pipeline, input.substr(1));
+            else if (input == "layout") Doc().Connect("shape", "layout", pipeline, "vertex.layout");
+            else Doc().SetInput(pipeline, input, value == "~" ? name : value);
+        }
+        const auto* status = Doc().Runtime().Status(pipeline);
+        ASSERT_NE(status, nullptr);
+        EXPECT_TRUE(status->ok) << name << ": " << status->error;
+        ++made;
+    };
+    for (const bool whole : { false, true })
+        for (const bool tess : { false, true })
+            for (const bool geometry : { false, true })
+                for (const bool fragment : { false, true }) {
+                    std::vector<std::pair<std::string, std::string>> settings { { "vertex.module", "~" }, { "@framebuffer", "sky target" } };
+                    if (!whole) { settings.push_back({ "layout", "" }); settings.push_back({ "@param.frame", "frame data" }); }
+                    if (tess) { settings.push_back({ "tessellationControl.module", "~" }); settings.push_back({ "tessellationEvaluation.module", "~" }); }
+                    if (geometry) settings.push_back({ "geometry.module", "~" });
+                    if (fragment) settings.push_back({ "fragment.module", "~" });
+                    if (whole && fragment) settings.push_back({ "@param.source", "color" });
+                    build(std::format("vertex{}{}{}{}", whole ? "Whole" : "", tess ? "Tess" : "", geometry ? "Geometry" : "", fragment ? "" : "Depth"), "Vertex",
+                          { .wholePicture = whole, .tessellation = tess, .geometry = geometry, .fragment = fragment }, "GraphicsPipeline", std::move(settings));
+                }
+    for (const bool task : { false, true })
+        for (const bool fragment : { false, true }) {
+            std::vector<std::pair<std::string, std::string>> settings { { "stages", "eMesh" }, { "mesh.module", "~" }, { "@framebuffer", "sky target" } };
+            if (task) settings.push_back({ "task.module", "~" });
+            if (fragment) settings.push_back({ "fragment.module", "~" });
+            build(std::format("meshes{}{}", task ? "Task" : "", fragment ? "" : "Depth"), "MeshShading", { .task = task, .fragment = fragment }, "GraphicsPipeline", std::move(settings));
+        }
+    build("compute", "Compute", {}, "ComputePipeline", { { "compute.module", "~" } });
+    for (const bool anyHit : { false, true })
+        for (const bool intersection : { false, true }) {
+            std::vector<std::pair<std::string, std::string>> settings { { "raygen.module", "~" }, { "miss[0].module", "~" }, { "hitGroup[0].closestHit.module", "~" } };
+            if (anyHit) settings.push_back({ "hitGroup[0].anyHit.module", "~" });
+            if (intersection) settings.push_back({ "hitGroup[0].intersection.module", "~" });
+            build(std::format("rays{}{}", anyHit ? "AnyHit" : "", intersection ? "Intersection" : ""), "RayTracing", { .anyHit = anyHit, .intersection = intersection },
+                  "RayTracingPipeline", std::move(settings));
+        }
+    std::printf("[ shaders  ] %d of 25 made and built here\n", made);
+    EXPECT_GE(made, 9) << "every vertex shader without tessellation or geometry, and compute, wherever there is a GPU";
+    EXPECT_FALSE(Session().NewShader("other", "Mesh")) << "no such kind";
+
+    // The dialog offers the kinds by what they are, and what each can have.
+    Session().AskForNewShader();
+    for (const char* kind : { "Vertex + fragment", "Mesh + fragment", "Compute", "Ray tracing" }) EXPECT_TRUE(Shows(kind)) << kind;
+    for (const char* option : { "Over the whole picture", "Tessellation", "Geometry shader", "Fragment shader" }) EXPECT_TRUE(Shows(option)) << option;
+    Sheet("new shader");
+}
+
 // A shader and a script are made from the editor: a file in the project to start from, which a pipeline can name
 // as it is and a script host loads.
 TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
@@ -1024,8 +1327,8 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
 
     for (const auto& [kind, what] : keditor::Session::ShaderKinds()) EXPECT_FALSE(what.empty()) << kind;
     ASSERT_TRUE(Session().NewShader("glow", "Compute")) << Session().Status();
-    ASSERT_TRUE(Session().NewShader("paint", "Mesh")) << Session().Status();
-    ASSERT_TRUE(Session().NewShader("invert", "Fullscreen")) << Session().Status();
+    ASSERT_TRUE(Session().NewShader("paint", "Vertex")) << Session().Status();
+    ASSERT_TRUE(Session().NewShader("invert", "Vertex", { .wholePicture = true })) << Session().Status();
     for (const char* name : { "glow", "paint", "invert" }) EXPECT_TRUE(std::filesystem::exists(directory / "shaders" / (std::string(name) + ".slang"))) << name;
     EXPECT_TRUE(Shows("Made shaders/invert.slang"));
     EXPECT_FALSE(Session().NewShader("glow", "Compute")) << "one of that name is there";
@@ -1041,10 +1344,8 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().SetInput(glow, "compute.entry", "computeMain");
     EXPECT_TRUE(Doc().Runtime().Status(glow)->ok) << Doc().Runtime().Status(glow)->error;
     const std::string paint = Doc().AddNode("GraphicsPipeline", 0, 0, "paint", "scene");
-    Doc().SetInput(paint, "vertex.module", "paint");
-    Doc().SetInput(paint, "vertex.entry", "vertex");
+    Doc().SetInput(paint, "vertex.module", "paint");       // its entry points as a pipeline looks for them: vertexMain, fragmentMain
     Doc().SetInput(paint, "fragment.module", "paint");
-    Doc().SetInput(paint, "fragment.entry", "fragment");
     Doc().Connect("shape", "layout", paint, "vertex.layout");
     Doc().Connect("sky target", "out", paint, "framebuffer");
     Doc().Connect("frame data", "out", paint, "param.frame");
@@ -1066,9 +1367,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_EQ(Doc().World().Describe(component).fields.front().name, "color");
     const std::string invert = Doc().AddNode("GraphicsPipeline", 0, 0, "invert", "scene");
     Doc().SetInput(invert, "vertex.module", "invert");
-    Doc().SetInput(invert, "vertex.entry", "vertex");
     Doc().SetInput(invert, "fragment.module", "invert");
-    Doc().SetInput(invert, "fragment.entry", "fragment");
     Doc().Connect("sky target", "out", invert, "framebuffer");
     Doc().Connect("color", "out", invert, "param.source");
     EXPECT_TRUE(Doc().Runtime().Status(invert)->ok) << Doc().Runtime().Status(invert)->error;
@@ -1080,7 +1379,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
 
     // A script, in either language, the first time: a file with a class of its name. Its language is the project's from
     // then on, kept in project.json, and a script in the other is refused.
-    EXPECT_EQ(Session().ScriptKindsHere().size(), 2u) << "either, until the first";
+    EXPECT_EQ(Session().ScriptKindsHere().size(), 4u) << "either, until the first: a script of entities and a ResourceScript in each";
     ASSERT_TRUE(Session().NewScript("Drifter", "Kotlin")) << Session().Status();
     const auto text = [&](const std::filesystem::path& folder, const char* file) {
         std::ifstream in(folder / file);
@@ -1088,8 +1387,8 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     };
     EXPECT_NE(text(directory, "project.json").find(R"("scripts": "kotlin")"), std::string::npos) << text(directory, "project.json");
     EXPECT_EQ(Session().CurrentProject().Language(), 'k');
-    ASSERT_EQ(Session().ScriptKindsHere().size(), 1u);
-    EXPECT_EQ(Session().ScriptKindsHere()[0].first, "Kotlin") << "the New script dialog offers the project's only";
+    ASSERT_EQ(Session().ScriptKindsHere().size(), 2u);
+    for (const auto& [kind, what] : Session().ScriptKindsHere()) EXPECT_TRUE(kind.starts_with("Kotlin")) << kind << ": the New script dialog offers the project's only";
     EXPECT_FALSE(Session().NewScript("Roller", "C#")) << "a project's scripts are in one language";
     EXPECT_NE(Session().Status().find("in Kotlin"), std::string::npos) << Session().Status();
     ASSERT_TRUE(Session().NewScript("Roller", "Kotlin")) << Session().Status();
@@ -1113,6 +1412,9 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_TRUE(Shows("nothing runs Drifter and 1 more"));
     EXPECT_TRUE(Shows("Open with its scripts"));
     Session().Stop();
+    // A new scene knows them too, as one loaded from its file does: an entity in it is given one.
+    ASSERT_TRUE(Session().NewStandardScene()) << Session().Status();
+    EXPECT_TRUE(Doc().AddComponent(Doc().World().Roots().front(), "Drifter")) << "a new scene forgot the project's scripts";
     EXPECT_FALSE(Session().NewScript("Roller", "Kotlin")) << "a script of that name is there";
     EXPECT_FALSE(Session().NewScript("lit", "Kotlin")) << "a component is called that already";
     EXPECT_FALSE(Session().NewScript("My Script", "Kotlin"));
@@ -1245,7 +1547,9 @@ TEST_F(EditorTest, AFunctionIsMadeOpenedAndClosedFromTheEditor) {
     EXPECT_EQ(Doc().Runtime().ValueOf("show"), kgraph::Value(7));
     EXPECT_TRUE(Shows("Triple"));
     // Its `function` is chosen among the project's.
-    EXPECT_EQ(Doc().Functions(), (std::vector<std::string> { "Triple" }));
+    std::vector<std::string> own;
+    for (const auto& name : Doc().Functions()) if (!Doc().IsEngineFunction(name)) own.push_back(name);
+    EXPECT_EQ(own, (std::vector<std::string> { "Triple" })) << "the project's, besides the engine's";
     // And it is offered to be made like any node: by its name, among the functions.
     const auto presets = Doc().Presets();
     const auto offered = std::ranges::find(presets, std::string("Triple"), &kgraph::Preset::name);
@@ -1462,6 +1766,181 @@ TEST(Look, ImagesAreCountedAndPicturedAndBuffersAreTables) {
     EXPECT_EQ(table.rows[3], (std::vector<std::string> { "", "", "0", "0", "0", "1" }));
 }
 
+// Imported, a model or a picture is the project's — one of its assets, with what it names beside it — and nothing of it is
+// in the scene until it is dragged there.
+TEST_F(EditorTest, AnImportedAssetIsTheProjectsAndNotYetTheScenes) {
+    const auto project = scene::MakeProject("imports");
+    Open(project.directory);
+    // Outside the project: a model that names its materials, and they a picture; another that names a buffer and a picture.
+    const auto outside = std::filesystem::temp_directory_path() / "keditor-imports-outside";
+    std::filesystem::remove_all(outside);
+    std::filesystem::create_directories(outside / "data");
+    std::ofstream(outside / "crate.obj") << "mtllib crate.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvt 0 0\nvt 1 0\nvt 1 1\nvn 0 0 1\nusemtl wood\nf 1/1/1 2/2/1 3/3/1\n";
+    std::ofstream(outside / "crate.mtl") << "newmtl wood\nmap_Kd -s 1 1 1 wood.png\n";
+    std::ofstream(outside / "wood.png") << "not looked at";
+    std::ofstream(outside / "lamp.gltf") << R"({ "asset": { "version": "2.0" }, "buffers": [ { "uri": "data/lamp.bin", "byteLength": 4 } ],
+                                               "images": [ { "uri": "lamp%20glow.png" }, { "uri": "data:image/png;base64,AAAA" } ] })";
+    std::ofstream(outside / "data" / "lamp.bin") << "abcd";
+    std::ofstream(outside / "lamp glow.png") << "not looked at";
+    const std::size_t entities = Doc().World().EntityCount();
+
+    const std::string crate = Session().ImportAsset(outside / "crate.obj");
+    ASSERT_FALSE(crate.empty()) << Session().Status();
+    const auto models = project.directory / "assets" / "models";
+    for (const char* file : { "crate/crate.obj", "crate/crate.mtl", "crate/wood.png" }) EXPECT_TRUE(std::filesystem::exists(models / file)) << file;
+    ASSERT_FALSE(Session().ImportAsset(outside / "lamp.gltf").empty()) << Session().Status();
+    for (const char* file : { "lamp/lamp.gltf", "lamp/data/lamp.bin", "lamp/lamp glow.png" }) EXPECT_TRUE(std::filesystem::exists(models / file)) << file;
+    ASSERT_FALSE(Session().ImportAsset(outside / "wood.png").empty());
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "textures" / "wood.png"));
+
+    // None of it is in the scene: the Assets panel has it, picked, in its folder.
+    EXPECT_EQ(Doc().World().EntityCount(), entities) << "importing makes no entities";
+    EXPECT_EQ(Session().assetFolder, "assets/textures") << "the folder of the last imported is shown";
+    const auto assets = Session().Assets();
+    const auto listed = std::ranges::find(assets, crate, &keditor::Session::Asset::id);
+    ASSERT_NE(listed, assets.end()) << "the model is among the project's assets";
+    EXPECT_EQ(listed->kind, keditor::Session::Asset::Kind::eModel);
+    EXPECT_FALSE(listed->loaded) << "and not in the scene";
+    EXPECT_EQ(Session().ImportAsset(outside / "crate.obj"), crate) << "imported again, it is the one the project has";
+    EXPECT_EQ(Session().ImportAsset(models / "crate" / "crate.obj"), crate) << "one of the project's is only picked";
+    EXPECT_TRUE(Session().ImportAsset(outside / "crate.mtl").empty()) << "a material file is no asset of its own";
+
+    // Dragged onto the scene, it is: entities of it, now.
+    ASSERT_TRUE(Session().ImportModel(models / "crate" / "crate.obj")) << Session().Status();
+    EXPECT_GT(Doc().World().EntityCount(), entities);
+}
+
+// A prefab is made by dragging an entity from the outliner into the Assets panel — or with the inspector's button, the
+// Assets panel's Create, the Edit menu, the outliner's menu. It is then among the assets, picked, and the entity its instance.
+TEST_F(EditorTest, AnEntityDraggedIntoTheAssetsIsAPrefab) {
+    const auto project = scene::MakeProject("prefabs");
+    Open(project.directory);
+    const kecs::Entity crate = Doc().CreateEntity("Crate");
+    Session().Select(crate);
+    EXPECT_TRUE(Shows("Save as prefab")) << "the inspector offers it";
+    Sheet("prefab before");
+
+    // Picked up in the outliner, let go over the Assets panel.
+    auto& input = editor->SceneInput();
+    input.FeedMousePosition({ 120.f, 131.f });
+    Frame();
+    input.FeedMouseButton(kor::MouseButton::eLeft, true);
+    Frame();
+    for (int step = 1; step <= 12; ++step) {
+        input.FeedMousePosition({ 120.f + 30.f * static_cast<float>(step), 131.f + 52.f * static_cast<float>(step) });
+        Frame();
+    }
+    input.FeedMouseButton(kor::MouseButton::eLeft, false);
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "prefabs" / "Crate.prefab")) << Session().Status();
+    EXPECT_EQ(Doc().PrefabOf(crate), "prefabs/Crate.prefab") << "the entity is its first instance";
+    EXPECT_EQ(Session().assetFolder, "prefabs") << "the Assets panel shows it";
+    EXPECT_EQ(Session().selectedAsset, "prefab:Crate.prefab") << "picked";
+    Session().Select(crate);
+    EXPECT_TRUE(Shows("An instance of Crate"));
+    EXPECT_FALSE(Shows("Save as prefab")) << "an instance is offered Apply, not another prefab";
+    Sheet("prefab after");
+}
+
+// A prefab is made in the Assets panel and opened by itself, as Unity's prefab mode does: the scene is put aside, the
+// prefab's entities are all the outliner and the scene view have, and back to the scene every instance follows it.
+TEST_F(EditorTest, APrefabIsMadeAndEditedByItself) {
+    const auto project = scene::MakeProject("prefab mode");
+    Open(project.directory);
+    const kecs::Entity tree = Doc().CreateEntity("Tree");
+    const kecs::Entity crate = Doc().CreateEntity("Crate");
+    ASSERT_TRUE(Session().SaveAsPrefab(crate)) << Session().Status();
+    for (int i = 0; i < 30; ++i) Frame();       // (what can be taken back, counted)
+    const bool couldUndo = Session().CanUndo();
+
+    // Right-clicked, the Assets panel offers a new prefab.
+    RightClick({ 500.f, 780.f });
+    EXPECT_TRUE(Shows("Create prefab...")) << "in the Assets panel's menu";
+    Click({ 1400.f, 120.f });       // (the menu shut)
+
+    // Made, it is open by itself: one entity of its name, and nothing of the scene's.
+    ASSERT_TRUE(Session().NewPrefab("Lamp")) << Session().Status();
+    EXPECT_EQ(Session().PrefabOpen(), "prefabs/Lamp.prefab");
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "prefabs" / "Lamp.prefab"));
+    ASSERT_EQ(Doc().World().Roots().size(), 1u);
+    const kecs::Entity lamp = Doc().World().Roots().front();
+    EXPECT_EQ(Doc().NameOf(lamp), "Lamp");
+    EXPECT_TRUE(Doc().PrefabRootOf(lamp).IsNull()) << "an entity like any, not an instance";
+    EXPECT_TRUE(Shows("Back to the scene"));
+    EXPECT_FALSE(Shows("Tree")) << "the scene's entities are put aside";
+    EXPECT_FALSE(Session().CanUndo()) << "what is taken back here is the prefab's";
+    Session().StartPlaying();
+    EXPECT_FALSE(Session().InPlayMode()) << "a prefab is not played";
+
+    // What is made in it is the prefab's, once saved — Ctrl+S saves the prefab.
+    Doc().CreateEntity("Bulb", lamp);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(Session().PrefabChanged());
+    EXPECT_TRUE(Shows("Lamp  ·  changed")) << "the bar over the outliner says so";
+    Sheet("prefab mode");
+    ASSERT_TRUE(Session().Save()) << Session().Status();
+    EXPECT_FALSE(Session().PrefabChanged());
+    ASSERT_TRUE(Session().ClosePrefab()) << Session().Status();
+
+    // Back: the scene as it was, and what could be taken back of it.
+    EXPECT_TRUE(Session().PrefabOpen().empty());
+    EXPECT_TRUE(Doc().World().Alive(Doc().World().FindEntity("Tree")));
+    EXPECT_FALSE(Doc().World().Alive(Doc().World().FindEntity("Lamp"))) << "the prefab is no part of the scene until it is placed";
+    EXPECT_EQ(Session().CanUndo(), couldUndo);
+    const kecs::Entity placed = Session().PlacePrefab("prefab:Lamp.prefab");
+    ASSERT_FALSE(placed.IsNull()) << Session().Status();
+    ASSERT_EQ(Doc().World().ChildrenOf(placed).size(), 1u);
+    EXPECT_EQ(Doc().NameOf(Doc().World().ChildrenOf(placed).front()), "Bulb") << "placed, it is the prefab as it was saved";
+
+    // An instance in the scene follows its prefab, edited by itself.
+    ASSERT_TRUE(Session().OpenPrefab("prefab:Crate.prefab")) << Session().Status();
+    Doc().CreateEntity("Lid", Doc().World().Roots().front());
+    ASSERT_TRUE(Session().ClosePrefab(true)) << Session().Status();     // saved, as it changed
+    const kecs::Entity instance = Doc().World().FindEntity("Crate");
+    ASSERT_TRUE(Doc().World().Alive(instance));
+    ASSERT_EQ(Doc().World().ChildrenOf(instance).size(), 1u) << "the scene's crate has the lid";
+    EXPECT_EQ(Doc().NameOf(Doc().World().ChildrenOf(instance).front()), "Lid");
+    EXPECT_TRUE(Doc().Dirty()) << "the scene changed, where its instance did";
+    (void)tree;
+}
+
+// The scene tree's menus: an entity's, short — what is done to it, then submenus beside it for what is made under it and
+// for its prefab — and the tree's own, where no entity is, for what is made at the top.
+TEST_F(EditorTest, TheSceneTreesMenusHaveSubmenusBesideThem) {
+    const auto project = scene::MakeProject("scene tree");
+    Open(project.directory);
+    const kecs::Entity parent = Doc().CreateEntity("Parent");
+    Doc().CreateEntity("Child", parent);
+    EXPECT_EQ(Session().EntityKind(parent), "group");
+
+    // An entity's: no line for each kind of object, but one that opens them beside it.
+    RightClick({ 120.f, 131.f });
+    EXPECT_TRUE(Shows("Create under it"));
+    EXPECT_TRUE(Shows("Prefab"));
+    EXPECT_TRUE(Shows("Delete, with what is under it"));
+    EXPECT_FALSE(Shows("New entity under it"));
+    EXPECT_FALSE(Shows("Empty entity")) << "until it is come onto";
+    auto& input = editor->SceneInput();
+    // Rename, Duplicate, Delete, a line, then Create under it: 6 + 3 × 36 + 9 + 18 below where it opened.
+    input.FeedMousePosition({ 170.f, 131.f + 141.f });
+    EXPECT_TRUE(Shows("Empty entity")) << "beside it, as the pointer comes onto it";
+    Sheet("scene tree menu");
+    // Picked in it: an entity under the one whose menu it is.
+    const std::size_t before = Doc().World().ChildrenOf(parent).size();
+    input.FeedMousePosition({ 410.f, 131.f + 141.f });     // the submenu's first line, beside the line that opened it
+    for (int i = 0; i < 4; ++i) Frame();
+    input.FeedMouseButton(kor::MouseButton::eLeft, true);
+    Frame();
+    input.FeedMouseButton(kor::MouseButton::eLeft, false);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(Doc().World().ChildrenOf(parent).size(), before + 1) << "an empty entity, made under it";
+
+    // Where no entity is: what is made at the top.
+    RightClick({ 140.f, 280.f });
+    EXPECT_TRUE(Shows("Empty entity"));
+    EXPECT_TRUE(Shows("Mesh"));
+}
+
 // A model's meshes are read with every attribute they have. Its inspector lists them, each read or left out and in
 // which buffer; a change is an edit of the scene — read again at once, taken back with Undo.
 TEST_F(EditorTest, AModelsAttributesAreChosenInItsInspector) {
@@ -1577,8 +2056,8 @@ TEST_F(EditorTest, NewEntitiesAreOfferedInGroups) {
     for (const char* group : { "Mesh", "Light", "Camera" }) EXPECT_TRUE(Shows(group)) << group;
     EXPECT_FALSE(Shows("Torus")) << "a mesh is in its group, until that is opened";
     EXPECT_FALSE(Shows("Spot Light"));
-    Click({ 75.f, 137.f + 36.f });     // the second line: Mesh
-    EXPECT_TRUE(Shows("Torus")) << "opened in place";
+    Click({ 75.f, 137.f + 36.f + 9.f });     // under Empty entity and the line after it: Mesh
+    EXPECT_TRUE(Shows("Torus")) << "opened beside it";
     Sheet("groups");
     EXPECT_TRUE(Shows("Cube"));
     EXPECT_FALSE(Shows("Fly Camera"));
@@ -1626,4 +2105,287 @@ TEST_F(EditorTest, DISABLED_FlyingThroughAProjectTakesNoLongerThanStandingStill)
     input.FeedMouseButton(kor::MouseButton::eRight, false);
     std::printf("            standing still: %.3f ms a frame; looking round: %.3f; flying: %.3f (the interface made again %llu times in %d frames)\n",
                 still, looking, flying, static_cast<unsigned long long>(bumped), frames);
+}
+
+// What a page can use is pictured, and its pictures are made anew every few seconds: what shows them finds each again, and
+// does not hold on to one that is gone. Seconds of it in sight, and then one of them brought in and picked.
+TEST_F(EditorTest, WhatAPageCanUseStaysInSightAsItsPicturesAreMadeAgain) {
+    const auto project = scene::MakeProject("in sight");
+    keditor::WriteStandardShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    Session().ShowPass("show");
+    EXPECT_TRUE(Shows("WHAT SHOW CAN USE"));
+    EXPECT_TRUE(Session().DrawerShown()) << "its panel is in sight, and says so";
+    // Long enough, as the clock goes, for its pictures to be made again, each in the place of the last.
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    while (std::chrono::steady_clock::now() < until) Frame();
+    EXPECT_TRUE(Session().NodePicture("color").Get());
+    Session().Select(Doc().Import("frame data", "show", 0, 0));
+    for (int i = 0; i < 30; ++i) Frame();
+    ASSERT_NE(Doc().Graph().Find(Session().selectedNode), nullptr);
+    EXPECT_EQ(Doc().Graph().Find(Session().selectedNode)->type, "Reference");
+}
+
+// How long a frame of the editor takes while a scene plays, nothing selected and then a body selected: KEDITOR_BENCH
+// names the project, whose start scene is played. Not run by default.
+TEST_F(EditorTest, DISABLED_PlayingWithABodySelectedTakesNoLongerThanWithNothing) {
+    const char* named = std::getenv("KEDITOR_BENCH");
+    if (!named) GTEST_SKIP() << "KEDITOR_BENCH names the project";
+    Open(named);
+    const int frames = std::getenv("KEDITOR_BENCH_FRAMES") ? std::atoi(std::getenv("KEDITOR_BENCH_FRAMES")) : 300;
+    Session().StartPlaying();
+    for (int i = 0; i < 120; ++i) Frame();
+    const auto time = [&] {
+        const auto versions = Session().Version();
+        const auto began = std::chrono::steady_clock::now();
+        for (int i = 0; i < frames; ++i) Frame();
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count() / frames;
+        return std::pair { ms, Session().Version() - versions };
+    };
+    // Nothing, something still (the sun: what having a selection costs, its outline, without its inspector built again),
+    // a body: in turn, round after round, so that the scene settling as it plays (cheaper as bodies sleep) falls on each
+    // alike.
+    kecs::Entity body = kecs::NullEntity;
+    Doc().World().EachEntity([&](const kecs::Entity e) { if (body.IsNull() && Doc().World().Has(e, Doc().World().Find("RigidBody"))) body = e; });
+    const kecs::Entity picks[3] { kecs::NullEntity, Doc().World().FindEntity("Sun"), body };
+    double total[3] {};
+    std::uint64_t rebuilt[3] {};
+    const int rounds = 6;
+    for (int round = 0; round < rounds; ++round)
+        for (int k = 0; k < 3; ++k) {
+            Session().Select(picks[k]);
+            for (int i = 0; i < 5; ++i) Frame();
+            const auto [ms, versions] = time();
+            total[k] += ms;
+            rebuilt[k] += versions;
+        }
+    std::printf("            playing, nothing selected: %.3f ms a frame; the sun selected: %.3f; a body selected: %.3f (interface made again %llu, %llu, %llu times), %d rounds of %d frames\n",
+                total[0] / rounds, total[1] / rounds, total[2] / rounds, static_cast<unsigned long long>(rebuilt[0]),
+                static_cast<unsigned long long>(rebuilt[1]), static_cast<unsigned long long>(rebuilt[2]), rounds, frames);
+
+    // Not playing, the body picked and dragged, as the gizmo drags it: moved, and the document told, every frame.
+    Session().Stop();
+    for (int i = 0; i < 10; ++i) Frame();
+    body = kecs::NullEntity;
+    Doc().World().EachEntity([&](const kecs::Entity e) { if (body.IsNull() && Doc().World().Has(e, Doc().World().Find("RigidBody"))) body = e; });
+    Session().Select(body);
+    for (int i = 0; i < 5; ++i) Frame();
+    const auto [held, rebuiltHeld] = time();
+    const auto versions = Session().Version();
+    const auto began = std::chrono::steady_clock::now();
+    for (int i = 0; i < frames; ++i) {
+        Doc().World().SetPosition(body, { 0.01f * static_cast<float>(i), 2.f, 0.f });
+        Doc().Moved(body, "position");
+        Frame();
+    }
+    const double dragging = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count() / frames;
+    std::printf("            stopped, a body picked: %.3f ms a frame; dragged: %.3f (interface made again %llu times while dragged)\n",
+                held, dragging, static_cast<unsigned long long>(Session().Version() - versions));
+    (void)rebuiltHeld;
+}
+
+// Dragged with the gizmo, an entity is moved every frame of the drag: the inspector follows it by itself, nothing else is
+// built again for it, and it is a change all the same — the scene not saved, and the drag one thing to take back.
+TEST_F(EditorTest, AnEntityDraggedIsFollowedWithoutTheInterfaceBuiltAgainAndIsTakenBack) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "dragged";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    Doc().SetDirty(false);
+    kecs::World& world = Doc().World();
+    kecs::Entity sphere = kecs::NullEntity;
+    world.EachEntity([&](const kecs::Entity e) { if (sphere.IsNull() && world.Has(e, world.Find("Mesh"))) sphere = e; });
+    ASSERT_FALSE(sphere.IsNull());
+    const std::string name = world.NameOf(sphere);
+    Session().Select(sphere);
+    Settle();
+    const kecs::Vec3 was = world.PositionOf(sphere);
+    const auto versions = Session().Version();
+    for (int i = 1; i <= 10; ++i) {
+        world.SetPosition(sphere, { 0.5f * static_cast<float>(i), was.y, was.z });       // as the gizmo does
+        Doc().Moved(sphere, "position");
+        Frame();
+    }
+    EXPECT_EQ(Session().Version(), versions) << "nothing built again for each frame of the drag";
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    EXPECT_TRUE(Shows("5.00")) << "the inspector shows where it is now";
+    EXPECT_TRUE(Doc().Dirty()) << "a change all the same";
+    for (int i = 0; i < 40; ++i) Frame();     // let go: the drag is one thing to take back
+    ASSERT_TRUE(Session().Undo());
+    EXPECT_EQ(world.PositionOf(world.FindEntity(name)).x, was.x) << "taken back to where it was";
+}
+
+TEST_F(EditorTest, TheDefaultMeshesAndMaterialsAreAssetsOfEveryProject) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "defaults";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    const auto assets = Session().Assets();
+    for (const auto& name : kgraph::DefaultMeshNames()) {
+        const auto it = std::ranges::find(assets, kgraph::DefaultMeshId(name), &keditor::Session::Asset::id);
+        ASSERT_NE(it, assets.end()) << name;
+        EXPECT_EQ(it->kind, keditor::Session::Asset::Kind::eMesh);
+        EXPECT_EQ(it->folder, "Meshes/Primitives");
+        EXPECT_TRUE(it->builtIn);
+    }
+    EXPECT_EQ(std::ranges::count(assets, keditor::Session::Asset::Kind::eModel, &keditor::Session::Asset::kind), 0) << "a default mesh is of no model";
+    const auto folders = Session().AssetFolders(assets);
+    EXPECT_TRUE(std::ranges::contains(folders, "Meshes/Primitives"));
+    EXPECT_TRUE(std::ranges::contains(folders, "Materials/Defaults"));
+    EXPECT_TRUE(Session().AssetFolderPath("Meshes/Primitives").empty()) << "of no folder on disk";
+    const auto gold = std::ranges::find(assets, "material:Gold", &keditor::Session::Asset::id);
+    ASSERT_NE(gold, assets.end());
+    EXPECT_EQ(gold->folder, "Materials/Defaults");
+
+    // Dropped on an entity that is drawn, its lit is given the material; on one that is not, it is given lit.
+    kecs::World& world = Doc().World();
+    kecs::Entity drawn = kecs::NullEntity;
+    world.EachEntity([&](const kecs::Entity e) { if (drawn.IsNull() && world.Has(e, world.Find("lit"))) drawn = e; });
+    ASSERT_FALSE(drawn.IsNull());
+    ASSERT_TRUE(Session().GiveAsset("material:Gold", drawn));
+    EXPECT_EQ(*Doc().Field(drawn, "lit", "albedo").Items(), (kgraph::Value::List { 1.f, 0.78f, 0.34f }));
+    EXPECT_EQ(Doc().Field(drawn, "lit", "metallic"), kgraph::Value(1));
+    EXPECT_EQ(Doc().Field(drawn, "lit", "roughness"), kgraph::Value(0.25f));
+    const kecs::Entity bare = Doc().CreateEntity("Bare");
+    ASSERT_TRUE(Session().GiveAsset("$torus", bare));
+    ASSERT_TRUE(Session().GiveAsset("material:Red plastic", bare));
+    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(bare), std::string("lit")));
+    EXPECT_EQ(*Doc().Field(bare, "lit", "albedo").Items(), (kgraph::Value::List { 0.8f, 0.1f, 0.08f }));
+    EXPECT_FALSE(Session().GiveAsset("material:Nothing", bare));
+    for (int i = 0; i < 5; ++i) Frame();
+
+    // Their tangents: four numbers, unless the graph says otherwise — a change, taken back as any is.
+    const auto semantics = [&] {
+        std::string all;
+        for (const auto& attribute : Doc().Runtime().ReadMesh("$torus")->attributes) all += attribute.semantic + " ";
+        return all;
+    };
+    EXPECT_EQ(semantics(), "POSITION NORMAL TANGENT UV ");
+    Doc().SetDefaultMeshTangents(kgraph::Tangents::eWithBitangent);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(semantics(), "POSITION NORMAL TANGENT BITANGENT UV ");
+    ASSERT_TRUE(Session().Undo());
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(semantics(), "POSITION NORMAL TANGENT UV ");
+}
+
+TEST_F(EditorTest, AFieldThatIsOneOfSoManyThingsIsShownByItsName) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "named";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    const kecs::Entity body = Doc().CreateEntity("Body");
+    ASSERT_TRUE(Doc().AddComponent(body, "RigidBody"));
+    ASSERT_TRUE(Doc().AddComponent(body, "Collider"));
+    ASSERT_TRUE(Doc().SetField(body, "Collider", "shape", "Capsule"));
+    Session().Select(body);
+    EXPECT_TRUE(Shows("Dynamic")) << "its kind, by name";
+    EXPECT_TRUE(Shows("Capsule")) << "its shape, by name";
+
+    // Its collider shown, and being changed, in the scene's view: every shape, a mesh's by its edges.
+    Session().ShowCollider(true, true);
+    ASSERT_TRUE(Doc().AddComponent(body, "Mesh"));
+    ASSERT_TRUE(Doc().SetField(body, "Mesh", "mesh", "$cube"));
+    for (const char* shape : { "Sphere", "Box", "Capsule", "Plane", "Cone", "Mesh" }) {
+        ASSERT_TRUE(Doc().SetField(body, "Collider", "shape", shape));
+        for (int i = 0; i < 3; ++i) Frame();
+    }
+    EXPECT_TRUE(Session().colliderShown && Session().colliderEditing);
+    Session().ShowCollider(false, false);
+    EXPECT_FALSE(Session().colliderShown);
+}
+
+TEST_F(EditorTest, APassRunsEveryFrameOnTheFixedStepOrOnceAndTheFixedStepIsTakenWhileItPlays) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "rates";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    ASSERT_TRUE(Doc().AddPass("simulate", -1, kgraph::PassRate::eFixed));
+    ASSERT_TRUE(Doc().AddPass("noise", -1, kgraph::PassRate::eSetup));
+    const auto& passes = Doc().Passes();
+    EXPECT_EQ(passes.front(), "noise") << "setup first";
+    EXPECT_EQ(passes[1], "simulate") << "then the fixed step, before every frame's";
+    EXPECT_EQ(Doc().RateOf("simulate"), kgraph::PassRate::eFixed);
+    Frame();
+    // Every frame now — the first of them, next to where it was — and taken back.
+    ASSERT_TRUE(Doc().SetPassRate("simulate", kgraph::PassRate::eFrame));
+    EXPECT_EQ(passes[1], "simulate");
+    EXPECT_EQ(Doc().RateOf("simulate"), kgraph::PassRate::eFrame);
+    EXPECT_FALSE(Doc().SetPassRate("simulate", kgraph::PassRate::eFrame)) << "it is that already";
+    Frame();
+    ASSERT_TRUE(Session().Undo());
+    EXPECT_EQ(Doc().RateOf("simulate"), kgraph::PassRate::eFixed);
+    Session().ShowPass("simulate");
+    EXPECT_TRUE(Shows("Fixed step")) << "its tab";
+    EXPECT_TRUE(Shows("ON THE FIXED STEP, BEFORE THE FRAME"));
+
+    // Its steps are taken while the scene plays, and not while it is paused.
+    kgraph::Graph graph = Doc().Graph();
+    graph.Add("step", "FixedStep").pass = "simulate";
+    Doc().SetGraph(graph);
+    const auto count = [&] { const auto n = Doc().Runtime().ValueOf("step", "count").Number(); return n ? *n : -1.0; };
+    for (int i = 0; i < 10; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); Frame(); }
+    EXPECT_EQ(count(), 0.0) << "not playing: no step";
+    Session().StartPlaying();
+    for (int i = 0; i < 10; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); Frame(); }
+    const double played = count();
+    EXPECT_GT(played, 3.0) << "a step every 1/60 s or so of the 0.2 s it played";
+    Session().Pause();
+    for (int i = 0; i < 10; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); Frame(); }
+    EXPECT_LE(count(), played + 1.0) << "paused: none taken";
+    Session().Stop();
+}
+
+TEST_F(EditorTest, TheEnginesFunctionsAreThereInEveryProjectAndAProjectsOwnComesFirst) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "engine functions";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    const auto names = Doc().Functions();
+    for (const char* name : { "Scan", "RadixSort", "Compact", "IndirectArgs" }) {
+        EXPECT_TRUE(std::ranges::contains(names, std::string(name))) << name;
+        EXPECT_TRUE(Doc().IsEngineFunction(name)) << name;
+    }
+    kgraph::Graph graph = Doc().Graph();
+    graph.Add("numbers", "Buffer").Set("instanceCount", 4096).Set("usage", kgraph::Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("sums", "Function").Set("function", "Scan").Wire("values", "numbers").Set("count", 1024);
+    Doc().SetGraph(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    ASSERT_NE(Doc().Runtime().Status("sums"), nullptr);
+    EXPECT_TRUE(Doc().Runtime().Status("sums")->ok) << Doc().Runtime().Status("sums")->error;
+
+    // The project's own of the same name is called in its place.
+    std::filesystem::create_directories(Doc().FunctionsDirectory());
+    std::filesystem::copy_file(keditor::Document::EngineFunctionsDirectory() / "Scan.kfunc", Doc().FunctionsDirectory() / "Scan.kfunc");
+    EXPECT_FALSE(Doc().IsEngineFunction("Scan"));
+    EXPECT_EQ(std::ranges::count(Doc().Functions(), std::string("Scan")), 1) << "listed once";
+}
+
+TEST_F(EditorTest, StepIsOneFixedStepAndPaused) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "step";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    ASSERT_TRUE(Doc().AddPass("simulate", -1, kgraph::PassRate::eFixed));
+    kgraph::Graph graph = Doc().Graph();
+    graph.Add("step", "FixedStep").pass = "simulate";
+    Doc().SetGraph(graph);
+    const auto count = [&] { const auto n = Doc().Runtime().ValueOf("step", "count").Number(); return n ? *n : -1.0; };
+    for (int i = 0; i < 3; ++i) Frame();
+    Session().Step();
+    for (int i = 0; i < 5; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); Frame(); }
+    EXPECT_TRUE(Session().InPlayMode()) << "started, as Play does";
+    EXPECT_FALSE(Session().IsPlaying()) << "and paused";
+    EXPECT_EQ(count(), 1.0) << "one step, and no more";
+    Session().Step();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(count(), 2.0);
+    Session().Stop();
 }

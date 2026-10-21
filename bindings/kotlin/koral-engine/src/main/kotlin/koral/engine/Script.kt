@@ -70,6 +70,114 @@ abstract class GraphicsScript : Script() {
     open fun prepare() {}
 }
 
+/**
+ * A script that makes resources — Images, Buffers, views of them, Samplers — and fills its images and buffers on the CPU
+ * as they are made: a Script node of the graph names it, and gives each as an output, by its property's name. Its public
+ * `var`s are its settings — the Script node's inputs, given there or wired — and it is no component: no entity has it. It
+ * runs when what it makes is made, and again when that is made again: a size changed, a setting changed, the script was
+ * edited.
+ *
+ * A resource's arguments are what it is made with, by the name of its node type's input: its source is read for them, so
+ * they are written as they are, not worked out — `width`, `height` and `depth` are its extent's, flags are
+ * `"eSampled | eStorage"`, and a view names what it is of, `::height.name`. The Script node can say otherwise:
+ * `height.format`, `height.extent.x`.
+ *
+ * ```kotlin
+ * class Terrain : ResourceScript() {
+ *     var seed = 7
+ *     val height = Image(format = "eR32_SFLOAT", width = 256, height = 256, usage = "eSampled | eStorage | eTransferDst")
+ *     val heightView = ImageView(image = ::height.name)
+ *     override fun init() {
+ *         val random = java.util.Random(seed.toLong())
+ *         for (i in 0 until height.bytes.capacity() / 4) height.bytes.putFloat(i * 4, random.nextFloat())
+ *     }
+ * }
+ * ```
+ */
+abstract class ResourceScript {
+    /** The scene whose graph it makes them in. */
+    lateinit var world: World
+        internal set
+
+    /** Fills what it makes: each [Image]'s and [Buffer]'s bytes, zeros to begin with, as they were made. */
+    abstract fun init()
+
+    /** One of what a script makes: an output of its Script node, by the property's name. */
+    abstract class Resource internal constructor(internal val kind: String, vararg given: Pair<String, Any?>) {
+        internal val settings: List<Pair<String, Any>> = given.mapNotNull { (input, value) -> value?.let { input to it } }
+        /** The property it is: the Script node's output. */
+        var name: String = ""
+            internal set
+    }
+
+    /** A resource that holds bytes the script writes: an image's texels, a buffer's every byte. */
+    abstract class Filled internal constructor(kind: String, vararg given: Pair<String, Any?>) : Resource(kind, *given) {
+        internal var data: java.nio.ByteBuffer? = null
+        /** Its bytes, zeros to begin with, little-endian: there to be written while `init` runs. `bytes.putFloat(i * 4, ...)`. */
+        val bytes: java.nio.ByteBuffer get() = data ?: throw IllegalStateException("$name is filled while init runs, and not otherwise")
+    }
+
+    /** An image, its first level filled: each layer one after another, each a row after another from the top, each a texel after another. */
+    class Image(format: String? = null, width: Int? = null, height: Int? = null, depth: Int? = null, mipLevels: Int? = null, arrayLayers: Int? = null,
+                usage: String? = null, type: String? = null, sampleCount: String? = null)
+        : Filled("Image", "format" to format, "extent.x" to width, "extent.y" to height, "extent.z" to depth, "mipLevels" to mipLevels,
+                 "arrayLayers" to arrayLayers, "usage" to usage, "type" to type, "sampleCount" to sampleCount) {
+        /** Its format, by name, as it was made: `eRGBA8_UNORM`. */
+        var format: String = ""
+            internal set
+        var width: Int = 0
+            internal set
+        var height: Int = 0
+            internal set
+        var depth: Int = 0
+            internal set
+        var layers: Int = 0
+            internal set
+        /** How many bytes one texel is. */
+        var texelBytes: Int = 0
+            internal set
+    }
+
+    /** A buffer, every byte of it filled. */
+    class Buffer(instanceCount: Int? = null, usage: String? = null, type: String? = null, sharedAcrossQueues: Boolean? = null)
+        : Filled("Buffer", "instanceCount" to instanceCount, "usage" to usage, "type" to type, "sharedAcrossQueues" to sharedAcrossQueues)
+
+    /** A view of one of the script's images: `ImageView(image = ::height.name)`. */
+    class ImageView(image: String? = null, viewType: String? = null, baseMipLevel: Int? = null, mipLevelCount: Int? = null,
+                    baseArrayLayer: Int? = null, arrayLayerCount: Int? = null)
+        : Resource("ImageView", "image" to image, "viewType" to viewType, "baseMipLevel" to baseMipLevel, "mipLevelCount" to mipLevelCount,
+                   "baseArrayLayer" to baseArrayLayer, "arrayLayerCount" to arrayLayerCount)
+
+    /** A view of one of the script's buffers as texels: `BufferView(buffer = ::table.name, format = "eR32_SFLOAT")`. */
+    class BufferView(buffer: String? = null, format: String? = null, offset: Long? = null, range: Long? = null)
+        : Resource("BufferView", "buffer" to buffer, "format" to format, "offset" to offset, "range" to range)
+
+    /** How an image is read in a shader: filtered, wrapped, compared. */
+    class Sampler(minFilter: String? = null, magFilter: String? = null, mipmapMode: String? = null, addressModeU: String? = null,
+                  addressModeV: String? = null, addressModeW: String? = null, mipLodBias: Float? = null, anisotropyEnable: Boolean? = null,
+                  maxAnisotropy: Float? = null, compareEnable: Boolean? = null, compareOp: String? = null, minLod: Float? = null,
+                  maxLod: Float? = null, unnormalizedCoordinates: Boolean? = null)
+        : Resource("Sampler", "minFilter" to minFilter, "magFilter" to magFilter, "mipmapMode" to mipmapMode, "addressModeU" to addressModeU,
+                   "addressModeV" to addressModeV, "addressModeW" to addressModeW, "mipLodBias" to mipLodBias, "anisotropyEnable" to anisotropyEnable,
+                   "maxAnisotropy" to maxAnisotropy, "compareEnable" to compareEnable, "compareOp" to compareOp, "minLod" to minLod,
+                   "maxLod" to maxLod, "unnormalizedCoordinates" to unnormalizedCoordinates)
+}
+
+/** The least and the most a property's numbers are — each of a vector's — as the editor lets them be set: `@Range(0f, 10f)`. */
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Range(val min: Float, val max: Float)
+
+/** The least a property's numbers are — each of a vector's — as the editor lets them be set: `@Min(0f)`. */
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Min(val min: Float)
+
+/** A property the editor drags by so much of what it is, not by so much: a distance, an intensity, a size. `@Logarithmic @Min(0f)`. */
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Logarithmic
+
 /** Gives a script's component another name than its class's. */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)
@@ -78,7 +186,7 @@ annotation class ScriptName(val name: String)
 internal enum class Hook { Created, Enabled, Started, FixedUpdate, Update, LateUpdate, Prepare, Disabled, Destroyed }
 
 /** How a script class's properties are laid out as a component's bytes. */
-internal class ScriptLayout private constructor(type: Class<out Script>) {
+internal class ScriptLayout private constructor(type: Class<*>) {
     class Property(val field: Field, val type: String, val offset: Int, val size: Int)
 
     val name: String = nameOf(type)
@@ -91,10 +199,11 @@ internal class ScriptLayout private constructor(type: Class<out Script>) {
         var offset = 0
         var widest = 1
         // A base class's first, each in the order it is written.
-        val chain = generateSequence<Class<*>>(type) { it.superclass }.takeWhile { it != Script::class.java && it != GraphicsScript::class.java }.toList().reversed()
+        val chain = generateSequence<Class<*>>(type) { it.superclass }.takeWhile { it !in bases }.toList().reversed()
         for (declaring in chain) {
             for (field in declaring.declaredFields) {
                 if (Modifier.isStatic(field.modifiers) || field.isSynthetic) continue
+                if (ResourceScript.Resource::class.java.isAssignableFrom(field.type)) continue     // what a ResourceScript makes: no setting
                 // A property the engine keeps is a public var: one with a getter and a setter anyone can call.
                 val suffix = field.name.replaceFirstChar { it.uppercaseChar() }
                 val getter = declaring.methods.any { (it.name == "get$suffix" || it.name == field.name) && it.parameterCount == 0 }
@@ -116,7 +225,7 @@ internal class ScriptLayout private constructor(type: Class<out Script>) {
     }
 
     /** The engine's bytes into the object's properties. */
-    fun load(script: Script, data: MemorySegment) {
+    fun load(script: Any, data: MemorySegment) {
         for (p in properties) {
             val at = p.offset.toLong()
             fun f(i: Int) = data.get(JAVA_FLOAT_UNALIGNED, at + i * 4L)
@@ -173,7 +282,9 @@ internal class ScriptLayout private constructor(type: Class<out Script>) {
 
         fun nameOf(type: Class<*>): String = type.getAnnotation(ScriptName::class.java)?.name ?: type.simpleName
 
-        @Synchronized fun of(type: Class<out Script>): ScriptLayout = layouts.getOrPut(type) { ScriptLayout(type) }
+        @Synchronized fun of(type: Class<*>): ScriptLayout = layouts.getOrPut(type) { ScriptLayout(type) }
+        /** What a script derives from: none of its properties are the script's own. */
+        private val bases = setOf(Script::class.java, GraphicsScript::class.java, ResourceScript::class.java, Any::class.java)
         /** Forgets every class [loader] loaded: it is being let go of. */
         @Synchronized fun forget(loader: ClassLoader) { layouts.keys.removeIf { it.classLoader === loader } }
 

@@ -141,6 +141,17 @@ internal object Native {
 
     val kengine_script_register = call("kengine_script_register", JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
     val kengine_script_unregister = call("kengine_script_unregister", null, ADDRESS, ADDRESS)
+    /** KengineResourceScriptCallbacks: user, then fill. */
+    val RESOURCE_CALLBACKS: StructLayout = MemoryLayout.structLayout(ADDRESS, ADDRESS)
+    /** KengineScriptResource: name, kind, settings. */
+    val SCRIPT_RESOURCE: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("kind"), ADDRESS.withName("settings"))
+    /** KengineContents: name, node, kind, format, extent[3], layers, texel_bytes, bytes, size. */
+    val CONTENTS: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("node"), ADDRESS.withName("kind"), ADDRESS.withName("format"),
+        JAVA_INT.withName("x"), JAVA_INT.withName("y"), JAVA_INT.withName("z"), JAVA_INT.withName("layers"), JAVA_INT.withName("texelBytes"),
+        MemoryLayout.paddingLayout(4), ADDRESS.withName("bytes"), JAVA_LONG.withName("size"))
+    val FILL: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG)
+    val kengine_resource_script_register = call("kengine_resource_script_register", JAVA_BOOLEAN, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
+    val kengine_resource_script_unregister = call("kengine_resource_script_unregister", null, ADDRESS, ADDRESS)
 
     /** KengineAttribute: the semantic, the type and count of its numbers, and the numbers. */
     val ATTRIBUTE: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("semantic"), JAVA_INT.withName("type"), JAVA_INT.withName("count"), ADDRESS.withName("data"))

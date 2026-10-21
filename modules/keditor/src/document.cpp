@@ -148,16 +148,82 @@ namespace keditor
     void Document::DeclareScripts(const std::filesystem::path& folder)
     {
         std::error_code ignored;
-        if (!std::filesystem::is_directory(folder, ignored)) return;
+        if (!std::filesystem::exists(folder, ignored)) return;     // a folder of scripts, or one script's file
         auto declared = kscript::DeclareFiles(folder);
         for (auto& problem : declared.problems) _notes.push_back(std::move(problem));
         for (auto& type : declared.types) {
+            if (type.makesResources) { DeclareResourceScript(std::move(type)); continue; }    // what a Script node runs, no component
             std::string error;
             const std::string name = type.name;
             if (_scripts.Declare(std::move(type), &error) == kecs::NoComponent) _notes.push_back(std::format("{}: {}", name, error));
         }
         Changed();
     }
+
+    namespace {
+        kgraph::ResourceScript ResourceScriptOf(kscript::ScriptType type)
+        {
+            kgraph::ResourceScript script;
+            script.name = std::move(type.name);
+            for (auto& declared : type.resources) {
+                kgraph::ScriptResource resource { std::move(declared.name), std::move(declared.kind), {} };
+                for (auto& [input, json] : declared.settings) {
+                    kecs::json::Value parsed;
+                    std::string ignored;
+                    if (kecs::json::Parse(json, parsed, ignored)) resource.settings.emplace_back(std::move(input), kgraph::Value::FromJson(parsed));
+                }
+                script.resources.push_back(std::move(resource));
+            }
+            script.fields = std::move(type.fields);
+            script.initial = std::move(type.initial);
+            script.size = type.size;
+            return script;
+        }
+    }
+
+    void Document::DeclareResourceScript(kscript::ScriptType type)
+    {
+        // One that runs already is what its host made of it: newer than what its source is read as.
+        for (const auto& running : _runtime->ResourceScripts())
+            if (running.name == type.name && running.fill) return;
+        _runtime->SetResourceScript(ResourceScriptOf(std::move(type)));
+        Changed();
+    }
+
+    void Document::RegisterResourceScript(kscript::ScriptType type, std::function<std::string(std::span<kgraph::Contents>, std::span<const std::byte>)> fill)
+    {
+        kgraph::ResourceScript script = ResourceScriptOf(std::move(type));
+        script.fill = std::move(fill);
+        // What its fields start as is its source's to say: a host registers the shape, and not that. And what it makes,
+        // when the host does not say.
+        for (const auto& declared : _runtime->ResourceScripts()) {
+            if (declared.name != script.name) continue;
+            if (script.initial.empty() && declared.size == script.size) script.initial = declared.initial;
+            if (script.resources.empty()) script.resources = declared.resources;
+            for (auto& field : script.fields)
+                if (const auto was = std::ranges::find(declared.fields, field.name, &kecs::FieldDescription::name);
+                    was != declared.fields.end() && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic) {
+                    field.min = was->min;
+                    field.max = was->max;
+                    field.logarithmic = was->logarithmic;
+                }
+        }
+        _runtime->SetResourceScript(std::move(script));
+        Changed();
+    }
+
+    void Document::UnregisterResourceScript(const std::string_view name)
+    {
+        // Its code is going: it is declared still, as its source says, and nothing runs it.
+        for (auto script : _runtime->ResourceScripts())
+            if (script.name == name && script.fill) {
+                script.fill = nullptr;
+                _runtime->SetResourceScript(std::move(script));
+                Changed();
+            }
+    }
+
+    std::vector<kgraph::ResourceScript> Document::ResourceScripts() const { return _runtime->ResourceScripts(); }
     Document::~Document()
     {
         _scripts.Shutdown();    // while the world they are told of is whole
@@ -188,6 +254,7 @@ namespace keditor
             if (const auto* status = _runtime->Status(node.id)) {
                 mix(status->ok ? 1 : 2);
                 mix(std::hash<std::string>{}(status->error));
+                mix(std::hash<std::string>{}(status->note));    // a script it waits for, run now
             }
             if (const auto* report = _runtime->ReportOf(node.id)) {
                 // (How many it is for, in sight or out of it: which of them are in sight changes as the camera turns, and
@@ -204,6 +271,7 @@ namespace keditor
 
     void Document::Apply(kgraph::Graph graph)
     {
+        graph.OrderByRate();    // what is made once comes first, then the fixed step, whatever the edit did to the order
         // Where every node is seen at once: what is gone is not anywhere there, and what is made there is where it was put.
         std::erase_if(graph.overview, [&](const auto& entry) { return !graph.Find(entry.first); });
         if (_makeInOverview && std::ranges::any_of(graph.nodes, [&](const kgraph::Node& node) { return !Graph().Find(node.id); })) {
@@ -255,14 +323,91 @@ namespace keditor
         return name;
     }
 
+    namespace {
+        /** The References something is wired from. */
+        std::set<std::string> WiredReferences(const kgraph::Graph& graph)
+        {
+            std::set<std::string> wired;
+            for (const auto& node : graph.nodes)
+                for (const auto& input : node.inputs | std::views::values)
+                    if (input.link)
+                        if (const kgraph::Node* from = graph.Find(input.link->node); from && from->type == "Reference") wired.insert(from->id);
+            return wired;
+        }
+
+        /**
+         * A Reference that loses the last wire from it goes with it: it is there to be wired from, and what it stands for
+         * is still in the drawer to bring in again. One that was never wired — just brought in — stays.
+         */
+        void LetGoOfUnwired(kgraph::Graph& graph, const kgraph::Graph& was)
+        {
+            const auto before = WiredReferences(was), now = WiredReferences(graph);
+            std::erase_if(graph.nodes, [&](const kgraph::Node& node) { return node.type == "Reference" && before.contains(node.id) && !now.contains(node.id); });
+        }
+    }
+
     // ---- passes -----------------------------------------------------------------------------------------------
 
-    bool Document::AddPass(const std::string_view name, const int index)
+    namespace {
+        /** Where a pass of a rate can be in the list: among the others of its rate, which are together — setup, fixed, every frame. */
+        std::pair<std::ptrdiff_t, std::ptrdiff_t> RangeOf(const kgraph::Graph& graph, const kgraph::PassRate rate)
+        {
+            const auto count = [&](const kgraph::PassRate of) {
+                return static_cast<std::ptrdiff_t>(std::ranges::count_if(graph.passes, [&](const std::string& pass) { return graph.RateOf(pass) == of; }));
+            };
+            const std::ptrdiff_t setups = count(kgraph::PassRate::eSetup), fixed = count(kgraph::PassRate::eFixed);
+            switch (rate) {
+            case kgraph::PassRate::eSetup: return { 0, setups };
+            case kgraph::PassRate::eFixed: return { setups, setups + fixed };
+            default: return { setups + fixed, static_cast<std::ptrdiff_t>(graph.passes.size()) };
+            }
+        }
+
+        /** The setup and fixed pages as the list has them: the order they run in. */
+        void RatesInOrder(kgraph::Graph& graph)
+        {
+            std::vector<std::string> setup, fixed;
+            for (const auto& pass : graph.passes) {
+                if (graph.IsSetup(pass)) setup.push_back(pass);
+                else if (graph.IsFixed(pass)) fixed.push_back(pass);
+            }
+            graph.setup = std::move(setup);
+            graph.fixed = std::move(fixed);
+        }
+    }
+
+    bool Document::AddPass(const std::string_view name, const int index, const kgraph::PassRate rate)
     {
         kgraph::Graph graph = Graph();
         if (name.empty() || std::ranges::find(graph.passes, name) != graph.passes.end()) return false;
-        if (index >= 0 && static_cast<std::size_t>(index) < graph.passes.size()) graph.passes.insert(graph.passes.begin() + index, std::string(name));
-        else graph.passes.emplace_back(name);
+        const auto [first, end] = RangeOf(graph, rate);
+        const std::ptrdiff_t at = index < 0 ? end : std::clamp<std::ptrdiff_t>(index, first, end);
+        graph.passes.insert(graph.passes.begin() + at, std::string(name));
+        if (rate == kgraph::PassRate::eSetup) graph.setup.emplace_back(name);
+        if (rate == kgraph::PassRate::eFixed) graph.fixed.emplace_back(name);
+        RatesInOrder(graph);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::SetPassRate(const std::string_view pass, const kgraph::PassRate rate)
+    {
+        kgraph::Graph graph = Graph();
+        const auto at = std::ranges::find(graph.passes, pass);
+        const kgraph::PassRate was = graph.RateOf(pass);
+        if (at == graph.passes.end() || was == rate) return false;
+        // Where it was, as near as it can be: at the end of its new rate's run coming from before it, at the start
+        // coming from after it (setup, fixed, every frame).
+        const std::string name = *at;
+        graph.passes.erase(at);
+        std::erase(graph.setup, name);
+        std::erase(graph.fixed, name);
+        const auto order = [](const kgraph::PassRate r) { return r == kgraph::PassRate::eSetup ? 0 : r == kgraph::PassRate::eFixed ? 1 : 2; };
+        const auto [first, end] = RangeOf(graph, rate);
+        graph.passes.insert(graph.passes.begin() + (order(was) < order(rate) ? first : end), name);
+        if (rate == kgraph::PassRate::eSetup) graph.setup.push_back(name);
+        if (rate == kgraph::PassRate::eFixed) graph.fixed.push_back(name);
+        RatesInOrder(graph);
         Apply(std::move(graph));
         return true;
     }
@@ -273,6 +418,8 @@ namespace keditor
         const auto at = std::ranges::find(graph.passes, pass);
         if (at == graph.passes.end() || name.empty() || std::ranges::find(graph.passes, name) != graph.passes.end()) return false;
         *at = std::string(name);
+        std::ranges::replace(graph.setup, std::string(pass), std::string(name));
+        std::ranges::replace(graph.fixed, std::string(pass), std::string(name));
         for (auto& node : graph.nodes)
             if (node.pass == pass) node.pass = std::string(name);
         Apply(std::move(graph));
@@ -286,8 +433,11 @@ namespace keditor
         if (at == graph.passes.end()) return false;
         const std::string name = *at;
         graph.passes.erase(at);
-        const auto to = std::clamp<std::ptrdiff_t>(index, 0, static_cast<std::ptrdiff_t>(graph.passes.size()));
+        // Among those of its rate: setup before the fixed step, and that before anything done every frame.
+        const auto [first, end] = RangeOf(graph, graph.RateOf(name));
+        const auto to = std::clamp<std::ptrdiff_t>(index, first, end);
         graph.passes.insert(graph.passes.begin() + to, name);
+        RatesInOrder(graph);
         Apply(std::move(graph));
         return true;
     }
@@ -296,6 +446,8 @@ namespace keditor
     {
         kgraph::Graph graph = Graph();
         if (std::erase(graph.passes, pass) == 0) return false;
+        std::erase(graph.setup, pass);
+        std::erase(graph.fixed, pass);
         std::set<std::string> gone;
         for (auto& node : graph.nodes)
             if (node.pass == pass) {
@@ -511,6 +663,7 @@ namespace keditor
         std::erase_if(graph.nodes, [&](const kgraph::Node& node) { return gone(node.id); });
         for (auto& node : graph.nodes)
             std::erase_if(node.inputs, [&](const auto& input) { return input.second.link && gone(input.second.link->node); });
+        LetGoOfUnwired(graph, Graph());
         Apply(std::move(graph));
     }
 
@@ -661,6 +814,14 @@ namespace keditor
         Apply(std::move(graph));
     }
 
+    void Document::SetDefaultMeshTangents(const kgraph::Tangents tangents)
+    {
+        if (Graph().defaultMeshTangents == tangents) return;
+        kgraph::Graph graph = Graph();
+        graph.defaultMeshTangents = tangents;
+        Apply(std::move(graph));
+    }
+
     kgraph::MeshImport Document::MeshImportOf(const std::string_view file) const
     {
         const auto it = Graph().meshImports.find(std::string(file));
@@ -698,7 +859,7 @@ namespace keditor
             if (error) *error = std::format("'{}' of '{}' has no node of its own to set it up", input, id);
             return {};
         }
-        const std::string pass = node->pass;
+        const std::string pass = node->pass;     // (the node is another once a node is added)
         const double x = node->x - 300.0, y = node->y;
         const std::string made = AddNode(port->companion, x, y, {}, pass);
         if (made.empty() || !Connect(made, "out", id, input)) {
@@ -756,6 +917,7 @@ namespace keditor
                 const auto pipeline = other.inputs.find("pipeline");
                 if (pipeline != other.inputs.end() && pipeline->second.link && pipeline->second.link->node == id) other.inputs.erase(std::string(input));
             }
+        LetGoOfUnwired(graph, Graph());
         Apply(std::move(graph));
         return true;
     }
@@ -765,6 +927,7 @@ namespace keditor
         kgraph::Graph graph = Graph();
         auto* node = graph.Find(id);
         if (!node || node->inputs.erase(std::string(input)) == 0) return false;
+        LetGoOfUnwired(graph, Graph());
         Apply(std::move(graph));
         return true;
     }
@@ -775,7 +938,10 @@ namespace keditor
         std::size_t taken = 0;
         for (auto& node : graph.nodes)
             taken += std::erase_if(node.inputs, [&](const auto& input) { return input.second.link && input.second.link->node == id && input.second.link->output == output; });
-        if (taken > 0) Apply(std::move(graph));
+        if (taken > 0) {
+            LetGoOfUnwired(graph, Graph());
+            Apply(std::move(graph));
+        }
         return taken;
     }
 
@@ -801,7 +967,7 @@ namespace keditor
     {
         if (!_world.SetPosition(entity, position)) return false;
         Override(entity, "position");
-        Changed();
+        Shifted();
         return true;
     }
 
@@ -809,7 +975,7 @@ namespace keditor
     {
         if (!_world.SetRotation(entity, degrees)) return false;
         Override(entity, "rotation");
-        Changed();
+        Shifted();
         return true;
     }
 
@@ -817,14 +983,14 @@ namespace keditor
     {
         if (!_world.SetScale(entity, scale)) return false;
         Override(entity, "scale");
-        Changed();
+        Shifted();
         return true;
     }
 
     void Document::Moved(const kecs::Entity entity, const std::string_view what)
     {
         Override(entity, what);
-        Changed();
+        Shifted();
     }
 
     bool Document::DestroyEntity(const kecs::Entity entity)
@@ -965,6 +1131,19 @@ namespace keditor
             if (numbers.count == 1) {
                 if (const bool* flag = value.Bool()) WriteNumber(numbers, at, *flag ? 1.0 : 0.0);
                 else if (const double* number = value.Number()) WriteNumber(numbers, at, *number);
+                else if (const std::string* name = value.String(); name && !found->choices.empty()) {
+                    // One of so many things, by its name — any case.
+                    const auto same = [&](const std::string& choice) {
+                        return std::ranges::equal(choice, *name, [](const char a, const char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); });
+                    };
+                    const auto it = std::ranges::find_if(found->choices, same);
+                    if (it == found->choices.end()) {
+                        std::string names;
+                        for (const auto& choice : found->choices) names += (names.empty() ? "" : ", ") + choice;
+                        return fail(std::format("'{}' is one of {}: not '{}'", field, names, *name));
+                    }
+                    WriteNumber(numbers, at, static_cast<double>(it - found->choices.begin()));
+                }
                 else return fail(std::format("'{}' is a {}", field, numbers.scalar == 'b' ? "true or false" : "number"));
             } else {
                 const auto* items = value.Items();
@@ -1363,14 +1542,27 @@ namespace keditor
         return project.empty() ? std::filesystem::path() : project / "functions";
     }
 
+    std::filesystem::path Document::EngineFunctionsDirectory() { return kscript::PackageDirectory() / "functions"; }
+
     std::vector<std::string> Document::Functions() const
     {
-        std::vector<std::string> names;
+        std::set<std::string> names;
         std::error_code ignored;
-        for (const auto& entry : std::filesystem::directory_iterator(FunctionsDirectory(), ignored))
-            if (entry.path().extension() == FunctionEnding) names.push_back(entry.path().stem().string());
-        std::ranges::sort(names);
-        return names;
+        for (const auto& folder : { FunctionsDirectory(), EngineFunctionsDirectory() }) {
+            if (folder.empty()) continue;
+            for (const auto& entry : std::filesystem::directory_iterator(folder, ignored))
+                if (entry.path().extension() == FunctionEnding) names.insert(entry.path().stem().string());
+        }
+        return { names.begin(), names.end() };
+    }
+
+    bool Document::IsEngineFunction(const std::string_view name) const
+    {
+        std::error_code ignored;
+        const std::string file = std::string(name) + FunctionEnding;
+        const std::filesystem::path project = FunctionsDirectory();
+        if (!project.empty() && std::filesystem::exists(project / file, ignored)) return false;
+        return std::filesystem::exists(EngineFunctionsDirectory() / file, ignored);
     }
 
     std::vector<kgraph::Preset> Document::Presets() const
@@ -1380,7 +1572,8 @@ namespace keditor
             kgraph::Preset call;
             call.name = kgraph::FindType(name) ? std::format("{} (function)", name) : name;
             call.type = "Function";
-            call.doc = std::format("A call of the project's function {}: its nodes, as one. Pressed twice, it is opened.", name);
+            call.doc = IsEngineFunction(name) ? std::format("A call of the engine's function {}: its nodes, as one. Pressed twice, it is opened; changed, it is saved as the project's own.", name)
+                                              : std::format("A call of the project's function {}: its nodes, as one. Pressed twice, it is opened.", name);
             call.inputs = { { "function", kgraph::Value(name) } };
             presets.push_back(std::move(call));
         }
@@ -1391,7 +1584,6 @@ namespace keditor
     {
         graph.functions.clear();
         const std::filesystem::path folder = FunctionsDirectory();
-        if (folder.empty()) return;
         std::vector<const kgraph::Graph*> look { &graph };
         while (!look.empty()) {
             const kgraph::Graph* of = look.back();
@@ -1400,7 +1592,8 @@ namespace keditor
                 if (node.type != "Function") continue;
                 const std::string* name = TextOf(node, "function");
                 if (!name || graph.functions.contains(*name)) continue;
-                const std::filesystem::path file = folder / (*name + FunctionEnding);
+                // The project's, or — when it has none so called — the engine's.
+                const std::filesystem::path file = (IsEngineFunction(*name) ? EngineFunctionsDirectory() : folder) / (*name + FunctionEnding);
                 std::error_code ec;
                 const auto written = std::filesystem::last_write_time(file, ec);
                 if (ec) continue;   // the call says there is no such function, on itself
@@ -1563,6 +1756,10 @@ namespace keditor
         opened.pass = Unique(std::format("{} (function)", *name), [&](const std::string& p) { return std::ranges::find(graph.passes, p) != graph.passes.end(); });
         const auto after = std::ranges::find(graph.passes, node->pass);
         graph.passes.insert(after == graph.passes.end() ? graph.passes.end() : after + 1, opened.pass);
+        // Run as often as the call is.
+        if (graph.IsSetup(node->pass)) graph.setup.push_back(opened.pass);
+        else if (graph.IsFixed(node->pass)) graph.fixed.push_back(opened.pass);
+        RatesInOrder(graph);
         std::map<std::string, std::string> outputEdge;      // a port of the call, the FunctionOutput it is
         for (const auto& inner : found->second->nodes) {
             kgraph::Node copy = inner;
@@ -1688,6 +1885,8 @@ namespace keditor
         std::erase(graph.passes, opened.pass);
         graph.nodes.push_back(call);
         std::string why;
+        // Into the project, always: one of the engine's changed is the project's own from then on.
+        if (FunctionsDirectory().empty()) return fail("a function is kept in a project, and this scene is in none");
         if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, why)) return fail(why);
         _functionFiles.erase(opened.function);
         WireAcrossPasses(graph, { call.id });

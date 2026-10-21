@@ -51,6 +51,103 @@ A pass holds what it makes for itself and what it runs. What it uses of an earli
 graph out, not a boundary: a wire may go from any node to any other. Their order decides one thing: which
 of two passes runs first when nothing they use says (see [Order](#order)).
 
+### How often a pass runs
+
+Each pass runs at one of three rates (`kgraph::PassRate`), in this order: **setup** (once), **fixed** (on the fixed
+step), and **every frame**, which a pass is when nothing says. `Graph::setup` and `Graph::fixed` name the pages of the
+first two, each in its own order; the rest run every frame. `passes` holds them all in that order, and they are saved
+apart (`"setup": [...]`, `"fixed": [...]`, `"passes": [...]`). `Graph::RateOf(pass)` says which a pass is, and
+`Graph::SetRate` moves it.
+
+#### Setup
+
+Some passes are made once, not every frame: a noise texture, a table worked out on the GPU, a buffer cleared to start
+with. `Graph::setup` names those pages. They are among `passes`, first and in the order they run, and are saved apart
+from the rest:
+
+```json
+{ "kgraph": 1, "setup": ["noise"], "passes": ["frame", "scene", "show"], "nodes": [
+  { "id": "noise", "type": "Image", "pass": "noise", "inputs": { "usage": ["eStorage", "eSampled"] } },
+  { "id": "make noise", "type": "Dispatch", "pass": "noise", "inputs": { "pipeline": { "$link": ["noise gen", "out"] }, "cover": "target" } }
+] }
+```
+
+A pass node on a setup page records on the frame after it is built, and rests from then on. It stays in the frame
+graph while it rests, so whatever reads what it made still runs after it. It records again only when it is built
+again, and it is built again whenever something it is wired to is: an image resized (by the Screen), a constant or a
+shader edited, a picture arriving from its file in place of its stand-in. A per-frame resource it writes is one copy
+for each frame in flight, so it records on that many frames, once into each copy. Setup is one sequence: when any pass
+of it records again, every pass of it does, as many times as the one that records most — so a pass that adds into a
+buffer another cleared before it never adds twice. What a setup page uses of a page of
+every frame is not there yet when it runs: a setup page brings in only what earlier setup pages made, and what is in
+no pass.
+
+A value it is given that follows the world (see [The scene](#the-scene)) changes where it is, without building
+anything, so it makes setup record nothing. A pass that should follow a value every frame belongs on a page of every
+frame.
+
+#### The fixed step
+
+A **fixed** page is for what must not go faster or slower with the frame rate: a simulation. Whoever runs the scene
+tells the runtime of each fixed step it takes (`Runtime::FixedStep(seconds)`: a scene's `FixedUpdate`, which the editor
+and the player call while the scene plays, 60 a second by default). A pass node on a fixed page records on a frame that
+has one or more steps in it, and rests on a frame that has none. `Runtime::FixedSteps()` is how many the frame has.
+
+A **FixedStep** node gives it as numbers: `dt` (a step's length, in seconds), `steps` (how many this frame has) and
+`count` (how many there have been, this frame's among them), `lost` (steps frames had beyond the most they run) and
+`alpha` (how far the frame is from the last step to the next, 0 to 1: what drawing mixes the last two steps' states by,
+so that what moves on the fixed step moves smoothly between steps; `Runtime::SetFixedFraction`, which a scene sets).
+
+Setup runs again when the scene starts playing from the beginning, and when it stops (`Runtime::RunSetupAgain`): what
+it made — a simulation's starting state — starts from the world as it is. Not when it is paused, or plays on.
+
+#### State kept from step to step
+
+A **Buffer** or an **Image** node is one copy, kept from frame to frame, unless it is `isPerFrame` (a copy for each
+frame in flight): what a step writes into it is there for the next. A pass on a fixed page that writes a per-frame one
+is said to (its node's note): each frame in flight would step its own copy.
+
+A **Keep** is a copy of a buffer or an image (`of`, with `eTransferSrc`) as it is where the Keep is among the passes: a
+pass node that makes its copy, like its `of`, and copies into it each time its page runs. What comes after it reads the
+Keep's `out` as the state was before, while it writes `of` itself: the last step's positions, beside this step's. It
+is ordered among what writes `of` — by page, then by its place in the node list — not after every writer, as a pass
+that only reads is (see [Order](#order)): put it first on the step's first page.
+
+#### Back into the entities
+
+A **WriteBack** writes what the GPU worked out into the entities it was worked out for. `buffer` is read back (a frame or
+two late, as a watch is: see [Looking at what a node made](#looking-at-what-a-node-made)); `forEach` names the ForEach
+whose elements the buffer's are — its first element is that ForEach's first entity — and `stride` how many bytes an
+element is. Each element's `position` (three floats, where the entity is relative to what it is under), `rotation` (a
+quaternion, x y z w) and `fields` (`{ "RigidBody.velocity": 32 }`: each component field's bytes, copied as they are) are
+read from where those say, in bytes, and written into the entity — but only when what is read back changes, so that a
+scene that is not stepping is not written over while it is edited. Only the runtime a scene is run by writes; a view
+that follows it does not.
+
+An entity moved by something else since it was last written — the gizmo, a script, the inspector — makes setup run
+again, from the world as it is: what setup made of the entities starts from where it was put, and the read-backs from
+before that are let pass. A simulation's state goes round through the entities this way, its velocities too when they
+are among `fields`. An element whose float at `follows` (bytes into it) is not 0 follows its entity instead — a kinematic
+body a script turns every step: it is neither written back nor taken as moved, and its entity's place goes to the
+simulation another way (XpbdStep's `driven`). Taken as moved, it would make setup run again every step.
+
+What is read back is of the steps before this frame's, while what a script moved this frame — that kinematic blade — is
+drawn where it was put: a body the blade pushes would be drawn a step behind it, in it. Given `velocity` (three floats,
+bytes into an element) and `spin` (three floats, radians a second about the world's axes), each element is sent on by
+them over this frame's fixed steps before it is written, so that it is drawn with the rest. Nothing is written while
+setup is still being recorded (once for each copy of what it makes): it is made from the entities, and what is read back
+is of what it is about to make again.
+
+A resource made of values wired from the world — a Buffer whose `instanceCount` is a ForEach's `count` — is made again
+when they change: one more body is a bigger buffer. What setup wrote into it is written again, as it is built again.
+
+A frame with several steps runs its fixed pages once for each, each step after the one before: the passes of the fixed
+pages are in the frame `Graph::fixedStepsAtMost` times over (4 unless the graph says; `"fixedStepsAtMost"`), and those
+beyond the steps the frame has rest. Within them, what a fixed pass reads that a fixed pass writes is ordered among the
+writers, so that a step reads what the step before it wrote. A frame with more steps than that loses the rest — the
+simulation slows rather than falling further behind — and FixedStep's `lost` counts them. Every step of a frame is
+given the same values: FixedStep's `count` is the frame's, not each step's.
+
 `Graph::overview` is where nodes are when every node is seen at once, by id — a layout apart from the
 passes' pages (`"overview": { "color": [1200, 40] }`). It is only for the editor; nothing that runs reads it.
 
@@ -65,7 +162,8 @@ whoever has the graph (`Graph::functions`, by name; a project's `functions/<name
 **FunctionInput** and **FunctionOutput** nodes are its edges. Each edge is a port of every call, by its `name`, in
 the order the edges are on the function's page, top to bottom; its `kind` says what it carries: `eValue`,
 `eEntities` (what a Filter keeps some of), or a resource — `eMesh`, `eBuffer`, `eImage`, `eResource`. An input a
-call is given nothing at takes its `default`.
+call is given nothing at takes its `default`; an `eBuffer` given nothing is a small buffer of zeros made in the call's
+place, so that a buffer a function can do without — with a count of 0 beside it — may be left unwired.
 
 Before the graph runs, each call is written out into its function's nodes, `<call>/<node>`, in the call's pass —
 before its loops are, so that a function can hold a loop and a call can be in one. What is wired to an input is
@@ -78,6 +176,41 @@ the node inside gives it, and `ValueOf` and `ResourceOf` what is there.
 A FunctionInput or FunctionOutput in a graph itself — a function opened in place, in the editor — stands for what
 its `value` is wired from.
 
+A call's nodes are written out where the call is among the nodes, and a loop's a turn at a time — every node of the
+turn, then the next turn's — where the loop's first node is: passes that nothing they use orders run in the order of
+the nodes, so a function's passes run where it is called, and a loop's in turns.
+
+**The engine's functions** are there in every project (`packages/koral/functions`, beside its shaders in
+`packages/koral/shaders`); a project's function of the same name is called in its place, and one of the engine's
+opened and changed is saved as the project's own (`Document::EngineFunctionsDirectory`, `IsEngineFunction`). Each
+works on 32-bit uints, in buffers with `eStorage`:
+
+| Function | Given | Gives |
+|---|---|---|
+| **Scan** | `values`, `count` (up to 1,048,576) | `values`, each the sum of those before it (an exclusive prefix sum), in place; `total`, a buffer whose first uint is the sum of them all |
+| **RadixSort** | `keys`, `values`, `count` (up to 16,777,216) | both sorted by key, in place: stable — the same keys keep their values in order — four bits a turn, eight turns |
+| **Compact** | `flags`, `values`, `count` | `kept`: the values whose flag is not 0, one after another, in their order; `count`, a buffer of how many |
+| **IndirectArgs** | `counter` (a buffer), `offset` (which uint of it), `groupSize` | `args`: the groups that cover that count, for a Dispatch's `indirect` |
+| **SpheresStep** | `bodies` (64 bytes each: position and inverse mass, velocity and radius, spin and inverse inertia, orientation), `materials` (16 bytes each: friction, restitution, linear and angular damping), `count`, `dt`, `gravity`, `cell` (the largest diameter), `ground` (a height) | one fixed step of the spheres, in place: kphysics' sequential impulses, one colour of contacts at a time — a hashed grid sorted with RadixSort, the contacts, colours worked out on the GPU (each contact proposes the lowest colour its bodies have free; twelve, and what is left one more), ten iterations — and `contacts`, a buffer whose first uint is how many touch |
+| **XpbdStep** | `bodies` (112 bytes each: position — of its centre of mass — and inverse mass; velocity and reach; spin and shape — 0 a sphere, 1 a box, 2 a capsule, 3 a plane, 4 a cone, 5 a mesh; orientation; size — a sphere's radius, a box's half extents, a capsule's radius and half its length, a cone's radius and height; inverse inertia about its own axes, and in `w` how long it has been still; where its entity is, what a WriteBack writes: a cone's middle, a quarter of its height above its centre of mass), `materials`, `count`, `shared` (what setup found: the largest reach, the planes, the joints, the mesh colliders and their triangles), `dt`, `gravity`, `cell` (0: the largest reach, twice), `ground` (a height; −1e31 none), `sleepAfter` (seconds still before a body sleeps; 0 never), `driven` (two float4 each kinematic body's entity: where it is and its entityId, its orientation) and `drivenCount`, `steps` (this frame's, to get there in), `contactsEvery` (how many substeps the contacts found are kept for; 2), `idle` | one fixed step the GPU's way: XPBD in eight substeps (Macklin and others' small steps), each body solved by itself from every contact it finds in the grid — collided as kphysics collides them, a box against a box by separating axes and the incident face clipped — the pushes averaged over its points, friction averaged over each contact's points and whole across contacts (which rolls a sphere), a velocity solve that takes off what pushing apart turned into speed and bounces what came fast; no colours. Its contacts with the bodies near it are found every `contactsEvery` substeps, each a little bigger by how far it goes meanwhile, and kept: each point on each body in its own frame (a round one's as its core and its radius), the normal kept too — but a sphere's against a sphere or a capsule along their cores as they are — so that a substep finds how deep each is from where the two are then, with no narrowphase of its own. Kept for a whole step, a crowd a blade throws about is met as it was and pressed into floors; found every substep, it costs most. Its pushes out of the bodies it meets that move are at most 5 m/s (and as much turning at its reach): turned into speed, more threw a capsule landing on a box metres up. Joints (ball, hinge with its limits and motor, distance, rope) hold whole, each body's averaged apart from its contacts, a hinge's turns about its pin; one at a limit it turned into stops there. A body still (under 0.05 m/s and rad/s) for `sleepAfter` sleeps — not moved, until something moving touches it or a joint's other moves. A cone meets what it touches by points — its point and twelve of its rim against the other's surface, and the other's points against its own; against a box, also its lines from point to rim where they run through the box, and the box's edges. A body's pushes out of what nothing moves (a static or kinematic body) are averaged apart from those with what moves, and the planes' and meshes' apart again, with the last word — what the rest would push it further into them with is let go — so that a crowd or a sweeping blade does not press it through a floor, a wall or the blade; the pushes between moving bodies stay shared by every point. A mesh collider (static or kinematic) is met one-sided, as kphysics meets one: each of the body's points against its triangles — a point behind a face the body's middle is behind too goes out through it, one behind faces the middle is in front of through the nearest — and an edge of it into a body in front of its face pushing the body off, never back through the face; sixteen lanes share a body's triangles before each solve, and a push out of a mesh is at most 5 m/s. A static body stays; a kinematic one goes by its velocity, pushing and never pushed — or, one whose entity is among `driven`, by the velocity that takes it where its entity is. The grid's cells are sized by the dynamic bodies: a static or kinematic one too big for them (a floor, a wall, a bar) is met from a list of its own, by what is near its surface rather than its middle. A body's contacts are found by sixteen lanes, each a sixteenth of the bodies near it, so that a few hundred bodies keep the GPU busy: a substep takes as long as its slowest group, and a narrowphase in any of them is what a substep costs |
+| **XpbdPrepare** | `bodies`, `count` | each body's inverse mass, inverse inertia and reach worked out from its shape, its size and its mass (given in `w` of its inverse inertia), and `shared` with no joints — on setup |
+| **XpbdFromComponents** | `described` (eight float4 an entity: position and kind; orientation; velocity and shape; spin and radius; half extents and height; scale and density; mass, friction, restitution, angular damping; linear damping, the entity's id and a mesh's thickness), `count`, `joints` (five float4 a Joint: its entity's id, the other's, kind, limited; anchor and lower limit; other anchor and upper limit; axis and motor speed; most torque and whether the two still collide), `jointCount`, the meshes: `meshesOf` (a float4 an entity with a Mesh: its id and its group, which of the pack's meshes it shows), `listed`, a MeshPack's `ranges` (its rangeBuffer) and `meshes` (its count), and its MeshBuffers' `vertices`, `indices`, `stride`, `position` and `indexCount` | `bodies`, `materials` and `shared` for XpbdStep, as kphysics' bridge reads a RigidBody, a Collider and a Joint: sizes by the entity's scale, the mass given or of the density and the volume, a cone's body at its centre of mass; each joint's bodies found by their entities, its anchors and axes in each one's frame, and each body's list of them; each mesh collider's line — its triangles, its scale, its thickness, its bounds — and every triangle of the pack |
+| **XpbdRigidBodies** | — | every entity with a RigidBody and a Collider (its ForEach is `<call>/bodies of`, which a WriteBack names), every Joint on one, and the meshes they show (a Filter of them grouped by Mesh, packed as positions only), as XpbdStep's `bodies`, `materials`, `count` and `shared`: put it on a setup page |
+
+A scene runs its RigidBodies on the GPU with no PhysicsSimulation: XpbdRigidBodies on a setup page; FixedStep and XpbdStep
+(wired from it) on a page of the fixed step; and a WriteBack of XpbdStep's `bodies` (stride 112, `position` 96,
+`rotation` 48, `follows` 108, `velocity` 16, `spin` 32, `fields` `{ "RigidBody.velocity": 16, "RigidBody.angularVelocity": 32 }`)
+on a page of every frame. The
+physics project's `gpu` scene is a thousand of them.
+
+Both behave as kphysics does (`tests/test_gpu_physics.cpp`: a falling sphere, one that rolls at 5/7 of the speed it slid at,
+a bounce, a pile), and on an RTX 5090 a step of either takes less than a step of kphysics with its threads: 10,000
+spheres 3.9 ms (SpheresStep) and 2.7 ms (SpheresXpbd) a frame against 4.1 ms; 50,000, 11.4 and 7.6 against 23.2;
+100,000, 20.7 and 14.7 against 51.8.
+
+A buffer read or written by one of the engine's shaders is read and written (`RWStructuredBuffer`), so that the passes
+that use it run in the order of the nodes.
+
 ## Node types
 
 `kgraph::Catalog()` lists them, with every input and output, its type and its description. This is what
@@ -89,8 +222,11 @@ the editor will build its node list and its nodes from.
   `extent.x`, `entryPoint.module`. A setting that can be given more than once is `color[].view`, written
   in a graph as `color[0].view`, `color[1].view`. Nothing is written by hand: a builder that gains a
   setting gains the input.
-- **Values:** Number, Bool, String, Vector, Color, Constant (`ePi`, `eTau`, `eE`, `eSqrt2`, `ePhi`), Component,
-  and Split (a vector's `x`, `y`, `z`, `w` as outputs of their own).
+- **Values:** numbers of a kind — Float (32 bits, as a shader's `float`), Double, Int and UInt (what they are given
+  rounded toward zero and kept within 32 bits; a UInt none or more) — and vectors of a size and a kind: Vec2, Vec3 and
+  Vec4 of floats, IVec2 to IVec4 of ints, UVec2 to UVec4 of uints, each component given (0 when not). Bool, String,
+  Color, Constant (`ePi`, `eTau`, `eE`, `eSqrt2`, `ePhi`), Component, and Split (a vector's `x`, `y`, `z`, `w` as
+  outputs of their own). Number and Vector, of no kind, are not offered any more: a graph that has them keeps them.
 - **Math:** Add, Subtract, Multiply, Divide, Min, Max, Pow, Mod, MultiplyAdd, Negate, Abs, Floor, Ceil, Round,
   Trunc, Fract, Sign, Saturate, OneMinus, Reciprocal, Sqrt, InverseSqrt, Exp, Exp2, Log, Log2, Log10, Sin, Cos,
   Tan, Asin, Acos, Atan, Atan2, Sinh, Cosh, Tanh, Radians, Degrees, Clamp, Lerp, InverseLerp, Remap (`value` from
@@ -108,9 +244,9 @@ the editor will build its node list and its nodes from.
 - **VertexLayout** describes a mesh's vertices: a list of `{ "semantic": "POSITION", "type": "eFloat",
   "count": 3 }`, packed in the order given. Its output goes to a pipeline's `vertexShader.layout` and to a
   Mesh node's `vertexLayout`.
-- **Primitive** is a mesh of a simple shape, centred on the origin and about a unit across: `eCube`,
-  `eSphere`, `ePlane` (facing up), `eCylinder`, `eCone`, `eCapsule`, `eTorus`, and `eQuad` (facing +z) and
-  `eTriangle`. Each has positions, normals and texture coordinates, and faces outward. Its second output,
+- **Primitive** is one of the default meshes (below), by its name: `eCube`, `eRoundedBox`, `eTeapot`, ...
+  Each has positions, normals, texture coordinates and the tangents the graph asks for, and faces outward
+  (the inside ones, in). Its second output,
   `layout`, is what a pipeline that draws it takes as `vertex.layout`.
 - **Entities** is every entity, a **Filter** those of them with and without components, an **Entity** one of them (the
   first with a component, or one by name), and a **ForEach** reads any
@@ -132,6 +268,20 @@ the editor will build its node list and its nodes from.
   made of that image. **Reference** stands for another node by id: how a pass brings in what an
   earlier one made.
 - **ImageFile** is a picture from a file. See [Files](#files).
+- **Script** runs one of the project's `ResourceScript`s (see [scripts](scripts.md#scripts-that-make-resources)), by
+  its class, in `script`. Its outputs are what the script makes, each by its name — Images, Buffers, ImageViews,
+  BufferViews, Samplers — and its inputs are the script's fields, `field.<name>`, and what each resource is made with,
+  `<resource>.<input>`: an Image's `picture.format`, `picture.extent.x`, the inputs a node of its kind has, starting as
+  the script's source says (`ScriptResource::settings`) and otherwise as that kind of node starts. A resource made of
+  another — an ImageView's `image` — names another of the script's in its source, or is wired. The images and buffers
+  that are of nothing else of the script's are made first; then the script fills them all at once — an image's first
+  level, every layer, its smaller levels made from it; a buffer's every byte — and they are made again with what it
+  wrote; then the views of them. It is all made and filled again whenever any of it is: a size changed, the script set
+  again (edited, loaded, run), a field changed. Whoever runs the graph says which scripts there are
+  (`Runtime::SetResourceScript`, a `ResourceScript` with its `resources` and a `fill` function); one declared and run by
+  nothing makes what it makes empty, and the node's `Status(id)->note` says so. A per-frame resource, or an image of a
+  format whose texel is no plain numbers, cannot be filled: it says why. An editor offers a Script node of each script
+  among the nodes to add (`Runtime::Presets`).
 - **Repeat**, **Previous**, **Element** and **Switch** are what is done more than once, and one of several
   ways. See [Loops and branches](#loops-and-branches).
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
@@ -208,10 +358,34 @@ arguments: a Framebuffer given only `depthStencil.view` has its depth attachment
 called `depth`, and a `color[n].view` alone clears to opaque black — where the builder's own zeros would clear depth
 to 0, which nothing drawn with a depth test passes.
 
+`Port::min` and `Port::max` are what an editor keeps a number input within, each of a vector's numbers, and each part
+of an input in parts the same as the whole: an Image's `extent` and `mipLevels` at least 1, a Repeat's `count` 1 to
+256, a Perspective's `fieldOfView` 1 to 179, a CubeFace's `face` 0 to 5, a ShadowCascades' `lambda` 0 to 1, a group's
+size at least 1, and any count, offset or size of a draw no less than 0; a copy's or a blit's levels 0 to 15 and its
+layers 0 to 2047; a framebuffer's clear depth 0 to 1 and stencil 0 to 255; a sampler's level of detail bias −16 to 16.
+An unsigned builder argument is at least 0. A Script node's `field.<name>` inputs have the script's `[Range]`, `[Min]`
+and `[Logarithmic]`. Anything else is unbounded — a position, a matrix, what a math node works on. The graph does not
+check them: a value from a wire, or a file, is used as it is.
+
+`Port::group` is the part of an inspector an input is in — a Draw's *Indirect*, *Depth*, *Stencil*; a builder's struct,
+`rasterizationState`; what three or more inputs share the start of the name of, `color[]` — and empty for what is at
+the top. `Port::when` is when it does anything: while another input is one of some values (a Draw's `indirectOffset`
+while its `command` is an indirect one, a Sampler's `maxAnisotropy` while `anisotropyEnable` is true), with what that
+is in words. `kgraph::Applies(port, node)` says whether it does as the node is set — by what it is given, or what that
+input starts as; one wired, or neither given nor starting as anything, might, and does.
+
+`Port::logarithmic` is a number dragged by so much of what it is rather than by so much: a size (an extent, a buffer's
+bytes, a shadow map's resolution), a distance (a lens's near and far, a cascade's reach), a count that may be a few
+or thousands (vertices, instances, groups). What is between two ends — a field of view, a `lambda`, a depth — is not.
+`Port::integer` is a whole number, dragged and typed a unit at a time: a builder's integer argument, a count, an
+index, a level or a layer, an Int's or a UVec's. `kgraph::LimitsOf(struct, field)` says the same of a field of one of
+the builders' structs: a stencil's masks and reference 0 to 255, a depth range 0 to 1, `minSampleShading` 0 to 1, a
+line 0 to 64 pixels wide, a vertex attribute of 1 to 4 numbers at location −1 (by its semantic) to 31.
+
 ## Pipelines
 
 A pipeline names its shaders itself, a stage at a time: `<stage>.module` is a `.slang` file among the
-project's shaders, and `<stage>.entry` the function in it (`<stage>Main` when not given).
+project's shaders, and `<stage>.entry` the function in it (`<stage>Main` when not given: of a hit group's, its own stage's, `closestHitMain`).
 
 | Pipeline | Stages |
 |---|---|
@@ -442,7 +616,8 @@ struct is `field.material.albedo`; a fixed array of numbers is one input taking 
 zero. A value with fewer numbers than the field fills the first of them.
 
 A **ForEach** node is every entity that has a `component` (and those of `with`, and none of `without`), in the
-hierarchy's order, an element at a time. It gives `field.<name>` for each number or vector field of the component
+hierarchy's order, an element at a time — with `where` (`{ "field.kind": 2 }`, a Filter's too), only those whose fields
+hold what it says, found again when those components change. It gives `field.<name>` for each number or vector field of the component
 (`Runtime::OutputsOf(id)`), and where the entity is: `matrix`, `worldPosition`, `forward`, `up`, `right`, `position`,
 `rotation`, `scale`. It gives no struct of them: each is wired where it goes. Also `count` and `entityId`, and — asked
 for, where the order matters more than the entity does — `index` (the element, from 0). With `repeat` (1 to 256) each
@@ -566,7 +741,7 @@ node, read the first time it is asked for, and saved by that name:
 | `Runtime::ResourceOf(...)` | What it is |
 |---|---|
 | `@textures/wall.png` | That picture, with its smaller levels made. Any format the framework's image importer reads, `.hdr` included. |
-| `@sponza/Sponza.gltf#3` | The fourth mesh of that model, laid out as the default meshes are: POSITION, NORMAL, UV. |
+| `@sponza/Sponza.gltf#3` | The fourth mesh of that model, its attributes as the file has them (see below). |
 | `$white`, `$black`, `$normal` | A picture of one texel. |
 
 A path is the file's own, or one under `Runtime::AssetDirectory()` — a project's `assets` folder, which a document
@@ -589,11 +764,42 @@ pass that draws a hundred of them binds one.
 ### Default meshes
 
 An entity's `kgraph::Mesh` can hold one of the default meshes without the graph having a node for it:
-`runtime.ResourceOf("$cube")`, and likewise `$sphere`, `$plane`, `$cylinder`, `$cone`, `$capsule` and
-`$torus` (`kgraph::DefaultMeshNames()`, `kgraph::DefaultMeshId(name)`). Each is made the first time it is
+`runtime.ResourceOf("$cube")`, and likewise each of `kgraph::DefaultMeshNames()` (`kgraph::DefaultMeshId(name)`).
+Each is about a unit across and centred on the origin:
+
+| Mesh | What it is |
+|---|---|
+| `$cube`, `$sphere`, `$plane` (facing up), `$cylinder`, `$cone`, `$capsule`, `$torus`, `$quad` (facing +z), `$triangle` | The Kotlin engine project's shapes, as it makes them. |
+| `$icosphere` | A sphere of 1280 even triangles: no bunching at the poles, for what is displaced. |
+| `$grid` | The plane cut 64 by 64: for water, ground, cloth — what is moved vertex by vertex. |
+| `$insideCube`, `$insideSphere` | The cube and the sphere facing in, their pictures the right way round from inside: a sky box, a sky dome, a room. |
+| `$roundedBox` | A cube with its edges and corners rounded, 0.1 round. |
+| `$wedge` | A ramp: its back a unit tall at -Z, sloping to nothing at +Z. |
+| `$pyramid`, `$hemisphere` (from -0.25 to 0.25, flat side down), `$pipe` (a tube, its wall 0.15 thick) | |
+| `$arch`, `$stairs` | Blocking out a level: an arch half a unit deep, 0.6 wide through; five stairs climbing towards -Z. |
+| `$teapot`, `$knot` | To try shading on: a teapot made of turned and swept shapes (not the Utah patches), a trefoil knot. |
+| `$arrow` | Up +Y, a shaft and a cone. `$axes`: arrows along +X, +Y, +Z from the origin, a ball where they meet. |
+| `$skinnedCylinder` | Of three bones (at its foot, middle and top), with `BONE_IDS` and `BONE_WEIGHTS`: laid out apart from the rest, so drawn by a Draw of its own. |
+ Each is made the first time it is
 asked for, and is saved by that id. They are the Primitive node's shapes, laid out the same way, so a
 pipeline that takes a Primitive's `layout` draws them. `<kgraph/meshes.h>` also gives the shapes as plain
 numbers (`ShapeData`), for code that wants the vertices.
+
+**Their tangents.** Besides POSITION, NORMAL and UV they have the way their picture's u grows along the surface
+(the tangent) and the way v does (the bitangent), for a normal map to be turned by, after the normal in one
+buffer, as `Graph::defaultMeshTangents` says (saved with the graph as `"defaultMeshTangents"` when it is not the
+first):
+
+| `Tangents` | Saved as | Attributes | Bytes a vertex |
+|---|---|---|---|
+| `eFour` (the default) | `tangent` | POSITION, NORMAL, `TANGENT` (float4: xyz the tangent, w ±1), UV — bitangent = cross(normal, tangent.xyz) · w, as glTF has it | 48 |
+| `eWithBitangent` | `tangentBitangent` | POSITION, NORMAL, `TANGENT` (float3), `BITANGENT` (float3), UV — as a model file's meshes are read, so that the two pack together | 56 |
+| `eNone` | `none` | POSITION, NORMAL, UV | 32 |
+
+Changed, the default meshes made are made again and what held them holds the new (`Resource::replacedBy`), and a
+Primitive is built again. `kgraph::AddTangents(data, form)` works them out for any `VertexData` with a NORMAL and a
+UV (per triangle, summed at each vertex, then made at right angles to the normal). Meshes drawn by one Draw are laid
+out alike: a script's mesh drawn with default ones has the same attributes in the same order.
 
 ### Meshes of any attributes
 
@@ -618,6 +824,17 @@ a script's are `$script/<name>` — replacing one there was. `runtime.ReadMesh(i
 device as `VertexData`: every attribute, in its buffers, and its indices (a model's part, only its own).
 
 ### Dispatch and Draw
+
+A Dispatch, a TraceRays, a Keep, a CopyBuffer and a ClearBuffer take `idle`: while what they are given is not zero (or
+is true), they record nothing that frame — given a number, always or never; wired from a value worked out each frame (a
+FixedStep's `steps` compared with 0, a count), on the frames it says. A Draw's `idle` is a number for each turn of its
+`cullIndex` (see [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame)).
+
+A **MeshBuffers** gives a mesh's buffers as buffers, for a compute shader to read its triangles: `vertices` (the buffer
+its positions are in), `indices` (32 bits each), `stride` and `position` (where in a vertex its position is, in bytes),
+`vertexCount`, `indexCount`, and a model's mesh's `firstIndex` and `vertexOffset` within the buffers its model shares.
+Every mesh made of numbers — a default one, a Primitive's, a model's, a script's, a MeshPack's — has its buffers with
+`eStorage`.
 
 **Dispatch** runs a compute pipeline, once or once an element of the ForEach its inputs are wired from. `groups` (or `groups.x/y/z`) is how many groups
 to run, rounded up: an image's `extent` divided by the pipeline's `numThreads`, wired straight in, covers
@@ -674,9 +891,11 @@ they show, and a buffer of commands saying how many of each to draw, from where.
   same for a shader in `rangeBuffer` (48 bytes a mesh: `uint firstIndex, indexCount; int vertexOffset; uint;
   float4 boundsMin; float4 boundsMax`) and `count`. It is packed again when the meshes are other ones, or one of
   them arrives from its file. The meshes' vertices must be laid out alike, and drawn by 32-bit indices; it says
-  so otherwise.
+  so otherwise. With `positions` it packs only where their vertices are, three floats each, however each mesh lays them
+  out — read back and packed on the CPU when it is built: for a compute shader that reads triangles (a mesh collider),
+  not for drawing.
   With nothing to pack yet — a Filter that keeps no one, or meshes still being read — it is an empty mesh laid out as the
-  default meshes are (POSITION, NORMAL, UV), whose ranges draw nothing: with no meshes the IndirectDraws has a `drawCount` of 0, and the Draw clears
+  default meshes are (POSITION, NORMAL, their tangents, UV), whose ranges draw nothing: with no meshes the IndirectDraws has a `drawCount` of 0, and the Draw clears
   and draws nothing, until there is something, when it is packed again.
 - **IndirectDraws** takes the pack's `ranges` and the Filter's `groups` (grouped by Mesh, so the two are in one
   order) and writes a `VkDrawIndexedIndirectCommand` for each mesh into `commands`, with `drawCount` and
@@ -772,6 +991,14 @@ the graph without them. The editor will show these.
 matrices are lists of numbers. A resource is saved as the id of the node that made it and found again on
 load. One made in code is saved as null.
 
+## What a pass costs
+
+`Runtime::Timings()` is each pass node's cost, averaged over recent frames, by its id: its GPU time (arriving a few
+frames late; `gpuMeasured` false on a device that cannot time), and the CPU's in recording and readying it — a fixed
+page's passes for every step a frame can run added together (`runs`). The editor shows it in a pass node's inspector.
+Each pass is a command buffer of its own in the frame graph, which costs some tens of microseconds of CPU and GPU time
+whatever it does: a loop of hundreds of small dispatches costs that many times over.
+
 ## Looking at what a node made
 
 `runtime.Watch(id)` copies what a node makes — its image or its buffer — out each frame from then on, and
@@ -780,6 +1007,15 @@ buffer's bytes, and for a ShaderBuffer its fields by name and offset. `TexelLayo
 texels are laid out. An image needs `eTransferSrc` among its usage, and so does a Buffer node's buffer; when one
 cannot be looked at, `WatchProblem(id)` says why. It costs a copy a frame, so `Unwatch` when done. The copying is
 two nodes added to the graph that runs and to nothing that is saved.
+
+A **Reference** watched is what it stands for as it is when the Reference's page begins: its copy is made first of
+that page, after what earlier pages did to it and before what its own page does. So a page that brings in a picture
+shows the picture it starts from. A Reference on a setup page is copied while setup records, and the first watch of
+one makes setup record again, so that the copy is of what setup made.
+
+`runtime.UsesOf(id)` lists the pass nodes that use what a node made, each with its page and whether it reads it,
+writes it or both, in the order of their pages. The ones before a page are what was done to it by the time that page
+begins.
 
 `runtime.WatchEvery(id, frames)` copies a watched node out once in so many frames rather than every frame — each
 watch on frames of its own, so that many of them are not all copied at once — at the cost of a picture that is that
@@ -791,6 +1027,10 @@ others, the copy is of those from a frame or two on, and a level or layer the im
 texels, a `Peek` of an image says all of it: `fullExtent`, `mips`, `layers`, `samples`, `type`, its `usage` by name,
 `byteSize` (every level and layer), and which `mip` and `layer` were copied. A picture of a file's that no node is is
 watched by the name it is found by (`@textures/wall.png`): an `ImageFile` of it is added to what runs to copy from.
+
+A node is watched — and `ResourceOf(id)` and `ImageOf(id)` are, given no output — by `runtime.ShownOutput(id)`: its
+`out`, or, for a node with none, a Script node, the first image it makes, else its first resource.
+`runtime.WatchOutput(id, output)` watches another of its outputs instead: a Script node's buffer, its other image.
 
 ## Evaluation
 
@@ -817,7 +1057,9 @@ write. Where a pass sits in the node list doesn't matter. The frame graph runs t
 resource in the order they were added, so kgraph adds a pass that only overwrites a resource (Clear)
 before one that reads and writes it (Dispatch on a read-write image). Two passes that both modify the
 same resource run in the order of the passes they are in, and within a pass in node-list order: usage
-does not say which is first.
+does not say which is first. A pass that only overwrites goes before one that reads and writes only within one page,
+or when the overwriting page is the earlier one: what a later page clears, it clears after what an earlier page drew.
+Setup pages come first, so what setup does to a resource is done before anything a frame does to it.
 
 A pass that only reads a resource runs after every pass that writes it. The one exception is a reader whose own
 output a later writer of that resource takes: a trace that reads the picture into an image which the next pass adds
@@ -862,14 +1104,20 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A script's component is read from its source as far as its fields go: numbers, true or false, and vectors,
   quaternions and matrices of numbers start as written; anything else starts at zero, and the document's notes say so.
 - A BufferBuilder's layout is numbers, vectors and matrices, and fixed arrays of them: no struct in a struct.
-- A cycle between passes is left to the frame graph. Reading a resource as it was last frame
-  (`ReadPrevious`) can't be asked for in a graph yet.
+- A Buffer node with no `type` is the framework's default, `eDynamic`: memory the CPU writes and the GPU reads over the
+  bus — right for one a script writes every frame, many times slower for what only the GPU works on. That one says
+  `eDeviceLocal`, as every Buffer of the engine's functions does.
+- A cycle between passes is left to the frame graph. A resource as it was before this frame's writers is a Keep's
+  copy of it (see [State kept from step to step](#state-kept-from-step-to-step)).
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is
   specialised.
 - When a shader edit removes a parameter the node wires, the framework logs one error for the old
   pipeline before the runtime replaces it.
 - The framework keeps every shader it compiled, by module and entry point, for the life of the app.
-- Initial data (an image's pixels, a buffer's bytes) can't be given in a graph.
+- What a resource starts with is made by a pass on a setup page (on the GPU) or a Script node (on the CPU, by a
+  script of the project's, while the project runs with its scripts). Bytes can't be typed into a graph, and a Script
+  node fills only the first level of an image: the rest are made from it. A resource a script makes of another of its
+  own — a view of its image — is not given to it to fill.
 - Fields for C++ components are still declared with `KECS_FIELDS`. Nothing reads the framework's
   `KORAL_REFLECT` for them.
 

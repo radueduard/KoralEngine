@@ -61,6 +61,14 @@ namespace kecs
          *        plain data and wrong for anything that owns something.
          */
         void (*assign)(void* to, const void* from, const FieldDescription& field) = nullptr;
+        /// The least and the most a number of it is — each component of a vector's — as a tool lets it be set: what a
+        /// script's `[Range(0, 10)]` or `[Min(0)]` says. Unbounded, when nothing says.
+        float min = -std::numeric_limits<float>::infinity(), max = std::numeric_limits<float>::infinity();
+        /// Set by so much of what it is, not by so much: a script's `[Logarithmic]` — a distance, an intensity, a size.
+        bool logarithmic = false;
+        /// A whole number's names, when it is one of so many things: 0 is the first, 1 the second... It is kept, saved
+        /// and set as the number; a tool shows, and is given, the name.
+        std::vector<std::string> choices;
 
         /** @brief Whether @p other is this field for the purposes of keeping a value: the same name, type and size. */
         [[nodiscard]] bool SameAs(const FieldDescription& other) const { return name == other.name && type == other.type && size == other.size; }

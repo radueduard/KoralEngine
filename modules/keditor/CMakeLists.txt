@@ -15,15 +15,15 @@ endforeach()
 string(APPEND KEDITOR_SHADER_TEXT "}\n")
 file(GENERATE OUTPUT ${KEDITOR_SHADER_HEADER} CONTENT "${KEDITOR_SHADER_TEXT}")
 
-add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp)
+add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp src/physics.cpp)
 target_include_directories(keditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
-target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras)
+target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras PRIVATE Koral::koral-image-import kphysics)
 target_compile_options(keditor PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-missing-field-initializers>)
 
 if(KORAL_ENGINE_BUILD_TESTS)
-    add_executable(keditor_tests tests/test_document.cpp tests/test_editor.cpp tests/test_forward_plus.cpp ${CMAKE_SOURCE_DIR}/modules/kgraph/tests/support.cpp)
+    add_executable(keditor_tests tests/test_document.cpp tests/test_editor.cpp tests/test_forward_plus.cpp tests/test_physics.cpp ${CMAKE_SOURCE_DIR}/modules/kgraph/tests/support.cpp)
     target_include_directories(keditor_tests PRIVATE ${CMAKE_SOURCE_DIR}/modules/kgraph/tests ${CMAKE_SOURCE_DIR}/samples/forward-plus)
     target_link_libraries(keditor_tests PRIVATE keditor GTest::gtest GTest::gtest_main)
     target_compile_definitions(keditor_tests PRIVATE

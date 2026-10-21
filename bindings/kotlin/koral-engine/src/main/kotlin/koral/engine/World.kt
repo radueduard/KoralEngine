@@ -388,8 +388,8 @@ class World internal constructor(internal val document: MemorySegment) {
     fun <T : Resource> resource(node: String, output: String = "out"): T? = native { a ->
         resourceFromHandle(Native.kengine_node_resource.invokeExact(document, a.allocateFrom(node), a.allocateFrom(output)) as MemorySegment)
     }
-    fun buffer(node: String): Buffer? = resource(node)
-    fun image(node: String): Image? = resource(node)
+    fun buffer(node: String, output: String = "out"): Buffer? = resource(node, output)
+    fun image(node: String, output: String = "out"): Image? = resource(node, output)
 
     /** Adds a node, as the editor does. The id it got. */
     fun addNode(type: String, id: String? = null, x: Double = 0.0, y: Double = 0.0): String = native { a ->

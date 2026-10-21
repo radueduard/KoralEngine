@@ -70,6 +70,35 @@ internal unsafe struct KengineScriptCallbacks
     public delegate* unmanaged[Cdecl]<IntPtr, Entity, IntPtr, void> Destroyed;
 }
 
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineScriptResource
+{
+    public byte* Name;
+    public byte* Kind;
+    public byte* Settings;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineContents
+{
+    public byte* Name;
+    public byte* Node;
+    public byte* Kind;
+    public byte* Format;
+    public uint ExtentX, ExtentY, ExtentZ;
+    public uint Layers;
+    public uint TexelBytes;
+    public byte* Bytes;
+    public nuint Size;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineResourceScriptCallbacks
+{
+    public IntPtr User;
+    public delegate* unmanaged[Cdecl]<IntPtr, KengineContents*, nuint, byte*, nuint, byte*> Fill;
+}
+
 internal static unsafe partial class Native
 {
     private const string Lib = EngineLibrary.Name;
@@ -179,6 +208,10 @@ internal static unsafe partial class Native
     public static partial uint kengine_script_register(IntPtr document, string name, nuint size, nuint alignment, KecsField* fields, nuint fieldCount,
                                                        KengineScriptCallbacks* callbacks);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_script_unregister(IntPtr document, string name);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_resource_script_register(IntPtr document, string name, nuint size, KecsField* fields, nuint fieldCount,
+                                                                KengineScriptResource* resources, nuint resourceCount, KengineResourceScriptCallbacks* callbacks);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_resource_script_unregister(IntPtr document, string name);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     public static partial byte* kengine_mesh_create(IntPtr document, string name, uint vertexCount, KengineAttribute* attributes, uint attributeCount,

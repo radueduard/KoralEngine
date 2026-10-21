@@ -72,6 +72,17 @@ namespace keditor
      */
     [[nodiscard]] std::optional<int> RunThroughScripts(const Project& project);
 
+    /** @brief What a new shader of a kind has besides what every one of its kind has. Each is for the kinds it names. */
+    struct ShaderChoice {
+        bool wholePicture = false;      ///< Vertex: one triangle over the whole picture, reading another — no mesh — in place of each entity's mesh.
+        bool tessellation = false;      ///< Vertex: tessellation control and evaluation shaders, each triangle cut finer.
+        bool geometry = false;          ///< Vertex: a geometry shader, each triangle passed on.
+        bool task = false;              ///< MeshShading: a task shader, saying how many mesh shader groups there are.
+        bool fragment = true;           ///< Vertex, MeshShading: a fragment shader. Without, only depth is drawn: a shadow map, a depth prepass.
+        bool anyHit = false;            ///< RayTracing: an any hit shader in the hit group, that can let a ray pass on.
+        bool intersection = false;      ///< RayTracing: an intersection shader, for what is no triangles: a sphere in each box.
+    };
+
     /** @brief What the editor's panels share: the project, the scene being worked on, and what is picked. */
     class Session {
     public:
@@ -135,6 +146,15 @@ namespace keditor
          */
         void Show(const std::string& node, const std::string& input) { _asked[node].insert(input); ++_changes; }
         void Hide(const std::string& node, const std::string& input) { _asked[node].erase(input); ++_changes; }
+        /** @brief Whether a part of a node's inspector (Port::group) is open: as it was left, or — never opened nor closed — @p otherwise. */
+        [[nodiscard]] bool SectionOpen(const std::string& node, const std::string& group, const bool otherwise) const
+        {
+            const auto it = _sections.find(node);
+            if (it == _sections.end()) return otherwise;
+            const auto open = it->second.find(group);
+            return open == it->second.end() ? otherwise : open->second;
+        }
+        void OpenSection(const std::string& node, const std::string& group, const bool open) { _sections[node][group] = open; ++_changes; }
         [[nodiscard]] bool Asked(const std::string& node, const std::string& input) const
         {
             const auto it = _asked.find(node);
@@ -157,6 +177,13 @@ namespace keditor
         bool gizmoEnabled = true;
         kor::GizmoMode gizmo = kor::GizmoMode::eTranslate;
         void SetGizmo(const bool enabled, const kor::GizmoMode mode) { gizmoEnabled = enabled; gizmo = mode; ++_changes; }
+        /**
+         * The picked entity's Collider, as its inspector asks: drawn in the scene's view as the physics will have it —
+         * and, being changed, sized by a gizmo of its own in place of the one that moves the entity. Only ever the
+         * picked one's.
+         */
+        bool colliderShown = false, colliderEditing = false;
+        void ShowCollider(const bool shown, const bool editing) { colliderShown = shown || editing; colliderEditing = editing; ++_changes; }
         void SetLookThroughCamera(const bool through) { lookThroughCamera = through; ++_changes; }
         /** What the scene's panel shows the scene through: its pointer, for the gizmo and for picking. */
         std::shared_ptr<kgui::ViewportState> viewport = std::make_shared<kgui::ViewportState>();
@@ -177,9 +204,36 @@ namespace keditor
         /** @brief Starts, or goes on, playing: scripts and the scene's systems run. The scene as it was is kept, for Stop. */
         void StartPlaying();
         void Pause();
+        /**
+         * @brief Paused, or not yet playing: one fixed step and no more — the scripts' fixedUpdate and the graph's fixed
+         *        pages, once — and paused after it. Started from the beginning, as Play is, when it was not playing.
+         */
+        void Step();
         /** @brief Ends play, and puts the scene back as it was when it began. */
         void Stop();
         [[nodiscard]] bool InPlayMode() const { return !_snapshot.empty(); }
+
+        // ---- a prefab, opened ----------------------------------------------------------------------------------
+        //
+        // A prefab is edited by itself, as Unity's are: opened, the scene's entities are put aside — with what can be
+        // taken back of them — and the outliner and the scene view have the prefab's alone, entities like any. Back to
+        // the scene, it is as it was, and every instance of the prefab follows what was saved of it.
+
+        /**
+         * @brief Makes a prefab of one empty entity, @p name — `prefabs/<name>.prefab` — and opens it. False, saying why,
+         *        for a name that is not one, one that is there, or no project.
+         */
+        bool NewPrefab(const std::string& name);
+        /** @brief Opens the prefab whose asset id is @p id (`prefab:Crate.prefab`) by itself. One open already is saved first. */
+        bool OpenPrefab(const std::string& id);
+        /** @brief Writes the prefab that is open as it is now: its first entity at the top, and what is under it. */
+        bool SavePrefab();
+        /** @brief Back to the scene, as it was — the prefab saved first, when @p save — and its instances as the prefab is. */
+        bool ClosePrefab(bool save = true);
+        /** @brief The prefab that is open, as it names it (`prefabs/Crate.prefab`); empty when the scene is. */
+        [[nodiscard]] std::string PrefabOpen() const { return _prefab ? _prefab->name : std::string(); }
+        /** @brief Whether the prefab that is open has changed since it was opened or saved. */
+        [[nodiscard]] bool PrefabChanged();
         [[nodiscard]] bool IsPlaying() const { return _play.Playing(); }
 
         // ---- entities ---------------------------------------------------------------------------------------
@@ -201,19 +255,35 @@ namespace keditor
         kecs::Entity PlacePrefab(const std::string& id, kecs::Entity parent = kecs::NullEntity);
         // ---- files ------------------------------------------------------------------------------------------
 
-        /** @brief The kinds of shader there are to start from, by name, each with what it is. */
+        /**
+         * @brief The kinds of shader there are to start from, by name, each with what it is: "Vertex" (vertices and their
+         *        fragments), "MeshShading" (mesh shaders and theirs), "Compute", "RayTracing" (a ray generation shader, a
+         *        miss shader and a hit group).
+         */
         [[nodiscard]] static const std::vector<std::pair<std::string, std::string>>& ShaderKinds();
+        using ShaderChoice = keditor::ShaderChoice;
+        /**
+         * @brief Why a shader of @p kind — with @p option of its ShaderChoice, by the field's name, when given — cannot be run
+         *        on this device; empty when it can. "This GPU has no mesh shaders."
+         */
+        [[nodiscard]] static std::string ShaderMissing(std::string_view kind, std::string_view option = {});
         /** @brief The languages a script is written in, the same way. */
         [[nodiscard]] static const std::vector<std::pair<std::string, std::string>>& ScriptKinds();
         /** @brief The languages a script can be made in here: the project's, once it has one; either, until then. */
         [[nodiscard]] std::vector<std::pair<std::string, std::string>> ScriptKindsHere() const;
         /**
-         * @brief Makes a shader of @p kind, one of ShaderKinds, called @p name: `shaders/<name>.slang`, a module a
-         *        pipeline node then names. False, saying why, for a name that is not one or a file that is there.
+         * @brief Makes a shader of @p kind, one of ShaderKinds, with what @p choice says, called @p name:
+         *        `shaders/<name>.slang`, a module a pipeline node then names — each entry point called as a pipeline looks
+         *        for it when it is not named: vertexMain, fragmentMain, closestHitMain. False, saying why, for a name that is
+         *        not one, a file that is there, or what this device cannot run.
          */
-        bool NewShader(const std::string& name, const std::string& kind);
-        /** @brief Makes a script called @p name in @p language, one of ScriptKinds: `scripts/<name>.cs`, or `.kt`. */
-        bool NewScript(const std::string& name, const std::string& language);
+        bool NewShader(const std::string& name, const std::string& kind, const ShaderChoice& choice = {});
+        /**
+         * @brief Makes a script called @p name of @p kind, one of ScriptKinds — its language, and what it is: "C#" or "Kotlin"
+         *        for a script of entities, "C# ResourceScript" or "Kotlin ResourceScript" for one that makes resources and fills
+         *        them as they are made — as `scripts/<name>.cs`, or `.kt`.
+         */
+        bool NewScript(const std::string& name, const std::string& kind);
 
         /**
          * @brief Starts the scene over as the standard one: the graph that draws meshes lit under a sky, and a sky,
@@ -221,6 +291,14 @@ namespace keditor
          */
         /** @brief Makes entities of a model file (Document::ImportModel), and picks the one over them all. */
         bool ImportModel(const std::filesystem::path& file);
+        /**
+         * @brief Brings a picture or a model into the project, as one of its assets — and nothing into the scene: the Assets
+         *        panel has it, to be dragged onto the scene or the outliner when it is wanted there. A picture is copied to
+         *        `assets/textures`, a model to a folder of its own in `assets/models`, with what it names beside it — a
+         *        glTF's buffers and pictures, an OBJ's materials and theirs. One in the project already is only picked.
+         * @return Its asset's id; empty, with why said, when there is no project or it is no picture or model.
+         */
+        std::string ImportAsset(const std::filesystem::path& file);
         bool NewStandardScene();
         /** @brief Reads the scene again from its file. */
         bool Revert();
@@ -232,6 +310,12 @@ namespace keditor
         [[nodiscard]] bool ShowsEveryPass() const { return _everyPass; }
         void ShowPass(std::string pass) { _pass = std::move(pass); _everyPass = false; ++_changes; }
         void ShowEveryPass() { _everyPass = true; ++_changes; }
+        /**
+         * @brief Whether the Here to use panel — what the page shown can use of the passes before it — is in sight: its
+         *        images are pictured while it is. The editor says so as its panels are laid out.
+         */
+        void ShowDrawer(const bool open) { _drawer = open; ++_changes; }
+        [[nodiscard]] bool DrawerShown() const { return _drawer; }
         /** @brief Picks node @p id, and turns to the page it is on: the graph panel brings it into view. */
         void GoTo(const std::string& id);
         /** @brief Where the graph panel looks: shared with it, so that whoever asks knows where a node is on the screen. */
@@ -349,7 +433,7 @@ namespace keditor
 
         /** @brief Something of the project's that is in a file: what the Assets panel lists. */
         struct Asset {
-            enum class Kind : std::uint8_t { eModel, eMesh, eTexture, eShader, eScript, eScene, ePrefab };
+            enum class Kind : std::uint8_t { eModel, eMesh, eTexture, eShader, eScript, eScene, ePrefab, eMaterial };
             Kind kind = Kind::eTexture;
             /// What it is picked by, and — for a mesh or a texture — what an entity's field holds to have it:
             /// `@textures/wall.png`, `@sponza.gltf#3`. A shader is `shader:<module>`, a script `script:<file>` and a
@@ -364,7 +448,26 @@ namespace keditor
             /// own (`assets/textures`, `shaders`) — or, for a file that is not in the project, under OutsideFolder.
             std::string folder;
             std::string parent;             ///< A mesh's: the model it is of, by that model's id.
+            /// The editor's own, of no file: a default mesh (`$cube`, under Meshes/Primitives) or a default material
+            /// (`material:Gold`, under Materials/Defaults).
+            bool builtIn = false;
         };
+        /**
+         * @brief What a thing drawn is made of, as the fields of the component that draws it (`lit`'s, or any with an
+         *        `albedo`): its colour as it is picked, how metallic and how rough, the light it gives. Dropped on an
+         *        entity, these are what that component holds — its pictures white, so that the colour is the colour.
+         */
+        struct Material {
+            std::string name;
+            float albedo[3] { 0.8f, 0.8f, 0.8f };
+            float metallic = 0.f;
+            float roughness = 0.5f;
+            float emission[3] { 0.f, 0.f, 0.f };
+        };
+        /** @brief The editor's materials, listed under Materials/Defaults: `material:<name>` each. */
+        [[nodiscard]] static const std::vector<Material>& DefaultMaterials();
+        /** @brief A default material, by its asset's id (`material:Gold`); null for none. */
+        [[nodiscard]] static const Material* MaterialOf(std::string_view id);
         /** @brief The folder files that are not in the project are shown under, in the Assets panel. */
         static constexpr const char* OutsideFolder = "Outside the project";
         /**
@@ -382,6 +485,9 @@ namespace keditor
         std::string assetFolder;            ///< The folder the Assets panel shows: empty, the project's own.
         int assetKind = -1;                 ///< An Asset::Kind the panel shows nothing but, wherever it is; -1, every kind.
         float assetTileSize = 72.f;         ///< How big the panel shows each thing; at its least, a line each.
+        bool drawerList = false;            ///< The drawer beside a pass's page shows a line a thing, not a picture over its name.
+        const kor::Window* window = nullptr;    ///< The editor's own window: what its title bar's buttons make smaller, bigger, or close.
+        void SetDrawerList(const bool lines) { drawerList = lines; ++_changes; }
         std::set<std::string> assetsOpened; ///< The models whose meshes are shown after them, by id.
         /**
          * @brief Every folder the Assets panel has: the project's own, empty ones too, and those the things in
@@ -453,6 +559,9 @@ namespace keditor
         [[nodiscard]] const std::string& Looking() const { return _looking; }
         LookMode lookMode = LookMode::eAuto;
         std::uint32_t lookSlice = 0;                    ///< Which slice, of an image with depth.
+        std::uint32_t lookMip = 0, lookLayer = 0;       ///< Which level and layer of the image looked at last: its first, to begin with.
+        /// How a picture looked at is drawn bigger or smaller than it is: blended, or a texel a square — a height map's cells.
+        kui::ImageFilter lookFilter = kui::ImageFilter::eLinear;
         /** @brief What is looked at, as last made: an image's picture (and what its values run from and to), or a buffer's lines. */
         [[nodiscard]] kor::ResourceRef<const kor::Image> LookPicture() const { return LookPictureOf(_looking); }
         [[nodiscard]] const std::string& LookSays() const { return LookSaysOf(_looking); }
@@ -469,6 +578,12 @@ namespace keditor
          *        copy a frame. Null until the first is made.
          */
         [[nodiscard]] kor::ResourceRef<const kor::Image> ThumbnailOf(std::string_view id) const;
+        /**
+         * @brief A small picture of what node @p id makes, for the drawer beside a page: an image's, as it was when its turn
+         *        last came to be copied out (UpdateThumbnails copies the drawer's while it is open); a mesh drawn by itself.
+         *        Empty for anything else, and until it is made.
+         */
+        kor::ResourceRef<const kor::Image> NodePicture(std::string_view id);
         /** @brief What a thumbnail cannot be, when it cannot: an image of a format that does not read back. Empty otherwise. */
         [[nodiscard]] const std::string& ThumbnailSaysOf(std::string_view id) const;
         /**
@@ -501,6 +616,7 @@ namespace keditor
         struct ImageView {
             std::uint32_t mip = 0, layer = 0;
             LookOptions look;
+            kui::ImageFilter filter = kui::ImageFilter::eLinear;    ///< How it is drawn zoomed in or out: blended, or a texel a square.
             bool logHistogram = false;
         };
         ImageView imageView;
@@ -531,6 +647,9 @@ namespace keditor
 
         void AskForNodes() { _wantsNodes = true; ++_changes; }
         [[nodiscard]] bool TakeAskForNodes() { return std::exchange(_wantsNodes, false); }
+        /** @brief Asks for the New shader dialog: its kinds, and what each can have. */
+        void AskForNewShader() { _wantsShader = true; ++_changes; }
+        [[nodiscard]] bool TakeAskForNewShader() { return std::exchange(_wantsShader, false); }
         /** @brief Asks for the page the graph shows to be put in order: its nodes left to right, by what is wired to what. */
         void AskToArrange() { _wantsArrange = true; ++_changes; }
         [[nodiscard]] bool TakeAskToArrange() { return std::exchange(_wantsArrange, false); }
@@ -550,9 +669,11 @@ namespace keditor
         bool _failed = false;
         std::uint64_t _changes = 0;
         std::map<std::string, std::set<std::string>> _asked;
+        std::map<std::string, std::map<std::string, bool>> _sections;   // which parts of a node's inspector were opened or closed
         std::set<kecs::Entity> _folded;
         std::string _pass;
         bool _everyPass = false;
+        bool _drawer = false;      // the Here to use panel is in sight
         std::string _snapshot;              // the entities as they were when play began
         std::vector<ObjectTemplate> _objects;
         int _fps = 0, _framesCounted = 0;
@@ -562,6 +683,7 @@ namespace keditor
         std::optional<kor::Vec2> _pressAt;
         bool _gizmoMoved = false, _wasDown = false;
         bool _wantsNodes = false, _wantsArrange = false;
+        bool _wantsShader = false;
         std::uint32_t _went = 0;
         // What the outliner asks of every entity, worked out once for the scene as it is.
         std::map<std::string, std::string> _pipelines;
@@ -578,6 +700,17 @@ namespace keditor
         struct Was { std::string graph, world; };
         std::vector<Was> _undo, _redo;
         Was _now;                               // as it is, by the last count
+        // The prefab that is open, and the scene put aside for it: its entities, whether it had changed, what could be taken back.
+        struct OpenPrefabState {
+            std::string name;                   // `prefabs/Crate.prefab`
+            std::filesystem::path file;
+            std::string scene;
+            bool sceneDirty = false;
+            std::vector<Was> undo, redo;
+            Was now;
+            std::uint64_t saved = 0;            // the document's revision when the prefab was last saved or opened
+        };
+        std::optional<OpenPrefabState> _prefab;
         const Document* _undoOf = nullptr;      // the document those are states of: another one starts over
         std::uint64_t _undoRevision = 0;
         float _undoQuiet = 0.f;
@@ -636,7 +769,8 @@ namespace keditor
     struct PlacedNode {
         std::string id;
         float x = 0.f, y = 0.f, width = 160.f, height = 80.f;
-        std::string group;      ///< What it is kept together with, down a column: the loop it is of. Empty: nothing.
+        std::string group;      ///< The frame it is in — the outermost, of those one inside another — laid out as a block of its own. Empty: none.
+        int depth = 0;          ///< How many frames are inside that one, one in another: how far out it is drawn from its nodes.
     };
     /**
      * @brief Where a page's nodes go to be read from left to right: each in the column after the last thing it is

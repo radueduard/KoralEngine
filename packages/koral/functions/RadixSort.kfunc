@@ -1,0 +1,625 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "keys",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "keys",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "values",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "values",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 256
+        }
+      },
+      {
+        "id": "idle",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "idle",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "bytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          300
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "blocks",
+        "type": "Ceil",
+        "at": [
+          200,
+          360
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "over",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "over",
+        "type": "Divide",
+        "at": [
+          200,
+          420
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "bins",
+        "type": "Multiply",
+        "at": [
+          200,
+          480
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "b": 16
+        }
+      },
+      {
+        "id": "binBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          540
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "bins",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "keys2",
+        "type": "Buffer",
+        "at": [
+          200,
+          600
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "values2",
+        "type": "Buffer",
+        "at": [
+          200,
+          660
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "counts",
+        "type": "Buffer",
+        "at": [
+          200,
+          720
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "binBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "turns",
+        "type": "Repeat",
+        "at": [
+          200,
+          780
+        ],
+        "inputs": {
+          "count": 8
+        }
+      },
+      {
+        "id": "odd",
+        "type": "Mod",
+        "at": [
+          300,
+          840
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "b": 2
+        }
+      },
+      {
+        "id": "shift",
+        "type": "Multiply",
+        "at": [
+          300,
+          900
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "keysIn",
+        "type": "Switch",
+        "at": [
+          300,
+          960
+        ],
+        "inputs": {
+          "index": {
+            "$link": [
+              "odd",
+              "out"
+            ]
+          },
+          "option[0]": {
+            "$link": [
+              "keys",
+              "out"
+            ]
+          },
+          "option[1]": {
+            "$link": [
+              "keys2",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "valuesIn",
+        "type": "Switch",
+        "at": [
+          300,
+          1020
+        ],
+        "inputs": {
+          "index": {
+            "$link": [
+              "odd",
+              "out"
+            ]
+          },
+          "option[0]": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          },
+          "option[1]": {
+            "$link": [
+              "values2",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "keysOut",
+        "type": "Switch",
+        "at": [
+          300,
+          1080
+        ],
+        "inputs": {
+          "index": {
+            "$link": [
+              "odd",
+              "out"
+            ]
+          },
+          "option[0]": {
+            "$link": [
+              "keys2",
+              "out"
+            ]
+          },
+          "option[1]": {
+            "$link": [
+              "keys",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "valuesOut",
+        "type": "Switch",
+        "at": [
+          300,
+          1140
+        ],
+        "inputs": {
+          "index": {
+            "$link": [
+              "odd",
+              "out"
+            ]
+          },
+          "option[0]": {
+            "$link": [
+              "values2",
+              "out"
+            ]
+          },
+          "option[1]": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "counting",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          1200
+        ],
+        "inputs": {
+          "compute.module": "koral_sort",
+          "compute.entry": "count",
+          "param.keysIn": {
+            "$link": [
+              "keysIn",
+              "out"
+            ]
+          },
+          "param.counts": {
+            "$link": [
+              "counts",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "scattering",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          1260
+        ],
+        "inputs": {
+          "compute.module": "koral_sort",
+          "compute.entry": "scatter",
+          "param.keysIn": {
+            "$link": [
+              "keysIn",
+              "out"
+            ]
+          },
+          "param.valuesIn": {
+            "$link": [
+              "valuesIn",
+              "out"
+            ]
+          },
+          "param.keysOut": {
+            "$link": [
+              "keysOut",
+              "out"
+            ]
+          },
+          "param.valuesOut": {
+            "$link": [
+              "valuesOut",
+              "out"
+            ]
+          },
+          "param.counts": {
+            "$link": [
+              "counts",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run count",
+        "type": "Dispatch",
+        "at": [
+          500,
+          1320
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "counting",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.shift": {
+            "$link": [
+              "shift",
+              "out"
+            ]
+          },
+          "push.blocks": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "zero",
+        "type": "Multiply",
+        "at": [
+          300,
+          1380
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "b": 0
+        }
+      },
+      {
+        "id": "binsThisTurn",
+        "type": "Add",
+        "at": [
+          300,
+          1440
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "bins",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "zero",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "where",
+        "type": "Function",
+        "at": [
+          500,
+          1500
+        ],
+        "inputs": {
+          "function": "Scan",
+          "values": {
+            "$link": [
+              "counts",
+              "out"
+            ]
+          },
+          "count": {
+            "$link": [
+              "binsThisTurn",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run scatter",
+        "type": "Dispatch",
+        "at": [
+          500,
+          1560
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "scattering",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.shift": {
+            "$link": [
+              "shift",
+              "out"
+            ]
+          },
+          "push.blocks": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sortedKeys",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          1620
+        ],
+        "inputs": {
+          "name": "keys",
+          "value": {
+            "$link": [
+              "keys",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sortedValues",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          1680
+        ],
+        "inputs": {
+          "name": "values",
+          "value": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

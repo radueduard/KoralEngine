@@ -362,7 +362,9 @@ namespace kecs
                     for (const auto& [fieldName, fieldValue] : value.members) {
                         const FieldDescription* field = type.FindField(fieldName);
                         const auto was = saved->second.fields.find(fieldName);
-                        if (!field || was == saved->second.fields.end() || was->second.first != field->type || was->second.second != field->size) {
+                        // A field the file's type does not list — newer than it, written in by hand or by a script — is read
+                        // as the world's type has it; one it lists otherwise than the world has it is left at its default.
+                        if (!field || (was != saved->second.fields.end() && (was->second.first != field->type || was->second.second != field->size))) {
                             problems.insert(std::format("'{}.{}' is not what it was when saved: left at its default", name, fieldName));
                             continue;
                         }

@@ -166,12 +166,171 @@ namespace kscript
             static const std::regex call(R"(^\s*([\w.]+)\s*\()");
             std::smatch found;
             if (std::regex_search(value, found, call)) return found[1].str();
+            // A type's constant, `Entity.Null`, `Vec3.Zero`: of that type. (A capital first, so no number like 1.5.)
+            static const std::regex constant(R"(^\s*([A-Z]\w*)\.[A-Za-z_]\w*\s*$)");
+            if (std::regex_match(value, found, constant)) return found[1].str();
             if (value == "true" || value == "false") return "Boolean";
             if (!value.empty() && (value.back() == 'f' || value.back() == 'F')) return "Float";
             if (!value.empty() && value.back() == 'L') return "Long";
             if (value.find('.') != std::string::npos || value.find('e') != std::string::npos || value.find('E') != std::string::npos) return "Double";
             if (!value.empty() && (std::isdigit(static_cast<unsigned char>(value.back())))) return "Int";
             return {};
+        }
+
+        /** A number as a source writes it: `0`, `-1.5f`, `1e3`, `2.0d`. Null for what is no number. */
+        std::optional<float> Literal(std::string text)
+        {
+            text = Trim(text);
+            while (!text.empty() && (text.back() == 'f' || text.back() == 'F' || text.back() == 'd' || text.back() == 'D' || text.back() == 'L')) text.pop_back();
+            if (text.empty()) return std::nullopt;
+            char* end = nullptr;
+            const float value = std::strtof(text.c_str(), &end);
+            return end == text.c_str() + text.size() ? std::optional(value) : std::nullopt;
+        }
+
+        /**
+         * What a field is kept within, as its attributes say: C#'s `[Range(0, 10)]` and `[Min(0)]`, Kotlin's `@Range(0f, 10f)`
+         * and `@Min(0f)` — as Unity has them. What an editor lets it be set to; and `[Logarithmic]`, how it is dragged.
+         */
+        void Limits(const std::string& statement, kecs::FieldDescription& field)
+        {
+            static const std::regex range(R"([\[@,]\s*(?:[\w.]+\.)?Range\s*\(\s*(?:min\s*=\s*)?([^,()]+),\s*(?:max\s*=\s*)?([^,()]+)\))");
+            static const std::regex least(R"([\[@,]\s*(?:[\w.]+\.)?Min\s*\(\s*(?:min\s*=\s*)?([^,()]+)\))");
+            static const std::regex logarithmic(R"([\[@,]\s*(?:[\w.]+\.)?Logarithmic\b)");
+            std::smatch found;
+            field.logarithmic = std::regex_search(statement, logarithmic);
+            if (std::regex_search(statement, found, range)) {
+                const auto low = Literal(found[1].str()), high = Literal(found[2].str());
+                if (low && high && *low <= *high) { field.min = *low; field.max = *high; }
+            } else if (std::regex_search(statement, found, least)) {
+                if (const auto low = Literal(found[1].str())) field.min = *low;
+            }
+        }
+
+        /** What a ResourceScript can make: its resource types, by the node type each is made as. */
+        bool IsResourceKind(const std::string& written)
+        {
+            const std::string bare = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
+            return bare == "Image" || bare == "Buffer" || bare == "ImageView" || bare == "BufferView" || bare == "Sampler";
+        }
+
+        /** What is between brackets, apart at the commas that are not in brackets or strings of their own. */
+        std::vector<std::string> Arguments(const std::string& text)
+        {
+            std::vector<std::string> parts;
+            std::string current;
+            int depth = 0;
+            for (std::size_t i = 0; i < text.size(); ++i) {
+                const char c = text[i];
+                if (c == '"') {
+                    current += c;
+                    for (++i; i < text.size() && text[i] != '"'; ++i) {
+                        if (text[i] == '\\' && i + 1 < text.size()) current += text[i++];
+                        current += text[i];
+                    }
+                    if (i < text.size()) current += '"';
+                    continue;
+                }
+                if (c == '(' || c == '[' || c == '{') ++depth;
+                else if (c == ')' || c == ']' || c == '}') --depth;
+                if (c == ',' && depth == 0) { parts.push_back(Trim(current)); current.clear(); continue; }
+                current += c;
+            }
+            if (!Trim(current).empty()) parts.push_back(Trim(current));
+            return parts;
+        }
+
+        std::string JsonString(const std::string_view text)
+        {
+            std::string out = "\"";
+            for (const char c : text) {
+                if (c == '"' || c == '\\') out += '\\';
+                out += c;
+            }
+            return out + '"';
+        }
+
+        /**
+         * What a resource is made with, as its source writes it, as JSON: a string (`"eR32_SFLOAT"`, flags as
+         * `"eSampled | eStorage"`), a number, true or false, a vector (`new(256, 256)`), a list (`["eSampled"]`,
+         * `listOf(...)`), another field by name (`nameof(Height)`, `::height.name`, `height`), or an enumeration's value
+         * (`Format.eR32_SFLOAT`). Null for what is not understood without running it.
+         */
+        std::optional<std::string> SettingJson(std::string value)
+        {
+            value = Trim(value);
+            static const std::regex text(R"rx(^"((?:[^"\\]|\\.)*)"$)rx");
+            static const std::regex nameOf(R"(^nameof\s*\(\s*([\w.]+)\s*\)$)");
+            static const std::regex reference(R"(^(?:this)?::(\w+)\.name$)");
+            static const std::regex word(R"(^[A-Za-z_][\w.]*$)");
+            static const std::regex listed(R"(^(?:\[([\s\S]*)\]|new\s*(?:\w+\s*)?\[\s*\]\s*\{([\s\S]*)\}|(?:listOf|arrayOf|setOf)\s*\(([\s\S]*)\))$)");
+            std::smatch found;
+            if (std::regex_match(value, found, text)) {
+                const std::string said = found[1].str();
+                if (said.find('|') == std::string::npos) return JsonString(said);
+                std::string list = "[";
+                std::stringstream parts(said);
+                for (std::string part; std::getline(parts, part, '|');)
+                    if (!Trim(part).empty()) list += (list.size() > 1 ? ", " : "") + JsonString(Trim(part));
+                return list + "]";
+            }
+            if (value == "true" || value == "false") return value;
+            if (std::regex_match(value, found, nameOf) || std::regex_match(value, found, reference)) {
+                const std::string name = found[1].str();
+                return JsonString(name.substr(name.rfind('.') == std::string::npos ? 0 : name.rfind('.') + 1));
+            }
+            if (std::regex_match(value, found, listed)) {
+                const std::string inside = found[1].matched ? found[1].str() : found[2].matched ? found[2].str() : found[3].str();
+                std::string list = "[";
+                for (const auto& part : Arguments(inside)) {
+                    const auto one = SettingJson(part);
+                    if (!one) return std::nullopt;
+                    list += (list.size() > 1 ? ", " : "") + *one;
+                }
+                return list + "]";
+            }
+            if (const auto numbers = Numbers(value)) {
+                if (numbers->size() == 1) return std::format("{}", numbers->front());
+                std::string list = "[";
+                for (const double n : *numbers) list += std::format("{}{}", list.size() > 1 ? ", " : "", n);
+                return list + "]";
+            }
+            if (std::regex_match(value, word)) return JsonString(value.substr(value.rfind('.') == std::string::npos ? 0 : value.rfind('.') + 1));
+            return std::nullopt;
+        }
+
+        /**
+         * A resource a ResourceScript declares: its kind, and what its initialiser's arguments — each given by name —
+         * make it with. What is not understood is said in @p problems, and left to start as its node type has it.
+         */
+        DeclaredResource Resource(const std::string& name, const std::string& written, const std::string& value, const std::string& where,
+                                  std::vector<std::string>& problems)
+        {
+            DeclaredResource resource;
+            resource.name = name;
+            resource.kind = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
+            if (value.empty()) return resource;
+            static const std::regex made(R"(^\s*(?:new\b\s*)?(?:[\w.]+)?\s*\(([\s\S]*)\)\s*$)");
+            static const std::regex named(R"(^(\w+)\s*[:=]\s*([\s\S]+)$)");
+            std::smatch found;
+            if (!std::regex_match(value, found, made)) {
+                problems.push_back(std::format("{}{} is made as '{}', which is not understood without running it: it is made as a {} node starts", where, name, value, resource.kind));
+                return resource;
+            }
+            for (const auto& argument : Arguments(found[1].str())) {
+                std::smatch part;
+                if (!std::regex_match(argument, part, named)) {
+                    problems.push_back(std::format("{}{} is given '{}': each of what a resource is made with is given by name, `format: ...`", where, name, argument));
+                    continue;
+                }
+                std::string input = part[1].str();
+                if (input == "width") input = "extent.x";
+                else if (input == "height") input = "extent.y";
+                else if (input == "depth") input = "extent.z";
+                if (const auto json = SettingJson(part[2].str())) resource.settings.emplace_back(std::move(input), *json);
+                else problems.push_back(std::format("{}{}'s {} is '{}', which is not understood without running it: it is as a {} node starts", where, name, part[1].str(), Trim(part[2].str()), resource.kind));
+            }
+            return resource;
         }
 
         /** One number of a field's starting value, written as the field holds it. */
@@ -192,15 +351,16 @@ namespace kscript
         const std::string where = file.empty() ? std::string() : std::format("{}: ", file);
         // A class, what it is said to be before its body, and its body.
         static const std::regex classes(R"(\bclass\s+(\w+)([^{;]*)\{)");
-        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(?:Script|GraphicsScript)\b)");
-        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(?:Script|GraphicsScript)\s*\(\s*\))");
+        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript)\b)");
+        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript)\s*\(\s*\))");
         static const std::regex named(R"rx(ScriptName\s*\(\s*(?:name\s*=\s*)?"([^"]*)"\s*\)\s*\]?\s*[\w\s]*$)rx");
         static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
-        static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)var\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
+        static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
         for (auto it = std::sregex_iterator(text.begin(), text.end(), classes); it != std::sregex_iterator(); ++it) {
             const std::smatch& found = *it;
             const std::string header = found[2].str();
-            if (!std::regex_search(header, kotlin ? kotlinBase : csharpBase)) continue;
+            std::smatch base;
+            if (!std::regex_search(header, base, kotlin ? kotlinBase : csharpBase)) continue;
             // What it is said to be, before `class`: abstract is no script, and a ScriptName names it otherwise.
             const std::size_t at = static_cast<std::size_t>(found.position(0));
             const std::size_t from = text.find_last_of(";}{", at == 0 ? 0 : at - 1);
@@ -208,6 +368,7 @@ namespace kscript
             if (std::regex_search(before, std::regex(R"(\babstract\b)"))) continue;
             ScriptType type;
             type.name = found[1].str();
+            type.makesResources = base[1].str() == "ResourceScript";
             if (std::smatch name; std::regex_search(before, name, named)) type.name = name[1].str();
 
             const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
@@ -216,26 +377,38 @@ namespace kscript
             std::size_t offset = 0, alignment = 1;
             struct Start { std::size_t offset; const Kind* kind; std::vector<double> numbers; };
             std::vector<Start> starts;
-            for (const std::string& statement : Statements(text.substr(open + 1, close - open - 1), kotlin)) {
+            // A Kotlin annotation on a line of its own is the next property's.
+            static const std::regex annotationsOnly(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)+$)");
+            std::string pending;
+            for (const std::string& line : Statements(text.substr(open + 1, close - open - 1), kotlin)) {
+                const std::string statement = pending.empty() ? line : pending + " " + line;
+                if (kotlin && std::regex_match(line, annotationsOnly)) { pending = statement; continue; }
+                pending.clear();
                 std::smatch field;
                 std::string name, written, value, modifiers;
                 if (kotlin) {
                     if (!std::regex_match(statement, field, kotlinField)) continue;
                     modifiers = field[1].str();
-                    name = field[2].str();
-                    written = field[3].str();
-                    value = Trim(field[4].str());
+                    name = field[3].str();
+                    written = field[4].str();
+                    value = Trim(field[5].str());
                     if (std::regex_search(modifiers, std::regex(R"(\b(?:private|protected|internal)\b)"))) continue;
                     if (written.empty()) written = Inferred(value);
+                    // A resource it makes is one, kept as it is made: a val.
+                    if (type.makesResources && IsResourceKind(written)) { type.resources.push_back(Resource(name, written, value, where + type.name + ".", out.problems)); continue; }
+                    if (field[2].str() == "val") continue;
                 } else {
                     if (!std::regex_match(statement, field, csharpField)) continue;
                     modifiers = field[1].str();
                     written = field[2].str();
                     name = field[3].str();
                     value = Trim(field[4].str());
-                    if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))
-                        || std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)")))
+                    if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))) continue;
+                    if (type.makesResources && IsResourceKind(written) && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
+                        type.resources.push_back(Resource(name, written, value, where + type.name + ".", out.problems));
                         continue;
+                    }
+                    if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;
                 }
                 const Kind* kind = KindOf(written, kotlin);
                 if (!kind) {
@@ -245,6 +418,7 @@ namespace kscript
                 }
                 offset = (offset + kind->alignment - 1) / kind->alignment * kind->alignment;
                 type.fields.push_back({ .name = name, .type = kind->name, .offset = offset, .size = kind->size });
+                Limits(statement, type.fields.back());
                 if (!value.empty()) {
                     auto numbers = Numbers(value);
                     const bool identity = kind->numbers == 16 && numbers && numbers->empty();
@@ -323,6 +497,7 @@ namespace kscript
             }
         std::ranges::sort(found.types, {}, &ScriptType::name);
         for (auto& type : found.types) {
+            if (type.makesResources) continue;      // a script that makes resources is no component
             std::string error;
             const std::string name = type.name;
             if (scripts.Declare(std::move(type), &error) == kecs::NoComponent) found.problems.push_back(std::format("{}: {}", name, error));

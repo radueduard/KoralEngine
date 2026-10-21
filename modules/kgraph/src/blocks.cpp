@@ -32,7 +32,7 @@ namespace kgraph
             std::uint32_t of = 0;                   // what a vector, a matrix, an array or a pointer is of
             std::uint32_t count = 0;                // a vector's components, a matrix's columns, an array's length (a constant's id)
             std::uint32_t storage = 0;              // a pointer's storage class
-            std::vector<std::uint32_t> members;     // a struct's
+            std::vector<std::uint32_t> members {};     // a struct's
         };
 
         using Member = std::pair<std::uint32_t, std::uint32_t>;     // a struct, and which of its members

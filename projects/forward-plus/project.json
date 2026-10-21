@@ -1,0 +1,6 @@
+{
+  "koral-engine-project": 1,
+  "name": "ForwardPlus",
+  "scenes": ["main"],
+  "start": "main"
+}

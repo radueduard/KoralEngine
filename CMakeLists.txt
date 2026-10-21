@@ -24,6 +24,7 @@ endif()
 
 add_subdirectory(modules/kecs)
 add_subdirectory(modules/kscript)
+add_subdirectory(modules/kphysics)
 
 # What runs on the GPU needs the Koral framework: an SDK, which is a Koral checkout's `stage/debug` or
 # `stage/release`. The one that matches this build is found by itself when the checkout is known —

@@ -1,4 +1,5 @@
 import koral.Vec3
+import koral.engine.ResourceScript
 import koral.engine.Entity
 import koral.engine.GraphicsScript
 import koral.engine.Script
@@ -39,5 +40,21 @@ class Feeder : GraphicsScript() {
     override fun prepare() {
         ++prepared
         world.buffer("numbers")?.write(floatArrayOf(value, value * 2))
+    }
+}
+
+/**
+ * Makes a buffer of a number each, a step apart, an image a step brighter a row, a view of it and a sampler. A Script
+ * node of the graph runs it, with its settings, and gives what it makes.
+ */
+class Ramp : ResourceScript() {
+    var step = 1f
+    val table = Buffer(instanceCount = 32, usage = "eStorage")
+    val rows = Image(format = "eR32_SFLOAT", width = 4, height = 8, usage = "eSampled | eTransferSrc | eTransferDst")
+    val rowsView = ImageView(image = ::rows.name)
+    val nearest = Sampler(minFilter = "eNearest", magFilter = "eNearest")
+    override fun init() {
+        for (i in 0 until table.bytes.capacity() / 4) table.bytes.putFloat(i * 4, i * step)
+        for (y in 0 until rows.height) for (x in 0 until rows.width) rows.bytes.putFloat((y * rows.width + x) * 4, y * step)
     }
 }

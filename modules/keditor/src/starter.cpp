@@ -582,7 +582,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         doc.AddPass(pass);
         node("Blit", "show", 320, 40);
         wire(bring("color", 40, 40), "show", "source");
-        wire(bring("screen", 40, 180), "show", "destination");
+        wire(bring("screen", 40, 300), "show", "destination");     // under the picture's: a card as tall as its picture
 
         if (!ok && error.empty()) error = "a node of the standard graph could not be set up";
         return ok;

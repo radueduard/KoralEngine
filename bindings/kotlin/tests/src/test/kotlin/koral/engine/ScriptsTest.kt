@@ -8,10 +8,12 @@ import kotlin.io.path.deleteRecursively
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import koral.App
 import koral.AppSettings
 import koral.OffscreenSettings
+import koral.Resource
 import koral.Vec3
 import koral.WindowPlatform
 
@@ -133,6 +135,22 @@ class ScriptsTest {
             assertEquals(42f, written[1], "all of it")
             assertTrue(number(source, "Feeder", "prepared") >= 2, "once a frame")
 
+            // ---- a script fills a resource as it is made --------------------------------------------------------
+            assertEquals(setOf("Ramp"), host.resourceScripts, "a script that makes resources is one")
+            assertFalse(world.hasComponentType("Ramp"), "and no component")
+            world.addNode("Script", "ramp")
+            world.setInput("ramp", "script", "\"Ramp\"")
+            world.setInput("ramp", "field.step", "0.25")
+            assertEquals(null, world.nodeProblem("ramp"), "what it makes is made")
+            frames(1)
+            assertEquals(0.75f, world.buffer("ramp", "table")!!.readFloats(8)[3], "with what the script filled it with, given the node's setting")
+            assertNotNull(world.image("ramp", "rows"), "its image, an output by its name")
+            assertNotNull(world.resource<Resource>("ramp", "rowsView"), "and its view")
+            assertNotNull(world.resource<Resource>("ramp", "nearest"), "and its sampler")
+            world.setInput("ramp", "field.step", "2")
+            frames(2)
+            assertEquals(6f, world.buffer("ramp", "table")!!.readFloats(8)[3], "a setting changed: made and filled again")
+
             // ---- a property a script cannot keep changes nothing, and is said plainly --------------------------
             install("bad")
             assertFalse(host.reload(), "a property a script cannot keep is refused")
@@ -228,8 +246,8 @@ class ScriptsTest {
             assertEquals(listOf(0, 1, 2), read.indices.toList())
             val cube = world.meshes.read("\$cube")
             val coloured = world.meshes.withAttributes("\$cube", "coloured cube", listOf(MeshAttribute.floats("COLOR", 3, FloatArray(cube.vertexCount * 3))))
-            assertEquals(4, world.meshes.read(coloured).attributes.size, "a default mesh, with an attribute more")
-            assertEquals(2, world.meshes.read(world.meshes.withoutAttributes(coloured, "bare cube", "COLOR", "UV")).attributes.size, "and fewer")
+            assertEquals(5, world.meshes.read(coloured).attributes.size, "a default mesh (position, normal, UV, tangent), with an attribute more")
+            assertEquals(3, world.meshes.read(world.meshes.withoutAttributes(coloured, "bare cube", "COLOR", "UV")).attributes.size, "and fewer")
             assertTrue(runCatching { world.meshes.create("wrong", 3, listOf(MeshAttribute.floats("WIND", 1, floatArrayOf(0f)))) }.isFailure, "no mesh is refused")
             frames(2)
         }

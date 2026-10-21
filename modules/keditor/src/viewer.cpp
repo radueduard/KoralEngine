@@ -29,10 +29,22 @@ namespace keditor
             style.weight = 700;
             return kui::Text(std::move(text), style);
         }
-        kui::Widget Small(std::string label, std::function<void()> onPressed, const bool enabled = true)
+        /** A small button in a bar of the viewer's controls: as the editor's chips are, its words in the middle. */
+        kui::Widget Chip(std::string label, std::function<void()> onPressed, const bool enabled = true)
         {
-            return kui::Button(std::move(label), std::move(onPressed),
-                               kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary).SetPadding(kui::EdgeInsets::Symmetric(8.f, 2.f)).SetEnabled(enabled));
+            const kui::Theme& t = kui::Theme::Current();
+            kui::TextStyle style = t.textStyle;
+            style.size = 12.f;
+            style.color = t.text;
+            return kui::Button(kui::Text(std::move(label), style, kui::TextAlign::eCenter, false), std::move(onPressed),
+                               kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary).SetPadding(kui::EdgeInsets::Symmetric(10.f, 4.f)).SetEnabled(enabled));
+        }
+        /** A small button that is a picture of what it does, as the editor's are: said by what is shown when the pointer rests on it. */
+        kui::Widget IconChip(const std::string_view icon, std::string what, std::function<void()> onPressed, const bool enabled = true)
+        {
+            const kui::Theme& t = kui::Theme::Current();
+            return kui::Tooltip(std::move(what), kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, enabled ? t.textMuted : t.textMuted.WithAlpha(0.4f))),
+                                                             std::move(onPressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary).SetPadding(kui::EdgeInsets::Symmetric(4.f, 2.f)).SetEnabled(enabled)));
         }
         kui::Widget Rows(std::vector<kui::Widget> children, const float gap = 6.f)
         {
@@ -121,7 +133,7 @@ namespace keditor
                         const kor::Vec2 corner = size * 0.5f - centre * shown;
                         const kui::Rect where = kui::Rect::XYWH(corner.x, corner.y, shown.x, shown.y);
                         c.DrawRect(where.Inflate(1.f), kui::Paint::Stroked(kui::Color::Hex(0x3A3A44), 1.f));
-                        c.DrawImage(picture, where);
+                        c.DrawImage(picture, where, {}, kui::colors::White, session->imageView.filter);
                         // Near enough to tell texels apart: the lines between them, and the one under the pointer.
                         const float texel = Scale();
                         if (texel >= 12.f) {
@@ -166,8 +178,8 @@ namespace keditor
                 // Over it: how near, and back to fitting it or to a texel a unit.
                 const std::string zoom = std::format("{:.0f}%", Scale() * 100.f);
                 layers.push_back(kui::Positioned(kui::PositionedOptions { .top = 6.f, .right = 6.f },
-                    Bar({ kgui::Muted(zoom, 12.f), Small("Fit", [this] { SetState([&] { scale = 0.f; centre = { 0.5f, 0.5f }; }); }),
-                          Small("1:1", [this] { SetState([&] { scale = 1.f; }); }) })));
+                    Bar({ kgui::Muted(zoom, 12.f), Chip("Fit", [this] { SetState([&] { scale = 0.f; centre = { 0.5f, 0.5f }; }); }),
+                          Chip("1:1", [this] { SetState([&] { scale = 1.f; }); }) })));
                 // Under it: the texel under the pointer, as it is stored.
                 std::string said = "Over the picture: what a texel holds. The wheel zooms, a drag moves it.";
                 if (const auto& peek = session->ViewedPeek(); peek && pointer) {
@@ -194,15 +206,18 @@ namespace keditor
                 c.DrawRect(bounds, kui::Paint::Fill(kui::Color::Hex(0x141418)));
                 c.DrawRect(bounds, kui::Paint::Stroked(kui::Color::Hex(0x3A3A44), 1.f));
                 if (histogram.channels == 0) return;
+                // As high as the highest bin of what is shown: a channel switched off — an alpha all of one value, its one bin
+                // every texel — flattens nothing.
+                const auto drawn = [&](const int ch) { return shown[ch] || histogram.channels == 1; };
                 std::uint32_t most = 1;
                 for (int ch = 0; ch < histogram.channels; ++ch)
-                    for (const auto n : histogram.bins[ch]) most = std::max(most, n);
+                    if (drawn(ch)) for (const auto n : histogram.bins[ch]) most = std::max(most, n);
                 const auto height = [&](const std::uint32_t n) {
                     const double share = log ? std::log1p(static_cast<double>(n)) / std::log1p(static_cast<double>(most)) : static_cast<double>(n) / most;
                     return static_cast<float>(share) * (size.y - 4.f);
                 };
                 for (int ch = 0; ch < histogram.channels; ++ch) {
-                    if (!shown[ch] && histogram.channels > 1) continue;
+                    if (!drawn(ch)) continue;
                     const auto& bins = histogram.bins[ch];
                     const float wide = size.x / static_cast<float>(bins.size());
                     const kui::Color color = histogram.channels == 1 ? ChannelColor[3] : ChannelColor[ch];
@@ -252,7 +267,11 @@ namespace keditor
                     controls.push_back(kgui::Labeled("Slice", kui::SizedBox(80.f, -1.f, kgui::DragFloats({ static_cast<float>(view.look.slice) }, [session, depth = peek->extent.z](const std::vector<float>& to) {
                         session->imageView.look.slice = static_cast<std::uint32_t>(std::clamp(std::round(to[0]), 0.f, static_cast<float>(depth - 1)));
                         session->ViewChanged();
-                    }, 0.2f, 0)), 40.f));
+                    }, 0.2f, 0, 0.f, static_cast<float>(peek->extent.z - 1))), 40.f));
+                controls.push_back(kui::SizedBox(110.f, -1.f, kui::Dropdown({ "Linear", "Nearest" }, view.filter == kui::ImageFilter::eNearest ? 1 : 0, [session](const int f) {
+                    session->imageView.filter = f == 1 ? kui::ImageFilter::eNearest : kui::ImageFilter::eLinear;
+                    session->ViewChanged();
+                })));
                 controls.push_back(kui::SizedBox(170.f, -1.f, kui::Dropdown(LookModeNames(), static_cast<int>(view.look.mode), [session](const int m) {
                     session->imageView.look.mode = static_cast<LookMode>(m);
                     session->ViewChanged();
@@ -306,9 +325,9 @@ namespace keditor
                     session->ViewChanged();
                 }, std::max(std::abs(white - black), 1e-3f) * 0.004f, 4), Label));
                 facts.push_back(Bar({
-                    Small("Fit to its values", [session, histogram] { session->imageView.look.black = histogram.least; session->imageView.look.white = histogram.greatest; session->ViewChanged(); }),
-                    Small("0 to 1", [session] { session->imageView.look.black = 0.0; session->imageView.look.white = 1.0; session->ViewChanged(); }),
-                    Small("As the mode has it", [session] { session->imageView.look.black.reset(); session->imageView.look.white.reset(); session->ViewChanged(); }, view.look.black.has_value()),
+                    Chip("Fit to its values", [session, histogram] { session->imageView.look.black = histogram.least; session->imageView.look.white = histogram.greatest; session->ViewChanged(); }),
+                    Chip("0 to 1", [session] { session->imageView.look.black = 0.0; session->imageView.look.white = 1.0; session->ViewChanged(); }),
+                    Chip("As the mode has it", [session] { session->imageView.look.black.reset(); session->imageView.look.white.reset(); session->ViewChanged(); }, view.look.black.has_value()),
                 }));
             }
             std::vector<kui::Widget> rows;
@@ -356,15 +375,15 @@ namespace keditor
             const Table table = ToTable(*peek, layout ? &*layout : nullptr, session->bufferFirst, RowsAPage, session->bufferHex);
             const std::size_t last = table.total == 0 ? 0 : (table.total - 1) / RowsAPage * RowsAPage;
             rows.push_back(Bar({
-                Small("◀", [session] { session->bufferFirst = session->bufferFirst >= RowsAPage ? session->bufferFirst - RowsAPage : 0; session->ViewChanged(); }, table.first > 0),
+                IconChip("chevron_left", "The page before", [session] { session->bufferFirst = session->bufferFirst >= RowsAPage ? session->bufferFirst - RowsAPage : 0; session->ViewChanged(); }, table.first > 0),
                 kgui::Line(table.total == 0 ? std::string("No rows")
                            : std::format("{} {} to {} of {}", table.byField ? "Elements" : "Rows", table.first,
                                          table.first + (table.byField ? std::min(RowsAPage, table.total - table.first) : table.rows.size()) - 1, table.total)),
-                Small("▶", [session, last] { session->bufferFirst = std::min(session->bufferFirst + RowsAPage, last); session->ViewChanged(); }, table.first < last),
+                IconChip("chevron_right", "The page after", [session, last] { session->bufferFirst = std::min(session->bufferFirst + RowsAPage, last); session->ViewChanged(); }, table.first < last),
                 kgui::Labeled("Go to", kui::SizedBox(90.f, -1.f, kgui::DragFloats({ static_cast<float>(table.first) }, [session, total = table.total](const std::vector<float>& to) {
                     session->bufferFirst = static_cast<std::size_t>(std::clamp(std::round(to[0]), 0.f, static_cast<float>(total == 0 ? 0 : total - 1)));
                     session->ViewChanged();
-                }, 1.f, 0)), 44.f),
+                }, 1.f, 0, 0.f, static_cast<float>(table.total == 0 ? 0 : table.total - 1))), 44.f),
                 kui::Checkbox(session->bufferHex, [session](const bool on) { session->bufferHex = on; session->ViewChanged(); }, "Hexadecimal"),
             }));
             // The table: a column a number, each as wide as a number needs — or its name, when that is wider — moved across
@@ -494,8 +513,8 @@ namespace keditor
                     controls.push_back(kgui::Labeled("Width", kui::SizedBox(64.f, -1.f, kgui::DragFloats({ viewer->EdgeWidth() }, [session](const std::vector<float>& to) {
                         if (MeshViewer* v = session->ViewedMesh()) v->SetEdgeWidth(to[0]);
                         session->ViewChanged();
-                    }, 0.05f, 1)), 40.f));
-                controls.push_back(Small("Seen whole", [session] { if (MeshViewer* v = session->ViewedMesh()) v->Frame(); session->ViewChanged(); }));
+                    }, 0.05f, 1, 0.5f, 8.f)), 40.f));
+                controls.push_back(Chip("Seen whole", [session] { if (MeshViewer* v = session->ViewedMesh()) v->Frame(); session->ViewChanged(); }));
                 controls.push_back(kgui::Muted(std::format("{:.0f}% near   ·   drag to turn it, the wheel to bring it near", viewer->Nearness() * 100.f), 12.f));
             }
             std::vector<kui::Widget> rows;
@@ -520,7 +539,7 @@ namespace keditor
         kui::Widget body = kind == Session::ViewKind::eImage ? ImageView(session) : kind == Session::ViewKind::eBuffer ? BufferView(session) : MeshView(session);
         return kui::Padding(kui::EdgeInsets::All(10.f), Rows({
             Bar({ kui::Expanded(Heading(std::format("{}   ·   {}", id.starts_with('@') ? session->AssetLabel(id) : id, what))),
-                  Small("Stop viewing", [session] { session->StopViewing(); }) }),
+                  Chip("Stop viewing", [session] { session->StopViewing(); }) }),
             kui::Expanded(std::move(body)),
         }, 8.f));
     }

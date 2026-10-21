@@ -32,6 +32,7 @@ public sealed unsafe class ScriptHost : IDisposable
     private readonly World _world;
     private ScriptContext? _context;
     private readonly Dictionary<string, Registered> _registered = [];
+    private readonly Dictionary<string, RegisteredResource> _resources = [];
     private string _snapshot = "", _pending = "";
     private DateTime _pendingSince, _lastPoll;
     private int _generation;
@@ -47,6 +48,8 @@ public sealed unsafe class ScriptHost : IDisposable
     public string Directory { get; }
     /// <summary>The scripts there are now, by name.</summary>
     public IReadOnlyCollection<string> Scripts => _registered.Keys;
+    /// <summary>The scripts that make resources there are now, by name: what the graph's Script nodes can name.</summary>
+    public IReadOnlyCollection<string> ResourceScripts => _resources.Keys;
     /// <summary>How many times the scripts have been loaded.</summary>
     public int Generation => _generation;
     /// <summary>The errors of the last build that failed; empty once one succeeds.</summary>
@@ -111,14 +114,28 @@ public sealed unsafe class ScriptHost : IDisposable
         }
 
         // The code that is going stops being called before its functions go. Its data stays where it is.
-        var gone = _registered.Keys.Except(layouts.Select(l => l.Layout.Name)).ToList();
+        var gone = _registered.Keys.Concat(_resources.Keys).Except(layouts.Select(l => l.Layout.Name)).ToList();
         foreach (var registered in _registered.Values) Native.kengine_script_unregister(_world.Document, registered.Layout.Name);
         foreach (var registered in _registered.Values) registered.Free();
         _registered.Clear();
+        foreach (var resource in _resources.Values) Native.kengine_resource_script_unregister(_world.Document, resource.Layout.Name);
+        foreach (var resource in _resources.Values) resource.Free();
+        _resources.Clear();
 
         var failed = new List<string>();
         foreach (var (type, layout) in layouts)
         {
+            // One that makes resources is a Script node's to run, and no component.
+            if (type.IsSubclassOf(typeof(ResourceScript)))
+            {
+                var resource = new RegisteredResource(_world, type, layout);
+                string? why;
+                try { why = resource.Register() ? null : Native.LastError(); }
+                catch (TargetInvocationException e) { why = $"making one threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"; }
+                if (why is null) _resources[layout.Name] = resource;
+                else { failed.Add($"{layout.Name}: {why}"); resource.Free(); }
+                continue;
+            }
             var registered = new Registered(_world, type, layout);
             if (registered.Register()) _registered[layout.Name] = registered;
             else { failed.Add($"{layout.Name}: {Native.LastError()}"); registered.Free(); }
@@ -129,7 +146,7 @@ public sealed unsafe class ScriptHost : IDisposable
         Errors = failed;
         if (previous is not null) Unload(previous);
         foreach (var error in failed) Log.Error($"[scripts] {error}");
-        Log.Info($"[scripts] loaded: {(_registered.Count == 0 ? "none" : string.Join(", ", _registered.Keys.Order()))}"
+        Log.Info($"[scripts] loaded: {(_registered.Count + _resources.Count == 0 ? "none" : string.Join(", ", _registered.Keys.Concat(_resources.Keys).Order()))}"
                  + (gone.Count > 0 ? $" (gone: {string.Join(", ", gone)})" : ""));
         return true;
     }
@@ -142,6 +159,12 @@ public sealed unsafe class ScriptHost : IDisposable
             registered.Free();
         }
         _registered.Clear();
+        foreach (var resource in _resources.Values)
+        {
+            Native.kengine_resource_script_unregister(_world.Document, resource.Layout.Name);
+            resource.Free();
+        }
+        _resources.Clear();
         if (_context is not null) Unload(_context);
         _context = null;
     }
@@ -270,6 +293,133 @@ public sealed unsafe class ScriptHost : IDisposable
         private static void OnDestroyed(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Destroyed, e, data, 0);
     }
 
+    // ---- one script that makes resources, registered -----------------------------------------------------------
+
+    /// <summary>
+    /// A script class that makes resources, as the engine has it: an object made each time it fills what it makes, given
+    /// the Script node's settings, so that nothing one node's were filled with is left over for the next.
+    /// </summary>
+    private sealed class RegisteredResource(World world, Type type, ScriptLayout layout)
+    {
+        public ScriptLayout Layout { get; } = layout;
+        private GCHandle _self;
+        private IntPtr _error;      // why the last fill could not be: the engine reads it before the next
+
+        /// <summary>The fields of what it makes, in the order they are written.</summary>
+        private static IEnumerable<FieldInfo> Made(Type type) =>
+            type.GetFields(BindingFlags.Public | BindingFlags.Instance).Where(f => typeof(ResourceScript.Resource).IsAssignableFrom(f.FieldType)).OrderBy(f => f.MetadataToken);
+
+        /// <summary>One of a resource type, given nothing: what a field left null makes, as its node type starts one.</summary>
+        private static ResourceScript.Resource Blank(Type type) =>
+            (ResourceScript.Resource)Activator.CreateInstance(type, type.GetConstructors()[0].GetParameters().Select(_ => (object?)null).ToArray())!;
+
+        /// <summary>What a resource is made with, as JSON: flags given as <c>"eSampled | eStorage"</c> a list of them.</summary>
+        private static string Json(ResourceScript.Resource resource)
+        {
+            static string Text(string text) => System.Text.Json.JsonSerializer.Serialize(text);
+            var parts = resource.Settings.Select(s => $"{Text(s.Input)}: {s.Value switch
+            {
+                string text when text.Contains('|') => $"[{string.Join(", ", text.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(Text))}]",
+                string text => Text(text),
+                bool on => on ? "true" : "false",
+                IFormattable number => number.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+                var other => Text(other.ToString() ?? ""),
+            }}");
+            return "{" + string.Join(", ", parts) + "}";
+        }
+
+        public bool Register()
+        {
+            _self = GCHandle.Alloc(this);
+            var callbacks = new KengineResourceScriptCallbacks { User = GCHandle.ToIntPtr(_self), Fill = &OnFill };
+            var names = new List<IntPtr>();
+            IntPtr Utf8(string text) { var at = Marshal.StringToCoTaskMemUTF8(text); names.Add(at); return at; }
+            try
+            {
+                var fields = stackalloc KecsField[Math.Max(Layout.Fields.Count, 1)];
+                for (var i = 0; i < Layout.Fields.Count; ++i)
+                {
+                    var field = Layout.Fields[i];
+                    fields[i] = new KecsField { Name = (byte*)Utf8(field.Info.Name), Type = (byte*)Utf8(field.Type), Offset = (uint)field.Offset, Size = (uint)field.Size };
+                }
+                // What it makes, as an object of it makes them: each as its field's initialiser says.
+                var sample = (ResourceScript)Activator.CreateInstance(type)!;
+                var made = Made(type).Select(f => (f.Name, Resource: (ResourceScript.Resource?)f.GetValue(sample) ?? Blank(f.FieldType))).ToList();
+                var resources = stackalloc KengineScriptResource[Math.Max(made.Count, 1)];
+                for (var i = 0; i < made.Count; ++i)
+                    resources[i] = new KengineScriptResource { Name = (byte*)Utf8(made[i].Name), Kind = (byte*)Utf8(made[i].Resource.Kind), Settings = (byte*)Utf8(Json(made[i].Resource)) };
+                return Native.kengine_resource_script_register(world.Document, Layout.Name, (nuint)Layout.Size, fields, (nuint)Layout.Fields.Count,
+                                                               resources, (nuint)made.Count, &callbacks);
+            }
+            finally
+            {
+                foreach (var name in names) Marshal.FreeCoTaskMem(name);
+            }
+        }
+
+        public void Free()
+        {
+            if (_self.IsAllocated) _self.Free();
+            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+        }
+
+        private byte* Fill(KengineContents* contents, nuint count, byte* settings, nuint size)
+        {
+            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+            var node = count > 0 ? Native.Text(contents[0].Node) : "";
+            var filled = new List<ResourceScript.Filled>();
+            try
+            {
+                var script = (ResourceScript)Activator.CreateInstance(type)!;
+                script.World = world;
+                if ((int)size >= Layout.Size) Layout.Load(script, (IntPtr)settings);
+                foreach (var field in Made(type))
+                {
+                    if (field.GetValue(script) is not ResourceScript.Resource resource)
+                    {
+                        resource = Blank(field.FieldType);
+                        field.SetValue(script, resource);
+                    }
+                    resource.Name = field.Name;
+                }
+                // Each of its images and buffers, as it was made, to be written.
+                for (nuint i = 0; i < count; ++i)
+                {
+                    var given = &contents[i];
+                    var name = Native.Text(given->Name);
+                    if (Made(type).FirstOrDefault(f => f.Name == name)?.GetValue(script) is not ResourceScript.Filled resource) continue;
+                    resource.Data = (byte*)given->Bytes;
+                    resource.Size = checked((int)given->Size);
+                    if (resource is ResourceScript.Image image)
+                    {
+                        image.Format = Native.Text(given->Format);
+                        image.Width = (int)given->ExtentX; image.Height = (int)given->ExtentY; image.Depth = (int)given->ExtentZ;
+                        image.Layers = (int)given->Layers; image.TexelBytes = (int)given->TexelBytes;
+                    }
+                    filled.Add(resource);
+                }
+                script.InitCore();
+                return null;
+            }
+            catch (Exception e)
+            {
+                var thrown = e is TargetInvocationException { InnerException: not null } ? e.InnerException! : e;
+                Log.Error($"[scripts] {Layout.Name}.Init threw on {node}: {thrown}");
+                _error = Marshal.StringToCoTaskMemUTF8($"it threw {thrown.GetType().Name}: {thrown.Message}");
+                return (byte*)_error;
+            }
+            finally
+            {
+                // What it was given is the engine's again: written to after this, it says so.
+                foreach (var resource in filled) { resource.Data = null; resource.Size = 0; }
+            }
+        }
+
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static byte* OnFill(IntPtr user, KengineContents* contents, nuint count, byte* settings, nuint size) =>
+            GCHandle.FromIntPtr(user).Target is RegisteredResource registered ? registered.Fill(contents, count, settings, size) : null;
+    }
+
     // ---- building ----------------------------------------------------------------------------------------------
 
     private sealed class ScriptBuildException(IReadOnlyList<string> errors) : Exception("the scripts did not compile")
@@ -346,7 +496,7 @@ public sealed unsafe class ScriptHost : IDisposable
         pdb.Position = 0;
         var assembly = context.LoadFromStream(pe, pdb);
         var types = assembly.GetExportedTypes()
-            .Where(t => t.IsClass && !t.IsAbstract && t.IsSubclassOf(typeof(Script)) && t.GetConstructor(Type.EmptyTypes) is not null)
+            .Where(t => t.IsClass && !t.IsAbstract && (t.IsSubclassOf(typeof(Script)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .ToList();
         return (context, types);

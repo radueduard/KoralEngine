@@ -637,6 +637,57 @@ void kengine_script_unregister(KengineDocument* document, const char* name)
     Guarded([&] { Doc(document).Scripts().Unregister(Text(name)); return 0; }, 0);
 }
 
+bool kengine_resource_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,
+                                      const KengineScriptResource* resources, const size_t resource_count, const KengineResourceScriptCallbacks* callbacks)
+{
+    return Guarded([&] {
+        if (!name || !*name) { Fail("a script needs a name"); return false; }
+        kscript::ScriptType type;
+        type.name = name;
+        type.makesResources = true;
+        type.size = size;
+        for (size_t i = 0; i < field_count; ++i) {
+            if (fields[i].offset + fields[i].size > size) { Fail(std::format("field '{}' is past the end of the script's data", Text(fields[i].name))); return false; }
+            type.fields.push_back({ Text(fields[i].name), Text(fields[i].type), fields[i].offset, fields[i].size, nullptr });
+        }
+        for (size_t i = 0; i < resource_count; ++i) {
+            const KengineScriptResource& given = resources[i];
+            const std::string kind = Text(given.kind);
+            if (!given.name || !*given.name) { Fail(std::format("a resource of '{}' needs a name", name)); return false; }
+            if (kind != "Image" && kind != "Buffer" && kind != "ImageView" && kind != "BufferView" && kind != "Sampler") {
+                Fail(std::format("{}.{} is a '{}': a script makes an Image, a Buffer, an ImageView, a BufferView or a Sampler", name, given.name, kind));
+                return false;
+            }
+            kscript::DeclaredResource resource { given.name, kind, {} };
+            if (given.settings && *given.settings) {
+                kgraph::Value settings;
+                if (!Parse(given.settings, settings)) return false;
+                if (!settings.Named()) { Fail(std::format("{}.{}'s settings are an object of its inputs: {{\"format\": \"eR32_SFLOAT\"}}", name, given.name)); return false; }
+                for (const auto& [input, value] : *settings.Named()) resource.settings.emplace_back(input, value.ToJson());
+            }
+            type.resources.push_back(std::move(resource));
+        }
+        std::function<std::string(std::span<kgraph::Contents>, std::span<const std::byte>)> fill;
+        if (callbacks && callbacks->fill)
+            fill = [user = callbacks->user, call = callbacks->fill](const std::span<kgraph::Contents> contents, const std::span<const std::byte> settings) -> std::string {
+                std::vector<KengineContents> given;
+                given.reserve(contents.size());
+                for (auto& each : contents)
+                    given.push_back({ each.name.c_str(), each.node.c_str(), each.kind.c_str(), each.format.c_str(), { each.extent.x, each.extent.y, each.extent.z },
+                                      each.layers, each.texelBytes, each.bytes.data(), each.bytes.size() });
+                const char* why = call(user, given.data(), given.size(), settings.data(), settings.size());
+                return why ? std::string(why) : std::string();
+            };
+        Doc(document).RegisterResourceScript(std::move(type), std::move(fill));
+        return true;
+    }, false);
+}
+
+void kengine_resource_script_unregister(KengineDocument* document, const char* name)
+{
+    Guarded([&] { Doc(document).UnregisterResourceScript(Text(name)); return 0; }, 0);
+}
+
 // ---- meshes ---------------------------------------------------------------------------------------------------------
 
 namespace {

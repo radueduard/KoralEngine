@@ -3,6 +3,8 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <bit>
+#include <limits>
 
 #include <kgraph/catalog.h>
 #include <kgraph/graph.h>
@@ -134,7 +136,8 @@ TEST(Catalog, SaysWhatANodeCannotDoWithoutAndWhatAnEditorOffersForEach) {
     EXPECT_EQ(port("Dispatch", "cover").editor, "parameter");
     EXPECT_EQ(port("VertexLayout", "attributes").editor, "attributes");
     EXPECT_EQ(port("Draw", "command").choices.size(), 9u);
-    EXPECT_EQ(port("Primitive", "shape").choices.size(), 9u);
+    EXPECT_EQ(port("Primitive", "shape").choices.size(), kgraph::DefaultMeshNames().size());
+    EXPECT_EQ(port("Primitive", "shape").choices[13], "eRoundedBox") << "each default mesh, by its name";
 
     // A graphics pipeline is drawn one of two ways, and has the inputs of the one it is.
     const kgraph::NodeType* graphics = kgraph::FindType("GraphicsPipeline");
@@ -185,7 +188,9 @@ namespace {
 // Each default mesh is a closed, outward-facing shape of the size it says: every triangle faces the way its
 // corners' normals point, which is what lighting and back-face culling both go by.
 TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
-    EXPECT_EQ(kgraph::DefaultMeshNames(), (std::vector<std::string> { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus" }));
+    EXPECT_EQ(std::vector<std::string>(kgraph::DefaultMeshNames().begin(), kgraph::DefaultMeshNames().begin() + 9),
+              (std::vector<std::string> { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus", "quad", "triangle" }))
+        << "the first are the Kotlin project's, in its order";
     for (const char* name : { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus", "quad", "triangle" }) {
         const auto mesh = kgraph::ShapeData(name);
         ASSERT_TRUE(mesh.has_value()) << name;
@@ -237,6 +242,49 @@ TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
     EXPECT_EQ(kgraph::DefaultMeshId("cube"), "$cube");
 }
 
+// A default mesh's tangents: at right angles to its normal, a unit long, along u; the bitangent along v.
+TEST(DefaultMeshes, HaveTangentsAlongTheirPicture) {
+    const auto f = [](const kgraph::VertexAttribute& a, const std::size_t v, const std::size_t c) { return std::bit_cast<float>(a.words[v * a.count + c]); };
+    for (const auto& name : kgraph::DefaultMeshNames()) {
+        const kgraph::VertexData four = kgraph::ToVertexData(*kgraph::ShapeData(name), kgraph::Tangents::eFour);
+        EXPECT_TRUE(four.Problem().empty()) << name << ": " << four.Problem();
+        const auto* normal = four.Find("NORMAL");
+        const auto* tangent = four.Find("TANGENT");
+        ASSERT_NE(tangent, nullptr) << name;
+        ASSERT_EQ(tangent->count, 4u);
+        EXPECT_EQ(four.attributes[2].semantic, "TANGENT") << "after the normal, as a model file's";
+        const kgraph::VertexData both = kgraph::ToVertexData(*kgraph::ShapeData(name), kgraph::Tangents::eWithBitangent);
+        const auto* bitangent = both.Find("BITANGENT");
+        ASSERT_NE(bitangent, nullptr) << name;
+        for (std::size_t v = 0; v < four.vertexCount; ++v) {
+            float dot = 0.f, length = 0.f;
+            for (std::size_t c = 0; c < 3; ++c) { dot += f(*normal, v, c) * f(*tangent, v, c); length += f(*tangent, v, c) * f(*tangent, v, c); }
+            EXPECT_NEAR(dot, 0.f, 1e-4f) << name << " vertex " << v;
+            EXPECT_NEAR(length, 1.f, 1e-4f) << name << " vertex " << v;
+            EXPECT_EQ(std::abs(f(*tangent, v, 3)), 1.f) << name;
+            // The bitangent is cross(normal, tangent) on the side w says.
+            const float n[3] { f(*normal, v, 0), f(*normal, v, 1), f(*normal, v, 2) }, t[3] { f(*tangent, v, 0), f(*tangent, v, 1), f(*tangent, v, 2) };
+            const float b[3] { (n[1] * t[2] - n[2] * t[1]) * f(*tangent, v, 3), (n[2] * t[0] - n[0] * t[2]) * f(*tangent, v, 3), (n[0] * t[1] - n[1] * t[0]) * f(*tangent, v, 3) };
+            for (std::size_t c = 0; c < 3; ++c) EXPECT_NEAR(f(*bitangent, v, c), b[c], 1e-4f) << name << " vertex " << v;
+        }
+    }
+    // The plane's picture: u along +x, v along +z, facing up.
+    const kgraph::VertexData plane = kgraph::ToVertexData(*kgraph::ShapeData("plane"), kgraph::Tangents::eWithBitangent);
+    EXPECT_NEAR(std::bit_cast<float>(plane.Find("TANGENT")->words[0]), 1.f, 1e-5f);
+    EXPECT_EQ(kgraph::ToVertexData(*kgraph::ShapeData("cube")).attributes.size(), 3u) << "none, unless asked for";
+    EXPECT_EQ(kgraph::TangentsNamed(kgraph::TangentsName(kgraph::Tangents::eWithBitangent)), kgraph::Tangents::eWithBitangent);
+}
+
+TEST(DefaultMeshes, TheirTangentsAreSavedWithTheGraphWhenNotTheFourOfThem) {
+    kgraph::Graph graph;
+    EXPECT_EQ(graph.ToJson().find("defaultMeshTangents"), std::string::npos);
+    graph.defaultMeshTangents = kgraph::Tangents::eNone;
+    kgraph::Graph read;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), read, error)) << error;
+    EXPECT_EQ(read.defaultMeshTangents, kgraph::Tangents::eNone);
+}
+
 // Where an input is set: on the node (what is read there — a number of what works values out, a pass being on), in
 // the inspector (what takes room), or by a wire only (what only a node makes — a vertex layout, from a VertexLayout).
 // A node can move one of the first two to the other, and keeps that when it is saved.
@@ -283,4 +331,173 @@ TEST(Catalog, SaysWhereEachInputIsSet) {
     EXPECT_EQ(loaded.Find("add")->placed.at("a"), "inspector");
     EXPECT_EQ(loaded.Find("image")->placed.at("format"), "node");
     EXPECT_FALSE(loaded.Find("image")->placed.contains("usage"));
+}
+
+TEST(Catalog, SaysWhatANumberIsKeptWithin) {
+    const auto port = [](const std::string_view type, const std::string_view name) {
+        for (const auto& input : kgraph::FindType(type)->inputs)
+            if (input.name == name) return input;
+        ADD_FAILURE() << type << " has no " << name;
+        return kgraph::Port {};
+    };
+    constexpr float any = std::numeric_limits<float>::infinity();
+    // As the node says: a field of view that sees something, a cube's six faces, a part of the way.
+    EXPECT_EQ(port("Perspective", "fieldOfView").min, 1.f);
+    EXPECT_EQ(port("Perspective", "fieldOfView").max, 179.f);
+    EXPECT_EQ(port("CubeFace", "face").max, 5.f);
+    EXPECT_EQ(port("ShadowCascades", "lambda").max, 1.f);
+    EXPECT_EQ(port("Repeat", "count").min, 1.f);
+    // A whole in parts, and each part, alike.
+    EXPECT_EQ(port("Image", "extent").min, 1.f);
+    EXPECT_EQ(port("Image", "extent.y").min, 1.f);
+    EXPECT_EQ(port("Dispatch", "groupSize.z").min, 1.f);
+    EXPECT_EQ(port("Dispatch", "groups.x").min, 0.f);
+    // What a builder takes unsigned is none or more; what nothing says of, anything.
+    EXPECT_EQ(port("Image", "mipLevels").max, 16.f);
+    EXPECT_EQ(port("Orthographic", "left").min, -any);
+    EXPECT_EQ(port("Draw", "vertexOffset").max, any);
+    EXPECT_EQ(port("Lerp", "t").min, -any);
+
+    // How each is dragged: a size, a distance or a count by so much of it; a count, an index a unit at a time.
+    EXPECT_TRUE(port("Image", "extent.x").logarithmic);
+    EXPECT_TRUE(port("Image", "extent").logarithmic) << "the whole, as its parts";
+    EXPECT_TRUE(port("Perspective", "near").logarithmic);
+    EXPECT_GT(port("Perspective", "near").min, 0.f) << "a plane in front of the eye";
+    EXPECT_FALSE(port("Perspective", "fieldOfView").logarithmic);
+    EXPECT_FALSE(port("ShadowCascades", "lambda").logarithmic);
+    EXPECT_TRUE(port("Image", "mipLevels").integer);
+    EXPECT_TRUE(port("Repeat", "count").integer);
+    EXPECT_TRUE(port("Blit", "sourceExtent.x").integer);
+    EXPECT_FALSE(port("Orthographic", "size").integer);
+    EXPECT_FALSE(port("Perspective", "near").integer);
+    // What it was not said of before: a copy's levels and layers, a framebuffer's depth, a sampler's levels of detail.
+    EXPECT_EQ(port("CopyBufferToImage", "mip").max, 15.f);
+    EXPECT_EQ(port("Framebuffer", "depthStencil.depth").max, 1.f);
+    EXPECT_EQ(port("Sampler", "mipLodBias").min, -16.f);
+    EXPECT_EQ(port("Component", "index").max, 3.f);
+    // A field of a builder's struct: a stencil's mask, a depth range, a vertex attribute's numbers.
+    EXPECT_EQ(kgraph::LimitsOf("KoralStencilOpState", "writeMask").max, 255.f);
+    EXPECT_EQ(kgraph::LimitsOf("KoralDepthStencilState", "maxDepth").max, 1.f);
+    EXPECT_EQ(kgraph::LimitsOf("KoralVertexAttribute", "channelCount").min, 1.f);
+    EXPECT_EQ(kgraph::LimitsOf("KoralVertexAttribute", "location").min, -1.f) << "-1: matched by its semantic";
+    EXPECT_EQ(kgraph::LimitsOf("KoralRasterizationState", "depthBiasSlopeFactor").min, -any);
+
+    // Numbers and vectors of a kind: an unsigned one's none or more, and whole.
+    EXPECT_EQ(port("UInt", "value").min, 0.f);
+    EXPECT_TRUE(port("Int", "value").integer);
+    EXPECT_FALSE(port("Float", "value").integer);
+    EXPECT_EQ(port("UVec3", "z").min, 0.f);
+    EXPECT_TRUE(port("IVec2", "y").integer);
+    EXPECT_EQ(port("Vec4", "w").min, -any);
+    EXPECT_FALSE(kgraph::FindType("Number")->listed) << "kept for the graphs made with it, offered as its kinds";
+    EXPECT_FALSE(kgraph::FindType("Vector")->listed);
+    EXPECT_TRUE(kgraph::FindType("Vec3")->listed);
+}
+
+// Where each input is in an inspector, and when it does anything: a Draw's by what it is about, a builder's struct a part
+// of its own; a Draw's indirect offset only for the indirect commands, a Sampler's anisotropy only while it is on.
+TEST(Catalog, SaysWhereEachInputIsShownAndWhenItDoesAnything) {
+    const auto port = [](const std::string_view type, const std::string_view name) {
+        for (const auto& input : kgraph::FindType(type)->inputs)
+            if (input.name == name) return input;
+        ADD_FAILURE() << type << " has no " << name;
+        return kgraph::Port {};
+    };
+    EXPECT_TRUE(port("Draw", "pipeline").group.empty()) << "what it cannot do without, at the top";
+    EXPECT_TRUE(port("Draw", "command").group.empty());
+    EXPECT_EQ(port("Draw", "indirectOffset").group, "Indirect");
+    EXPECT_EQ(port("Draw", "stencilWriteMask").group, "Stencil");
+    EXPECT_EQ(port("Draw", "tasks.y").group, "What is drawn");
+    EXPECT_EQ(port("Draw", "tasks").group, "What is drawn") << "the whole, as its parts";
+    EXPECT_EQ(port("GraphicsPipeline", "rasterizationState").group, "rasterizationState") << "a struct, a part of its own";
+    EXPECT_EQ(port("Framebuffer", "color[].view").group, "color[]") << "what several share the start of the name of";
+    EXPECT_TRUE(port("Image", "format").group.empty()) << "a few, all at the top";
+    EXPECT_EQ(port("Sampler", "maxLod").group, "Level of detail");
+
+    kgraph::Graph graph;
+    auto& draw = graph.Add("draw", "Draw");
+    EXPECT_FALSE(kgraph::Applies(port("Draw", "indirectOffset"), draw)) << "eAuto, as it starts, draws no indirect buffer";
+    EXPECT_TRUE(kgraph::Applies(port("Draw", "vertexCount"), draw));
+    EXPECT_TRUE(kgraph::Applies(port("Draw", "stencilReference"), draw)) << "the pipeline's stencil test, not known here: it might";
+    draw.Set("command", "eDrawIndexedIndirectCount");
+    EXPECT_TRUE(kgraph::Applies(port("Draw", "indirectOffset"), draw));
+    EXPECT_TRUE(kgraph::Applies(port("Draw", "countOffset"), draw));
+    EXPECT_FALSE(kgraph::Applies(port("Draw", "vertexCount"), draw));
+    EXPECT_EQ(port("Draw", "vertexCount").when.what, "for draws of vertices") << "what an editor says of what it leaves out";
+    draw.Set("stencilTest", false);
+    EXPECT_FALSE(kgraph::Applies(port("Draw", "stencilReference"), draw));
+    auto& sampler = graph.Add("sampler", "Sampler");
+    EXPECT_FALSE(kgraph::Applies(port("Sampler", "maxAnisotropy"), sampler)) << "anisotropy starts off";
+    sampler.Set("anisotropyEnable", true);
+    EXPECT_TRUE(kgraph::Applies(port("Sampler", "maxAnisotropy"), sampler));
+}
+
+// Every default mesh: numbers that make a mesh, normals a unit long, each triangle facing the way its corners' normals
+// do (counter-clockwise seen from there), and about a unit across.
+TEST(DefaultMeshes, EveryOneFacesTheWayItsNormalsDoAndIsAboutAUnitAcross) {
+    for (const auto& name : kgraph::DefaultMeshNames()) {
+        const auto mesh = kgraph::ShapeData(name);
+        ASSERT_TRUE(mesh.has_value()) << name;
+        ASSERT_FALSE(mesh->vertices.empty()) << name;
+        ASSERT_EQ(mesh->indices.size() % 3, 0u) << name;
+        const kgraph::VertexData data = kgraph::ToVertexData(*mesh, kgraph::Tangents::eFour);
+        EXPECT_TRUE(data.Problem().empty()) << name << ": " << data.Problem();
+        float low[3] { 1e9f, 1e9f, 1e9f }, high[3] { -1e9f, -1e9f, -1e9f };
+        for (const auto& v : mesh->vertices) {
+            EXPECT_NEAR(v.normal[0] * v.normal[0] + v.normal[1] * v.normal[1] + v.normal[2] * v.normal[2], 1.f, 1e-4f) << name;
+            for (int a = 0; a < 3; ++a) { low[a] = std::min(low[a], v.position[a]); high[a] = std::max(high[a], v.position[a]); }
+        }
+        for (int a = 0; a < 3; ++a) {
+            EXPECT_GE(low[a], -0.65f) << name << ", axis " << a;
+            EXPECT_LE(high[a], 0.65f) << name << ", axis " << a;
+        }
+        EXPECT_GT(std::max({ high[0] - low[0], high[1] - low[1], high[2] - low[2] }), 0.5f) << name;
+        int wrong = 0;
+        for (std::size_t i = 0; i < mesh->indices.size(); i += 3) {
+            const auto& a = mesh->vertices[mesh->indices[i]], & b = mesh->vertices[mesh->indices[i + 1]], & c = mesh->vertices[mesh->indices[i + 2]];
+            float e1[3], e2[3];
+            for (int k = 0; k < 3; ++k) { e1[k] = b.position[k] - a.position[k]; e2[k] = c.position[k] - a.position[k]; }
+            const float face[3] { e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0] };
+            const float area = std::sqrt(face[0] * face[0] + face[1] * face[1] + face[2] * face[2]);
+            if (area < 1e-9f) continue;     // a band's at a pole: nothing to face
+            float facing = 0.f;
+            for (int k = 0; k < 3; ++k) facing += face[k] * (a.normal[k] + b.normal[k] + c.normal[k]);
+            if (facing <= 0.f) ++wrong;
+        }
+        EXPECT_EQ(wrong, 0) << name << ": triangles facing away from their normals";
+    }
+    const kgraph::VertexData skinned = kgraph::ToVertexData(*kgraph::ShapeData("skinnedCylinder"));
+    ASSERT_NE(skinned.Find("BONE_IDS"), nullptr);
+    EXPECT_EQ(skinned.Find("BONE_IDS")->type, kgraph::AttributeType::eUInt);
+    ASSERT_NE(skinned.Find("BONE_WEIGHTS"), nullptr);
+    EXPECT_EQ(kgraph::ToVertexData(*kgraph::ShapeData("teapot")).Find("BONE_IDS"), nullptr) << "only the skinned one has bones";
+}
+
+// Each pass runs as often as its rate says, and the passes are in the order of their rates: setup, fixed, every frame.
+TEST(PassRates, ArePutInTheOrderTheyRunAndSetOneAtATime) {
+    kgraph::Graph graph;
+    graph.passes = { "draw", "simulate", "noise", "post" };
+    graph.setup = { "noise" };
+    graph.fixed = { "simulate", "gone", "noise" };
+    graph.OrderByRate();
+    EXPECT_EQ(graph.passes, (std::vector<std::string> { "noise", "simulate", "draw", "post" }));
+    EXPECT_EQ(graph.fixed, (std::vector<std::string> { "simulate" })) << "what is no pass, or is setup, is forgotten";
+    EXPECT_EQ(graph.RateOf("noise"), kgraph::PassRate::eSetup);
+    EXPECT_EQ(graph.RateOf("simulate"), kgraph::PassRate::eFixed);
+    EXPECT_EQ(graph.RateOf("draw"), kgraph::PassRate::eFrame);
+    EXPECT_EQ(graph.RateOf(""), kgraph::PassRate::eFrame) << "a node in no pass runs every frame";
+
+    ASSERT_TRUE(graph.SetRate("post", kgraph::PassRate::eFixed));
+    EXPECT_EQ(graph.passes, (std::vector<std::string> { "noise", "simulate", "post", "draw" }));
+    ASSERT_TRUE(graph.SetRate("noise", kgraph::PassRate::eFrame));
+    EXPECT_TRUE(graph.setup.empty());
+    EXPECT_FALSE(graph.SetRate("nothing", kgraph::PassRate::eSetup));
+    EXPECT_EQ(kgraph::PassRateName(kgraph::PassRate::eFixed), "fixed");
+
+    // A graph saved before there was a fixed step reads as it did.
+    kgraph::Graph old;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(R"({ "kgraph": 1, "setup": ["a"], "passes": ["b"], "nodes": [] })", old, error)) << error;
+    EXPECT_EQ(old.passes, (std::vector<std::string> { "a", "b" }));
+    EXPECT_TRUE(old.fixed.empty());
 }

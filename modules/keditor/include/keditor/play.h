@@ -44,6 +44,16 @@ namespace keditor
          */
         void SetPlaying(const bool playing) { _playing = playing; }
         [[nodiscard]] bool Playing() const { return _playing; }
+        /**
+         * @brief The scene starts playing from the beginning, or stops and is put back: its graph's setup pages run
+         *        again (Runtime::RunSetupAgain), here and in any view that follows it, so that what they made starts from
+         *        the world as it is. Not for a pause, or playing on from one.
+         */
+        void Restart();
+        /** @brief One fixed step, as a frame's would be — the scripts' fixedUpdate, and the graph told of it — whether or not it plays. */
+        void StepOnce();
+        /** @brief How many times it has been restarted: what a view that follows it goes by. */
+        [[nodiscard]] std::uint64_t Restarts() const { return _restarts; }
         /** @brief The scene running @p document, or null: how what only has the document reaches the scene. */
         [[nodiscard]] static PlayScene* Of(const Document& document);
         /**
@@ -71,6 +81,7 @@ namespace keditor
         std::unique_ptr<Document> _replaced;    // the one before, until the frame it was drawn in is done
         std::string _error;
         bool _playing = true;
+        std::uint64_t _restarts = 0;
         std::function<void()> _onFrame;
         const kor::Input* _input = nullptr;
         bool _edited = false;
@@ -89,6 +100,7 @@ namespace keditor
     public:
         explicit GameScene(PlayScene& play) : _play(play) {}
 
+        void FixedUpdate() override;
         void Update() override;
         void LateUpdate() override;
         void Shutdown() override;
@@ -103,7 +115,7 @@ namespace keditor
         PlayScene& _play;
         const Document* _following = nullptr;
         std::unique_ptr<kgraph::Runtime> _runtime, _before;     // (the one before, until the frame it was drawn in is done)
-        std::uint64_t _seen = 0;
+        std::uint64_t _seen = 0, _restarts = 0;
         bool _shown = false, _enabled = true;     // not drawn until whoever shows it says it is seen
     };
 }

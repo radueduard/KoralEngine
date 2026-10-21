@@ -78,6 +78,42 @@ namespace kgraph
 
     Node* Graph::Find(const std::string_view id) { return const_cast<Node*>(std::as_const(*this).Find(id)); }
 
+    std::string_view PassRateName(const PassRate rate)
+    {
+        switch (rate) {
+        case PassRate::eSetup: return "setup";
+        case PassRate::eFixed: return "fixed";
+        default: return "frame";
+        }
+    }
+
+    bool Graph::IsSetup(const std::string_view pass) const { return !pass.empty() && std::ranges::find(setup, pass) != setup.end(); }
+    bool Graph::IsFixed(const std::string_view pass) const { return !pass.empty() && !IsSetup(pass) && std::ranges::find(fixed, pass) != fixed.end(); }
+    PassRate Graph::RateOf(const std::string_view pass) const { return IsSetup(pass) ? PassRate::eSetup : IsFixed(pass) ? PassRate::eFixed : PassRate::eFrame; }
+
+    bool Graph::SetRate(const std::string_view pass, const PassRate rate)
+    {
+        if (pass.empty() || std::ranges::find(passes, pass) == passes.end()) return false;
+        std::erase(setup, pass);
+        std::erase(fixed, pass);
+        if (rate == PassRate::eSetup) setup.emplace_back(pass);
+        if (rate == PassRate::eFixed) fixed.emplace_back(pass);
+        OrderByRate();
+        return true;
+    }
+
+    void Graph::OrderByRate()
+    {
+        const auto gone = [&](const std::string& pass) { return std::ranges::find(passes, pass) == passes.end(); };
+        std::erase_if(setup, gone);
+        std::erase_if(fixed, [&](const std::string& pass) { return gone(pass) || IsSetup(pass); });
+        std::vector<std::string> ordered = setup;
+        ordered.insert(ordered.end(), fixed.begin(), fixed.end());
+        for (const auto& pass : passes)
+            if (RateOf(pass) == PassRate::eFrame) ordered.push_back(pass);
+        passes = std::move(ordered);
+    }
+
     Node& Graph::Add(std::string id, std::string type)
     {
         Node node;
@@ -91,11 +127,17 @@ namespace kgraph
     std::string Graph::ToJson() const
     {
         std::string out = "{\n  \"kgraph\": 1,";
-        if (!passes.empty()) {
-            out += "\n  \"passes\": [";
-            for (std::size_t i = 0; i < passes.size(); ++i) out += std::format("{}{}", i ? ", " : "", json::Quote(passes[i]));
-            out += "],";
-        }
+        // The pages by how often they run: what is made once, what is done on the fixed step, then every frame.
+        const auto list = [&](const char* key, const PassRate rate) {
+            std::string names;
+            for (const auto& pass : passes)
+                if (RateOf(pass) == rate) names += std::format("{}{}", names.empty() ? "" : ", ", json::Quote(pass));
+            if (!names.empty()) out += std::format("\n  \"{}\": [{}],", key, names);
+        };
+        list("setup", PassRate::eSetup);
+        list("fixed", PassRate::eFixed);
+        list("passes", PassRate::eFrame);
+        if (fixedStepsAtMost != Graph().fixedStepsAtMost) out += std::format("\n  \"fixedStepsAtMost\": {},", fixedStepsAtMost);
         if (!meshImports.empty()) {
             // How model files are read: each file's attributes left out, and its buffers.
             out += "\n  \"meshImports\": {";
@@ -109,6 +151,8 @@ namespace kgraph
             }
             out += "\n  },";
         }
+        if (defaultMeshTangents != Graph().defaultMeshTangents)
+            out += std::format("\n  \"defaultMeshTangents\": {},", json::Quote(TangentsName(defaultMeshTangents)));
         if (!overview.empty()) {
             // Where each node is when every node is seen at once.
             out += "\n  \"overview\": {";
@@ -201,6 +245,22 @@ namespace kgraph
                     }
                 if (!import.Default()) graph.meshImports[file] = std::move(import);
             }
+        if (const json::Value* tangents = root.Find("defaultMeshTangents"); tangents && tangents->kind == json::Value::Kind::eString)
+            if (const auto named = TangentsNamed(tangents->string)) graph.defaultMeshTangents = *named;
+        if (const json::Value* setup = root.Find("setup"))
+            for (const auto& pass : setup->items)
+                if (pass.kind == json::Value::Kind::eString && std::ranges::find(graph.passes, pass.string) == graph.passes.end()) {
+                    graph.passes.push_back(pass.string);
+                    graph.setup.push_back(pass.string);
+                }
+        if (const json::Value* most = root.Find("fixedStepsAtMost"); most && most->kind == json::Value::Kind::eNumber)
+            graph.fixedStepsAtMost = std::clamp(static_cast<int>(most->number), 1, 16);
+        if (const json::Value* fixed = root.Find("fixed"))
+            for (const auto& pass : fixed->items)
+                if (pass.kind == json::Value::Kind::eString && std::ranges::find(graph.passes, pass.string) == graph.passes.end()) {
+                    graph.passes.push_back(pass.string);
+                    graph.fixed.push_back(pass.string);
+                }
         if (const json::Value* passes = root.Find("passes"))
             for (const auto& pass : passes->items)
                 if (pass.kind == json::Value::Kind::eString && std::ranges::find(graph.passes, pass.string) == graph.passes.end()) graph.passes.push_back(pass.string);

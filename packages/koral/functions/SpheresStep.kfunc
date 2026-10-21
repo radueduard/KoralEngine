@@ -1,0 +1,1769 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "bodies",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "bodies",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "materials",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "materials",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "dt",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "dt",
+          "kind": "eValue",
+          "default": 0.016666666666666666
+        }
+      },
+      {
+        "id": "gravity",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {
+          "name": "gravity",
+          "kind": "eValue",
+          "default": [
+            0,
+            -9.81,
+            0
+          ]
+        }
+      },
+      {
+        "id": "cell",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          360
+        ],
+        "inputs": {
+          "name": "cell",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "ground",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          420
+        ],
+        "inputs": {
+          "name": "ground",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "four",
+        "type": "Multiply",
+        "at": [
+          200,
+          480
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "table",
+        "type": "Max",
+        "at": [
+          200,
+          540
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 512
+        }
+      },
+      {
+        "id": "tableBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          600
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "table",
+              "out"
+            ]
+          },
+          "b": 8
+        }
+      },
+      {
+        "id": "room",
+        "type": "Multiply",
+        "at": [
+          200,
+          660
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 8
+        }
+      },
+      {
+        "id": "contactBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          720
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "room",
+              "out"
+            ]
+          },
+          "b": 48
+        }
+      },
+      {
+        "id": "orderedBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          780
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "room",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "claimBytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          840
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 48
+        }
+      },
+      {
+        "id": "keys buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          900
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "four",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "ids buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          960
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "four",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "claims buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1020
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "claimBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "masks buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1080
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "four",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "starts buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1140
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "tableBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "ends buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1200
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "tableBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "contacts buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1260
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "contactBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "ordered buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1320
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "orderedBytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "counter buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1380
+        ],
+        "inputs": {
+          "instanceCount": 16,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "colourCounts buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1440
+        ],
+        "inputs": {
+          "instanceCount": 52,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "colourStarts buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1500
+        ],
+        "inputs": {
+          "instanceCount": 52,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "colourFill buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1560
+        ],
+        "inputs": {
+          "instanceCount": 52,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "args buffer",
+        "type": "Buffer",
+        "at": [
+          200,
+          1620
+        ],
+        "inputs": {
+          "instanceCount": 156,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Divide",
+        "at": [
+          200,
+          1680
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 64
+        }
+      },
+      {
+        "id": "g",
+        "type": "Split",
+        "at": [
+          200,
+          1740
+        ],
+        "inputs": {
+          "vector": {
+            "$link": [
+              "gravity",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "push",
+        "type": "Vec4",
+        "at": [
+          200,
+          1800
+        ],
+        "inputs": {
+          "x": {
+            "$link": [
+              "g",
+              "x"
+            ]
+          },
+          "y": {
+            "$link": [
+              "g",
+              "y"
+            ]
+          },
+          "z": {
+            "$link": [
+              "g",
+              "z"
+            ]
+          },
+          "w": 0
+        }
+      },
+      {
+        "id": "velocities",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          1860
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "velocities",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.materials": {
+            "$link": [
+              "materials",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run velocities",
+        "type": "Dispatch",
+        "at": [
+          500,
+          1920
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "velocities",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cellKeys",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          1980
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "cellKeys",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.keys": {
+            "$link": [
+              "keys buffer",
+              "out"
+            ]
+          },
+          "param.ids": {
+            "$link": [
+              "ids buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run cellKeys",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2040
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "cellKeys",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sort",
+        "type": "Function",
+        "at": [
+          400,
+          2100
+        ],
+        "inputs": {
+          "function": "RadixSort",
+          "keys": {
+            "$link": [
+              "keys buffer",
+              "out"
+            ]
+          },
+          "values": {
+            "$link": [
+              "ids buffer",
+              "out"
+            ]
+          },
+          "count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear starts",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2160
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear ends",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2220
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "ranges",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2280
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "ranges",
+          "param.keys": {
+            "$link": [
+              "sort",
+              "keys"
+            ]
+          },
+          "param.starts": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          },
+          "param.ends": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run ranges",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2340
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "ranges",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "findContacts",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          2400
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "findContacts",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.ids": {
+            "$link": [
+              "sort",
+              "values"
+            ]
+          },
+          "param.starts": {
+            "$link": [
+              "starts buffer",
+              "out"
+            ]
+          },
+          "param.ends": {
+            "$link": [
+              "ends buffer",
+              "out"
+            ]
+          },
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run findContacts",
+        "type": "Dispatch",
+        "at": [
+          500,
+          2460
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "findContacts",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "over contacts",
+        "type": "Function",
+        "at": [
+          400,
+          2520
+        ],
+        "inputs": {
+          "function": "IndirectArgs",
+          "counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          },
+          "groupSize": 64
+        }
+      },
+      {
+        "id": "clear counts",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2580
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear fill",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2640
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "colourFill buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "clear masks",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2700
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "masks buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "rounds",
+        "type": "Repeat",
+        "at": [
+          400,
+          2760
+        ],
+        "inputs": {
+          "count": 8
+        }
+      },
+      {
+        "id": "round push",
+        "type": "Vec4",
+        "at": [
+          400,
+          2820
+        ],
+        "inputs": {
+          "x": {
+            "$link": [
+              "g",
+              "x"
+            ]
+          },
+          "y": {
+            "$link": [
+              "g",
+              "y"
+            ]
+          },
+          "z": {
+            "$link": [
+              "g",
+              "z"
+            ]
+          },
+          "w": {
+            "$link": [
+              "rounds",
+              "index"
+            ]
+          }
+        }
+      },
+      {
+        "id": "round zero",
+        "type": "Multiply",
+        "at": [
+          400,
+          2880
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "rounds",
+              "index"
+            ]
+          },
+          "b": 0
+        }
+      },
+      {
+        "id": "clear claims",
+        "type": "ClearBuffer",
+        "at": [
+          400,
+          2940
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "claims buffer",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "round zero",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "claim",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3000
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "claim",
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          },
+          "param.claims": {
+            "$link": [
+              "claims buffer",
+              "out"
+            ]
+          },
+          "param.masks": {
+            "$link": [
+              "masks buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run claim",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3060
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "claim",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "over contacts",
+              "args"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "round push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "settle",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3120
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "settle",
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          },
+          "param.claims": {
+            "$link": [
+              "claims buffer",
+              "out"
+            ]
+          },
+          "param.masks": {
+            "$link": [
+              "masks buffer",
+              "out"
+            ]
+          },
+          "param.colourCounts": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run settle",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3180
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "settle",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "over contacts",
+              "args"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "round push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "rest",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3240
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "rest",
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          },
+          "param.colourCounts": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run rest",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3300
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "rest",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "over contacts",
+              "args"
+            ]
+          }
+        }
+      },
+      {
+        "id": "copy counts",
+        "type": "CopyBuffer",
+        "at": [
+          400,
+          3360
+        ],
+        "inputs": {
+          "source": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          },
+          "destination": {
+            "$link": [
+              "colourStarts buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "starts of colours",
+        "type": "Function",
+        "at": [
+          400,
+          3420
+        ],
+        "inputs": {
+          "function": "Scan",
+          "values": {
+            "$link": [
+              "colourStarts buffer",
+              "out"
+            ]
+          },
+          "count": 13
+        }
+      },
+      {
+        "id": "bucket",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3480
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "bucket",
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.counter": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          },
+          "param.colourFill": {
+            "$link": [
+              "colourFill buffer",
+              "out"
+            ]
+          },
+          "param.colourStarts": {
+            "$link": [
+              "starts of colours",
+              "values"
+            ]
+          },
+          "param.ordered": {
+            "$link": [
+              "ordered buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run bucket",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3540
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "bucket",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "over contacts",
+              "args"
+            ]
+          }
+        }
+      },
+      {
+        "id": "colourArgs",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3600
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "colourArgs",
+          "param.colourCounts": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "args buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run colourArgs",
+        "type": "Dispatch",
+        "at": [
+          500,
+          3660
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "colourArgs",
+              "out"
+            ]
+          },
+          "groups.x": 1
+        }
+      },
+      {
+        "id": "turns",
+        "type": "Repeat",
+        "at": [
+          400,
+          3720
+        ],
+        "inputs": {
+          "count": 130
+        }
+      },
+      {
+        "id": "colour",
+        "type": "Mod",
+        "at": [
+          400,
+          3780
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "b": 13
+        }
+      },
+      {
+        "id": "colour push",
+        "type": "Vec4",
+        "at": [
+          400,
+          3840
+        ],
+        "inputs": {
+          "x": {
+            "$link": [
+              "g",
+              "x"
+            ]
+          },
+          "y": {
+            "$link": [
+              "g",
+              "y"
+            ]
+          },
+          "z": {
+            "$link": [
+              "g",
+              "z"
+            ]
+          },
+          "w": {
+            "$link": [
+              "colour",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "colour args",
+        "type": "Multiply",
+        "at": [
+          400,
+          3900
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "colour",
+              "out"
+            ]
+          },
+          "b": 12
+        }
+      },
+      {
+        "id": "solve",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          3960
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "solve",
+          "param.contacts": {
+            "$link": [
+              "contacts buffer",
+              "out"
+            ]
+          },
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.materials": {
+            "$link": [
+              "materials",
+              "out"
+            ]
+          },
+          "param.colourCounts": {
+            "$link": [
+              "colourCounts buffer",
+              "out"
+            ]
+          },
+          "param.colourStarts": {
+            "$link": [
+              "starts of colours",
+              "values"
+            ]
+          },
+          "param.ordered": {
+            "$link": [
+              "ordered buffer",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run solve",
+        "type": "Dispatch",
+        "at": [
+          500,
+          4020
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "solve",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "args buffer",
+              "out"
+            ]
+          },
+          "indirectOffset": {
+            "$link": [
+              "colour args",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "colour push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "positions",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          4080
+        ],
+        "inputs": {
+          "compute.module": "koral_spheres",
+          "compute.entry": "positions",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run positions",
+        "type": "Dispatch",
+        "at": [
+          500,
+          4140
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "positions",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.dt": {
+            "$link": [
+              "dt",
+              "out"
+            ]
+          },
+          "push.cell": {
+            "$link": [
+              "cell",
+              "out"
+            ]
+          },
+          "push.ground": {
+            "$link": [
+              "ground",
+              "out"
+            ]
+          },
+          "push.gravity": {
+            "$link": [
+              "push",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "moved",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          4200
+        ],
+        "inputs": {
+          "name": "bodies",
+          "value": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "touching",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          4260
+        ],
+        "inputs": {
+          "name": "contacts",
+          "value": {
+            "$link": [
+              "counter buffer",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

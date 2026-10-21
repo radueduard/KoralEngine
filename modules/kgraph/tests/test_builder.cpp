@@ -255,3 +255,39 @@ TEST_F(BuilderTest, WhatALayoutCannotBeIsSaid) {
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("data")->error.find("has no field 'colour'. It has: position"), std::string::npos) << runtime.Status("data")->error;
 }
+
+// What the GPU has is written back into the entities it is of: a buffer of each light's position, one along X, written
+// back moves each light along X a little at a time, as each read-back arrives. One moved by something else is not put
+// back where the buffer had it: setup is made again from where it is, and it goes on from there.
+TEST_F(BuilderTest, WhatIsReadBackIsWrittenIntoTheEntitiesItIsOf) {
+    const kecs::Entity first = Lamp({ 1, 0, 0 }, 1.f, 1.f, { 0, 2, 0 });
+    const kecs::Entity second = Lamp({ 0, 1, 0 }, 1.f, 1.f, { 5, 0, 0 });
+    kgraph::Graph graph;
+    graph.Add("lamps", "ForEach").Set("component", "PointLight");
+    graph.Add("on", "Add").Wire("a", "lamps", "position").Set("b", Value::List { 1, 0, 0 });
+    graph.Add("data", "BufferBuilder").Set("layout", Value::List { Field("position", "eVec3"), Field("range", "eFloat") }).Wire("field.position", "on")
+        .Wire("field.range", "lamps", "field.range");
+    graph.Add("back", "WriteBack").Wire("buffer", "data").Set("forEach", "lamps").Set("stride", 16).Set("position", 0)
+        .Set("fields", Value::Members { { "PointLight.range", 12 } });
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    Ok();
+    EXPECT_EQ(runtime.ValueOf("data", "stride"), Value(16));
+    auto& world = scene->world;
+    for (int i = 0; i < 30; ++i) Frame();
+    EXPECT_GT(world.PositionOf(first).x, 3.f) << "moved along X, a read-back at a time";
+    EXPECT_FLOAT_EQ(world.PositionOf(first).y, 2.f);
+    EXPECT_GT(world.PositionOf(second).x, 8.f) << "each its own";
+
+    world.SetPosition(first, { 100.f, 2.f, 0.f });        // as the gizmo does
+    for (int i = 0; i < 30; ++i) Frame();
+    EXPECT_GT(world.PositionOf(first).x, 100.f) << "going on from where it was put, not from where the buffer had it";
+
+    // Wrongly set: said so.
+    graph.Find("back")->Set("forEach", "data");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("back")->error.find("ForEach"), std::string::npos) << runtime.Status("back")->error;
+    graph.Find("back")->Set("forEach", "lamps").Set("position", 8);
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("back")->error.find("within its stride"), std::string::npos) << runtime.Status("back")->error;
+}

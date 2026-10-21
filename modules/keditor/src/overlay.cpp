@@ -2,7 +2,8 @@
 // keditor: what an editor draws over a scene, and reads back of it. @see overlay.h
 //
 // It is a graph like a scene's, run by a runtime of its own in the scene's frame graph: an image of which entity is
-// where, drawn from every entity with a Mesh; a Pick of it; a line round the picked one and the editor's shapes, into
+// where, drawn from every entity with a Mesh on a frame a pick is asked of, and from the picked one alone otherwise; a
+// Pick of it; a line round the picked one and the editor's shapes, into
 // a picture that is nothing wherever neither is.
 //
 
@@ -167,16 +168,21 @@ float4 fragment(Raster raster) : SV_Target
             graph.Add("entities", "GraphicsPipeline").Set("vertex.module", "koralEditorIds").Set("vertex.entry", "vertex")
                 .Set("fragment.module", "koralEditorIds").Set("fragment.entry", "fragment").Wire("vertex.layout", "shape", "layout")
                 .Wire("framebuffer", "ids target").Wire("param.view", "view");
-            // Every entity, those of them with a Mesh, and a draw of each.
+            // Every entity with a Mesh, drawn only on a frame a pick is asked of: what is under the pointer is found among
+            // them all. Otherwise idle: with thousands of entities, a draw each, every frame, is what the editor spent most on.
             graph.Add("all", "Entities");
             graph.Add("drawn", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" });
-            // Drawn only when something reads them: while one is picked, for its outline, and on a frame a pick is asked
-            // of. Otherwise idle: with thousands of entities, a draw each, every frame, is what the editor spent most on.
             graph.Add("picked", "Selected");
-            graph.Add("ids wanted", "Add").Wire("a", "picked", "present").Wire("b", "picked", "picking");
-            graph.Add("ids unwanted", "LessOrEqual").Wire("a", "ids wanted").Set("b", 0);
-            graph.Add("draw ids", "Draw").Wire("pipeline", "entities").Wire("cull", "seen").Wire("idle", "ids unwanted")
+            graph.Add("not picking", "LessOrEqual").Wire("a", "picked", "picking").Set("b", 0);
+            graph.Add("draw ids", "Draw").Wire("pipeline", "entities").Wire("cull", "seen").Wire("idle", "not picking")
                 .Wire("mesh", "drawn", "Mesh.mesh").Wire("push.model", "drawn", "matrix").Wire("push.entityId", "drawn", "entityId");
+            // The picked one alone, every other frame it is picked: all its outline needs. Its line goes round all of it,
+            // what is in front of it as well (as the ids of everything else are not drawn to hide it).
+            graph.Add("chosen", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Wire("entityId", "picked", "entityId");
+            graph.Add("chosen wanted", "Subtract").Wire("a", "picked", "present").Wire("b", "picked", "picking");
+            graph.Add("chosen unwanted", "LessOrEqual").Wire("a", "chosen wanted").Set("b", 0);
+            graph.Add("draw chosen", "Draw").Wire("pipeline", "entities").Wire("cull", "seen").Wire("idle", "chosen unwanted")
+                .Wire("mesh", "chosen", "Mesh.mesh").Wire("push.model", "chosen", "matrix").Wire("push.entityId", "chosen", "entityId");
             graph.Add("pick", "Pick").Wire("ids", "ids");
 
             // Over the scene's picture: the line round what is picked, then the editor's shapes.

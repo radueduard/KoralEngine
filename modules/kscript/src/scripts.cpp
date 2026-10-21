@@ -1,5 +1,7 @@
 #include <kscript/scripts.h>
 
+#include <cmath>
+
 #include <algorithm>
 #include <cstring>
 #include <format>
@@ -48,6 +50,15 @@ namespace kscript
         description.size = std::max<std::size_t>(type.size, 1);
         description.alignment = std::max<std::size_t>(type.alignment, 1);
         description.construct = &ConstructScript;
+        // What its source says the fields are kept within, when what registers it does not say: a host gives the shape.
+        if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent)
+            for (auto& field : type.fields)
+                if (const kecs::FieldDescription* was = _world.Describe(existing).FindField(field.name);
+                    was && was->SameAs(field) && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic) {
+                    field.min = was->min;
+                    field.max = was->max;
+                    field.logarithmic = was->logarithmic;
+                }
         description.fields = type.fields;
         if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent && type.initial.empty())
             type.initial = Carried(_world.Describe(existing), type);

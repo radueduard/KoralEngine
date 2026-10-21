@@ -18,6 +18,7 @@
 #include <kecs/kecs.h>
 #include <kecs/serialize.h>
 #include <kgraph/graph.h>
+#include <limits>
 #include <map>
 #include <optional>
 
@@ -81,11 +82,16 @@ namespace keditor
         [[nodiscard]] std::uint64_t Revision() const { return _revision; }
         /**
          * @brief Goes up when anything there is to show of it changed: the document, or what the runtime says of it —
-         *        which entities a pass runs for and which it passes by, known only the frame after the change.
+         *        which entities a pass runs for and which it passes by, known only the frame after the change. Not when
+         *        an entity is only moved, turned or scaled (dragged, every frame of the drag): a change all the same
+         *        (Revision, Dirty), but what shows where an entity is follows it by itself, and an interface built again
+         *        for each frame of a drag, with thousands of entities, took most of the frame.
          */
-        [[nodiscard]] std::uint64_t Version() const { return _revision + _reported; }
+        [[nodiscard]] std::uint64_t Version() const { return _revision - _moves + _reported; }
         /** @brief Whether it changed since it was last saved or loaded. */
         [[nodiscard]] bool Dirty() const { return _revision != _saved; }
+        /** @brief Says whether it has changed since it was saved: a scene put back as it was, changed or not. */
+        void SetDirty(const bool dirty) { _saved = dirty ? std::numeric_limits<std::uint64_t>::max() : _revision; }
         /** @brief What happened that the user should hear of, oldest first: an input an edited shader took away. */
         [[nodiscard]] const std::vector<std::string>& Notes() const { return _notes; }
 
@@ -104,11 +110,23 @@ namespace keditor
         // before it. The order of the passes is the order they are drawn in, where what they use does not say.
 
         [[nodiscard]] const std::vector<std::string>& Passes() const { return Graph().passes; }
-        /** @brief A new pass so named, at @p index among them (last, when below 0). False when there is one already. */
-        bool AddPass(std::string_view name, int index = -1);
+        /** @brief Whether @p pass is one of setup: its passes are recorded once, when they are built. @see kgraph::Graph::setup */
+        [[nodiscard]] bool IsSetup(std::string_view pass) const { return Graph().IsSetup(pass); }
+        /** @brief How often @p pass runs: once, on the fixed step, or every frame. @see kgraph::PassRate */
+        [[nodiscard]] kgraph::PassRate RateOf(std::string_view pass) const { return Graph().RateOf(pass); }
+        /**
+         * @brief A new pass so named, at @p index among those of its @p rate — setup first, then fixed, then every frame
+         *        — last of them when below 0. False when there is one already.
+         */
+        bool AddPass(std::string_view name, int index = -1, kgraph::PassRate rate = kgraph::PassRate::eFrame);
+        /**
+         * @brief Makes a pass one of @p rate, as near where it was as it can be: the first of its new rate's passes when
+         *        it comes from an earlier rate (setup, then fixed, then every frame), the last when from a later one.
+         */
+        bool SetPassRate(std::string_view pass, kgraph::PassRate rate);
         /** @brief Gives a pass another name, and every node of it with it. */
         bool RenamePass(std::string_view pass, std::string_view name);
-        /** @brief Moves a pass to @p index among them: earlier is drawn first. */
+        /** @brief Moves a pass to @p index among them: earlier is drawn first. A pass of setup stays before those of every frame. */
         bool MovePass(std::string_view pass, int index);
         /** @brief Takes a pass away: with its nodes, or — @p keepNodes — leaving them in no pass. */
         bool RemovePass(std::string_view pass, bool keepNodes = false);
@@ -161,6 +179,8 @@ namespace keditor
          */
         void SetMeshImport(const std::string& file, kgraph::MeshImport import);
         [[nodiscard]] kgraph::MeshImport MeshImportOf(std::string_view file) const;
+        /** @brief What the default meshes have of their surface's directions (Graph::defaultMeshTangents): a change to undo. */
+        void SetDefaultMeshTangents(kgraph::Tangents tangents);
         /**
          * @brief Puts copies of @p nodes — of this graph, or as they were copied from one — into the graph, the
          *        top-left of them all at (@p x, @p y): each by a name of its own, wired among themselves as they
@@ -270,8 +290,16 @@ namespace keditor
 
         /** @brief Where the project's functions are: its `functions` folder. Empty for a scene in no project. */
         [[nodiscard]] std::filesystem::path FunctionsDirectory() const;
-        /** @brief The project's functions, by name. */
+        /**
+         * @brief Where the engine's functions are, in every project: its package's `functions` folder — Scan,
+         *        RadixSort, Compact, IndirectArgs. A project's function of the same name is called in its place, and one
+         *        of the engine's opened and changed is saved as the project's own.
+         */
+        [[nodiscard]] static std::filesystem::path EngineFunctionsDirectory();
+        /** @brief The functions there are to call, by name: the project's, and the engine's. */
         [[nodiscard]] std::vector<std::string> Functions() const;
+        /** @brief Whether @p name is one of the engine's functions, and the project has none of its own so called. */
+        [[nodiscard]] bool IsEngineFunction(std::string_view name) const;
         /**
          * @brief What a node can be made as besides the types there are: the runtime's, a node for each component —
          *        and a call of each of the project's functions, by its name (or `<name> (function)`, where a type has it).
@@ -388,16 +416,34 @@ namespace keditor
         void SetAssetDirectory(const std::filesystem::path& directory) { _runtime->SetAssetDirectory(directory); }
 
         /**
-         * @brief Makes the components the scripts under @p folder declare known, as their sources declare them: what a
-         *        project's scripts are, whether or not anything runs them. Load does it for the scene's project.
+         * @brief Makes the components the scripts under @p folder — or the one script file it is — declare known, as their
+         *        sources declare them: what a project's scripts are, whether or not anything runs them. Load does it for the
+         *        scene's project.
          */
         void DeclareScripts(const std::filesystem::path& folder);
+        /**
+         * @brief Makes a ResourceScript one a Script node can name, as its source declares it: what it makes, its fields,
+         *        and what they start as. One a host runs already stays as the host made it.
+         */
+        void DeclareResourceScript(kscript::ScriptType type);
+        /**
+         * @brief Runs a ResourceScript: @p fill fills the images and buffers each Script node that names it makes, given
+         *        that node's settings as @p type lays them out. What it makes is what @p type says, or — when it says
+         *        nothing — what its source declares. Whatever it made is made and filled again.
+         */
+        void RegisterResourceScript(kscript::ScriptType type, std::function<std::string(std::span<kgraph::Contents>, std::span<const std::byte>)> fill);
+        /** @brief Stops running a resource script: its code is going. It is declared still, and what it makes is made empty. */
+        void UnregisterResourceScript(std::string_view name);
+        /** @brief The scripts that fill resources, running or declared: what a Script node can name. */
+        [[nodiscard]] std::vector<kgraph::ResourceScript> ResourceScripts() const;
 
         bool Save(const std::filesystem::path& path, std::string& error);
         bool Load(const std::filesystem::path& path, std::string& error);
 
     private:
         void Changed() { ++_revision; }
+        /** A change that is only where an entity is: a change, but not one of Version (see there). */
+        void Shifted() { ++_revision; ++_moves; }
         void Apply(kgraph::Graph graph);
         bool _makeInOverview = false;
         /** An instance's entity was changed: what, as an override of the prefab, kept on the instance. */
@@ -428,6 +474,7 @@ namespace keditor
         void Imported(kecs::Entity root, const kgraph::Model& model);
         std::vector<std::pair<std::filesystem::path, kecs::Entity>> _importing;     // a model being read, and the entity its things go under
         std::uint64_t _revision = 0, _saved = 0;
+        std::uint64_t _moves = 0;                       // of _revision, the changes that were only an entity moved
         std::uint64_t _reported = 0;
         std::size_t _reports = 0;       // a digest of every pass's report, as last seen
     };

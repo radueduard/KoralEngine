@@ -57,7 +57,11 @@ namespace kgraph
         {
             Graph graph;
             graph.passes = given.passes;
+            graph.setup = given.setup;
+            graph.fixed = given.fixed;
+            graph.fixedStepsAtMost = given.fixedStepsAtMost;
             graph.meshImports = given.meshImports;
+            graph.defaultMeshTangents = given.defaultMeshTangents;
             graph.nodes = given.nodes;
             // What each edge stands for, by its id: a wire to it is a wire to that.
             std::map<std::string, Input, std::less<>> stands;
@@ -67,6 +71,10 @@ namespace kgraph
                 std::vector<Node> calls;
                 for (const auto& node : graph.nodes) if (node.type == "Function") calls.push_back(node);
                 if (calls.empty()) break;
+                // Where each call is among the nodes: its nodes go there, so that its passes are where it is among the
+                // others of its page — which, with nothing they use to say, run in the order of the nodes.
+                std::vector<std::string> sequence;
+                for (const auto& node : graph.nodes) sequence.push_back(node.id);
                 std::erase_if(graph.nodes, [](const Node& node) { return node.type == "Function"; });
                 if (depth >= 8) {
                     for (const auto& call : calls) out.errors[call.id] = "its function calls itself, further than eight deep: a function cannot have itself in it";
@@ -98,6 +106,21 @@ namespace kgraph
                         // What the call is given there: a wire, a value typed on it — or the input's default.
                         const auto on = call.inputs.find(port);
                         stands[prefix + edge->id] = on != call.inputs.end() && (on->second.link || !on->second.value.IsNull()) ? on->second : EdgeValue(*edge);
+                        // A buffer given nothing: one of nothing, made in the call's place — what the function reads of it,
+                        // zeros; so that one may be left out (it is given, with its count, where it is wanted).
+                        if (kind && *kind == "eBuffer" && !stands[prefix + edge->id].link && stands[prefix + edge->id].value.IsNull()) {
+                            Node none;
+                            none.id = prefix + edge->id + " (none)";
+                            none.type = "Buffer";
+                            none.pass = call.pass;
+                            none.x = call.x;
+                            none.y = call.y;
+                            none.Set("instanceCount", Value(256)).Set("type", Value("eDeviceLocal"))
+                                .Set("usage", Value(Value::List { Value("eStorage"), Value("eTransferSrc"), Value("eTransferDst") }));
+                            record.nodes.push_back(none.id);
+                            stands[prefix + edge->id] = Input { {}, Link { none.id, "out" } };
+                            graph.nodes.push_back(std::move(none));
+                        }
                     }
                     for (const Node* edge : outs) {
                         const std::string port = portName(*edge);
@@ -148,6 +171,20 @@ namespace kgraph
                     }
                     input.link = gives->second;
                 }
+                std::map<std::string, std::size_t, std::less<>> at;
+                for (std::size_t i = 0; i < graph.nodes.size(); ++i) at.emplace(graph.nodes[i].id, i);
+                std::vector<Node> placed;
+                std::vector<bool> taken(graph.nodes.size(), false);
+                const auto take = [&](const std::string& id) {
+                    if (const auto it = at.find(id); it != at.end() && !taken[it->second]) { taken[it->second] = true; placed.push_back(std::move(graph.nodes[it->second])); }
+                };
+                for (const auto& id : sequence) {
+                    if (const auto call = out.calls.find(id); call != out.calls.end() && std::ranges::any_of(calls, [&](const Node& c) { return c.id == id; }))
+                        for (const auto& made : call->second.nodes) take(made);
+                    else take(id);
+                }
+                for (std::size_t i = 0; i < graph.nodes.size(); ++i) if (!taken[i]) placed.push_back(std::move(graph.nodes[i]));
+                graph.nodes = std::move(placed);
             }
             // Each wire to an edge is a wire to what the edge stands for — through as many as there are between.
             const auto follow = [&](Input input) {
@@ -179,7 +216,11 @@ namespace kgraph
         // The calls first: what a function holds may be a loop, and a call may be in one.
         const Graph written = WriteCalls(given, out);
         out.graph.passes = written.passes;
+        out.graph.setup = written.setup;
+        out.graph.fixed = written.fixed;
+        out.graph.fixedStepsAtMost = written.fixedStepsAtMost;
         out.graph.meshImports = written.meshImports;
+        out.graph.defaultMeshTangents = written.defaultMeshTangents;
 
         // The loops: a Repeat, and how many turns it has.
         std::map<std::string, int, std::less<>> loops;
@@ -296,6 +337,29 @@ namespace kgraph
         for (const auto& id : out.errors | std::views::keys) {
             std::erase_if(out.graph.nodes, [&](const Node& node) { return node.id == id || node.id.starts_with(id + " ["); });
             out.turns.erase(id);
+        }
+        // A loop's turns one after another, each with every node of the loop — where its first node is among the rest:
+        // so that its passes, which with nothing they use to say run in the order of the nodes, run a turn at a time
+        // (count, then scan, then scatter; and then the next turn's), not each node's turns together.
+        {
+            std::map<std::string, std::size_t, std::less<>> at;
+            for (std::size_t i = 0; i < out.graph.nodes.size(); ++i) at.emplace(out.graph.nodes[i].id, i);
+            std::vector<Node> placed;
+            std::vector<bool> taken(out.graph.nodes.size(), false);
+            const auto take = [&](const std::string& id) {
+                if (const auto it = at.find(id); it != at.end() && !taken[it->second]) { taken[it->second] = true; placed.push_back(std::move(out.graph.nodes[it->second])); }
+            };
+            std::set<std::string> done;
+            for (const auto& node : written.nodes) {
+                const std::string& loop = loopOf[node.id];
+                if (loop.empty()) { take(node.id); continue; }
+                if (!done.insert(loop).second) continue;
+                for (int turn = 0; turn < loops[loop]; ++turn)
+                    for (const auto& member : written.nodes)
+                        if (loopOf[member.id] == loop) take(TurnId(member.id, turn));
+            }
+            for (std::size_t i = 0; i < out.graph.nodes.size(); ++i) if (!taken[i]) placed.push_back(std::move(out.graph.nodes[i]));
+            out.graph.nodes = std::move(placed);
         }
         return out;
     }

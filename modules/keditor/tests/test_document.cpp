@@ -6,6 +6,7 @@
 #include <set>
 #include <ranges>
 
+#include <kgraph/meshes.h>
 #include <keditor/editor.h>
 #include <keditor/play.h>
 #include <log.h>
@@ -193,8 +194,9 @@ TEST_F(DocumentTest, AnEntitysFieldsAreReadAndSetAsValues) {
     EXPECT_NE(std::ranges::find(images, "backdrop"), images.end());
     EXPECT_NE(std::ranges::find(images, "canvas view"), images.end()) << "a view of an image will do";
     EXPECT_EQ(std::ranges::find(images, "square"), images.end());
-    EXPECT_EQ(doc.NodesFor("Mesh"), (std::vector<std::string> { "square", "$cube", "$sphere", "$plane", "$cylinder", "$cone", "$capsule", "$torus" }))
-        << "the node that makes one, and the meshes there are without a node";
+    std::vector<std::string> meshes { "square" };
+    for (const auto& name : kgraph::DefaultMeshNames()) meshes.push_back(kgraph::DefaultMeshId(name));
+    EXPECT_EQ(doc.NodesFor("Mesh"), meshes) << "the node that makes one, and the meshes there are without a node";
 
     EXPECT_TRUE(doc.RemoveComponent(entity, "stamp"));
     EXPECT_FALSE(doc.RemoveComponent(entity, "stamp"));
@@ -463,7 +465,9 @@ TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {
         const std::string call = doc.MakeFunction({ "double", "twice" }, "Scale", &error);
         ASSERT_FALSE(call.empty()) << error;
         EXPECT_TRUE(std::filesystem::exists(project.directory / "functions" / "Scale.kfunc"));
-        EXPECT_EQ(doc.Functions(), (std::vector<std::string> { "Scale" }));
+        std::vector<std::string> own;
+        for (const auto& name : doc.Functions()) if (!doc.IsEngineFunction(name)) own.push_back(name);
+        EXPECT_EQ(own, (std::vector<std::string> { "Scale" })) << "the project's, besides the engine's";
         EXPECT_EQ(doc.Graph().Find("double"), nullptr);
         EXPECT_EQ(link(call, "a"), "n.out") << "what came in, an input";
         EXPECT_EQ(link("show", "a"), call + ".twice") << "what went out, an output";
@@ -641,4 +645,92 @@ TEST_F(DocumentTest, AnArrangedPageIsShapedAsItsView) {
     for (const auto& [from, to] : wires) EXPECT_LT(wide.at(from).first, wide.at(to).first) << from << " feeds " << to;
     std::set<std::pair<double, double>> places;
     for (const auto& at : wide | std::views::values) EXPECT_TRUE(places.insert(at).second) << "two nodes at one place";
+}
+
+// Put in order, each loop is a block of its own: what is in its frame is its nodes, and no two loops' frames are one over
+// the other — though how they are wired would put others' nodes between theirs, column by column.
+TEST(Arrange, EachLoopIsABlockOfItsOwn) {
+    struct Box { double left, top, right, bottom; };
+    const auto check = [](const std::vector<keditor::PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires, const bool inOrder) {
+        const auto where = keditor::ArrangeNodes(nodes, wires, 1.6f);
+        ASSERT_EQ(where.size(), nodes.size());
+        const auto box = [&](const std::string& group) {
+            Box b { 1e9, 1e9, -1e9, -1e9 };
+            for (const auto& node : nodes)
+                if (node.group == group) {
+                    const auto [x, y] = where.at(node.id);
+                    b = { std::min(b.left, x), std::min(b.top, y), std::max(b.right, x + node.width), std::max(b.bottom, y + node.height) };
+                }
+            return b;
+        };
+        const auto meet = [](const Box& a, const Box& b) { return a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom; };
+        const Box a = box("loop a"), b = box("loop b");
+        EXPECT_FALSE(meet(a, b)) << "two loops are two blocks";
+        for (const auto& node : nodes) {
+            const auto [x, y] = where.at(node.id);
+            const Box own { x, y, x + node.width, y + node.height };
+            if (node.group != "loop a") EXPECT_FALSE(meet(own, a)) << node.id << " is not of loop a, and not in its frame";
+            if (node.group != "loop b") EXPECT_FALSE(meet(own, b)) << node.id << " is not of loop b, and not in its frame";
+        }
+        if (inOrder)
+            for (const auto& [from, to] : wires) EXPECT_LT(where.at(from).first, where.at(to).first) << from << " feeds " << to;
+    };
+    // Each loop two columns wide, with what is of neither fed from one and feeding the other beside them.
+    check({ { "a1", 0, 0, 160, 80, "loop a", 0 }, { "a2", 0, 0, 160, 80, "loop a", 0 },
+            { "b1", 0, 0, 160, 80, "loop b", 0 }, { "b2", 0, 0, 160, 80, "loop b", 0 },
+            { "before", 0, 0, 160, 80, {}, 0 }, { "aside", 0, 0, 160, 80, {}, 0 }, { "after", 0, 0, 160, 80, {}, 0 } },
+          { { "before", "a1" }, { "a1", "a2" }, { "a2", "b1" }, { "b1", "b2" }, { "a1", "aside" }, { "aside", "b2" }, { "b2", "after" } }, true);
+    // Fed from each other, two loops kept apart cannot both be after the other: they are two blocks all the same.
+    check({ { "a1", 0, 0, 160, 80, "loop a", 0 }, { "a2", 0, 0, 160, 80, "loop a", 0 },
+            { "b1", 0, 0, 160, 80, "loop b", 0 }, { "b2", 0, 0, 160, 80, "loop b", 0 } },
+          { { "a1", "b1" }, { "b1", "a2" }, { "a2", "b2" } }, false);
+}
+
+// Put in order, a page's wires cross as few times as they can: each column is ordered by what it is wired to on either
+// side, its first one too — not only by what comes before it.
+TEST(Arrange, WiresCrossAsFewTimesAsTheyCan) {
+    // How many wires cross, drawn straight from the middle of one's right side to the middle of the other's left.
+    const auto crossings = [](const std::vector<keditor::PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires) {
+        const auto where = keditor::ArrangeNodes(nodes, wires);
+        const auto of = [&](const std::string& id) { return *std::ranges::find(nodes, id, &keditor::PlacedNode::id); };
+        struct Line { double x1, y1, x2, y2; std::string a, b; };
+        std::vector<Line> lines;
+        for (const auto& [from, to] : wires) {
+            const auto [fx, fy] = where.at(from);
+            const auto [tx, ty] = where.at(to);
+            lines.push_back({ fx + of(from).width, fy + of(from).height * 0.5, tx, ty + of(to).height * 0.5, from, to });
+        }
+        const auto side = [](const Line& l, const double x, const double y) { return (l.x2 - l.x1) * (y - l.y1) - (l.y2 - l.y1) * (x - l.x1); };
+        int crossed = 0;
+        for (std::size_t i = 0; i < lines.size(); ++i)
+            for (std::size_t j = i + 1; j < lines.size(); ++j) {
+                const Line& p = lines[i];
+                const Line& q = lines[j];
+                if (p.a == q.a || p.b == q.b || p.a == q.b || p.b == q.a) continue;     // meeting at a node is no crossing
+                if (side(p, q.x1, q.y1) * side(p, q.x2, q.y2) < 0 && side(q, p.x1, p.y1) * side(q, p.x2, p.y2) < 0) ++crossed;
+            }
+        return crossed;
+    };
+    // Six into six, each to another than the one across from it: none need cross.
+    std::vector<keditor::PlacedNode> nodes;
+    std::vector<std::pair<std::string, std::string>> wires;
+    const int to[] { 3, 0, 5, 1, 4, 2 };
+    for (int i = 0; i < 6; ++i) {
+        nodes.push_back({ std::format("s{}", i), 0, static_cast<float>(i) * 100.f, 160, 80, {}, 0 });
+        nodes.push_back({ std::format("t{}", i), 300, static_cast<float>(i) * 100.f, 160, 80, {}, 0 });
+    }
+    for (int i = 0; i < 6; ++i) wires.emplace_back(std::format("s{}", i), std::format("t{}", to[i]));
+    EXPECT_EQ(crossings(nodes, wires), 0);
+
+    // Three into two, the outer two to one and the middle one to the other: none cross once the first column is ordered
+    // by what it feeds — which the order it starts in, top to bottom, does not give.
+    EXPECT_EQ(crossings({ { "a", 0, 0, 160, 80, {}, 0 }, { "b", 0, 100, 160, 80, {}, 0 }, { "c", 0, 200, 160, 80, {}, 0 },
+                          { "x", 300, 0, 160, 80, {}, 0 }, { "y", 300, 100, 160, 80, {}, 0 } },
+                        { { "a", "y" }, { "b", "x" }, { "c", "y" } }), 0);
+
+    // A wire across a column is ordered with it: through it, it crosses nothing that need not be crossed.
+    EXPECT_EQ(crossings({ { "a", 0, 0, 160, 80, {}, 0 }, { "b", 0, 100, 160, 80, {}, 0 },
+                          { "m", 300, 0, 160, 80, {}, 0 }, { "n", 300, 100, 160, 80, {}, 0 },
+                          { "z", 600, 0, 160, 80, {}, 0 }, { "w", 600, 100, 160, 80, {}, 0 } },
+                        { { "a", "n" }, { "n", "w" }, { "b", "m" }, { "m", "z" }, { "b", "w" } }), 0);
 }

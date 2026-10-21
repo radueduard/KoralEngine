@@ -91,6 +91,155 @@ public abstract class GraphicsScript : Script
     private protected sealed override void PrepareCore() => Prepare();
 }
 
+/// <summary>
+/// A script that makes resources — Images, Buffers, views of them, Samplers — and fills its images and buffers on the CPU
+/// as they are made: a Script node of the graph names it, and gives each as an output, by its field's name. Its other
+/// public fields are its settings — the Script node's inputs, given there or wired — and it is no component: no entity has
+/// it. It runs when what it makes is made, and again when that is made again: a size changed, a field changed, the
+/// script was edited.
+/// </summary>
+/// <remarks>
+/// A resource field's arguments are what it is made with, by the name of its node type's input: its source is read for
+/// them, so they are written as they are, not worked out — <c>width</c>, <c>height</c> and <c>depth</c> are its extent's,
+/// flags are <c>"eSampled | eStorage"</c>, and a view names what it is of, <c>nameof(Height)</c>. The Script node can say
+/// otherwise: <c>Height.format</c>, <c>Height.extent.x</c>.
+/// <code>
+/// public sealed class Terrain : ResourceScript
+/// {
+///     public int Seed = 7;
+///     public Image Height = new(format: "eR32_SFLOAT", width: 256, height: 256, usage: "eSampled | eStorage | eTransferDst");
+///     public ImageView HeightView = new(image: nameof(Height));
+///     public Sampler Smooth = new(minFilter: "eLinear", magFilter: "eLinear");
+///     protected override void Init()
+///     {
+///         var random = new Random(Seed);
+///         foreach (ref var h in Height.As&lt;float&gt;()) h = random.NextSingle();
+///     }
+/// }
+/// </code>
+/// </remarks>
+public abstract class ResourceScript
+{
+    /// <summary>The scene whose graph it makes them in.</summary>
+    public World World { get; internal set; } = null!;
+    /// <summary>Fills what it makes: each <see cref="Image"/>'s and <see cref="Buffer"/>'s bytes, zeros to begin with, as they were made.</summary>
+    protected abstract void Init();
+    internal void InitCore() => Init();
+
+    /// <summary>One of what a script makes: an output of its Script node, by the field's name.</summary>
+    public abstract class Resource
+    {
+        internal readonly List<(string Input, object Value)> Settings = [];
+        internal abstract string Kind { get; }
+        /// <summary>The field it is: the Script node's output.</summary>
+        public string Name { get; internal set; } = "";
+        private protected void Set(string input, object? value) { if (value is not null) Settings.Add((input, value)); }
+    }
+
+    /// <summary>A resource that holds bytes the script writes: an image's texels, a buffer's every byte.</summary>
+    public abstract unsafe class Filled : Resource
+    {
+        internal byte* Data;
+        internal int Size;
+        /// <summary>Its bytes, zeros to begin with: there to be written while <c>Init</c> runs.</summary>
+        public Span<byte> Bytes => Data is null ? throw new InvalidOperationException($"{Name} is filled while Init runs, and not otherwise") : new Span<byte>(Data, Size);
+        /// <summary>Its bytes as <typeparamref name="T"/>s: <c>Span&lt;uint&gt;</c> for an RGBA8 image, <c>Span&lt;Vec4&gt;</c> for an RGBA32F one, <c>Span&lt;float&gt;</c>.</summary>
+        public Span<T> As<T>() where T : unmanaged => MemoryMarshal.Cast<byte, T>(Bytes);
+    }
+
+    /// <summary>An image, its first level filled: each layer one after another, each a row after another from the top, each a texel after another.</summary>
+    public sealed class Image : Filled
+    {
+        public Image(string? format = null, uint? width = null, uint? height = null, uint? depth = null, uint? mipLevels = null, uint? arrayLayers = null,
+                     string? usage = null, string? type = null, string? sampleCount = null)
+        {
+            Set("format", format); Set("extent.x", width); Set("extent.y", height); Set("extent.z", depth); Set("mipLevels", mipLevels);
+            Set("arrayLayers", arrayLayers); Set("usage", usage); Set("type", type); Set("sampleCount", sampleCount);
+        }
+        internal override string Kind => "Image";
+        /// <summary>Its format, by name, as it was made: <c>eRGBA8_UNORM</c>.</summary>
+        public string Format { get; internal set; } = "";
+        public int Width { get; internal set; }
+        public int Height { get; internal set; }
+        public int Depth { get; internal set; }
+        public int Layers { get; internal set; }
+        /// <summary>How many bytes one texel is.</summary>
+        public int TexelBytes { get; internal set; }
+    }
+
+    /// <summary>A buffer, every byte of it filled.</summary>
+    public sealed class Buffer : Filled
+    {
+        public Buffer(uint? instanceCount = null, string? usage = null, string? type = null, bool? sharedAcrossQueues = null)
+        {
+            Set("instanceCount", instanceCount); Set("usage", usage); Set("type", type); Set("sharedAcrossQueues", sharedAcrossQueues);
+        }
+        internal override string Kind => "Buffer";
+    }
+
+    /// <summary>A view of one of the script's images: <c>new(image: nameof(Height))</c>.</summary>
+    public sealed class ImageView : Resource
+    {
+        public ImageView(string? image = null, string? viewType = null, uint? baseMipLevel = null, uint? mipLevelCount = null,
+                         uint? baseArrayLayer = null, uint? arrayLayerCount = null)
+        {
+            Set("image", image); Set("viewType", viewType); Set("baseMipLevel", baseMipLevel); Set("mipLevelCount", mipLevelCount);
+            Set("baseArrayLayer", baseArrayLayer); Set("arrayLayerCount", arrayLayerCount);
+        }
+        internal override string Kind => "ImageView";
+    }
+
+    /// <summary>A view of one of the script's buffers as texels: <c>new(buffer: nameof(Table), format: "eR32_SFLOAT")</c>.</summary>
+    public sealed class BufferView : Resource
+    {
+        public BufferView(string? buffer = null, string? format = null, ulong? offset = null, ulong? range = null)
+        {
+            Set("buffer", buffer); Set("format", format); Set("offset", offset); Set("range", range);
+        }
+        internal override string Kind => "BufferView";
+    }
+
+    /// <summary>How an image is read in a shader: filtered, wrapped, compared.</summary>
+    public sealed class Sampler : Resource
+    {
+        public Sampler(string? minFilter = null, string? magFilter = null, string? mipmapMode = null, string? addressModeU = null, string? addressModeV = null,
+                       string? addressModeW = null, float? mipLodBias = null, bool? anisotropyEnable = null, float? maxAnisotropy = null,
+                       bool? compareEnable = null, string? compareOp = null, float? minLod = null, float? maxLod = null, bool? unnormalizedCoordinates = null)
+        {
+            Set("minFilter", minFilter); Set("magFilter", magFilter); Set("mipmapMode", mipmapMode); Set("addressModeU", addressModeU);
+            Set("addressModeV", addressModeV); Set("addressModeW", addressModeW); Set("mipLodBias", mipLodBias); Set("anisotropyEnable", anisotropyEnable);
+            Set("maxAnisotropy", maxAnisotropy); Set("compareEnable", compareEnable); Set("compareOp", compareOp); Set("minLod", minLod);
+            Set("maxLod", maxLod); Set("unnormalizedCoordinates", unnormalizedCoordinates);
+        }
+        internal override string Kind => "Sampler";
+    }
+}
+
+/// <summary>
+/// The least and the most a field's numbers are — each of a vector's — as the editor lets them be set: <c>[Range(0, 10)]</c>.
+/// Read from the script's source, as Unity's is.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class RangeAttribute(float min, float max) : Attribute
+{
+    public float Min { get; } = min;
+    public float Max { get; } = max;
+}
+
+/// <summary>The least a field's numbers are — each of a vector's — as the editor lets them be set: <c>[Min(0)]</c>.</summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class MinAttribute(float min) : Attribute
+{
+    public float Min { get; } = min;
+}
+
+/// <summary>
+/// A field the editor drags by so much of what it is, not by so much: a distance, an intensity, a size that may be 0.1 or
+/// 10 000. <c>[Logarithmic, Min(0)]</c>. Read from the script's source.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class LogarithmicAttribute : Attribute;
+
 /// <summary>Gives a script's component another name than its class's.</summary>
 [AttributeUsage(AttributeTargets.Class)]
 public sealed class ScriptNameAttribute(string name) : Attribute
@@ -109,6 +258,8 @@ internal sealed unsafe class ScriptLayout
     public IReadOnlyList<Field> Fields { get; }
 
     private static readonly Dictionary<Type, ScriptLayout> s_layouts = [];
+    /// <summary>What a script derives from: none of its fields are the script's own.</summary>
+    private static readonly HashSet<Type> s_bases = [typeof(Script), typeof(GraphicsScript), typeof(ResourceScript), typeof(object)];
 
     /// <summary>What a field type is called as a component's, and how big it is; null for one a script cannot keep.</summary>
     private static (string Type, int Size, int Alignment)? Describe(Type type)
@@ -164,12 +315,13 @@ internal sealed unsafe class ScriptLayout
         int offset = 0, alignment = 1;
         // Public fields, a base class's first, in the order they are written.
         var chain = new List<Type>();
-        for (var t = type; t is not null && t != typeof(Script) && t != typeof(GraphicsScript); t = t.BaseType) chain.Insert(0, t);
+        for (var t = type; t is not null && !s_bases.Contains(t); t = t.BaseType) chain.Insert(0, t);
         foreach (var declaring in chain)
         {
             foreach (var info in declaring.GetFields(BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly).OrderBy(f => f.MetadataToken))
             {
                 if (info.IsInitOnly || info.IsLiteral) continue;
+                if (typeof(ResourceScript.Resource).IsAssignableFrom(info.FieldType)) continue;    // what a ResourceScript makes: no setting
                 var described = Describe(info.FieldType)
                     ?? throw new EngineException($"{type.Name}.{info.Name} is a {info.FieldType.Name}, which a script cannot keep: its fields are numbers, bool, " +
                                                  "Koral's vectors, Mat4, Quat and Entity. Make it private if it is only this run's.");
@@ -185,7 +337,7 @@ internal sealed unsafe class ScriptLayout
     }
 
     /// <summary>The engine's bytes into the object's fields.</summary>
-    public void Load(Script script, IntPtr data)
+    public void Load(object script, IntPtr data)
     {
         foreach (var field in Fields)
         {

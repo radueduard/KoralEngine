@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstring>
 #include <string>
 
@@ -117,6 +118,13 @@ TEST(Declarations, AKotlinScriptsPropertiesAreItsComponent) {
     ASSERT_EQ(unclear.types.size(), 1u) << "a type it can tell is declared, with a field it cannot start at zero";
     ASSERT_EQ(unclear.problems.size(), 1u);
     EXPECT_NE(unclear.problems.front().find("A.at starts as 'Vec3.Zero'"), std::string::npos) << unclear.problems.front();
+    EXPECT_EQ(unclear.types.front().fields[0].type, "vec3") << "a type's constant is of that type, though its value is not read";
+
+    // An entity said to start as none is one, and starts as none: nothing to note.
+    const auto entity = kscript::Declare("class Joint : Script() { var other = Entity.Null\n var kind = 0 }", true);
+    ASSERT_EQ(entity.types.size(), 1u);
+    EXPECT_TRUE(entity.problems.empty()) << entity.problems.front();
+    EXPECT_EQ(entity.types.front().fields[0].type, "entity");
 }
 
 // Declared, a component is data: it starts as its source says, nothing is called on it, and it is not a script that
@@ -194,4 +202,131 @@ TEST(Declarations, ThePackageIsTheSameInEitherLanguage) {
     float value = 0.f;
     std::memcpy(&value, static_cast<const std::byte*>(world.Get(entity, lamp)) + range->offset, 4);
     EXPECT_EQ(value, 5.f);
+}
+
+// A ResourceScript is read as one: what it makes — each field of a resource type, with what its initialiser makes it
+// with — and its other fields as settings. No component.
+TEST(Declarations, AResourceScriptMakesWhatItDeclares) {
+    const auto csharp = kscript::Declare(R"(
+        public sealed class Terrain : ResourceScript
+        {
+            public int Seed = 7;
+            public float Scale = 4;
+            public Image Height = new(format: "eR32_SFLOAT", width: 256, height: 128, usage: "eSampled | eStorage");
+            public readonly ImageView HeightView = new(image: nameof(Height));
+            public Buffer Table = new Buffer(instanceCount: 64, usage: ["eStorage"], isPerFrame: false);
+            public Sampler Smooth = new(minFilter: Filter.eLinear, maxAnisotropy: 4f);
+            public Image Plain;
+            protected override void Init() { }
+        }
+        public sealed class Spin : Script { public float Speed; }
+    )", false);
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(csharp.types.size(), 2u);
+    const auto& terrain = csharp.types[0];
+    EXPECT_TRUE(terrain.makesResources);
+    ASSERT_EQ(terrain.fields.size(), 2u) << "its settings, and none of what it makes";
+    EXPECT_EQ(terrain.fields[0].name, "Seed");
+    std::int32_t seed = 0;
+    ASSERT_GE(terrain.initial.size(), 4u);
+    std::memcpy(&seed, terrain.initial.data(), 4);
+    EXPECT_EQ(seed, 7) << "what it starts as, as a Script node's input is when not given";
+    ASSERT_EQ(terrain.resources.size(), 5u);
+    using Settings = std::vector<std::pair<std::string, std::string>>;
+    EXPECT_EQ(terrain.resources[0].name, "Height");
+    EXPECT_EQ(terrain.resources[0].kind, "Image");
+    EXPECT_EQ(terrain.resources[0].settings, (Settings { { "format", "\"eR32_SFLOAT\"" }, { "extent.x", "256" }, { "extent.y", "128" },
+                                                         { "usage", "[\"eSampled\", \"eStorage\"]" } })) << "its width and height, its extent's";
+    EXPECT_EQ(terrain.resources[1].kind, "ImageView");
+    EXPECT_EQ(terrain.resources[1].settings, (Settings { { "image", "\"Height\"" } })) << "another of the script's, by name";
+    EXPECT_EQ(terrain.resources[2].settings, (Settings { { "instanceCount", "64" }, { "usage", "[\"eStorage\"]" }, { "isPerFrame", "false" } }));
+    EXPECT_EQ(terrain.resources[3].settings, (Settings { { "minFilter", "\"eLinear\"" }, { "maxAnisotropy", "4" } })) << "an enumeration's value, by its name";
+    EXPECT_TRUE(terrain.resources[4].settings.empty()) << "one given nothing: as its node type starts";
+    EXPECT_FALSE(csharp.types[1].makesResources) << "a script of entities makes nothing";
+
+    const auto kotlin = kscript::Declare(R"(
+        import koral.engine.ResourceScript
+        class Terrain : ResourceScript() {
+            var seed = 7
+            val height = Image(format = "eR32_SFLOAT", width = 256, height = 256)
+            val heightView = ImageView(image = ::height.name)
+            val table = ResourceScript.Buffer(instanceCount = 8,
+                                              usage = listOf("eStorage"))
+            override fun init() {}
+        }
+    )", true);
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(kotlin.types.size(), 1u);
+    EXPECT_TRUE(kotlin.types[0].makesResources);
+    ASSERT_EQ(kotlin.types[0].fields.size(), 1u);
+    EXPECT_EQ(kotlin.types[0].fields.front().name, "seed");
+    ASSERT_EQ(kotlin.types[0].resources.size(), 3u);
+    EXPECT_EQ(kotlin.types[0].resources[1].settings, (Settings { { "image", "\"height\"" } }));
+    EXPECT_EQ(kotlin.types[0].resources[2].kind, "Buffer");
+    EXPECT_EQ(kotlin.types[0].resources[2].settings, (Settings { { "instanceCount", "8" }, { "usage", "[\"eStorage\"]" } })) << "over two lines";
+
+    // What is not understood without running it is said, and left as the node type starts it.
+    const auto unclear = kscript::Declare("public sealed class A : ResourceScript { public Image Big = new(width: Size * 2, 16); }", false);
+    ASSERT_EQ(unclear.types.size(), 1u);
+    ASSERT_EQ(unclear.problems.size(), 2u);
+    EXPECT_NE(unclear.problems[0].find("A.Big's width is 'Size * 2'"), std::string::npos) << unclear.problems[0];
+    EXPECT_NE(unclear.problems[1].find("given by name"), std::string::npos) << unclear.problems[1];
+    EXPECT_TRUE(unclear.types[0].resources[0].settings.empty());
+}
+
+// What a field is kept within, as its source says — `[Range(1, 179)]`, `[Min(0)]`, or Kotlin's `@Range`, `@Min`, on its
+// line or the one before — is the component's, for an editor; and stays so once the host registers it.
+TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {
+    const auto csharp = kscript::Declare(R"(
+        public sealed class Lens : Script
+        {
+            [Range(1, 179)] public float FieldOfView = 60f;
+            [Min(0.001f), Logarithmic] public float Near = 0.1f;
+            [Min(-1.5e1)]
+            public float Far = 100f;
+            public float Free;
+        }
+    )", false);
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(csharp.types.size(), 1u);
+    const auto& lens = csharp.types.front();
+    EXPECT_EQ(Field(lens, "FieldOfView")->min, 1.f);
+    EXPECT_EQ(Field(lens, "FieldOfView")->max, 179.f);
+    EXPECT_FLOAT_EQ(Field(lens, "Near")->min, 0.001f);
+    EXPECT_FALSE(std::isfinite(Field(lens, "Near")->max));
+    EXPECT_TRUE(Field(lens, "Near")->logarithmic) << "dragged by so much of it";
+    EXPECT_FALSE(Field(lens, "FieldOfView")->logarithmic);
+    EXPECT_EQ(Field(lens, "Far")->min, -15.f) << "an attribute on the line before";
+    EXPECT_FALSE(std::isfinite(Field(lens, "Free")->min));
+
+    const auto kotlin = kscript::Declare(R"(
+        class Lens : Script() {
+            @Range(1f, 179f) var fieldOfView = 60f
+            @Min(0f)
+            @Logarithmic
+            var near = 0.1f
+            var far = 100f
+        }
+    )", true);
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(kotlin.types.size(), 1u);
+    EXPECT_EQ(Field(kotlin.types[0], "fieldOfView")->max, 179.f);
+    EXPECT_EQ(Field(kotlin.types[0], "near")->min, 0.f) << "an annotation on a line of its own";
+    EXPECT_TRUE(Field(kotlin.types[0], "near")->logarithmic) << "and two";
+    EXPECT_FALSE(std::isfinite(Field(kotlin.types[0], "far")->min));
+
+    // Its host says nothing of limits: the declared ones stay.
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    const kecs::ComponentId id = scripts.Declare(lens);
+    kscript::ScriptType hosted;
+    hosted.name = "Lens";
+    hosted.size = 16;
+    hosted.alignment = 4;
+    hosted.fields = { { "FieldOfView", "f32", 0, 4 }, { "Near", "f32", 4, 4 }, { "Far", "f32", 8, 4 }, { "Free", "f32", 12, 4 } };
+    ASSERT_EQ(scripts.Register(hosted), id);
+    const auto* kept = world.Describe(id).FindField("FieldOfView");
+    ASSERT_NE(kept, nullptr);
+    EXPECT_EQ(kept->min, 1.f);
+    EXPECT_EQ(kept->max, 179.f);
 }

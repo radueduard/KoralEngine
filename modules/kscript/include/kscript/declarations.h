@@ -23,7 +23,11 @@ namespace kscript
 
     /**
      * @brief The script types @p source declares, read as C# when @p kotlin is false and Kotlin when it is. A class is a
-     *        Script's when it derives from Script or GraphicsScript; abstract ones are none. Its component is named for
+     *        Script's when it derives from Script or GraphicsScript; abstract ones are none. One that derives from
+     *        ResourceScript makes resources (ScriptType::makesResources), and is no component: its fields of a resource
+     *        type — `public Image Height = new(format: "eR32_SFLOAT", width: 256, height: 256);`, Kotlin's
+     *        `val height = Image(format = "eR32_SFLOAT", width = 256, height = 256)` — are what it makes, each
+     *        argument one of what it is made with (`width`, `height` and `depth` its extent's). Its component is named for
      *        the class, or for its ScriptName. A field's starting value is understood when it is a number, true or
      *        false, or a vector, quaternion or matrix made of numbers; anything else starts at zero, and is said.
      * @param file What is said of a problem as where it is.

@@ -3,7 +3,7 @@
 
 public sealed class Camera : Script
 {
-    public float fieldOfView = 60f;    // Top to bottom, in degrees.
-    public float near = 0.1f;
-    public float far = 100f;
+    [Range(1f, 179f)] public float fieldOfView = 60f;    // Top to bottom, in degrees.
+    [Min(0.001f), Logarithmic] public float near = 0.1f;
+    [Min(0.01f), Logarithmic] public float far = 100f;
 }

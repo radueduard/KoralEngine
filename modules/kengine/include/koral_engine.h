@@ -296,6 +296,49 @@ KENGINE_API uint32_t kengine_script_register(KengineDocument* document, const ch
 /** Stops calling a script type's functions: its code is about to go. Its data stays, on every entity. */
 KENGINE_API void kengine_script_unregister(KengineDocument* document, const char* name);
 
+/* ---- scripts that make resources --------------------------------------------------------------------------------- */
+
+/** One of the resources a resource script makes: an output of the Script node that runs it, by its name. */
+typedef struct KengineScriptResource {
+    const char* name;           /* the field it is */
+    const char* kind;           /* the node type it is made as: "Image", "Buffer", "ImageView", "BufferView", "Sampler" */
+    /* What it is made with, as a JSON object of its node type's inputs — {"format": "eR32_SFLOAT", "extent.x": 256},
+     * {"image": "height"} for one made of another of the script's — or null for nothing: as its node type starts. */
+    const char* settings;
+} KengineScriptResource;
+
+/** What a resource script fills: one of its images or buffers as it was made, and its contents, to be written. */
+typedef struct KengineContents {
+    const char* name;           /* the resource, as the script declares it */
+    const char* node;           /* the Script node it is of */
+    const char* kind;           /* "Image" or "Buffer" */
+    const char* format;         /* an image's: "eRGBA8_UNORM" */
+    uint32_t extent[3];         /* an image's, of its first level */
+    uint32_t layers;            /* an image's array layers */
+    uint32_t texel_bytes;       /* an image's: the bytes of one texel */
+    void* bytes;                /* to fill, zeros to begin with: an image's first level, a layer, a row, a texel after another; a buffer's every byte */
+    size_t size;
+} KengineContents;
+
+typedef struct KengineResourceScriptCallbacks {
+    void* user;
+    /* Fills each of @p contents' bytes — its images and buffers, @p count of them — given @p settings: the script's
+     * fields, as it registered them. Returns null when it did, or why it could not — the caller's, good until it is
+     * called again. */
+    const char* (*fill)(void* user, const KengineContents* contents, size_t count, const void* settings, size_t settings_size);
+} KengineResourceScriptCallbacks;
+
+/**
+ * Makes a script that makes resources — @p resources, each an output of a Script node that names it — one the graph's
+ * Script nodes can name, with these fields as the node's inputs, and runs it: what it makes is filled by it as it is
+ * made. Given no resources, it makes what its source declares. With one so named already, it takes its place, and
+ * whatever it made is made and filled again. False when it cannot be.
+ */
+KENGINE_API bool kengine_resource_script_register(KengineDocument* document, const char* name, size_t size, const KecsField* fields, size_t field_count,
+                                                  const KengineScriptResource* resources, size_t resource_count, const KengineResourceScriptCallbacks* callbacks);
+/** Stops running a resource script: its code is about to go. A Script node still names it, and what it made is made empty. */
+KENGINE_API void kengine_resource_script_unregister(KengineDocument* document, const char* name);
+
 #ifdef __cplusplus
 }
 #endif

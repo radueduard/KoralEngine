@@ -68,7 +68,19 @@ knows its scripts' components: to give an entity one, and to offer a node of it.
 
 An `Entity` field is another entity of the scene for the script to use: it starts as none (`Entity.Null`, whatever
 it is said to start as), and is set in the inspector — chosen from the scene's entities, or an entity dragged there
-from the outliner. A prefab keeps what one of its entities holds of another: each instance's holds its own.
+from the scene tree. A prefab keeps what one of its entities holds of another: each instance's holds its own.
+
+A number field can say what it is kept within: `[Range(1, 179)]` or `[Min(0)]` in C#, `@Range(1f, 179f)` or
+`@Min(0f)` in Kotlin (`koral.engine.Range`, `koral.engine.Min`), on the field's line or the line before; and
+`[Logarithmic]` (`@Logarithmic`), that it is dragged by so much of what it is — a distance, an intensity, a size. It is read
+from the source with the rest, and the inspector's drag boxes — and a Script node's `field.<name>` inputs — keep to it,
+dragged or typed; for a vector, each of its numbers. An unsigned field is never less than 0. Nothing is checked as
+the script runs: a script can set a field to anything.
+
+```csharp
+[Range(1, 179)] public float FieldOfView = 60f;
+[Min(0), Logarithmic] public float Intensity = 1f;
+```
 
 ## The engine's package
 
@@ -239,6 +251,69 @@ because a node that is built again makes another.
 Koral's matrices are stored a column after another and Slang reads a row after another, so a shader given
 one multiplies with the vector first: `mul(float4(position, 1.0), light.viewProjection)`.
 
+## Scripts that make resources
+
+A `ResourceScript` makes resources and fills them on the CPU as they are made: a noise, a table a shader looks up, the
+numbers a simulation starts from, and the views and samplers that go with them. No entity has one. A **Script** node of
+the graph names it, and gives each resource it declares as an output, by its field's name (see [kgraph](kgraph.md)).
+The editor offers a Script node of each among the nodes to add, by the script's name.
+
+```csharp
+public sealed class Terrain : ResourceScript
+{
+    public int Seed = 7;            // the Script node's inputs: given there, or wired
+    public float Scale = 4;
+
+    // What it makes: the Script node's outputs, Height, HeightView, Smooth and Particles.
+    public Image Height = new(format: "eR32_SFLOAT", width: 256, height: 256, usage: "eSampled | eStorage | eTransferDst");
+    public ImageView HeightView = new(image: nameof(Height));
+    public Sampler Smooth = new(minFilter: "eLinear", magFilter: "eLinear");
+    public Buffer Particles = new(instanceCount: 4096, usage: "eStorage");
+
+    protected override void Init()
+    {
+        var random = new Random(Seed);
+        foreach (ref var h in Height.As<float>()) h = random.NextSingle() * Scale;
+        foreach (ref var p in Particles.As<Vec4>()) p = new(random.NextSingle(), random.NextSingle(), random.NextSingle(), 1);
+    }
+}
+```
+
+```kotlin
+class Ramp : ResourceScript() {
+    var step = 1f
+    val table = Buffer(instanceCount = 64, usage = "eStorage")
+    val rows = Image(format = "eR32_SFLOAT", width = 4, height = 8)
+    val rowsView = ImageView(image = ::rows.name)
+    override fun init() {
+        for (i in 0 until table.bytes.capacity() / 4) table.bytes.putFloat(i * 4, i * step)
+        for (y in 0 until rows.height) for (x in 0 until rows.width) rows.bytes.putFloat((y * rows.width + x) * 4, y * step)
+    }
+}
+```
+
+What it makes are its public fields of `Image`, `Buffer`, `ImageView`, `BufferView` and `Sampler` — `ResourceScript`'s
+own, not Koral's — each given, by name, what it is made with: the inputs a node of its kind has. `width`, `height` and
+`depth` are an image's extent; flags are one string, `"eSampled | eStorage"`; an enumeration's value is its name,
+`"eR32_SFLOAT"`; a view names what it is of, `nameof(Height)` in C#, `::height.name` in Kotlin. What is not given is as a
+node of that kind starts: an Image of 512 by 512, sampled and copyable. The Script node can say otherwise of any of
+it: `Height.format`, `Height.extent.x`, `Particles.instanceCount`, or a resource wired into a view's `HeightView.image`.
+The editor reads them from the source, so they are written as they are — a constant, not worked out — and one not
+understood is said, and left as the node starts it.
+
+Its other public fields (vars) are its settings: they are the Script node's inputs, `field.<name>`, and start as the
+source says. `Init` is called once each time what it makes is made, with every image and buffer it makes of nothing else
+of its own as it was made, zeros to begin with: an image's `Width`, `Height`, `Depth`, `Layers`, `Format` and
+`TexelBytes`, and its first level's texels, a layer after another, a row after another from the top (the smaller
+levels are made from it); a buffer's every byte. C# has them as a `Span<byte>`, `Bytes`, and `As<T>()`; Kotlin as a
+little-endian `ByteBuffer`, `bytes`. They are there while `Init` runs: after it, asking for them throws. A new object is
+made for each fill, so nothing is left over from the last.
+
+It runs when what it makes is made, and again whenever it is made again: a size changed, a field of the node changed,
+the script was edited and loaded. A script that throws leaves the node failed, saying what was thrown. From C:
+`kengine_resource_script_register`, with what it makes as `KengineScriptResource`s, and
+`kengine_resource_script_unregister`.
+
 ## Running a project with scripts
 
 A runner runs its project's scripts in that project's scenes only: another project opened in the editor it hosts
@@ -305,6 +380,8 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 ## Not yet
 
 - **Text, lists and resources as fields.** A script reaches a resource through `World`, by node id.
+- **A ResourceScript runs only with its project's scripts**, as every script does: in plain `koral-editor` what it
+  makes is made with nothing in it, and its node says so.
 - **Scripts run only while the scene plays** in the editor (Play, in the Scene panel): nothing is created, enabled
   or started before then — a `GraphicsScript`'s `Prepare` alone runs as the scene is edited, for what is drawn — and
   what they made is gone on Stop. Start the editor with

@@ -1,0 +1,300 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "values",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "values",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 1024
+        }
+      },
+      {
+        "id": "idle",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "idle",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "sums",
+        "type": "Buffer",
+        "at": [
+          200,
+          240
+        ],
+        "inputs": {
+          "instanceCount": 4096,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "total",
+        "type": "Buffer",
+        "at": [
+          200,
+          300
+        ],
+        "inputs": {
+          "instanceCount": 16,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Divide",
+        "at": [
+          200,
+          360
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 1024
+        }
+      },
+      {
+        "id": "blocks",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          420
+        ],
+        "inputs": {
+          "compute.module": "koral_scan",
+          "compute.entry": "blocks",
+          "param.values": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          },
+          "param.sums": {
+            "$link": [
+              "sums",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run blocks",
+        "type": "Dispatch",
+        "at": [
+          500,
+          480
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "totals",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          540
+        ],
+        "inputs": {
+          "compute.module": "koral_scan",
+          "compute.entry": "totals",
+          "param.sums": {
+            "$link": [
+              "sums",
+              "out"
+            ]
+          },
+          "param.total": {
+            "$link": [
+              "total",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run totals",
+        "type": "Dispatch",
+        "at": [
+          500,
+          600
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "totals",
+              "out"
+            ]
+          },
+          "groups.x": 1,
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "add",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          660
+        ],
+        "inputs": {
+          "compute.module": "koral_scan",
+          "compute.entry": "add",
+          "param.values": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          },
+          "param.sums": {
+            "$link": [
+              "sums",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run add",
+        "type": "Dispatch",
+        "at": [
+          500,
+          720
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "add",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "scanned",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          780
+        ],
+        "inputs": {
+          "name": "values",
+          "value": {
+            "$link": [
+              "values",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sum",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          840
+        ],
+        "inputs": {
+          "name": "total",
+          "value": {
+            "$link": [
+              "total",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

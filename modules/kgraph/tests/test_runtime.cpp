@@ -2,6 +2,9 @@
 // built again. Offscreen, with no windowing system.
 
 #include <gtest/gtest.h>
+#include <sstream>
+#include <kecs/json.h>
+#include <kgraph/meshes.h>
 
 #include <chrono>
 #include <filesystem>
@@ -301,14 +304,45 @@ TEST_F(RuntimeTest, APrimitiveIsAMeshWithItsLayout) {
     EXPECT_EQ(vertices("triangle"), 3u);
     EXPECT_EQ(vertices("plain"), 24u) << "a cube, when it is not said";
 
-    // What a pipeline that draws it is built against: position, normal and texture coordinate, 32 bytes a vertex.
+    // What a pipeline that draws it is built against: position, normal, a tangent of four and texture coordinate,
+    // 48 bytes a vertex.
     const kgraph::Value layout = runtime.ValueOf("cube", "layout");
     ASSERT_NE(layout.Find("attributes"), nullptr);
-    ASSERT_EQ(layout.Find("attributes")->Items()->size(), 3u);
-    EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("semantic")->String(), "UV");
+    ASSERT_EQ(layout.Find("attributes")->Items()->size(), 4u);
+    EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("semantic")->String(), "TANGENT");
     EXPECT_EQ(*(*layout.Find("attributes")->Items())[2].Find("offset")->Number(), 24.0);
-    EXPECT_EQ(*(*layout.Find("bindings")->Items())[0].Find("stride")->Number(), 32.0);
+    EXPECT_EQ(*(*layout.Find("attributes")->Items())[3].Find("semantic")->String(), "UV");
+    EXPECT_EQ(*(*layout.Find("attributes")->Items())[3].Find("offset")->Number(), 40.0);
+    EXPECT_EQ(*(*layout.Find("bindings")->Items())[0].Find("stride")->Number(), 48.0);
     EXPECT_EQ(*layout.Find("positionAttribute")->Number(), 0.0);
+
+    // As the graph asks: a tangent and a bitangent of three each, as a model file's are; or neither.
+    graph.defaultMeshTangents = kgraph::Tangents::eWithBitangent;
+    runtime.Set(graph);
+    const kgraph::Value both = runtime.ValueOf("cube", "layout");
+    ASSERT_EQ(both.Find("attributes")->Items()->size(), 5u);
+    EXPECT_EQ(*(*both.Find("attributes")->Items())[3].Find("semantic")->String(), "BITANGENT");
+    EXPECT_EQ(*(*both.Find("bindings")->Items())[0].Find("stride")->Number(), 56.0);
+    graph.defaultMeshTangents = kgraph::Tangents::eNone;
+    runtime.Set(graph);
+    EXPECT_EQ(*runtime.ValueOf("cube", "layout").Find("bindings")->Items()->at(0).Find("stride")->Number(), 32.0);
+}
+
+// A default mesh an entity holds is made again when the graph asks for other tangents, and what held it follows.
+TEST_F(RuntimeTest, ADefaultMeshIsMadeAgainWithTheTangentsAskedFor) {
+    auto& runtime = *scene->runtime;
+    const auto attributes = [&] {
+        std::vector<std::string> semantics;
+        for (const auto& attribute : runtime.ReadMesh("$sphere")->attributes) semantics.push_back(attribute.semantic + std::to_string(attribute.count));
+        return semantics;
+    };
+    EXPECT_EQ(attributes(), (std::vector<std::string> { "POSITION3", "NORMAL3", "TANGENT4", "UV2" }));
+    const auto first = runtime.ResourceOf("$sphere");
+    kgraph::Graph graph;
+    graph.defaultMeshTangents = kgraph::Tangents::eWithBitangent;
+    runtime.Set(graph);
+    EXPECT_EQ(attributes(), (std::vector<std::string> { "POSITION3", "NORMAL3", "TANGENT3", "BITANGENT3", "UV2" }));
+    EXPECT_TRUE(first->replacedBy != nullptr) << "what held the old one is led to the new";
 }
 
 // A pipeline names its shaders: no node for each, and no wire to it.
@@ -431,7 +465,7 @@ TEST_F(RuntimeTest, ValuesAreWorkedOutByNodes) {
     node("degrees", "Degrees").Set("a", 3.14159265358979323846);
     runtime.Set(graph);
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
-    const auto number = [&](const char* id, const char* output = "out") { const double* n = runtime.ValueOf(id, output).Number(); return n ? *n : -999.0; };
+    const auto number = [&](const char* id, const char* output = "out") { const kgraph::Value value = runtime.ValueOf(id, output); const double* n = value.Number(); return n ? *n : -999.0; };
 
     EXPECT_EQ(number("clamp"), 1.0);
     EXPECT_EQ(runtime.ValueOf("lerp"), Value(Value::List { 2.5, 12.5 }));
@@ -466,6 +500,29 @@ TEST_F(RuntimeTest, ValuesAreWorkedOutByNodes) {
     EXPECT_NE(runtime.Status("cross")->error.find("do not go together"), std::string::npos) << runtime.Status("cross")->error;
     EXPECT_NE(runtime.Status("less")->error.find("numbers"), std::string::npos) << runtime.Status("less")->error;
     EXPECT_NE(runtime.Status("clamp")->error.find("'max' is not given"), std::string::npos) << runtime.Status("clamp")->error;
+
+    // Numbers and vectors of a kind: as a shader's float, a double, an int and a uint hold them.
+    kgraph::Graph kinds;
+    kinds.Add("third", "Float").Set("value", 1.0 / 3.0);
+    kinds.Add("precise", "Double").Set("value", 1.0 / 3.0);
+    kinds.Add("whole", "Int").Set("value", -2.75);
+    kinds.Add("none", "UInt").Set("value", -5);
+    kinds.Add("huge", "Int").Set("value", 1e12);
+    kinds.Add("place", "Vec3").Set("x", 1).Set("y", 2).Set("z", 0.1);
+    kinds.Add("cell", "IVec2").Set("x", 3.9).Set("y", -3.9);
+    kinds.Add("size", "UVec4").Set("x", 8).Set("y", -1).Set("z", 2).Set("w", 1);
+    kinds.Add("flat", "Vec2").Set("x", 1);
+    runtime.Set(kinds);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(number("third"), static_cast<double>(1.f / 3.f)) << "32 bits of it";
+    EXPECT_EQ(number("precise"), 1.0 / 3.0);
+    EXPECT_EQ(number("whole"), -2.0) << "toward zero";
+    EXPECT_EQ(number("none"), 0.0) << "a uint is none or more";
+    EXPECT_EQ(number("huge"), 2147483647.0) << "as much as an int holds";
+    EXPECT_EQ(runtime.ValueOf("place"), Value(Value::List { 1, 2, static_cast<double>(0.1f) }));
+    EXPECT_EQ(runtime.ValueOf("cell"), Value(Value::List { 3, -3 }));
+    EXPECT_EQ(runtime.ValueOf("size"), Value(Value::List { 8, 0, 2, 1 }));
+    EXPECT_EQ(runtime.ValueOf("flat"), Value(Value::List { 1, 0 })) << "what is not given, 0";
 }
 
 // The rest of what a shader's arithmetic has: inverse trigonometry, logarithms of other bases, ranges mapped, vectors
@@ -507,7 +564,7 @@ TEST_F(RuntimeTest, MoreFunctionsAndMatricesAreWorkedOut) {
     node("rotating", "MatrixRotate").Set("rotation", Value::List { 0, 90, 0 });
     runtime.Set(graph);
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
-    const auto number = [&](const char* id) { const double* n = runtime.ValueOf(id).Number(); return n ? *n : -999.0; };
+    const auto number = [&](const char* id) { const kgraph::Value value = runtime.ValueOf(id); const double* n = value.Number(); return n ? *n : -999.0; };
     const auto near = [&](const char* id, const std::vector<double>& numbers, const double within = 1e-5) {
         const Value value = runtime.ValueOf(id);
         const auto* items = value.Items();
@@ -831,3 +888,552 @@ TEST_F(RuntimeTest, ImagesAndBuffersAreCopiedAndMipsFilled) {
     EXPECT_NE(runtime.Status("mips")->error.find("one mip level"), std::string::npos) << runtime.Status("mips")->error;
     EXPECT_NE(runtime.Status("copy bytes")->error.find("eTransferDst"), std::string::npos) << runtime.Status("copy bytes")->error;
 }
+
+// A setup page's passes record once, on the frame after they are built, and again only when they are built again:
+// a picture cleared there and halved every frame grows darker, where one cleared every frame would stay as it is.
+TEST_F(RuntimeTest, ASetupPassRecordsWhenItIsBuiltAndRestsAfter) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "frame" };
+    graph.setup = { "made" };
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 }).pass = "made";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "target").Set("constant.level", 0.5).pass = "frame";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "target").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    // What uses the picture, page by page: what wrote it before a page is what comes before it.
+    const std::vector<kgraph::PassUse> uses {
+        { "clear", "made", false, true }, { "halve", "frame", true, true }, { "show", "frame", true, false } };
+    EXPECT_EQ(runtime.UsesOf("target"), uses);
+    EXPECT_TRUE(runtime.UsesOf("pipeline").empty()) << "a pipeline is no image or buffer";
+
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_LT(scene->Pixel(4, 4).x, 16) << "cleared once, and halved every frame since";
+    EXPECT_NEAR(scene->Pixel(4, 4).y, 128, 1) << "the frame's pass ran all the while";
+
+    // Built again — another colour — it clears again, once.
+    graph.Find("clear")->Set("color", Value::List { 1, 1, 0, 1 });
+    runtime.Set(graph);
+    Frame();
+    Frame();
+    const int again = scene->Pixel(4, 4).x;
+    EXPECT_GT(again, 16) << "cleared again when it was built again";
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_LT(scene->Pixel(4, 4).x, again) << "and only then";
+
+    // On a page of every frame, it is cleared every frame.
+    graph.setup.clear();
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 128, 1) << "cleared each frame, and halved once";
+
+    // Saved, the setup pages are apart from the rest, and come first.
+    graph.setup = { "made" };
+    kgraph::Graph loaded;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), loaded, error)) << error;
+    EXPECT_EQ(loaded.setup, graph.setup);
+    EXPECT_EQ(loaded.passes, graph.passes);
+    EXPECT_NE(graph.ToJson().find("\"setup\": [\"made\"]"), std::string::npos) << graph.ToJson();
+    EXPECT_NE(graph.ToJson().find("\"passes\": [\"frame\"]"), std::string::npos) << graph.ToJson();
+}
+
+// A Reference looked at is what it stands for as it is where the Reference is: when its page begins, before what the page
+// does to it. And what a later page overwrites, it overwrites after what an earlier one did.
+TEST_F(RuntimeTest, AReferenceLookedAtIsItsResourceAsItsPageBegins) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "cleared", "halved", "shown" };
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "cleared";
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 }).pass = "cleared";
+    graph.Add("in halved", "Reference").Set("node", "target").pass = "halved";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "in halved").Set("constant.level", 0.5).pass = "halved";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "halved";
+    graph.Add("in shown", "Reference").Set("node", "target").pass = "shown";
+    graph.Add("screen", "Screen").pass = "shown";
+    graph.Add("show", "Blit").Wire("source", "in shown").Wire("destination", "screen").pass = "shown";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (const char* id : { "in halved", "in shown", "target" }) runtime.Watch(id);
+    const auto red = [&](const char* id) -> int {
+        for (int i = 0; i < 6; ++i) {
+            if (const auto peek = runtime.Watched(id); peek && !peek->bytes.empty()) return static_cast<int>(peek->bytes[0]);
+            Frame();
+        }
+        ADD_FAILURE() << id << " was never copied: " << runtime.WatchProblem(id);
+        return -1;
+    };
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(red("in halved"), 255, 1) << "as the page that halves it begins: cleared, not halved yet";
+    EXPECT_NEAR(red("in shown"), 128, 1) << "after the page before it halved it";
+    EXPECT_NEAR(red("target"), 128, 1) << "the node itself: as the frame ends";
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 128, 1) << "looking at it changes nothing of what is drawn";
+
+    // Cleared on a later page than it is halved on: it is halved, then cleared, as the pages are in order.
+    graph.Find("clear")->pass = "shown";
+    graph.Find("clear")->Set("color", Value::List { 0, 1, 0, 1 });
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(scene->Pixel(4, 4).y, 255) << "the clear of the last page is what is shown";
+}
+
+// A fixed page's passes record on a frame with a fixed step in it and rest on one without: a picture cleared in setup and
+// halved on the fixed step is halved once for each frame given a step, and not at all on the others. Setup runs again
+// when asked, as when the scene starts or stops playing.
+TEST_F(RuntimeTest, AFixedPassRunsOnFramesWithAStepAndSetupRunsAgainWhenAsked) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "simulate", "frame" };
+    graph.setup = { "made" };
+    graph.fixed = { "simulate" };
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 }).pass = "made";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "target").Set("constant.level", 0.5).pass = "simulate";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "simulate";
+    graph.Add("step", "FixedStep").pass = "simulate";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "target").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(runtime.FixedSteps(), 0u);
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 255, 1) << "no step taken: cleared, and never halved";
+
+    for (int i = 0; i < 3; ++i) {
+        runtime.FixedStep(1.f / 50.f);
+        Frame();
+        EXPECT_EQ(runtime.FixedSteps(), 1u);
+    }
+    for (int i = 0; i < 3; ++i) Frame();     // and frames with no step: it rests
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 32, 2) << "halved once for each frame with a step, three times";
+    EXPECT_EQ(runtime.ValueOf("step", "count"), Value(3)) << "the steps there have been";
+    EXPECT_NEAR(*runtime.ValueOf("step", "dt").Number(), 0.02, 1e-6);
+    EXPECT_EQ(runtime.ValueOf("step", "steps"), Value(0)) << "this frame has none";
+
+    runtime.RunSetupAgain();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 255, 1) << "setup made again: cleared";
+
+    // Saved, each rate's pages are apart: setup, the fixed step, every frame — and come in that order.
+    kgraph::Graph loaded;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), loaded, error)) << error;
+    EXPECT_EQ(loaded.fixed, graph.fixed);
+    EXPECT_EQ(loaded.passes, graph.passes);
+    EXPECT_NE(graph.ToJson().find("\"fixed\": [\"simulate\"]"), std::string::npos) << graph.ToJson();
+}
+
+// A Keep on a page of the fixed step is the state as it was when the step began: what that step reads as before, while it
+// writes the state itself. Cleared to 255 and halved each step, the state is 32 after three steps, and the kept copy 64.
+TEST_F(RuntimeTest, AKeepIsTheStateAsItWasWhenTheStepBegan) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "simulate", "frame" };
+    graph.setup = { "made" };
+    graph.fixed = { "simulate" };
+    graph.Add("state", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "state").Set("color", Value::List { 1, 0, 0, 1 }).pass = "made";
+    graph.Add("before", "Keep").Wire("of", "state").pass = "simulate";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "state").Set("constant.level", 0.5).pass = "simulate";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "simulate";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "before").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ResourceOf("before")->kind, "Image");
+    EXPECT_TRUE(runtime.Status("halve")->note.empty()) << "its state is one copy: " << runtime.Status("halve")->note;
+
+    for (int i = 0; i < 3; ++i) Frame();
+    for (int i = 0; i < 3; ++i) {
+        runtime.FixedStep(1.f / 60.f);
+        Frame();
+    }
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 2) << "kept before the third step halved it: 255 / 4";
+
+    // A per-frame state on the fixed step is said to be wrong: each frame in flight would step its own copy.
+    graph.Find("state")->Set("isPerFrame", true);
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Status("halve") && runtime.Status("halve")->ok) << runtime.Status("halve")->error;
+    EXPECT_NE(runtime.Status("halve")->note.find("per-frame"), std::string::npos) << runtime.Status("halve")->note;
+
+    // What is not a buffer or an image is not kept.
+    graph.Find("before")->Wire("of", "pipeline");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("before")->error.find("a buffer or an image"), std::string::npos) << runtime.Status("before")->error;
+}
+
+// A frame with several fixed steps runs its fixed pages once for each, each step after the last: three steps in one frame
+// halve the state three times, and a Keep at the start of the step is the state the third step began with. A frame runs
+// as many as the graph says at most, and the rest are lost.
+TEST_F(RuntimeTest, AFrameWithSeveralFixedStepsRunsTheFixedPagesOnceForEach) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "simulate", "frame" };
+    graph.setup = { "made" };
+    graph.fixed = { "simulate" };
+    graph.Add("state", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "state").Set("color", Value::List { 1, 1, 0, 1 }).pass = "made";
+    graph.Add("before", "Keep").Wire("of", "state").pass = "simulate";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "state").Set("constant.level", 0.5).pass = "simulate";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "simulate";
+    graph.Add("step", "FixedStep").pass = "simulate";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "before").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (int i = 0; i < 3; ++i) Frame();
+
+    for (int i = 0; i < 3; ++i) runtime.FixedStep(1.f / 60.f);
+    Frame();
+    EXPECT_EQ(runtime.FixedSteps(), 3u);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 2) << "the third step began from 255 halved twice: the steps ran in turn, in one frame";
+    EXPECT_EQ(runtime.ValueOf("step", "count"), Value(3));
+
+    // At most two a frame: of five, three are lost.
+    graph.fixedStepsAtMost = 2;
+    runtime.Set(graph);
+    runtime.RunSetupAgain();
+    for (int i = 0; i < 3; ++i) Frame();
+    for (int i = 0; i < 5; ++i) runtime.FixedStep(1.f / 60.f);
+    Frame();
+    EXPECT_EQ(runtime.FixedSteps(), 2u);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 128, 2) << "the second step began from 255 halved once";
+    EXPECT_EQ(runtime.ValueOf("step", "lost"), Value(3));
+    kgraph::Graph loaded;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), loaded, error)) << error;
+    EXPECT_EQ(loaded.fixedStepsAtMost, 2);
+}
+
+// A Dispatch's `idle`: while what it is given is not zero, it records nothing. Given a number, always or never; wired
+// from what is worked out each frame — here, whether the frame has no fixed step — on the frames it says.
+TEST_F(RuntimeTest, AnIdleDispatchRecordsNothing) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "frame" };
+    graph.setup = { "made" };
+    graph.Add("state", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "state").Set("color", Value::List { 1, 0, 0, 1 }).pass = "made";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "state").Set("constant.level", 0.5).pass = "frame";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").Set("idle", 1).pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "state").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 255, 1) << "idle: never halved";
+
+    graph.Add("step", "FixedStep").pass = "frame";
+    graph.Add("none", "LessOrEqual").Wire("a", "step", "steps").Set("b", 0).pass = "frame";
+    graph.Find("halve")->Wire("idle", "none");
+    runtime.Set(graph);
+    runtime.RunSetupAgain();
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 255, 1) << "no step: idle";
+    for (int i = 0; i < 2; ++i) { runtime.FixedStep(1.f / 60.f); Frame(); }
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 2) << "halved on the two frames with a step";
+}
+
+// A mesh's buffers, as buffers: a compute shader can read its positions and its indices — a cube's, here, copied out.
+TEST_F(RuntimeTest, AMeshsBuffersAreBuffersAShaderCanRead) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("cube", "Primitive").Set("shape", "eCube");
+    graph.Add("parts", "MeshBuffers").Wire("mesh", "cube");
+    graph.Add("copy", "Buffer").Set("instanceCount", 4096).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" });
+    graph.Add("out", "CopyBuffer").Wire("source", "parts", "vertices").Wire("destination", "copy");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ResourceOf("parts", "vertices")->kind, "Buffer");
+    EXPECT_EQ(runtime.ResourceOf("parts", "indices")->kind, "Buffer");
+    EXPECT_EQ(runtime.ValueOf("parts", "vertexCount"), Value(24));
+    EXPECT_EQ(runtime.ValueOf("parts", "indexCount"), Value(36));
+    EXPECT_EQ(runtime.ValueOf("parts", "stride"), Value(48)) << "position, normal, a tangent of four and a UV";
+    EXPECT_EQ(runtime.ValueOf("parts", "position"), Value(0));
+    runtime.Watch("copy");
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto peek = runtime.Watched("copy");
+    ASSERT_TRUE(peek && peek->bytes.size() >= 12);
+    float first[3];
+    std::memcpy(first, peek->bytes.data(), sizeof first);
+    const auto cube = kgraph::ShapeData("cube");
+    for (int axis = 0; axis < 3; ++axis) EXPECT_FLOAT_EQ(first[axis], cube->vertices[0].position[axis]) << axis;
+
+    graph.Find("parts")->Wire("mesh", "copy");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("parts")->error.find("needs a mesh"), std::string::npos) << runtime.Status("parts")->error;
+}
+
+namespace {
+    /** One of the engine's functions, as its file has it: packages/koral/functions/<name>.kfunc. */
+    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
+    {
+        const std::filesystem::path file = std::filesystem::path(KGRAPH_PACKAGE_SHADERS).parent_path() / "functions" / (name + ".kfunc");
+        std::ifstream in(file, std::ios::binary);
+        std::stringstream read;
+        read << in.rdbuf();
+        const std::string text = read.str();
+        kecs::json::Value parsed;
+        std::string error;
+        auto graph = std::make_shared<kgraph::Graph>();
+        if (!kecs::json::Parse(text, parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
+            ADD_FAILURE() << name << ": " << error;
+        return graph;
+    }
+    std::uint32_t SeedHash(std::uint32_t i) { i *= 2654435761u; i ^= i >> 15; i *= 2246822519u; i ^= i >> 13; return i; }
+}
+
+// The engine's functions, on the GPU: a radix sort of 70,000 keys with their values — stable, so that the same keys keep
+// their values in order — what is kept of them by a flag, one after another, and how many groups cover a count the GPU
+// worked out.
+TEST_F(RuntimeTest, TheEnginesFunctionsSortCompactAndCountOnTheGpu) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    constexpr std::uint32_t n = 70000;
+    kgraph::Graph graph;
+    for (const char* name : { "Scan", "RadixSort", "Compact", "IndirectArgs" }) graph.functions[name] = EngineFunction(name);
+    const Value storage = Value::List { "eStorage", "eTransferSrc", "eTransferDst" };
+    for (const char* name : { "keys", "values", "flags" }) graph.Add(name, "Buffer").Set("instanceCount", n * 4).Set("usage", storage);
+    graph.Add("counter", "Buffer").Set("instanceCount", 16).Set("usage", storage);
+    graph.Add("seeding", "ComputePipeline").Set("compute.module", "seed").Set("compute.entry", "computeMain")
+        .Wire("param.keys", "keys").Wire("param.values", "values").Wire("param.flags", "flags").Wire("param.counter", "counter");
+    graph.Add("seed", "Dispatch").Wire("pipeline", "seeding").Set("groups.x", (n + 255) / 256).Set("push.count", n);
+    graph.Add("kept", "Function").Set("function", "Compact").Wire("flags", "flags").Wire("values", "values").Set("count", n);
+    graph.Add("sort", "Function").Set("function", "RadixSort").Wire("keys", "keys").Wire("values", "values").Set("count", n);
+    graph.Add("groups", "Function").Set("function", "IndirectArgs").Wire("counter", "counter").Set("groupSize", 64);
+    for (const char* name : { "keys", "values", "kept", "many", "args" }) graph.Add(std::string("out ") + name, "Buffer").Set("instanceCount", n * 4).Set("usage", storage);
+    graph.Add("copy keys", "CopyBuffer").Wire("source", "sort", "keys").Wire("destination", "out keys");
+    graph.Add("copy values", "CopyBuffer").Wire("source", "sort", "values").Wire("destination", "out values");
+    graph.Add("copy kept", "CopyBuffer").Wire("source", "kept", "kept").Wire("destination", "out kept");
+    graph.Add("copy many", "CopyBuffer").Wire("source", "kept", "count").Wire("destination", "out many");
+    graph.Add("copy args", "CopyBuffer").Wire("source", "groups", "args").Wire("destination", "out args");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (const char* name : { "out keys", "out values", "out kept", "out many", "out args" }) runtime.Watch(name);
+    for (int i = 0; i < 5; ++i) Frame();
+    const auto words = [&](const char* name) {
+        const auto peek = runtime.Watched(name);
+        std::vector<std::uint32_t> out(peek ? peek->bytes.size() / 4 : 0);
+        if (peek) std::memcpy(out.data(), peek->bytes.data(), out.size() * 4);
+        return out;
+    };
+    const auto keys = words("out keys"), values = words("out values"), kept = words("out kept"), many = words("out many"), args = words("out args");
+    ASSERT_GE(keys.size(), n);
+    ASSERT_GE(values.size(), n);
+    std::size_t unsorted = 0, unstable = 0, wrong = 0;
+    for (std::uint32_t k = 0; k < n; ++k) {
+        if (k > 0 && keys[k - 1] > keys[k]) ++unsorted;
+        if (k > 0 && keys[k - 1] == keys[k] && values[k - 1] > values[k]) ++unstable;
+        if (values[k] >= n || (SeedHash(values[k]) & 0xFFFFF) != keys[k]) ++wrong;
+    }
+    EXPECT_EQ(unsorted, 0u) << "sorted";
+    EXPECT_EQ(unstable, 0u) << "the same keys keep their values in order";
+    EXPECT_EQ(wrong, 0u) << "each key with its own value";
+
+    // Kept: the indices of the odd keys, in order, and how many.
+    std::vector<std::uint32_t> odd;
+    for (std::uint32_t i = 0; i < n; ++i) if (SeedHash(i) & 1) odd.push_back(i);
+    ASSERT_FALSE(many.empty());
+    EXPECT_EQ(many[0], odd.size());
+    ASSERT_GE(kept.size(), odd.size());
+    EXPECT_TRUE(std::equal(odd.begin(), odd.end(), kept.begin())) << "the flagged, one after another, in their order";
+
+    ASSERT_GE(args.size(), 3u);
+    EXPECT_EQ(args[0], (n + 63) / 64);
+    EXPECT_EQ(args[1], 1u);
+    EXPECT_EQ(args[2], 1u);
+}
+
+// A Reference on a setup page is what setup made before its page, though setup is made only now and then.
+TEST_F(RuntimeTest, AReferenceOnASetupPageIsWhatSetupMadeBeforeIt) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "cleared", "then", "frame" };
+    graph.setup = { "cleared", "then" };
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "cleared";
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 }).pass = "cleared";
+    graph.Add("in then", "Reference").Set("node", "target").pass = "then";
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain")
+        .Wire("param.target", "target").Set("constant.level", 0.5).pass = "frame";
+    graph.Add("halve", "Dispatch").Wire("pipeline", "pipeline").Set("cover", "target").pass = "frame";
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Ok());
+    for (int i = 0; i < 4; ++i) Frame();     // setup made, and the picture halved since
+    runtime.Watch("in then");
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto peek = runtime.Watched("in then");
+    ASSERT_TRUE(peek && !peek->bytes.empty()) << runtime.WatchProblem("in then");
+    EXPECT_NEAR(static_cast<int>(peek->bytes[0]), 255, 1) << "as setup left it before 'then', not as the frames since left it";
+}
+
+// A script makes resources and fills them on the CPU: a Script node names it, gives it its fields, and gives what it
+// makes — an image, a buffer, a view of the image, a sampler — each an output by its name, made as its source says and
+// as the node says otherwise. Until something runs the script, they are made empty, and the node says why.
+TEST_F(RuntimeTest, AScriptMakesResourcesAndFillsThem) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    // As the source declares it: a level to fill with, what it makes, and nothing to run it yet.
+    kgraph::ResourceScript script;
+    script.name = "Flat";
+    script.fields = { { .name = "level", .type = "f32", .offset = 0, .size = 4 }, { .name = "tint", .type = "vec3", .offset = 4, .size = 12 } };
+    script.initial.assign(16, std::byte { 0 });
+    const float half = 0.5f;
+    std::memcpy(script.initial.data(), &half, 4);
+    script.resources = {
+        { "picture", "Image", { { "format", "eRGBA8_UNORM" }, { "extent", Value::List { 32, 32 } }, { "usage", Value::List { "eSampled", "eTransferSrc", "eTransferDst" } } } },
+        { "seen", "ImageView", { { "image", "picture" } } },
+        { "table", "Buffer", { { "instanceCount", 8 }, { "usage", Value::List { "eStorage", "eTransferSrc" } } } },
+        { "smooth", "Sampler", {} },
+    };
+    runtime.SetResourceScript(script);
+
+    kgraph::Graph graph;
+    graph.Add("flat", "Script").Set("script", "Flat").Set("field.tint", Value::List { 0, 1, 0 });
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "flat", "picture").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Status("flat")->ok) << runtime.Status("flat")->error;
+    EXPECT_NE(runtime.Status("flat")->note.find("Flat fills what it makes when the project runs with its scripts"), std::string::npos) << runtime.Status("flat")->note;
+    std::vector<std::string> outputs;
+    for (const auto& output : runtime.OutputsOf("flat"))
+        if (output.kind == kgraph::PortKind::eResource) outputs.push_back(output.name + ":" + output.type);
+    EXPECT_EQ(outputs, (std::vector<std::string> { "picture:Image", "seen:ImageView", "table:Buffer", "smooth:Sampler" })) << "what it makes, by name";
+    ASSERT_TRUE(runtime.ImageOf("flat", "picture").Get());
+    EXPECT_EQ(runtime.ImageOf("flat", "picture")->Extent().x, 32u) << "made as its source says";
+    ASSERT_NE(runtime.ResourceOf("flat", "seen"), nullptr);
+    EXPECT_EQ(runtime.ResourceOf("flat", "seen")->source, runtime.ResourceOf("flat", "picture")) << "a view of the script's image";
+    const auto ports = runtime.PortsOf("flat");
+    EXPECT_TRUE(std::ranges::contains(ports, std::string("field.level"), &kgraph::Port::name)) << "its fields are the node's inputs";
+    const auto wide = std::ranges::find(ports, std::string("picture.extent.x"), &kgraph::Port::name);
+    ASSERT_NE(wide, ports.end()) << "and what each resource is made with";
+    ASSERT_TRUE(wide->initial.Number());
+    EXPECT_EQ(*wide->initial.Number(), 32.0) << "starting as its source says";
+
+    // Run: it is given what it makes as it was made, and its settings, and fills them.
+    std::vector<kgraph::Contents> seen;
+    std::vector<float> given;
+    script.fill = [&](const std::span<kgraph::Contents> contents, const std::span<const std::byte> settings) -> std::string {
+        seen.assign(contents.begin(), contents.end());
+        given.assign(4, 0.f);
+        std::memcpy(given.data(), settings.data(), 16);
+        for (auto& each : contents) {
+            if (each.kind == "Image")
+                for (std::size_t texel = 0; texel < each.bytes.size() / 4; ++texel)
+                    for (int c = 0; c < 4; ++c)
+                        each.bytes[texel * 4 + c] = static_cast<std::byte>(static_cast<int>(255.f * (c == 3 ? 1.f : given[0] * given[1 + c])));
+            else
+                for (std::size_t i = 0; i < each.bytes.size(); ++i) each.bytes[i] = static_cast<std::byte>(i);
+        }
+        return {};
+    };
+    const auto builds = runtime.Status("flat")->builds;
+    runtime.SetResourceScript(script);
+    Frame();
+    Frame();
+    EXPECT_GT(runtime.Status("flat")->builds, builds) << "made again, now that its script runs";
+    EXPECT_TRUE(runtime.Status("flat")->note.empty());
+    ASSERT_EQ(seen.size(), 2u) << "its image and its buffer: a view and a sampler hold nothing to fill";
+    EXPECT_EQ(seen[0].name, "picture");
+    EXPECT_EQ(seen[0].format, "eRGBA8_UNORM");
+    EXPECT_EQ(seen[0].extent.x, 32u);
+    EXPECT_EQ(seen[0].texelBytes, 4u);
+    EXPECT_EQ(seen[1].name, "table");
+    EXPECT_EQ(seen[1].kind, "Buffer");
+    EXPECT_EQ(given, (std::vector<float> { 0.5f, 0.f, 1.f, 0.f })) << "what the source says for the level, and what the node gives for the tint";
+    Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).y, 127, 1) << "the image is what the script filled it with";
+    EXPECT_EQ(scene->Pixel(4, 4).x, 0);
+    EXPECT_EQ(runtime.ResourceOf("flat", "seen")->source, runtime.ResourceOf("flat", "picture")) << "a view of the image as it was filled";
+
+    // Looked at, it is its first image — it has no `out` — or another of what it makes, as asked.
+    EXPECT_EQ(runtime.ShownOutput("flat"), "picture");
+    EXPECT_EQ(runtime.ImageOf("flat").Get(), runtime.ImageOf("flat", "picture").Get()) << "what it is looked at by, when no output is said";
+    runtime.Watch("flat");
+    Frame();
+    Frame();
+    Frame();
+    auto peek = runtime.Watched("flat");
+    ASSERT_TRUE(peek && peek->image) << runtime.WatchProblem("flat");
+    EXPECT_EQ(peek->extent.x, 32u);
+    runtime.WatchOutput("flat", "table");
+    EXPECT_EQ(runtime.ShownOutput("flat"), "table");
+    Frame();
+    Frame();
+    Frame();
+    peek = runtime.Watched("flat");
+    ASSERT_TRUE(peek && !peek->image) << runtime.WatchProblem("flat");
+    EXPECT_EQ(peek->bytes.size(), 8u) << "its buffer of eight bytes";
+    EXPECT_EQ(static_cast<int>(peek->bytes[5]), 5) << "as the script filled it";
+    runtime.Unwatch("flat");
+
+    // A field, and what a resource is made with, given on the node: made and filled again.
+    graph.Find("flat")->Set("field.level", 1.0).Set("picture.extent.x", 16);
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(given[0], 1.f);
+    EXPECT_EQ(seen[0].extent.x, 16u);
+    EXPECT_EQ(seen[0].extent.y, 32u) << "the rest as its source says";
+    EXPECT_EQ(scene->Pixel(4, 4).y, 255);
+
+    // What is wrong is said: a field it has not, a resource it does not make, one made of nothing it has, a script that fails.
+    graph.Find("flat")->Set("field.speed", 2.0);
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("flat")->error.find("Flat has no field 'speed': it has level, tint"), std::string::npos) << runtime.Status("flat")->error;
+    graph.Find("flat")->inputs.erase("field.speed");
+    graph.Find("flat")->Set("sky.format", "eRGBA8_UNORM");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("flat")->error.find("Flat makes no 'sky': it makes picture, seen, table, smooth"), std::string::npos) << runtime.Status("flat")->error;
+    graph.Find("flat")->inputs.erase("sky.format");
+    runtime.Set(graph);
+    auto wrong = script;
+    wrong.resources[1].settings = { { "image", "nothing" } };
+    runtime.SetResourceScript(wrong);
+    Frame();
+    EXPECT_NE(runtime.Status("flat")->error.find("Flat.seen's 'image' names 'nothing'"), std::string::npos) << runtime.Status("flat")->error;
+    script.fill = [](std::span<kgraph::Contents>, std::span<const std::byte>) -> std::string { return "it is out of numbers"; };
+    runtime.SetResourceScript(script);
+    Frame();
+    EXPECT_NE(runtime.Status("flat")->error.find("Flat: it is out of numbers"), std::string::npos) << runtime.Status("flat")->error;
+    runtime.RemoveResourceScript("Flat");
+    Frame();
+    EXPECT_NE(runtime.Status("flat")->error.find("there is no ResourceScript 'Flat'"), std::string::npos) << runtime.Status("flat")->error;
+}
+
+

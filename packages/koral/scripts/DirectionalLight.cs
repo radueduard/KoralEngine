@@ -3,6 +3,6 @@
 
 public sealed class DirectionalLight : Script
 {
-    public Vec3 color = new(1f, 1f, 1f);
-    public float intensity = 1f;
+    [Min(0f)] public Vec3 color = new(1f, 1f, 1f);
+    [Min(0f), Logarithmic] public float intensity = 1f;
 }

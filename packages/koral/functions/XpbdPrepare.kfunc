@@ -1,0 +1,225 @@
+{
+  "koral-function": 1,
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "bodies",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "bodies",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Divide",
+        "at": [
+          200,
+          180
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 64
+        }
+      },
+      {
+        "id": "starts words",
+        "type": "Multiply",
+        "at": [
+          200,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 2
+        }
+      },
+      {
+        "id": "shared words",
+        "type": "Add",
+        "at": [
+          200,
+          300
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "starts words",
+              "out"
+            ]
+          },
+          "b": 69
+        }
+      },
+      {
+        "id": "shared bytes",
+        "type": "Multiply",
+        "at": [
+          200,
+          360
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "shared words",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "shared",
+        "type": "Buffer",
+        "at": [
+          200,
+          420
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "shared bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "clear",
+        "type": "ClearBuffer",
+        "at": [
+          300,
+          480
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "pipeline",
+        "type": "ComputePipeline",
+        "at": [
+          300,
+          540
+        ],
+        "inputs": {
+          "compute.module": "koral_xpbd",
+          "compute.entry": "prepare",
+          "param.bodies": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          },
+          "param.shared": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run",
+        "type": "Dispatch",
+        "at": [
+          500,
+          600
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "pipeline",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "made",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          660
+        ],
+        "inputs": {
+          "name": "bodies",
+          "value": {
+            "$link": [
+              "bodies",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "found",
+        "type": "FunctionOutput",
+        "at": [
+          700,
+          720
+        ],
+        "inputs": {
+          "name": "shared",
+          "value": {
+            "$link": [
+              "shared",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}
