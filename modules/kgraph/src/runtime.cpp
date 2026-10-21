@@ -414,8 +414,23 @@ namespace kgraph
             std::size_t capacity = 0;               // how many elements there is room for
             std::shared_ptr<const std::uint64_t> clock;     // the frames of the runtime that made it: another that follows it shares it
             std::uint64_t filled = 0;               // the frame it was last written in, by that clock: once a frame, whoever asks first
+            std::uint64_t written = 0;              // what was written then, made one number: from what it was written from
             bool full = false;                      // outgrown: the next Draw built makes another
         };
+
+        /** Bytes mixed into a number that is, as near as matters, another for any other bytes: what a Draw `whenChanged` compares. */
+        static void Mix(std::uint64_t& hash, const void* bytes, const std::size_t size)
+        {
+            const auto* at = static_cast<const unsigned char*>(bytes);
+            std::size_t i = 0;
+            for (; i + 8 <= size; i += 8) {
+                std::uint64_t word;
+                std::memcpy(&word, at + i, 8);
+                hash = (hash ^ word) * 1099511628211ull;
+                hash ^= hash >> 29;
+            }
+            for (; i < size; ++i) hash = (hash ^ at[i]) * 1099511628211ull;
+        }
 
         /** What tells one buffer of instances from another: whose entities, and what is written of each, where. */
         static std::string InstancesKey(const std::string& source, const Instancing& instancing, const kecs::ComponentId component)
@@ -452,6 +467,14 @@ namespace kgraph
             // A Draw's `idle`: the output whose number — the `cullIndex`th — says, while not zero, that nothing is drawn.
             std::string idleNode, idleOutput;
             bool idle = false;
+            // A Draw's `whenChanged`: idle, too, while what it would draw is what it drew last into what it draws into.
+            bool whenChanged = false;
+            std::vector<const void*> targets;       // the views it draws into
+            kor::u32 copies = 1;                    // how many of them there are of each: a per-frame image's, one a frame in flight
+            std::uint64_t drawnAs = 0;              // what it last drew, made one number
+            kor::u32 drawnTimes = 0;                // how many times in a row it drew that
+            std::uint64_t drawingAs = 0;            // what it would draw this frame, made one number
+            bool due = false;                       // whether it is to draw this frame
             kor::u32 groups[3] { 1, 1, 1 };
             kor::u32 groupSize[3] { 1, 1, 1 };
 
@@ -463,6 +486,14 @@ namespace kgraph
                 bool seen = false;
             };
             std::map<std::pair<std::uint64_t, std::size_t>, Cached> cache;     // by entity, and turn
+            // What each mesh is drawn with (PipelineFor), from frame to frame: the mesh held, so that another at its
+            // address is not taken for it. The pipeline, or why it cannot be drawn.
+            struct Fit {
+                kor::ResourceRef<const kor::Mesh> mesh;
+                kor::ResourceRef<const kor::GraphicsPipeline> pipeline;
+                std::string why;
+            };
+            std::unordered_map<const kor::Mesh*, Fit> fits;
 
             // As readied this frame: read while the pass records.
             std::vector<Item> items;
@@ -2646,6 +2677,15 @@ namespace kgraph
                     if (const auto index = inputs.find("cullIndex"); index != inputs.end() && index->second.value.Number()) run->cullIndex = static_cast<int>(*index->second.value.Number());
                 }
                 run->command = mustIndex ? DrawWith::eDrawIndexed : command == eAuto ? DrawWith::eAuto : DrawWith::eDraw;
+                run->whenChanged = flag("whenChanged").value_or(false);
+                const auto drawsInto = [&](const kor::ResourceRef<const kor::ImageView>& view) {
+                    if (!view.Get()) return;
+                    run->targets.push_back(view.Get());
+                    if (view->SourceImage().Get() && view->SourceImage()->IsPerFrame())
+                        run->copies = std::max(run->copies, kor::Context::HasScheduler() ? kor::Context::Scheduler().ImageCount() : 1u);
+                };
+                for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i) drawsInto(framebuffer->ColorAttachment(i));
+                if (framebuffer->HasDepthAttachment()) drawsInto(framebuffer->DepthAttachment());
 
                 const bool colorLoaded = render.ColorLoadOperation() == kor::LoadOperation::eLoad;
                 for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i)
@@ -5713,6 +5753,9 @@ namespace kgraph
                 stale = true;
                 return;
             }
+            std::uint64_t written = 1469598103934665603ull;
+            Mix(written, &rows, sizeof rows);
+            instances.written = written;
             if (rows == 0) return;
             // Straight into this frame's copy: all of it is written each frame, so there is nothing to carry to the others.
             auto mapping = instances.buffer->Map<std::byte>(rows * stride, 0);
@@ -5723,8 +5766,16 @@ namespace kgraph
                 std::memset(element, 0, stride);
                 if (!world->Alive(entity)) continue;
                 const auto* own = instances.component == kecs::NoComponent ? nullptr : static_cast<const std::byte*>(std::as_const(*world).Get(entity, instances.component));
+                const std::uint64_t key = KeyOf(entity);
+                Mix(written, &key, sizeof key);
+                bool placed = false;
                 for (const auto& field : instances.instancing->fields) {
                     std::byte* at = element + field.offset;
+                    if (field.from == Instancing::Field::From::eComponent && own) Mix(written, own + field.at, field.size);
+                    else if (field.from != Instancing::Field::From::eComponent && field.from != Instancing::Field::From::eId && !placed) {
+                        Mix(written, Placed(entity).m.data(), 64);
+                        placed = true;
+                    }
                     switch (field.from) {
                     case Instancing::Field::From::eComponent:
                         if (own) std::memcpy(at, own + field.at, field.size);
@@ -5752,6 +5803,71 @@ namespace kgraph
                     }
                 }
             }
+            instances.written = written;
+        }
+
+        /**
+         * A Draw's `whenChanged`: what it is to draw, made one number — the same meshes, of the same entities where they
+         * are, with the same sets, push constants, instances and matrix to cull by — and whether that is not what it drew
+         * last, as many times in a row as there are copies of what it draws into. Whether it draws is settled once every
+         * pass is readied (WhichDrawAgain): with the others that draw into what it does.
+         */
+        void Unchanged(EntityRun& run, const std::optional<kor::Mat4>& sight)
+        {
+            if (!run.whenChanged) return;
+            std::uint64_t hash = 1469598103934665603ull;
+            const auto mix = [&hash](const void* bytes, const std::size_t size) { Mix(hash, bytes, size); };
+            const auto mixed = [&](const auto& value) { mix(&value, sizeof value); };
+            if (sight) for (int column = 0; column < 4; ++column) mixed((*sight)[column]);
+            for (const Item& item : run.items) {
+                const std::uint64_t key = item.entity.IsNull() ? 0 : KeyOf(item.entity);
+                mixed(key);
+                if (!item.entity.IsNull()) mix(Placed(item.entity).m.data(), 64);
+                const void* handles[3] { item.mesh.Get(), item.pipeline.Get(), item.set.Get() };
+                mixed(handles);
+                const std::uint32_t range[6] { item.part, item.indexed, item.firstIndex, item.indexCount, static_cast<std::uint32_t>(item.vertexOffset), item.groups[0] };
+                mixed(range);
+            }
+            mix(run.pushed.data(), run.pushed.size());
+            // What each instance is given, where it draws instances: written from the entities, and not in its items.
+            for (const auto& instances : run.instances) mixed(instances->written);
+            run.drawingAs = hash;
+            run.due = hash != run.drawnAs || run.drawnTimes < run.copies;
+        }
+
+        /**
+         * Which Draws `whenChanged` draw this frame. One whose view another draws into is drawn with it: those that draw
+         * into one view after another — a cascade a quarter of an atlas, after the one that clears it — clear nothing of
+         * their own, and one drawn again alone would draw over what it drew before. So a view any of them is due in is
+         * drawn again by all of them, and one a Draw that draws every frame draws into, every frame.
+         */
+        void WhichDrawAgain()
+        {
+            std::vector<EntityRun*> runs;
+            std::unordered_map<const void*, bool> drawnInto;     // a view, and whether everything drawing into it draws
+            for (const auto& id : wanted) {
+                EntityRun* run = built.at(id).pass->entities.get();
+                if (!run || !run->draws || run->idle) continue;
+                for (const void* view : run->targets) drawnInto[view] = drawnInto[view] || !run->whenChanged || run->due;
+                if (run->whenChanged) runs.push_back(run);
+            }
+            for (bool more = true; more;) {
+                more = false;
+                for (EntityRun* run : runs) {
+                    if (run->due || std::ranges::none_of(run->targets, [&](const void* view) { return drawnInto[view]; })) continue;
+                    run->due = more = true;
+                    for (const void* view : run->targets) drawnInto[view] = true;
+                }
+            }
+            for (EntityRun* run : runs) {
+                if (!run->due) {
+                    run->idle = true;
+                    run->report.unchanged = true;
+                    continue;
+                }
+                run->drawnTimes = run->drawingAs == run->drawnAs ? run->drawnTimes + 1 : 1;
+                run->drawnAs = run->drawingAs;
+            }
         }
 
         /** Readies a Draw's or a Dispatch's draws for this frame: one, or one an element of its ForEach, and what each is made of. */
@@ -5759,6 +5875,7 @@ namespace kgraph
         {
             // Idle this frame: what it draws into stays as it is, nothing is readied for it, and what it last said stands.
             run.idle = false;
+            run.due = true;     // unless what it draws is found to be what it drew (Unchanged)
             if (!run.idleNode.empty())
                 if (const auto source = built.find(run.idleNode); source != built.end())
                     if (const auto output = source->second.outputs.find(run.idleOutput); output != source->second.outputs.end()) {
@@ -5798,7 +5915,6 @@ namespace kgraph
                             sight = matrix;
                         }
 
-            std::unordered_map<const kor::Mesh*, std::pair<kor::ResourceRef<const kor::GraphicsPipeline>, std::string>> fits;
             const auto graphics = run.draws ? kor::ResourceRef<const kor::GraphicsPipeline>(kor::capi::GraphicsPipelineOf(info.resource->handle)) : kor::ResourceRef<const kor::GraphicsPipeline>();
 
             // What one of them is, for the element at hand: a resource, or a value.
@@ -5808,25 +5924,29 @@ namespace kgraph
                 const auto it = from->second.outputs.find(source.output);
                 return it == from->second.outputs.end() ? nullptr : &it->second;
             };
-            const auto resource = [&](const Source& source, const kecs::Entity entity) -> Held {
-                Held held;
+            // Where it is held rather than a copy of it, for each element of every pass every frame: what holds it — the
+            // node, the entity's component, the output — stays as it is while the element is readied.
+            static const Held none;
+            const auto resource = [&](const Source& source, const kecs::Entity entity) -> const Held& {
+                const Held* held = &none;
                 switch (source.kind) {
                 case Source::Kind::eGiven:
-                case Source::Kind::eWired: held = source.resource; break;
+                case Source::Kind::eWired: held = &source.resource; break;
                 case Source::Kind::eField:
                     if (const auto* bytes = entity.IsNull() ? nullptr : static_cast<const std::byte*>(world->Get(entity, source.component)))
-                        held = *reinterpret_cast<const Held*>(bytes + source.field.offset);
+                        held = reinterpret_cast<const Held*>(bytes + source.field.offset);
                     break;
                 case Source::Kind::eWhere:
                 case Source::Kind::eChain:
-                    if (const auto* given = output(source)) held = given->resource;
+                    if (const auto* given = output(source)) held = &given->resource;
                     break;
                 default: break;
                 }
                 // A resource whose node was built again since: the new one, from here on.
-                while (held && held->replacedBy) held = held->replacedBy;
-                return held;
+                while (*held && (*held)->replacedBy) held = &(*held)->replacedBy;
+                return *held;
             };
+            std::vector<const Held*> held(slots);
 
             for (std::size_t row = 0; row < rows; ++row) {
                 const kecs::Entity entity = each && row / repeat < each->listed->entities.size() ? each->listed->entities[row / repeat] : kecs::NullEntity;
@@ -5844,7 +5964,7 @@ namespace kgraph
                 item.pipeline = graphics;
 
                 if (run.draws && run.mesh.kind != Source::Kind::eNone) {
-                    const Held mesh = resource(run.mesh, entity);
+                    const Held& mesh = resource(run.mesh, entity);
                     // A model's mesh is a part of the one mesh the model is: that is what is bound.
                     const Resource* whole = mesh && mesh->part ? mesh->source.get() : mesh.get();
                     if (!whole || !whole->handle || mesh->kind != "Mesh") { skip(mesh && mesh->node.starts_with('@') ? "its mesh is still being read" : "it has no mesh to draw"); continue; }
@@ -5854,13 +5974,13 @@ namespace kgraph
                     item.indexCount = mesh->indexCount;
                     item.vertexOffset = mesh->vertexOffset;
                     // Drawn with the pipeline made for its mesh's layout: any mesh that has what the vertex shader reads.
-                    auto [known, fresh] = fits.try_emplace(item.mesh.Get());
-                    if (fresh) {
+                    auto& known = run.fits[item.mesh.Get()];
+                    if (!known.mesh.Alive() || known.mesh.Get() != item.mesh.Get() || (known.why.empty() && !known.pipeline.Alive())) {
                         auto pipeline = PipelineFor(info, *item.mesh);
-                        known->second = pipeline ? std::pair { *pipeline, std::string() } : std::pair { kor::ResourceRef<const kor::GraphicsPipeline>(), pipeline.error() };
+                        known = pipeline ? EntityRun::Fit { item.mesh, *pipeline, {} } : EntityRun::Fit { item.mesh, {}, pipeline.error() };
                     }
-                    if (!known->second.second.empty()) { skip(known->second.second); continue; }
-                    item.pipeline = known->second.first;
+                    if (!known.why.empty()) { skip(known.why); continue; }
+                    item.pipeline = known.pipeline;
                     const bool indices = item.mesh->IndexCount().has_value();
                     if (run.command == DrawWith::eDrawIndexed && !indices) { skip("its mesh has no indices, and the node draws indexed"); continue; }
                     item.indexed = run.command == DrawWith::eDrawIndexed || (run.command == DrawWith::eAuto && indices);
@@ -5868,8 +5988,15 @@ namespace kgraph
                         // Its box's eight corners, where the matrix puts them — placed as its entity is: all past one side is out of sight.
                         const kor::Mat4 placed = entity.IsNull() ? *sight : *sight * ToKor(Placed(entity));
                         int past[6] { 0, 0, 0, 0, 0, 0 };
+                        // The least corner where the matrix puts it, and each edge of the box from there: every corner is
+                        // the one and some of the others, which is four products rather than eight.
+                        const kor::Vec4 least = placed * kor::Vec4(mesh->bounds[0], mesh->bounds[1], mesh->bounds[2], 1.f);
+                        const kor::Vec4 edges[3] { placed * kor::Vec4(mesh->bounds[3] - mesh->bounds[0], 0.f, 0.f, 0.f),
+                                                   placed * kor::Vec4(0.f, mesh->bounds[4] - mesh->bounds[1], 0.f, 0.f),
+                                                   placed * kor::Vec4(0.f, 0.f, mesh->bounds[5] - mesh->bounds[2], 0.f) };
                         for (int corner = 0; corner < 8; ++corner) {
-                            const kor::Vec4 at = placed * kor::Vec4(mesh->bounds[corner & 1 ? 3 : 0], mesh->bounds[corner & 2 ? 4 : 1], mesh->bounds[corner & 4 ? 5 : 2], 1.f);
+                            kor::Vec4 at = least;
+                            for (int axis = 0; axis < 3; ++axis) if (corner & (1 << axis)) at += edges[axis];
                             past[0] += at.x < -at.w; past[1] += at.x > at.w; past[2] += at.y < -at.w; past[3] += at.y > at.w; past[4] += at.z < 0.f; past[5] += at.z > at.w;
                         }
                         if (std::ranges::any_of(past, [](const int count) { return count == 8; })) {
@@ -5877,7 +6004,7 @@ namespace kgraph
                             // wrong with an entity is not a matter of where the camera is.
                             std::string lacking;
                             for (std::size_t i = 0; i < slots && lacking.empty(); ++i)
-                                if (const Held held = resource(run.slots[i], entity); !held || (!held->handle && !held->part)) lacking = Lacks(run.slots[i]);
+                                if (const Held& given = resource(run.slots[i], entity); !given || (!given->handle && !given->part)) lacking = Lacks(run.slots[i]);
                             if (!lacking.empty()) skip(lacking);
                             else ++run.report.culled;
                             continue;
@@ -5886,19 +6013,18 @@ namespace kgraph
                 }
 
                 if (slots > 0) {
-                    std::vector<Held> held(slots);
                     std::string lacking;
                     for (std::size_t i = 0; i < slots && lacking.empty(); ++i) {
                         const Slot& slot = info.slots[i];
-                        held[i] = resource(run.slots[i], entity);
-                        if (!held[i] || !held[i]->handle) lacking = Lacks(run.slots[i]);
-                        else if (!Takes(slot.type, held[i]->kind)) lacking = std::format("'param.{}' takes a {}, and was given a {}", slot.field, KindOf(slot.type), held[i]->kind);
+                        held[i] = &resource(run.slots[i], entity);
+                        if (!*held[i] || !(*held[i])->handle) lacking = Lacks(run.slots[i]);
+                        else if (!Takes(slot.type, (*held[i])->kind)) lacking = std::format("'param.{}' takes a {}, and was given a {}", slot.field, KindOf(slot.type), (*held[i])->kind);
                     }
                     if (!lacking.empty()) { skip(lacking); continue; }
 
                     auto& cached = run.cache[{ entity.IsNull() ? 0 : KeyOf(entity), row % repeat }];
                     bool same = cached.set.Valid() && cached.key.size() == slots;
-                    for (std::size_t i = 0; same && i < slots; ++i) same = cached.key[i] == held[i].get();
+                    for (std::size_t i = 0; same && i < slots; ++i) same = cached.key[i] == held[i]->get();
                     if (!same) {
                         kor::DescriptorSet::Builder set(info.pipeline, 1);
                         std::string failed;
@@ -5907,10 +6033,10 @@ namespace kgraph
                             if (slot.sampler) continue;
                             const Resource* sampler = nullptr;
                             if (slot.type == kor::DescriptorType::eCombinedImageSampler) {
-                                if (i + 1 < slots && info.slots[i + 1].sampler) sampler = held[i + 1].get();
+                                if (i + 1 < slots && info.slots[i + 1].sampler) sampler = held[i + 1]->get();
                                 else if (const auto shared = info.samplers.find(slot.parameter); shared != info.samplers.end()) sampler = shared->second.get();
                             }
-                            if (const auto written = WriteParameter(set, slot.parameter, slot.type, *held[i], sampler, "param." + slot.field); !written) failed = written.error();
+                            if (const auto written = WriteParameter(set, slot.parameter, slot.type, **held[i], sampler, "param." + slot.field); !written) failed = written.error();
                         }
                         kor::Resource<kor::DescriptorSet> made;
                         if (failed.empty()) {
@@ -5922,11 +6048,12 @@ namespace kgraph
                         if (!failed.empty()) { run.cache.erase({ entity.IsNull() ? 0 : KeyOf(entity), row % repeat }); run.changed = true; skip(failed); continue; }
                         cached.set = std::move(made);
                         cached.key.assign(slots, nullptr);
-                        cached.held = held;
+                        cached.held.clear();
+                        for (const Held* given : held) cached.held.push_back(*given);
                         cached.members.assign(slots, Member {});
                         for (std::size_t i = 0; i < slots; ++i) {
-                            cached.key[i] = held[i].get();
-                            if (!info.slots[i].sampler) cached.members[i] = MemberOf(held[i].get());
+                            cached.key[i] = held[i]->get();
+                            if (!info.slots[i].sampler) cached.members[i] = MemberOf(held[i]->get());
                         }
                         run.changed = true;
                     }
@@ -5995,6 +6122,7 @@ namespace kgraph
             // Those of one mesh one after another: a mesh is then bound once for all of them.
             if (run.draws) std::ranges::stable_sort(run.items, {}, [](const Item& item) { return item.mesh.Get(); });
             run.report.ran = run.items.size();
+            if (run.draws) Unchanged(run, sight);
 
             // Elements that are gone let go of what was made for them.
             for (auto it = run.cache.begin(); it != run.cache.end();) {
@@ -6245,6 +6373,7 @@ namespace kgraph
                 changed = changed || plan->entities->changed;
                 plan->entities->changed = false;
             }
+            WhichDrawAgain();
             return changed;
         }
 

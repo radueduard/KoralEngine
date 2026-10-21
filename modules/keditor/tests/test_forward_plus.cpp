@@ -876,3 +876,64 @@ TEST(ForwardPlus, AModelIsImportedWithItsPicturesUnderASkyFromAFile) {
         if (std::abs(int(made[i].x) - int(again[i].x)) > 2 || std::abs(int(made[i].y) - int(again[i].y)) > 2 || std::abs(int(made[i].z) - int(again[i].z)) > 2) ++different;
     EXPECT_LT(different, made.size() / 200) << "the saved project draws what the session that made it drew";
 }
+
+// The shadows are drawn again only when what is in them has changed (a Draw's `whenChanged`): while everything holds
+// still, nothing is drawn into them, and the picture is what drawing every one of them every frame makes — the camera
+// moved, a ball moved under the lamps and the sun, a lamp moved.
+TEST(ForwardPlus, ShadowsDrawnOnlyWhenChangedLookAsIfDrawnEveryFrame) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    const keditor::Project project = MakeProject("-changed");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    forwardplus::BuildScene(doc);
+    // Every lamp's turn every frame: what is not drawn is then left out by `whenChanged` alone.
+    ASSERT_TRUE(doc.SetInput("lamp shadows", "each", 0));
+    const kecs::Entity camera = doc.World().FindEntity("Camera"), ball = doc.World().FindEntity("Ball 0 0"), lamp = doc.World().FindEntity("Lamp 0");
+    ASSERT_FALSE(camera.IsNull() || ball.IsNull() || lamp.IsNull());
+    const kecs::Vec3 stood = doc.World().PositionOf(camera), lay = doc.World().PositionOf(ball), hung = doc.World().PositionOf(lamp);
+
+    const auto moved = [](const kecs::Vec3 from, const float x, const float y, const float z) { return kecs::Vec3 { from.x + x, from.y + y, from.z + z }; };
+    const auto pictures = [&](const bool whenChanged) {
+        EXPECT_TRUE(doc.SetInput("cast", "whenChanged", whenChanged));
+        EXPECT_TRUE(doc.SetInput("cast lamp", "whenChanged", whenChanged));
+        doc.SetPosition(camera, stood);
+        doc.SetPosition(ball, lay);
+        doc.SetPosition(lamp, hung);
+        std::vector<std::vector<kor::U8Vec4>> made;
+        for (int i = 0; i < 6; ++i) Frame();
+        for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
+        made.push_back(editing.Picture());
+        if (whenChanged) {
+            for (const char* cast : { "cast [0]", "cast [3]", "cast lamp [0]", "cast lamp [143]" }) {
+                const auto* report = doc.Runtime().ReportOf(cast);
+                EXPECT_TRUE(report && report->unchanged) << cast << ": nothing moved, and it draws nothing";
+            }
+        }
+        doc.SetPosition(camera, moved(stood, 1.5f, 0.5f, -1.f));
+        Frame();
+        if (const auto* report = doc.Runtime().ReportOf("cast [3]"); whenChanged && report) EXPECT_FALSE(report->unchanged) << "the cascades follow the camera";
+        Frame();
+        made.push_back(editing.Picture());
+        doc.SetPosition(ball, moved(lay, 0.f, 1.2f, 0.5f));
+        Frame();
+        Frame();
+        made.push_back(editing.Picture());
+        doc.SetPosition(lamp, moved(hung, 0.6f, 0.3f, 0.f));
+        Frame();
+        Frame();
+        made.push_back(editing.Picture());
+        return made;
+    };
+    const auto everyFrame = pictures(false), changed = pictures(true);
+    ASSERT_EQ(everyFrame.size(), changed.size());
+    for (std::size_t at = 0; at < everyFrame.size(); ++at) {
+        std::size_t different = 0;
+        for (std::size_t i = 0; i < everyFrame[at].size(); ++i) {
+            const auto a = everyFrame[at][i], b = changed[at][i];
+            if (std::abs(int(a.x) - int(b.x)) > 2 || std::abs(int(a.y) - int(b.y)) > 2 || std::abs(int(a.z) - int(b.z)) > 2) ++different;
+        }
+        EXPECT_LT(different, everyFrame[at].size() / 1000) << "picture " << at << ": still, the camera moved, a ball moved, a lamp moved";
+    }
+}

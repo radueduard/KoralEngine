@@ -314,6 +314,9 @@ namespace forwardplus
         wire(bring("cascades"), "cast", "cull", "matrices");
         wire("cascade", "cast", "cullIndex", "index");
         wire("cascade", "cast", "push.cascade", "index");
+        // A cascade is drawn again only when what is in it, or where it is seen from, has changed: not while the camera
+        // and everything in sight of the sun hold still.
+        set("cast", "whenChanged", true);
         drawEach("cast", "casters", nullptr, {}, { "PointLight", "Blended" });     // a lamp's own ball casts nothing, and nor does a decal
 
         // ---- prepass: depth, before anything is shaded -------------------------------------------------------------------
@@ -667,6 +670,8 @@ namespace forwardplus
         wire(bring("lamp shadows", pass, 370), "cast lamp", "cull", "matrices");
         wire("lamp face", "cast lamp", "cullIndex", "index");
         wire(bring("lamp shadows", pass, 370), "cast lamp", "idle", "idle");
+        // And of those whose turn it is, only a face something in sight of has moved in, or whose light has.
+        set("cast lamp", "whenChanged", true);
         // Every entity with a Mesh but a lamp's own ball and a decal, each where it is, told which face it is drawn into.
         node("Filter", "lamp casters", 1320, 480, pass);
         wire(doc.Import("all entities", pass, 1040, 480), "lamp casters", "entities");

@@ -487,7 +487,8 @@
         "mesh": { "$link": ["casters", "Mesh.mesh"] },
         "pipeline": { "$link": ["shadow", "out"] },
         "push.cascade": { "$link": ["cascade", "index"] },
-        "push.model": { "$link": ["casters", "matrix"] }
+        "push.model": { "$link": ["casters", "matrix"] },
+        "whenChanged": true
       }
     },
     {
@@ -1986,7 +1987,8 @@
         "mesh": { "$link": ["lamp casters", "Mesh.mesh"] },
         "pipeline": { "$link": ["lamp shadow", "out"] },
         "push.face": { "$link": ["lamp face", "index"] },
-        "push.model": { "$link": ["lamp casters", "matrix"] }
+        "push.model": { "$link": ["lamp casters", "matrix"] },
+        "whenChanged": true
       }
     },
     {

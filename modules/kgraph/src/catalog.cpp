@@ -193,7 +193,7 @@ namespace kgraph
                 set("stencilTest", "Stencil");
                 for (const char* name : { "stencilReference", "stencilCompareMask", "stencilWriteMask" }) set(name, "Stencil", stencil);
                 set("blendConstants", "Blending");
-                for (const char* name : { "cull", "cullIndex", "idle" }) set(name, "Culling");
+                for (const char* name : { "cull", "cullIndex", "idle", "whenChanged" }) set(name, "Culling");
                 return;
             }
             if (type.name == "Dispatch") {
@@ -1172,7 +1172,11 @@ namespace kgraph
                     optional(Bool("primitiveRestart", "Whether an index of all ones starts a new strip.")),
                     optional(hinted({ "cull", PortKind::eValue, "matrix", false, "Wired from what the picture is seen with — a Camera's viewProjection, a ShadowCascades' matrices: an entity whose mesh is wholly out of its sight is not drawn. Only a mesh whose box is known is left out: a default mesh, a model's.", nullptr }, "numbers")),
                     optional(Number("cullIndex", "Which of them, from 0, when 'cull' is wired from several matrices one after another.")),
-                    optional(hinted({ "idle", PortKind::eValue, "vector", false, "Wired from numbers, one for each of what 'cullIndex' counts — a PointShadows' idle: while this pass's is not zero it draws nothing, and what it draws into stays as it was. For what need not be drawn again every frame.", nullptr }, "matrix")) };
+                    optional(hinted({ "idle", PortKind::eValue, "vector", false, "Wired from numbers, one for each of what 'cullIndex' counts — a PointShadows' idle: while this pass's is not zero it draws nothing, and what it draws into stays as it was. For what need not be drawn again every frame.", nullptr }, "matrix")),
+                    optional(Bool("whenChanged", "True to draw only when what it would draw is not what it drew last — the same entities' meshes, where they are, with the same "
+                                                 "'cull' matrix, sets and push constants — leaving what it draws into as it was otherwise: a shadow map of what holds still. "
+                                                 "What the buffers it reads hold is not looked at: a matrix it is seen by is to be its 'cull' too. Drawn again into what "
+                                                 "another Draw started over this frame.")) };
                 types.push_back({ "Draw", "Passes", std::move(ports), {},
                                   "Draws with a graphics pipeline into a framebuffer. What a draw has of its own is given here — its `mesh`, and what the pipeline leaves "
                                   "unwired as `param.<name>` and `push.<name>`, a model matrix among them: wired from a ForEach, a draw for each of its elements; "

@@ -155,6 +155,7 @@ namespace kgraph
         std::size_t ran = 0;        ///< Entities it runs for.
         std::size_t skipped = 0;    ///< Entities that have what it asks for, and that it cannot run for.
         std::size_t culled = 0;     ///< Entities a Draw left out for being out of sight (its `cull`).
+        bool unchanged = false;     ///< A Draw `whenChanged` that drew nothing this frame: what it would draw is what it drew last.
         /// Which entities it could not run for, and why each: the first few hundred of them.
         std::vector<std::pair<kecs::Entity, std::string>> passedBy;
         std::string why;            ///< Why the first of those: a parameter with nothing in it, a mesh that does not fit.
