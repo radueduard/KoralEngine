@@ -261,6 +261,30 @@ TEST_F(EntityTest, OneDispatchOfEveryEntityStampsWhatADispatchEachDoes) {
     ExpectColor(Quarter(3), 0, 255, 255, "the others as they were");
 }
 
+// An entity destroyed after the passes are readied and before they record — what stopping a scene that plays does to
+// what its scripts made — takes its mesh with it, if it alone held it. Readied with it, it is drawn with it this frame
+// all the same: what is drawn is held until the passes are readied again, never recorded gone.
+TEST_F(EntityTest, AnEntityDestroyedBeforeItsDrawRecordsIsDrawnWithWhatItHad) {
+    Load(SceneGraph());
+    MakeFour();
+    // Its own mesh, which nothing else holds: not the first element's, which a ForEach's outputs hold besides.
+    scene->world.Mutable<kgraph::Mesh>(entities[2])->mesh = Square();
+    std::weak_ptr<kgraph::Resource> mesh = scene->world.Get<kgraph::Mesh>(entities[2])->mesh;
+    for (int i = 0; i < 3; ++i) Frame();
+    ExpectColor(Quarter(2), 128, 128, 64, "drawn, in its own mesh");
+
+    const std::uint64_t before = kor::log::LastSequence();
+    scene->afterUpdate = [&] { scene->world.Destroy(entities[2]); };
+    Frame();
+    EXPECT_FALSE(mesh.expired()) << "held for the frame it was readied in";
+    for (const auto& record : kor::log::HistorySince(before)) ADD_FAILURE() << record.message;
+    Frame();
+    for (const auto& record : kor::log::HistorySince(before)) ADD_FAILURE() << record.message;
+    EXPECT_TRUE(mesh.expired()) << "and let go of once it is not drawn";
+    ExpectColor(Quarter(2), 0, 0, 0, "gone: nothing drawn there");
+    ExpectColor(Quarter(0), 255, 0, 64, "and the others as they were");
+}
+
 TEST_F(EntityTest, APipelinesUnwiredParametersAreAComponent) {
     Load(SceneGraph());
     auto& world = scene->world;

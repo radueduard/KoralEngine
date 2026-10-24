@@ -584,6 +584,9 @@ namespace kgraph
 
             // As readied this frame: read while the pass records.
             std::vector<Item> items;
+            // What the items draw, held until they are readied again: an entity destroyed after they are readied — its mesh with it — is
+            // drawn this frame all the same, rather than recorded with a mesh that is gone.
+            std::vector<Held> holding;
             std::vector<std::byte> pushed;
             std::vector<std::vector<Member>> members;   // a slot each: every entity's, once each
             std::vector<Member> pictures;               // what its buffers of each instance's name by index: read, though no slot binds them
@@ -6672,6 +6675,7 @@ namespace kgraph
                         else if (const bool* flag = said.Bool()) run.idle = *flag;
                     }
             run.items.clear();
+            run.holding.clear();
             run.pushed.clear();
             // Its buffer of instances follows the entities, idle or not: another pass may read it while this one rests
             // (the meshlets read the forward Draw's). Whether it is due again is said by what it last drew, not by this.
@@ -6784,6 +6788,7 @@ namespace kgraph
                     const Resource* whole = mesh && mesh->part ? mesh->source.get() : mesh.get();
                     if (!whole || !whole->handle || mesh->kind != "Mesh") { skip(mesh && mesh->node.starts_with('@') ? "its mesh is still being read" : "it has no mesh to draw"); continue; }
                     item.mesh = kor::capi::MeshOf(whole->handle);
+                    if (run.holding.empty() || run.holding.back() != mesh) run.holding.push_back(mesh);
                     item.part = mesh->part;
                     item.firstIndex = mesh->firstIndex;
                     item.indexCount = mesh->indexCount;

@@ -5,6 +5,8 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <functional>
+#include <utility>
 #include <memory>
 #include <string>
 #include <vector>
@@ -77,6 +79,8 @@ namespace support
             const auto start = std::chrono::steady_clock::now();
             runtime->Update();
             updateMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            // What a test does after the passes are readied and before they record: once, and then forgotten.
+            if (afterUpdate) std::exchange(afterUpdate, {})();
         }
         void Shutdown() override { runtime.reset(); }
         [[nodiscard]] kor::U8Vec4 Pixel(const kor::u32 x, const kor::u32 y) const { return readback->Read<kor::U8Vec4>(Size * Size)[y * Size + x]; }
@@ -90,5 +94,6 @@ namespace support
         std::unique_ptr<kgraph::Runtime> runtime;
         kor::Resource<kor::Buffer> readback;
         double updateMs = 0.0;      // what the runtime's Update took, the last frame
+        std::function<void()> afterUpdate;     // done once, after the next frame's Update
     };
 }
