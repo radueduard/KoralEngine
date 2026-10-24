@@ -75,6 +75,40 @@ namespace {
 template <> struct kecs::Name<Glow> { static constexpr std::string_view value = "Glow"; };
 KECS_FIELDS(Glow, strength)
 
+// A Buffer given no `type` is kept where it is best kept: on the device while only passes reach it; once the CPU is handed
+// it — a script writes it every frame — made again where the CPU writes straight into it. One given a type keeps it.
+TEST_F(BufferTest, ABufferGivenNoTypeIsKeptWhereWhatReachesItIsFastest) {
+    using kgraph::Value;
+    kgraph::Runtime& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("passes alone", "Buffer").Set("instanceCount", 64).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" });
+    graph.Add("written by a script", "Buffer").Set("instanceCount", 64).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" });
+    graph.Add("said", "Buffer").Set("instanceCount", 64).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" }).Set("type", "eDynamic");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto type = [&](const char* node) { return kor::capi::BufferOf(runtime.ResourceOf(node)->handle)->MemoryType(); };
+    EXPECT_EQ(type("passes alone"), kor::Buffer::Type::eDeviceLocal) << "what only passes reach: on the device";
+    EXPECT_EQ(type("written by a script"), kor::Buffer::Type::eDeviceLocal);
+    EXPECT_EQ(type("said"), kor::Buffer::Type::eDynamic) << "a type given is the one it is made with";
+
+    // Handed to the CPU (what kengine_node_resource does for a script): made again where the CPU writes into it.
+    runtime.ReachedFromTheCpu("written by a script");
+    for (int i = 0; i < 2; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(type("written by a script"), kor::Buffer::Type::eDynamic);
+    EXPECT_EQ(type("passes alone"), kor::Buffer::Type::eDeviceLocal) << "and nothing else";
+    // Written by the CPU, and read back as written.
+    const std::vector<float> numbers(16, 2.5f);
+    const_cast<kor::Buffer&>(*kor::capi::BufferOf(runtime.ResourceOf("written by a script")->handle)).Write(numbers);
+    EXPECT_EQ(Floats("written by a script"), numbers);
+    // Built again for another reason, it stays where the CPU reaches it.
+    graph.Find("written by a script")->Set("instanceCount", 128);
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(type("written by a script"), kor::Buffer::Type::eDynamic);
+}
+
 // The struct is the shader's: its fields are the node's inputs, and each entity's values go where the shader has them.
 TEST_F(BufferTest, EachEntityIsAnElementLaidOutAsTheShaderHasIt) {
     kecs::World& world = scene->world;

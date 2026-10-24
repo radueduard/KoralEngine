@@ -572,7 +572,7 @@ while the scene plays: in `koral-play`, and in the editor after Run.
 
 `koral-editor` and `koral-play` given no project open the one this user chose with **Project, Open at startup**
 (kept in `~/.config/koral-engine/startup-project`, or under `$XDG_CONFIG_HOME`), and otherwise the engine's own:
-Forward+, made with nodes (`forward-plus` in the projects folder, `KORAL_ENGINE_PROJECTS` — `/mnt/w/EngineProjects` unless the build says otherwise; see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
+Forward+, made with nodes (`forward-plus` in the projects folder, `KORAL_ENGINE_PROJECTS` — `%USERPROFILE%\KoralProjects` on Windows and `/mnt/w/EngineProjects` elsewhere, unless the build says otherwise; see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
 validation layer, which they otherwise leave out: it costs a fifth of a frame and more in a scene of many draws.
 `koral-play --frames N --timings` says what the frames took and what each pass of them did.
 
@@ -646,7 +646,7 @@ time. Kotlin scripts have the same of the Gradle build the project is given.
 
 ## Where projects are made
 
-**File, New project** and **Open project** start in `/mnt/w/EngineProjects` — the build's `KORAL_ENGINE_PROJECTS`,
+**File, New project** and **Open project** start in `%USERPROFILE%\KoralProjects` (`/mnt/w/EngineProjects` off Windows) — the build's `KORAL_ENGINE_PROJECTS`,
 or the environment variable of that name — which is made if it is not there.
 
 ## Taking back, and not losing what was done

@@ -317,7 +317,7 @@ namespace kgraph
                 { "Atan2", { { "y", 0 }, { "x", 1 } } },
                 { "Length", { { "a", L { 1, 0, 0 } } } }, { "Normalize", { { "a", L { 1, 0, 0 } } } }, { "Dot", { { "a", L { 1, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
                 { "Cross", { { "a", L { 1, 0, 0 } }, { "b", L { 0, 1, 0 } } } }, { "Distance", { { "a", L { 0, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
-                { "Linear", { { "a", L { 1, 1, 1 } } } }, { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } },
+                { "Linear", { { "a", L { 1, 1, 1 } } } }, { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } }, { "Slice", { { "of", L { 0, 0, 0 } }, { "first", 0 }, { "count", 1 } } },
                 { "Less", { { "a", 0 }, { "b", 0 } } }, { "LessOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Greater", { { "a", 0 }, { "b", 0 } } },
                 { "GreaterOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Equal", { { "a", 0 }, { "b", 0 } } }, { "NotEqual", { { "a", 0 }, { "b", 0 } } },
                 { "Not", { { "a", false } } }, { "And", { { "a", false }, { "b", false } } }, { "Or", { { "a", false }, { "b", false } } }, { "Xor", { { "a", false }, { "b", false } } },
@@ -386,7 +386,7 @@ namespace kgraph
                 { "Repeat", "loop for each times iterate count mip chain" }, { "Previous", "loop last turn before feedback chain" },
                 { "Element", "loop index pick one turn result" }, { "Note", "comment text label remark annotate" }, { "Switch", "branch choose select if either option toggle" }, { "DebugView", "debug view visualize visualise buffer inspect scene view editor heat" },
                 { "ShaderBuffer", "ssbo struct storage structured uniform constant buffer map fields entities array lights" },
-                { "Append", "join concatenate vec4 combine" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
+                { "Append", "join concatenate vec4 combine" }, { "Slice", "part range sub list some numbers matrix of several cascade" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
                 { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
                 { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
                 { "CopyImageToBuffer", "download read back texels image buffer transfer" },
@@ -447,7 +447,7 @@ namespace kgraph
                 { "Float", "pin" }, { "Double", "pin" }, { "Int", "tag" }, { "UInt", "tag" },
                 { "Vec2", "north_east" }, { "Vec3", "north_east" }, { "Vec4", "north_east" }, { "IVec2", "grid_4x4" }, { "IVec3", "grid_4x4" }, { "IVec4", "grid_4x4" },
                 { "UVec2", "grid_4x4" }, { "UVec3", "grid_4x4" }, { "UVec4", "grid_4x4" },
-                { "Constant", "tag" }, { "Component", "looks_one" }, { "Split", "call_split" }, { "Append", "playlist_add" },
+                { "Constant", "tag" }, { "Component", "looks_one" }, { "Split", "call_split" }, { "Append", "playlist_add" }, { "Slice", "content_cut" },
                 { "ImageExtent", "aspect_ratio" }, { "Linear", "gradient" }, { "Select", "alt_route" },
                 // Cameras.
                 { "View", "visibility" }, { "Perspective", "videocam" }, { "Orthographic", "crop_square" }, { "Frustum", "change_history" },
@@ -584,6 +584,7 @@ namespace kgraph
             value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
             value("Append", { Any("a"), Any("b") }, "vector", "The numbers of a, then those of b: a colour and its alpha as one vector of four.");
+            value("Slice", { Any("of"), Number("first"), Number("count") }, "vector", "count of the numbers of a list, from the first-th (0 the first): of a ShadowCascades' matrices, sixteen from 16 times a cascade's number is its matrix.");
             value("MatrixMultiply", { Any("a"), Any("b") }, "matrix", "a times b, as matrices of four by four: what b does, then what a does.");
             value("MatrixInverse", { Any("a") }, "matrix", "What undoes a matrix of four by four.");
             // More of what is worked out of numbers, a component at a time.
@@ -1294,7 +1295,7 @@ namespace kgraph
             // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
             static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance", "Linear", "Reflect", "Refract", "Project" };
             static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };
-            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Constant", "Component", "Split", "ImageExtent", "VertexLayout", "Append",
+            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Constant", "Component", "Split", "ImageExtent", "VertexLayout", "Append", "Slice",
                                                             "Float", "Double", "Int", "UInt", "Vec2", "Vec3", "Vec4", "IVec2", "IVec3", "IVec4", "UVec2", "UVec3", "UVec4" };
             static const std::set<std::string_view> matrices { "MatrixMultiply", "MatrixInverse", "MatrixTranspose", "MatrixDeterminant", "MatrixTranslate", "MatrixRotate",
                                                                "MatrixAxisAngle", "MatrixScale", "MatrixCompose", "TransformPoint", "TransformDirection", "TransformPlane" };

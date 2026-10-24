@@ -3,8 +3,8 @@
 The framework's ForwardPlus project (`~/Koral/ForwardPlus`: C++ render passes and GLSL shaders) made as a Koral
 Engine scene: every pass a page of the graph, every buffer a node. Nothing in the engine knows of it.
 
-- `forward-plus` in the projects folder (`KORAL_ENGINE_PROJECTS`, `/mnt/w/EngineProjects` unless the build says
-  otherwise) is the project itself, and what `koral-editor` and `koral-play` open when they are given none: its
+- `forward-plus` in the projects folder (`KORAL_ENGINE_PROJECTS`: `%USERPROFILE%\KoralProjects` on Windows,
+  `/mnt/w/EngineProjects` elsewhere, unless the build says otherwise) is the project itself, and what `koral-editor` and `koral-play` open when they are given none: its
   `shaders` folder — the original's shaders in Slang — and a scene made of the original's own models, the three
   Sponza packages under `/mnt/w/Assets`, which it names by where they are. It is not in the repository.
 - `shaders` here are the sample's shaders, as the project started with them: what the tests copy into the projects

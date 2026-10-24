@@ -678,3 +678,63 @@ TEST_F(ScaleTest, ABatchedDrawGivenCullIsCulledOnTheGpu) {
     EXPECT_GT(p.x, 200) << "red, drawn from its own element";
     EXPECT_LT(p.z, 50) << "not the magenta of an element no entity is in";
 }
+
+// A shadow's cascades, as a batched Draw has them: a turn each of a Repeat, `cull` several matrices one after another and
+// `cullIndex` the turn's number. Each turn is culled on the GPU by its own — the `cullIndex`th — and all of them share the
+// batch and the pack. Here the first sees the cubes in the picture, the second those beside it. The entities have none of
+// the pipeline's component: what each instance is, is where its entity is, from the first frame on.
+TEST_F(ScaleTest, CascadesOfABatchedDrawAreEachCulledByTheirOwnMatrix) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    for (int i = 0; i < 16; ++i) {
+        const kecs::Entity entity = world.Create();
+        const float x = i < 8 ? -0.875f + 0.25f * static_cast<float>(i) : 2.f + 0.25f * static_cast<float>(i - 8);
+        world.SetPosition(entity, { x, 0.f, 0.5f });
+        world.SetScale(entity, { 0.2f, 0.2f, 0.2f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+    }
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive").Set("shape", "eCube");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("drawn", "ForEach").Set("component", "Mesh");
+    // Two cascades' matrices, one after the other: as the picture is, and moved left by 2.875 — what is beside it, in it.
+    graph.Add("as it is", "MatrixTranslate").Set("offset", Value::List { 0, 0, 0 });
+    graph.Add("beside", "MatrixTranslate").Set("offset", Value::List { -2.875, 0, 0 });
+    graph.Add("cascades", "Append").Wire("a", "as it is").Wire("b", "beside");
+    graph.Add("cascade", "Repeat").Set("count", 2);
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "drawn", "field.mesh").Set("batched", true)
+        .Wire("cull", "cascades").Wire("cullIndex", "cascade", "index").Set("load", true);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 6; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    for (const char* turn : { "draw [0]", "draw [1]" }) {
+        ASSERT_NE(runtime.Status(turn), nullptr) << turn;
+        EXPECT_TRUE(runtime.Status(turn)->note.empty()) << turn << ": " << runtime.Status(turn)->note;
+        ASSERT_NE(runtime.Status(std::string(turn) + "/cull"), nullptr) << turn << ": culled on the GPU";
+    }
+    EXPECT_NE(runtime.Status("draw [0]/pack"), nullptr);
+    EXPECT_EQ(runtime.Status("draw [1]/pack"), nullptr) << "one pack for both";
+    // Each turn's command read back, a turn at a time.
+    for (const char* turn : { "draw [0]", "draw [1]" }) {
+        runtime.Watch(std::string(turn) + "/commands");
+        for (int i = 0; i < 6; ++i) Frame();
+        const auto peek = runtime.Watched(std::string(turn) + "/commands");
+        ASSERT_TRUE(peek && peek->bytes.size() >= 20) << turn;
+        std::uint32_t command[5];
+        std::memcpy(command, peek->bytes.data(), 20);
+        EXPECT_EQ(command[1], 8u) << turn << ": its own cascade's eight";
+        runtime.Unwatch(std::string(turn) + "/commands");
+    }
+}

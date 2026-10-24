@@ -303,10 +303,10 @@ past entities:
 
 - **A batched Draw given `cull` is culled on the GPU by itself**, its shader unchanged: CullInSight's passes written out
   with it, and what its shader reads compacted to what is in sight (see
-  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)).
+  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)). A shadow's cascades too: each turn culled by its own
+  of the matrices (`cullIndex`, through a new **Slice** node), and every turn sharing one pack.
 
-Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
-a `cull` of several matrices (`cullIndex`, a shadow's cascades) picked on the GPU.
+Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework.
 
 ### E8: A graph made both to try ideas in and to make them fast
 

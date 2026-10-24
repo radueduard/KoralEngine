@@ -33,6 +33,7 @@ if(KORAL_ENGINE_BUILD_TESTS)
         KGRAPH_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/kgraph/tests/shaders"
         KGRAPH_PACKAGE_SHADERS="${CMAKE_SOURCE_DIR}/packages/koral/shaders"
         KEDITOR_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders"
+        KEDITOR_PROJECTS="${KORAL_ENGINE_PROJECTS}"
         # Forward+ made with nodes: its shaders, and where the project the test makes of it is left to be opened.
         KEDITOR_FORWARD_PLUS_SHADERS="${CMAKE_SOURCE_DIR}/samples/forward-plus/shaders"
         KEDITOR_FORWARD_PLUS_PROJECT="${CMAKE_BINARY_DIR}/forward-plus-project")

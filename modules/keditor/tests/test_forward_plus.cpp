@@ -550,7 +550,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_NE(project.find("Koral.Engine.dll"), std::string::npos) << "a C# script is written with the engine's names known";
         EXPECT_NE(project.find("scripts/**/*.cs"), std::string::npos);
     }
-    EXPECT_EQ(keditor::Session::ProjectsDirectory().filename(), "EngineProjects") << "where a new project is offered to be made";
+    EXPECT_EQ(keditor::Session::ProjectsDirectory(), std::filesystem::path(KEDITOR_PROJECTS)) << "where a new project is offered to be made";
 
     // A model imported: its meshes and its pictures are listed as they are read, a picture by itself, small; and
     // what is listed is what an entity's field takes, by the name it is found by.
@@ -695,7 +695,8 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         // all idle by the choice are left out, and a page of none that only those use.
         const std::set<std::string> vertexPages { "prepass", "culling", "forward", "occlusion", "sky", "reflections" };
         const std::set<std::string> meshletPages { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" };
-        const std::set<std::string> rayPages { "ray scene", "ray trace" }, shadowPages { "shadows", "lamp shadows" };
+        // The shadow maps and the lights' clusters rest while rays are traced: rays find their own shadows and their own light.
+        const std::set<std::string> rayPages { "ray scene", "ray trace" }, shadowPages { "shadows", "lamp shadows", "lights" };
         const auto expectLeftOut = [&](const std::vector<const std::set<std::string>*>& out, const char* chosen) {
             const auto hidden = session.PagesNotChosen();
             std::set<std::string> expected;

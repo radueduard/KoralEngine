@@ -421,6 +421,8 @@ namespace kgraph
     {
         Graph& graph = out.graph;
         const auto origin = [&](const std::string& id) { return OriginOf(graph, id); };
+        // The batch and the pack of each mesh source a batched Draw is of, by its wire (`node.output`): one for all of them.
+        std::map<std::string, std::pair<std::string, std::string>, std::less<>> packs;
         std::vector<std::string> draws;
         for (const Node& node : graph.nodes)
             if (node.type == "Draw")
@@ -437,9 +439,13 @@ namespace kgraph
             const auto component = source->inputs.find("component");
             const bool ofMesh = component != source->inputs.end() && component->second.value.String() && *component->second.value.String() == "Mesh";
 
-            // The same entities, grouped by mesh: of a Filter, those it keeps; of a ForEach, those with what it says.
+            // The same entities, grouped by mesh: of a Filter, those it keeps; of a ForEach, those with what it says. Draws of
+            // the meshes of one — a shadow's cascades, a turn each — share the batch and the pack, each with commands of its own.
             std::vector<Node> made;
-            const std::string batch = id + "/batch", pack = id + "/pack", commands = id + "/commands";
+            const std::string of = mesh->second.link->node + "." + mesh->second.link->output;
+            const bool sharing = packs.contains(of);
+            if (!sharing) packs[of] = { id + "/batch", id + "/pack" };
+            const std::string batch = packs[of].first, pack = packs[of].second, commands = id + "/commands";
             Node grouped;
             grouped.id = batch;
             grouped.type = "Filter";
@@ -460,13 +466,16 @@ namespace kgraph
                 if (const auto without = source->inputs.find("without"); without != source->inputs.end()) grouped.inputs["without"] = without->second;
             }
             grouped.Set("with", Value(std::move(with))).Set("groupBy", "Mesh");
-            made.push_back(std::move(grouped));
             Node packed;
             packed.id = pack;
             packed.type = "MeshPack";
             packed.pass = draw.pass;
             packed.Wire("meshes", batch, "Mesh.mesh");
-            made.push_back(std::move(packed));
+            if (sharing) made.clear();      // the Entities a ForEach's batch is of, too: the first's
+            else {
+                made.push_back(std::move(grouped));
+                made.push_back(std::move(packed));
+            }
             Node commanded;
             commanded.id = commands;
             commanded.type = "IndirectDraws";
@@ -474,12 +483,10 @@ namespace kgraph
             commanded.Wire("ranges", pack, "ranges").Wire("groups", batch, "groups");
             // Given `cull`: what is out of its sight left out on the GPU — CullInSight's passes, its commands starting with
             // no instances each frame, and what its shader reads compacted, the elements in sight one after another as they
-            // are drawn, so that it reads its instance at first + index as it does unculled. Of several matrices, the
-            // `cullIndex`th is not picked on the GPU: such a batch is drawn whole, and says so.
+            // are drawn, so that it reads its instance at first + index as it does unculled. Of several matrices one after
+            // another — a ShadowCascades' — the `cullIndex`th, sixteen numbers from sixteen times it (`<draw>/sight`).
             const auto cull = draw.inputs.find("cull");
-            const bool sighted = cull != draw.inputs.end() && cull->second.link && !draw.inputs.contains("cullIndex");
-            if (cull != draw.inputs.end() && cull->second.link && !sighted)
-                out.notes[id] = "batched: its 'cull' is one of several matrices ('cullIndex'), which is not culled on the GPU: it is drawn whole";
+            const bool sighted = cull != draw.inputs.end() && cull->second.link;
             if (sighted) commanded.Set("mode", "eGPU");
             made.push_back(std::move(commanded));
             if (sighted) {
@@ -500,7 +507,22 @@ namespace kgraph
                     .Wire("param.drawn", id, "drawnInstances");
                 Node& culls = add(id + "/cull", "Dispatch").Wire("pipeline", culler).Wire("indirect", groups).Wire("push.drawCount", commands, "drawCount")
                     .Wire("push.stride", id, "instanceStride").Wire("push.matrixOffset", id, "instanceMatrixOffset");
-                culls.inputs["push.viewProjection"] = cull->second;
+                if (const auto index = draw.inputs.find("cullIndex"); index != draw.inputs.end()) {
+                    // The `cullIndex`th of several: given, sixteen times it; wired, worked out of what it is wired from.
+                    Node& sight = add(id + "/sight", "Slice");
+                    sight.inputs["of"] = cull->second;
+                    sight.Set("count", 16);
+                    if (index->second.link) {
+                        add(id + "/sight first", "Multiply").Set("b", 16).inputs["a"] = index->second;
+                        Node& slice = *std::ranges::find(made, id + "/sight", &Node::id);
+                        slice.Wire("first", id + "/sight first");
+                    } else {
+                        sight.Set("first", 16.0 * (index->second.value.Number() ? *index->second.value.Number() : 0.0));
+                    }
+                    std::ranges::find(made, id + "/cull", &Node::id)->Wire("push.viewProjection", id + "/sight");
+                } else {
+                    culls.inputs["push.viewProjection"] = cull->second;
+                }
             }
 
             Node& written = *graph.Find(id);

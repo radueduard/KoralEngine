@@ -1190,6 +1190,7 @@ namespace kgraph
             std::map<std::string, Output, std::less<>> outputs {};
             std::uint64_t stamp = 0;                    // changes whenever it is built again: what those wired to it watch
             std::shared_ptr<PipelineInfo> pipeline {};
+            std::string automaticType {};                // a Buffer given no `type`: the one it was made with, chosen for it
             std::shared_ptr<PassPlan> pass {};
             // A setup pass's: the build it last recorded for, and the frames it has yet to record on.
             std::uint64_t ranFor = 0;
@@ -1275,6 +1276,9 @@ namespace kgraph
         std::map<std::string, std::set<std::string>, std::less<>> fromBundle;
         std::map<std::string, std::string, std::less<>> bundleNotes;
         // The Draws `batched` written out as one indirect draw, and those that could not be, with why.
+        // The nodes whose resource the CPU was handed (a script, through kengine_node_resource): a Buffer of them given no
+        // `type` is memory the CPU writes into.
+        std::set<std::string, std::less<>> reachedFromTheCpu;
         std::set<std::string, std::less<>> batched;
         std::map<std::string, std::string, std::less<>> unbatched;
 
@@ -1779,8 +1783,18 @@ namespace kgraph
             return {};
         }
 
-        Expected<void> BuildBuilder(const Node& node, const kb::Description& description, const Inputs& inputs, Built& out)
+        Expected<void> BuildBuilder(const Node& node, const kb::Description& description, const Inputs& given, Built& out)
         {
+            // A Buffer given no `type` is where it is best kept: on the device, which only passes reach — unless the CPU
+            // reaches it too (a script was handed it: ReachedFromTheCpu), when it is memory the CPU writes into.
+            Inputs automatic;
+            const bool chosen = description.name == "Buffer" && (!given.contains("type") || given.at("type").value.IsNull());
+            if (chosen) {
+                automatic = given;
+                automatic["type"].value = Value(reachedFromTheCpu.contains(node.id) ? "eDynamic" : "eDeviceLocal");
+            }
+            const Inputs& inputs = chosen ? automatic : given;
+            if (chosen) out.automaticType = automatic.at("type").value.String() ? *automatic.at("type").value.String() : std::string();
             std::vector<kb::Value> constructor;
             const auto calls = Calls(description, inputs, constructor, [](std::string_view) { return false; });
             if (!calls) return Fail(calls.error());
@@ -3438,6 +3452,18 @@ namespace kgraph
                     for (const double number : *numbers) joined.emplace_back(number);
                 }
                 result = Value(std::move(joined));
+            } else if (type == "Slice") {
+                const auto numbers = NumbersOf(value("of"), "of");
+                if (!numbers) return Fail(numbers.error());
+                const double* first = value("first").Number();
+                const double* count = value("count").Number();
+                if (!first || !count || *first < 0 || *count < 0) return Fail("'first' and 'count' are numbers, from 0");
+                const auto from = static_cast<std::size_t>(*first), many = static_cast<std::size_t>(*count);
+                if (from + many > numbers->size())
+                    return Fail(std::format("{} from the {}th is past the {} numbers of 'of'", many, from, numbers->size()));
+                Value::List part;
+                for (std::size_t i = from; i < from + many; ++i) part.emplace_back((*numbers)[i]);
+                result = Value(std::move(part));
             } else if (type == "MatrixMultiply" || type == "MatrixInverse" || type == "MatrixTranspose" || type == "MatrixDeterminant") {
                 const auto a = MatrixOf(value("a"), "a");
                 if (!a) return Fail(a.error());
@@ -6515,7 +6541,7 @@ namespace kgraph
             std::size_t room = placedAt.size();
             for (const auto* placed : { &roots, &nested })
                 for (const kecs::Entity entity : *placed) room = std::max<std::size_t>(room, std::size_t { entity.index } + 1);
-            if (room > placedAt.size()) { placedAt.resize(room, 0); placedMatrices.resize(room); }
+            if (room > placedAt.size()) { placedAt.resize(room, NeverPlaced); placedMatrices.resize(room); }
             for (const kecs::Entity entity : nested) (void)Placed(entity);
             const auto place = [&](const std::size_t first, const std::size_t last) { for (std::size_t i = first; i < last; ++i) (void)Placed(roots[i]); };
             if (roots.size() > Grain) kor::ParallelForRanges(0, roots.size(), place, Grain).Wait();
@@ -7229,13 +7255,16 @@ namespace kgraph
 
         // Where each entity is in the world, worked out once a frame however many passes ask.
         std::vector<kecs::Mat4> placedMatrices;
-        std::vector<std::uint64_t> placedAt;
+        std::vector<std::uint64_t> placedAt;        // the frame each was worked out in: NeverPlaced, not yet
         std::uint64_t placedFrame = 0;
+        // No frame's: what an entity not yet placed has, so that the first frame — 0, as a buffer of instances made while the
+        // graph is built is filled in — works out where each is rather than taking it as worked out already.
+        static constexpr std::uint64_t NeverPlaced = ~0ull;
         // How many resources have been made again in their places, by any runtime: an index a picture is read by may be another.
         static inline std::atomic<std::uint64_t> replacements = 0;
         const kecs::Mat4& Placed(const kecs::Entity entity)
         {
-            if (entity.index >= placedAt.size()) { placedAt.resize(entity.index + 1, 0); placedMatrices.resize(entity.index + 1); }
+            if (entity.index >= placedAt.size()) { placedAt.resize(entity.index + 1, NeverPlaced); placedMatrices.resize(entity.index + 1); }
             if (placedAt[entity.index] != placedFrame) { placedMatrices[entity.index] = world->WorldMatrix(entity); placedAt[entity.index] = placedFrame; }
             return placedMatrices[entity.index];
         }
@@ -8654,6 +8683,16 @@ namespace kgraph
         // One that draws once is no report of entities — unless it could not draw, and says why.
         const auto& run = *node->pass->entities;
         return run.each.empty() && run.report.skipped == 0 ? nullptr : &run.report;
+    }
+
+    void Runtime::ReachedFromTheCpu(const std::string_view id)
+    {
+        if (!_impl->reachedFromTheCpu.emplace(id).second) return;
+        // Made where only passes reach it: made again where the CPU does.
+        if (const auto it = _impl->built.find(std::string(id)); it != _impl->built.end() && it->second.automaticType == "eDeviceLocal") {
+            it->second.signature.clear();
+            _impl->stale = true;
+        }
     }
 
     std::optional<Runtime::Batching> Runtime::BatchingOf(const std::string_view id) const

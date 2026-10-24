@@ -626,7 +626,7 @@ seen — but what is in files, the default meshes and pictures and the meshes ma
 source's, so nothing is read or made twice. The editor's Game panel is one: the scene's camera, beside the
 editor's own view.
 
-These values are wired like any others: into Math and Vectors nodes (`Append`, `MatrixMultiply` and
+These values are wired like any others: into Math and Vectors nodes (`Append`, `Slice` — `count` numbers of a list from its `first` —, `MatrixMultiply` and
 `MatrixInverse` among them) and into a **DataBuffer**, whose `field[n].value` inputs are packed one after
 another as a shader's block lays them out (std140: a number in four bytes, a vector of three or four
 aligned to sixteen, so a `float3` followed by a `float` share one `float4`). `field[n].type` says what a
@@ -1084,8 +1084,11 @@ instances (`instances`, `instanceStride`, `instanceMatrixOffset`, which a Draw g
 Draw is `compacted`: its shader reads, in place of the buffer it fills, another as big (`drawnInstances`) into which
 the cull copies each element in sight, one after another as they are drawn. So a shader that reads its instance at
 `SV_StartInstanceLocation + SV_InstanceID`, as any of a buffer of instances does, draws only what is in sight with no
-change to it (`ScaleTest.ABatchedDrawGivenCullIsCulledOnTheGpu`). A `cull` of several matrices (`cullIndex`) is not
-picked on the GPU: such a batch is drawn whole, and its note says so.
+change to it (`ScaleTest.ABatchedDrawGivenCullIsCulledOnTheGpu`). A `cull` of several matrices one after another —
+a ShadowCascades' `matrices`, with `cullIndex` a Repeat's `index` — is the `cullIndex`th: sixteen numbers from sixteen
+times it, a **Slice** of them (`<draw>/sight`). Batched Draws of the same Filter's or ForEach's meshes — a cascade's
+turns — share the batch and the pack (the first's `<draw>/batch` and `<draw>/pack`), each with commands and a cull of its
+own (`ScaleTest.CascadesOfABatchedDrawAreEachCulledByTheirOwnMatrix`).
 
 One whose shader has no buffer of instances draws every element alike, and says so. Ten thousand entities of two
 meshes draw the same picture, pixel for pixel, either way; a draw each costs the CPU about 7.8 ms a frame (readying 3.1,
@@ -1303,9 +1306,12 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A script's component is read from its source as far as its fields go: numbers, true or false, and vectors,
   quaternions and matrices of numbers start as written; anything else starts at zero, and the document's notes say so.
 - A BufferBuilder's layout is numbers, vectors and matrices, and fixed arrays of them: no struct in a struct.
-- A Buffer node with no `type` is the framework's default, `eDynamic`: memory the CPU writes and the GPU reads over the
-  bus — right for one a script writes every frame, many times slower for what only the GPU works on. That one says
-  `eDeviceLocal`, as every Buffer of the engine's functions does.
+- A Buffer node with no `type` has the one that suits what reaches it: `eDeviceLocal` while only passes do — the GPU's
+  own memory, where its reads, writes and atomics are fastest — and `eDynamic`, memory the CPU writes into, once the CPU
+  is handed it (a script, through `kengine_node_resource`: `Runtime::ReachedFromTheCpu`), when it is made again so and
+  stays so. Nothing else reaches a Buffer node's memory from the CPU: what is looked at, and what a WriteBack reads, is
+  copied out on the GPU. A `type` given is the one it is made with. (Forward-plus's buffers were `eDynamic` before:
+  its lights' clusters, an atomic a group over the bus, took 2.9 ms a frame; on the device, 0.02 ms.)
 - A cycle between passes is left to the frame graph. A resource as it was before this frame's writers is a Keep's
   copy of it (see [State kept from step to step](#state-kept-from-step-to-step)).
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

@@ -359,6 +359,12 @@ namespace kgraph
          *        writes reaches both. Taken again whenever the source builds another. Nothing for one that follows none.
          */
         void Share(const std::set<std::string>& nodes);
+        /**
+         * @brief Says that the CPU was handed what node @p id makes — a script, through kengine_node_resource — and may
+         *        write or read it. A Buffer given no `type` is made where only passes reach it (eDeviceLocal) until then,
+         *        and made again from then on as memory the CPU writes into (eDynamic). Kept while the runtime is.
+         */
+        void ReachedFromTheCpu(std::string_view id);
         /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
         void SetSelected(kecs::Entity entity);
 

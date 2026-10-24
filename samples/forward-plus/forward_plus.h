@@ -1138,7 +1138,9 @@ namespace forwardplus
         for (const char* page : { "prepass", "culling", "forward", "occlusion", "sky", "reflections" }) idleWith(page, "not vertex");
         for (const char* page : { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" }) idleWith(page, "not meshlets");
         for (const char* page : { "ray scene", "ray trace" }) idleWith(page, "not rays");
-        for (const char* page : { "shadows", "lamp shadows" }) idleWith(page, "tracing rays");
+        // Rays find their own shadows, and are lit by what gives off light, not by the point lights: the shadow maps and the
+        // lights' clusters are for the other two, and rest while rays are traced.
+        for (const char* page : { "shadows", "lamp shadows", "lights" }) idleWith(page, "tracing rays");
         doc.SetGraph(std::move(graph));
     }
 
@@ -1296,8 +1298,8 @@ namespace forwardplus
      *             occlusion and what it mirrors each found by more rays
      *
      * `renderer` (on the frame page: 0, 1 or 2) says which: the Switches take its picture, its depth and where its
-     * surfaces are on to the rest, and the passes of the other two branches idle — as do the shadow maps' while rays
-     * are traced, which find their own shadows. False, with @p error, when a node could not be added, set or wired.
+     * surfaces are on to the rest, and the passes of the other two branches idle — as do the shadow maps and the lights' clusters while rays
+     * are traced, which find their own shadows and are lit by what gives off light. False, with @p error, when a node could not be added, set or wired.
      */
     inline bool AddBranches(keditor::Document& doc, std::string& error)
     {
