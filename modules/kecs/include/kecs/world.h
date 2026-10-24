@@ -296,6 +296,8 @@ namespace kecs
         [[nodiscard]] bool IsEnabled(Entity entity, ComponentId id) const;
         /** @brief Marks @p entity 's component @p id written now. */
         bool MarkChanged(Entity entity, ComponentId id);
+        /** @brief The tick @p entity 's component @p id was last added or written at; 0 when it has none. @see AdvanceTick */
+        [[nodiscard]] Tick ChangedTickOf(Entity entity, ComponentId id) const;
         /** @brief Every component @p entity has, switched on or off. */
         [[nodiscard]] std::vector<ComponentId> ComponentsOf(Entity entity) const;
 
@@ -369,13 +371,25 @@ namespace kecs
         bool SetScale(Entity entity, const Vec3& scale);
         /** @brief Its own transform as a matrix. */
         [[nodiscard]] Mat4 LocalMatrix(Entity entity) const;
-        /** @brief Where it is in the world: the transforms of everything above it, and its own. Worked out when asked for, and kept until something above it or it moves. */
+        /**
+         * @brief Where it is in the world: the transforms of everything above it, and its own. Worked out when asked for,
+         *        and kept until something above it or it moves. Of entities under nothing, each may be asked for on a
+         *        thread of its own at once — what is kept of one is that one's alone — while nothing changes the world.
+         */
         [[nodiscard]] Mat4 WorldMatrix(Entity entity) const;
         /**
          * @brief Places @p entity at @p matrix in the world by changing its own transform: only the parts asked
          *        for, so that moving a thing does not also round its rotation off.
          */
         bool SetWorldMatrix(Entity entity, const Mat4& matrix, bool position = true, bool rotation = true, bool scale = true);
+        /**
+         * @brief When @p entity's world matrix last changed, by MoveClock: it was made, it or something above it was
+         *        transformed, or it was put under something else. 0 for an entity there is not. One whose MovedAt is not
+         *        past what MoveClock was when its matrix was last read has the matrix it had then.
+         */
+        [[nodiscard]] std::uint64_t MovedAt(const Entity entity) const { return RecordOf(entity) && entity.index < _movedAt.size() ? _movedAt[entity.index] : 0; }
+        /** @brief Goes up whenever any entity's world matrix changes. @see MovedAt */
+        [[nodiscard]] std::uint64_t MoveClock() const { return _moveClock; }
         /** @brief Goes up whenever an entity is made, destroyed, renamed, moved in the hierarchy or transformed. */
         [[nodiscard]] std::uint64_t SceneVersion() const { return _sceneVersion; }
         /**
@@ -473,6 +487,8 @@ namespace kecs
         [[nodiscard]] const Mat4& WorldOf(Entity entity) const;
 
         mutable std::vector<Node> _nodes;
+        mutable std::vector<std::uint64_t> _movedAt;    /// An entity index's MovedAt: apart from the nodes, to be walked quickly.
+        mutable std::uint64_t _moveClock = 0;
         mutable std::vector<Entity> _roots;     ///< In order, with a NullEntity where one has gone since it was last compacted.
         mutable std::size_t _rootHoles = 0;
         std::uint64_t _sceneVersion = 0;

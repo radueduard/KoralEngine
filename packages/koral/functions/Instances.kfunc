@@ -1,0 +1,488 @@
+{
+  "koral-function": 1,
+  "purpose": "Instancing",
+  "description": "Many of one mesh, made on the GPU into one buffer — 20 bytes each, with a box round each 256 of them — and made again only when count, seed, extent, scale or jitter change: an Instancer's, wired from an Entity of it. A frame in which nothing changed runs three passes that do nothing.",
+  "tags": [
+    "instancer",
+    "instances",
+    "scatter",
+    "foliage",
+    "grass",
+    "many",
+    "millions",
+    "gpu driven"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 100000
+        }
+      },
+      {
+        "id": "seed",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          130
+        ],
+        "inputs": {
+          "name": "seed",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "extent",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          200
+        ],
+        "inputs": {
+          "name": "extent",
+          "kind": "eValue",
+          "default": [
+            100,
+            100
+          ]
+        }
+      },
+      {
+        "id": "scale",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          270
+        ],
+        "inputs": {
+          "name": "scale",
+          "kind": "eValue",
+          "default": [
+            0.5,
+            1.5
+          ]
+        }
+      },
+      {
+        "id": "jitter",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          340
+        ],
+        "inputs": {
+          "name": "jitter",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "per cluster",
+        "type": "Divide",
+        "at": [
+          220,
+          60
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "clusters",
+        "type": "Ceil",
+        "at": [
+          220,
+          130
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "per cluster",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cluster bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          200
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "clusters",
+              "out"
+            ]
+          },
+          "b": 32
+        }
+      },
+      {
+        "id": "instance bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          270
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 20
+        }
+      },
+      {
+        "id": "both",
+        "type": "Add",
+        "at": [
+          220,
+          340
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "cluster bytes",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "instance bytes",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "bytes",
+        "type": "Add",
+        "at": [
+          220,
+          410
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "both",
+              "out"
+            ]
+          },
+          "b": 32
+        }
+      },
+      {
+        "id": "instances",
+        "type": "Buffer",
+        "at": [
+          440,
+          60
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Buffer",
+        "at": [
+          440,
+          130
+        ],
+        "inputs": {
+          "instanceCount": 24,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "checker",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_instancer",
+          "compute.entry": "check",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "maker",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          130
+        ],
+        "inputs": {
+          "compute.module": "koral_instancer",
+          "compute.entry": "generate",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "bounder",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          200
+        ],
+        "inputs": {
+          "compute.module": "koral_instancer",
+          "compute.entry": "bounds",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "check",
+        "type": "Dispatch",
+        "at": [
+          880,
+          60
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "checker",
+              "out"
+            ]
+          },
+          "groups": [
+            1,
+            1,
+            1
+          ],
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.seed": {
+            "$link": [
+              "seed",
+              "out"
+            ]
+          },
+          "push.jitter": {
+            "$link": [
+              "jitter",
+              "out"
+            ]
+          },
+          "push.extent": {
+            "$link": [
+              "extent",
+              "out"
+            ]
+          },
+          "push.scale": {
+            "$link": [
+              "scale",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "make",
+        "type": "Dispatch",
+        "at": [
+          880,
+          130
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "maker",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "indirectOffset": 0,
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.seed": {
+            "$link": [
+              "seed",
+              "out"
+            ]
+          },
+          "push.jitter": {
+            "$link": [
+              "jitter",
+              "out"
+            ]
+          },
+          "push.extent": {
+            "$link": [
+              "extent",
+              "out"
+            ]
+          },
+          "push.scale": {
+            "$link": [
+              "scale",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "bound",
+        "type": "Dispatch",
+        "at": [
+          880,
+          200
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "bounder",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "indirectOffset": 12,
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.seed": {
+            "$link": [
+              "seed",
+              "out"
+            ]
+          },
+          "push.jitter": {
+            "$link": [
+              "jitter",
+              "out"
+            ]
+          },
+          "push.extent": {
+            "$link": [
+              "extent",
+              "out"
+            ]
+          },
+          "push.scale": {
+            "$link": [
+              "scale",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "instances out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          60
+        ],
+        "inputs": {
+          "name": "instances",
+          "value": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "count out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          130
+        ],
+        "inputs": {
+          "name": "count",
+          "value": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

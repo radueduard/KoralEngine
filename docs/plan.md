@@ -260,6 +260,27 @@ validation and sync validation. What differs from the plan:
 
 **Gate:** a batched node gives the same picture as unbatched, and 10,000 entities are measurably faster.
 
+**Begun** (2026-10-24). Multi-draw-indirect over shared mesh buffers, and push constants as a buffer, were already
+there before E7 was begun: MeshPack, IndirectDraws and the Draw-filled `[entity("PER_INSTANCE")]` buffer (see
+[kgraph.md](kgraph.md#each-instances-said-by-the-shader)). What E7 has added so far is what made them cheap, and a way
+past entities:
+
+- **A buffer of instances is written only where something changed.** kecs stamps each entity when its world matrix
+  changes (`MovedAt`, `MoveClock`) and says when a component was last written (`ChangedTickOf`). The runtime keeps the
+  buffer's elements, lays out again only those whose entity changed, writes into each frame's copy only what changed
+  since that copy was written, and spreads what it looks at and lays out over every core. MeshPack no longer walks every
+  entity each frame to know its meshes are the same. `ScaleTest` (`modules/kgraph/tests/test_scale.cpp`): 100,000
+  entities of one mesh in a pass and its prepass took 13 ms of `Runtime::Update` a frame whatever moved; now 0.04 ms
+  when nothing moves, 0.5 ms when 1% do, 3.3 ms when all do.
+- **Many of one mesh, with no entity each:** the `Instancer` component and the engine's Instances, CullInstances and
+  SplatPoints functions (see [kgraph.md](kgraph.md#many-of-one-mesh-on-the-gpu)). Made, culled, given a level of detail —
+  the mesh near, points far, never many more points than pixels — and drawn on the GPU. 100 million cost the CPU 0.08
+  ms a frame and the GPU 0.3 ms. 100 million entities could not be: kecs alone would need some 20 GB for them.
+
+Still to do for the gate: a Draw run per entity turned into the batched one by itself, and the editor saying why when it
+can't; a Dispatch batched by a dispatch dimension; and the culling the forward-plus sample does on the GPU made one of
+the engine's functions, for any indirect draw of entities.
+
 ### E8: A graph made both to try ideas in and to make them fast
 
 Planned 2026-10-21. The graph is to be friendlier without losing anything Vulkan can do, and to be where a frame is
@@ -317,5 +338,5 @@ and `PassRate` become `pages` and `PageRate` in one change later, writing `"page
 
 ## First steps
 
-The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. Next is **E7**:
-batching.
+The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, is begun:
+next is a per-entity Draw batched by itself.

@@ -1,0 +1,307 @@
+// Many of one mesh, and what the CPU spends on them a frame. A hundred thousand entities, drawn by one indirect draw a
+// pass as forward-plus draws its scene — a depth pass of where each is, and a forward pass of where each is, which way it
+// faces, its own colour and which it is — with nothing moving, with some moving and with all of them moving. And an
+// Instancer's tens of millions, made, culled and drawn on the GPU, whose frame costs the CPU the same whatever the count.
+// Offscreen.
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <format>
+#include <fstream>
+#include <sstream>
+#include <vector>
+
+#include <kecs/json.h>
+#include <kgraph/entities.h>
+
+#include "support.h"
+
+namespace {
+    using support::Frame;
+    using support::GraphScene;
+
+    /** How many: KGRAPH_SCALE_ENTITIES, or a hundred thousand (ten thousand in a debug build). */
+    int Count()
+    {
+        if (const char* said = std::getenv("KGRAPH_SCALE_ENTITIES"); said && *said) return std::max(1, std::atoi(said));
+#ifdef NDEBUG
+        return 100'000;
+#else
+        return 10'000;
+#endif
+    }
+
+    class ScaleTest : public ::testing::Test {
+    protected:
+        void SetUp() override {
+            if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+            GraphScene::withWorld = true;
+            scene = support::App()->OpenOffscreen<GraphScene>({ .title = "scale", .extent = { support::Size, support::Size } });
+            ASSERT_NE(scene, nullptr);
+        }
+        void TearDown() override {
+            if (scene) { support::App()->Close(*scene); Frame(); }
+        }
+        /** What the runtime's Update took over @p frames frames, the median, with @p between done before each. */
+        template <typename Between>
+        double Median(const int frames, Between&& between) {
+            std::vector<double> times;
+            for (int i = 0; i < frames; ++i) {
+                between(i);
+                Frame();
+                times.push_back(scene->updateMs);
+            }
+            std::ranges::sort(times);
+            return times[times.size() / 2];
+        }
+        GraphScene* scene = nullptr;
+    };
+}
+
+TEST_F(ScaleTest, AHundredThousandOfOneMeshAreReadiedInLittleTime) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("depth", "GraphicsPipeline").Set("vertex.module", "scale").Set("vertex.entry", "depthVertex").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "scale").Set("fragment.entry", "depthFragment").Wire("framebuffer", "target");
+    graph.Add("forward", "GraphicsPipeline").Set("vertex.module", "scale").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "scale").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("prepass", "Draw").Wire("pipeline", "depth").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    graph.Add("draw", "Draw").Wire("pipeline", "forward").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Set("load", true);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const kecs::ComponentId forward = world.Find("forward");
+    ASSERT_NE(forward, kecs::NoComponent) << "the forward pipeline's component, of its colour";
+
+    // A grid of them over the picture, each its own colour by where it is: the right half red, the left green.
+    const int n = Count();
+    const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
+    const float cell = 2.f / static_cast<float>(side);
+    std::vector<kecs::Entity> entities;
+    entities.reserve(static_cast<std::size_t>(n));
+    auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < n; ++i) {
+        const float x = -1.f + cell * (static_cast<float>(i % side) + 0.5f);
+        const float y = -1.f + cell * (static_cast<float>(i / side) + 0.5f);
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, y, 0.5f });
+        world.SetScale(entity, { 0.1f, 0.1f, 0.01f });      // many pixels each, overlapping: every pixel is covered
+        world.Add<kgraph::Mesh>(entity, { cube });
+        support::Give(world, entity, "forward", { { "color", x > 0.f ? std::vector { 1.f, 0.f, 0.f, 1.f } : std::vector { 0.f, 1.f, 0.f, 1.f } } });
+        entities.push_back(entity);
+    }
+    const double madeMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+    start = std::chrono::steady_clock::now();
+    Frame();
+    const double firstMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    for (int i = 0; i < 4; ++i) Frame();    // the buffers grown to fit, and every copy of them written
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("commands", "drawCount"), Value(1));
+    const auto colour = [&](const kor::u32 x, const kor::u32 y) { const auto p = scene->Pixel(x, y); return std::array<int, 3> { p.x, p.y, p.z }; };
+    // Lit by how much they face the viewer: half to all of their colour.
+    EXPECT_GT(colour(24, 16)[0], 100) << "the right half red";
+    EXPECT_LT(colour(24, 16)[1], 20);
+    EXPECT_GT(colour(8, 16)[1], 100) << "the left half green";
+    EXPECT_LT(colour(8, 16)[0], 20);
+
+    const double stillMs = Median(30, [](int) {});
+    const int few = std::max(1, n / 100);
+    const double someMs = Median(30, [&](const int frame) {
+        for (int i = 0; i < few; ++i) {
+            const kecs::Entity entity = entities[static_cast<std::size_t>((i * 97 + frame * 13) % n)];
+            const kecs::Vec3 at = world.PositionOf(entity);
+            world.SetPosition(entity, { at.x, at.y, frame % 2 ? 0.5f : 0.55f });
+        }
+    });
+    const double allMs = Median(30, [&](const int frame) {
+        for (const kecs::Entity entity : entities) {
+            const kecs::Vec3 at = world.PositionOf(entity);
+            world.SetPosition(entity, { at.x, at.y, frame % 2 ? 0.5f : 0.55f });
+        }
+    });
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_GT(colour(24, 16)[0], 100) << "still drawn, after all that moving";
+
+    const auto timings = runtime.Timings();
+    const auto prepare = [&](const char* id) { const auto found = timings.find(id); return found == timings.end() ? 0.0 : found->second.prepareMs; };
+    const auto gpu = [&](const char* id) { const auto found = timings.find(id); return found == timings.end() ? 0.0 : found->second.gpuMs; };
+    const std::string report = std::format(
+        "{} entities: made in {:.1f} ms, first frame {:.1f} ms\n"
+        "  runtime Update, median a frame: nothing moving {:.2f} ms, {} moving {:.2f} ms, all moving {:.2f} ms\n"
+        "  readied (last frames, averaged): prepass {:.2f} ms, draw {:.2f} ms; GPU: prepass {:.2f} ms, draw {:.2f} ms",
+        n, madeMs, firstMs, stillMs, few, someMs, allMs, prepare("prepass"), prepare("draw"), gpu("prepass"), gpu("draw"));
+    std::printf("%s\n", report.c_str());
+    RecordProperty("still_ms", std::format("{:.3f}", stillMs));
+    RecordProperty("some_ms", std::format("{:.3f}", someMs));
+    RecordProperty("all_ms", std::format("{:.3f}", allMs));
+}
+
+namespace {
+    /** How many instances: KGRAPH_INSTANCES, or ten million (a million in a debug build). */
+    int InstanceCount()
+    {
+        if (const char* said = std::getenv("KGRAPH_INSTANCES"); said && *said) return std::max(1, std::atoi(said));
+#ifdef NDEBUG
+        return 10'000'000;
+#else
+        return 1'000'000;
+#endif
+    }
+
+    /** One of the engine's functions, as its file in the package has it. */
+    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
+    {
+        const std::filesystem::path file = std::filesystem::path(KGRAPH_PACKAGE_SHADERS).parent_path() / "functions" / (name + ".kfunc");
+        std::ifstream in(file, std::ios::binary);
+        std::stringstream read;
+        read << in.rdbuf();
+        kecs::json::Value parsed;
+        std::string error;
+        auto graph = std::make_shared<kgraph::Graph>();
+        if (!kecs::json::Parse(read.str(), parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
+            ADD_FAILURE() << name << ": " << error;
+        return graph;
+    }
+
+    /** Sets an int field of an entity's component, by name: support::Give sets floats. */
+    void GiveInt(kecs::World& world, const kecs::Entity entity, const std::string_view component, const std::string_view field, const std::int32_t value)
+    {
+        const kecs::ComponentId id = world.Find(component);
+        const kecs::FieldDescription* found = world.Describe(id).FindField(field);
+        ASSERT_NE(found, nullptr) << component << "." << field;
+        std::memcpy(static_cast<std::byte*>(world.Mutable(entity, id)) + found->offset, &value, 4);
+    }
+}
+
+// An Instancer's instances — tens of millions of one mesh on one entity — made, culled and drawn on the GPU: near, each
+// is its mesh; further, a point; a cluster smaller than a pixel, one point. The CPU's frame is the same whatever the count.
+TEST_F(ScaleTest, AnInstancersMillionsCostTheCpuNothing) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    const int count = InstanceCount();
+    // About a unit apart: the square grows with the count.
+    const double side = std::sqrt(static_cast<double>(count));
+
+    const kecs::Entity field = world.Create();
+    world.Rename(field, "field");
+    world.Add<kgraph::Mesh>(field, { cube });
+    support::Give(world, field, "Instancer", { { "extent", { static_cast<float>(side), static_cast<float>(side) } }, { "scale", { 0.4f, 0.8f } },
+                                                { "pointDistance", { 40.f } }, { "color", { 0.f, 1.f, 0.f } } });
+    GiveInt(world, field, "Instancer", "count", count);
+    GiveInt(world, field, "Instancer", "seed", 7);
+
+    constexpr int Picture = 512;
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Picture, Picture })
+        .Set("usage", Value::List { "eColorAttachment", "eStorage", "eTransferSrc" });
+    graph.Add("depth", "Image").Set("format", "eD32_SFLOAT").Set("extent", Value::List { Picture, Picture })
+        .Set("usage", Value::List { "eDepthStencilAttachment", "eSampled" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("depth view", "ImageView").Wire("image", "depth");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view")
+        .Wire("depthStencil.view", "depth view").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
+
+    // Seen from above one corner, across the square: the near ones as cubes, then points to the far side.
+    graph.Add("instancer", "Entity").Set("component", "Instancer").Set("with", Value::List { "Mesh" });
+    graph.Add("lens", "Perspective").Set("fieldOfView", 60).Set("aspect", 1).Set("near", 0.5).Set("far", 4.0 * side + 100.0);
+    graph.Add("eye", "View").Set("position", Value::List { -side * 0.5, 12.0, -side * 0.5 }).Set("target", Value::List { side * 0.1, 0.0, side * 0.1 });
+    graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "eye");
+    graph.Add("to clip", "MatrixMultiply").Wire("a", "seen").Wire("b", "instancer", "matrix");
+
+    graph.Add("make", "Function").Set("function", "Instances").Wire("count", "instancer", "field.count").Wire("seed", "instancer", "field.seed")
+        .Wire("extent", "instancer", "field.extent").Wire("scale", "instancer", "field.scale").Wire("jitter", "instancer", "field.jitter");
+    graph.Add("parts", "MeshBuffers").Wire("mesh", "instancer", "Mesh.mesh");
+    graph.Add("cull", "Function").Set("function", "CullInstances").Wire("instances", "make", "instances").Wire("count", "instancer", "field.count")
+        .Wire("toClip", "to clip").Set("height", Picture).Set("meshRadius", 0.9).Wire("pointDistance", "instancer", "field.pointDistance")
+        .Wire("drawDistance", "instancer", "field.drawDistance").Wire("indexCount", "parts", "indexCount").Wire("firstIndex", "parts", "firstIndex")
+        .Wire("vertexOffset", "parts", "vertexOffset");
+    graph.Add("shape", "Primitive").Set("shape", "eCube");
+    graph.Add("near", "GraphicsPipeline").Set("vertex.module", "instancedField").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "instancedField").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target")
+        .Set("depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLess" } });
+    graph.Add("draw", "Draw").Wire("pipeline", "near").Wire("mesh", "instancer", "Mesh.mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "cull", "commands").Set("drawCount", 1).Wire("param.instances", "make", "instances").Wire("param.visible", "cull", "visible")
+        .Wire("push.toClip", "to clip").Set("clearColor", Value::List { 0, 0, 1, 1 });
+    graph.Add("far", "Function").Set("function", "SplatPoints").Wire("instances", "make", "instances").Wire("counters", "cull", "counters")
+        .Wire("points", "cull", "points").Wire("groups", "cull", "groups").Wire("target", "canvas").Wire("depth", "depth")
+        .Wire("count", "instancer", "field.count").Wire("toClip", "to clip").Wire("color", "instancer", "field.color")
+        .Set("width", Picture).Set("height", Picture).Set("meshRadius", 0.9);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    for (const char* name : { "Instances", "CullInstances", "SplatPoints" }) graph.functions[name] = EngineFunction(name);
+
+    const auto start = std::chrono::steady_clock::now();
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    const double firstMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    // Sky above, cubes near (red), points far (green).
+    const auto colour = [&](const kor::u32 x, const kor::u32 y) { const auto p = scene->Pixel(x, y); return std::array<int, 3> { p.x, p.y, p.z }; };
+    std::string picture;
+    for (kor::u32 y = 0; y < support::Size; y += 2) {
+        for (kor::u32 x = 0; x < support::Size; ++x) {
+            const auto c = colour(x, y);
+            picture += c[0] > 80 && c[1] < 60 ? 'R' : c[1] > 80 && c[0] < 60 ? 'G' : c[2] > 200 && c[0] < 40 && c[1] < 40 ? '.' : '?';
+        }
+        picture += '\n';
+    }
+    std::printf("%s", picture.c_str());
+    EXPECT_NE(picture.find('R'), std::string::npos) << "near: cubes";
+    EXPECT_NE(picture.find('G'), std::string::npos) << "far: points";
+    EXPECT_NE(picture.find('.'), std::string::npos) << "and the sky";
+    // The picture as it is drawn, to be looked at: KGRAPH_SCALE_PICTURE names a .ppm file for it.
+    if (const char* file = std::getenv("KGRAPH_SCALE_PICTURE"); file && *file) {
+        runtime.Watch("canvas");
+        for (int i = 0; i < 4; ++i) Frame();
+        if (const auto peek = runtime.Watched("canvas"); peek && peek->bytes.size() >= std::size_t { Picture } * Picture * 4) {
+            std::ofstream out(file, std::ios::binary);
+            out << "P6\n" << Picture << " " << Picture << "\n255\n";
+            for (std::size_t i = 0; i < std::size_t { Picture } * Picture; ++i) out.write(reinterpret_cast<const char*>(peek->bytes.data() + i * 4), 3);
+        }
+        runtime.Unwatch("canvas");
+    }
+
+    const double stillMs = Median(30, [](int) {});
+    // Moving the whole field moves every instance with it: no instance is touched on the CPU.
+    const double movedMs = Median(30, [&](const int frame) { world.SetPosition(field, { 0.f, frame % 2 ? 0.f : 0.5f, 0.f }); });
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    std::string timings;
+    double gpu = 0.0;
+    for (const auto& [id, timing] : runtime.Timings()) {
+        gpu += timing.gpuMs;
+        if (timing.gpuMs >= 0.01) timings += std::format("    {:<32} {:7.3f} ms\n", id, timing.gpuMs);
+    }
+    std::printf("%d instances (%.1f MB): set up and first frames %.0f ms; runtime Update, median a frame: still %.3f ms, field moved %.3f ms; GPU %.2f ms a frame:\n%s",
+                count, (32.0 + 32.0 * std::ceil(count / 256.0) + 20.0 * count) / 1e6, firstMs, stillMs, movedMs, gpu, timings.c_str());
+    EXPECT_LT(stillMs, 1.0) << "nothing a frame on the CPU is a number of instances";
+}

@@ -366,3 +366,67 @@ TEST(World, TheStructuresVersionIsWhatListsOfEntitiesAreMadeOf) {
     grows("made", [&] { (void)world.Create(); });
     grows("destroyed", [&] { world.Destroy(b); });
 }
+
+// What a reader of world matrices needs to know to read again only what moved: when each entity's last changed, by a
+// clock that goes up with every change — its own, something's above it, or being put under something else.
+TEST(Transform, AnEntityIsStampedWhenWhereItIsChanges) {
+    World world;
+    const Entity parent = world.Create(), child = world.Create(), apart = world.Create();
+    world.SetParent(child, parent);
+    std::uint64_t seen = world.MoveClock();
+    EXPECT_GT(world.MovedAt(child), 0u) << "made, and put under another";
+    const auto read = [&] {     // what a reader does: reads every matrix, and the clock
+        (void)world.WorldMatrix(parent); (void)world.WorldMatrix(child); (void)world.WorldMatrix(apart);
+        seen = world.MoveClock();
+    };
+    read();
+    EXPECT_EQ(world.MoveClock(), seen) << "read, nothing moved";
+
+    world.SetPosition(parent, { 1, 0, 0 });
+    EXPECT_GT(world.MovedAt(parent), seen);
+    EXPECT_GT(world.MovedAt(child), seen) << "what is under it moved with it";
+    EXPECT_LE(world.MovedAt(apart), seen) << "and nothing else";
+    read();
+
+    // Moved twice before it is read: still moved since.
+    world.SetPosition(child, { 0, 1, 0 });
+    world.SetPosition(child, { 0, 2, 0 });
+    world.SetPosition(parent, { 2, 0, 0 });
+    EXPECT_GT(world.MovedAt(child), seen);
+    read();
+    // The parent read alone leaves the child stale; moved again, the child is still moved since what read it last.
+    world.SetPosition(parent, { 3, 0, 0 });
+    (void)world.WorldMatrix(parent);
+    const std::uint64_t parentOnly = world.MoveClock();
+    world.SetPosition(parent, { 4, 0, 0 });
+    EXPECT_GT(world.MovedAt(child), seen);
+    EXPECT_GT(world.MovedAt(child), parentOnly) << "stamped again, though it was stale already";
+
+    world.SetScale(apart, { 2, 2, 2 });
+    EXPECT_GT(world.MovedAt(apart), seen);
+    read();
+    world.SetParent(apart, child);
+    EXPECT_GT(world.MovedAt(apart), seen) << "put under another: its world matrix is another";
+    world.Destroy(apart);
+    EXPECT_EQ(world.MovedAt(apart), 0u) << "gone";
+    const Entity again = world.Create();
+    EXPECT_GT(world.MovedAt(again), seen) << "one made in its place is moved since";
+}
+
+// A component written is stamped with the tick it was written at, for a reader to read again only what changed since.
+TEST(Ticks, AComponentWrittenSaysWhen) {
+    World world;
+    const Entity a = world.Create(Position { 1, 2 }), b = world.Create(Position { 3, 4 });
+    const kecs::ComponentId position = world.Id<Position>(), velocity = world.Id<Velocity>();
+    const kecs::Tick first = world.ChangedTickOf(a, position);
+    EXPECT_GT(first, 0u);
+    EXPECT_EQ(world.ChangedTickOf(a, velocity), 0u) << "one it does not have";
+    const kecs::Tick read = world.CurrentTick();
+    world.AdvanceTick();
+    world.Mutable<Position>(b)->x = 5;
+    EXPECT_LE(world.ChangedTickOf(a, position), read);
+    EXPECT_GT(world.ChangedTickOf(b, position), read) << "written since";
+    world.Add<Velocity>(a);
+    EXPECT_GT(world.ChangedTickOf(a, velocity), read) << "given since";
+    EXPECT_EQ(world.ChangedTickOf(a, position), first) << "moved to another archetype, its tick with it";
+}

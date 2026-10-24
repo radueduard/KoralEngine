@@ -1,0 +1,1020 @@
+{
+  "koral-function": 1,
+  "purpose": "Instancing",
+  "description": "What of an Instances function's instances is seen this frame, worked out on the GPU: clusters out of sight or past drawDistance left out; one wholly past pointDistance that spans fewer pixels than it has instances, as many points as it spans; and of the rest each instance its mesh when nearer than pointDistance, a point when further. So there are never many more points than pixels, however many instances. Gives the meshes' indirect draw (commands, one) and which instance each drawn one is (visible), and the points for SplatPoints. toClip is the Instancer's entity's matrix, then the view, then the lens; indexCount, firstIndex and vertexOffset are the mesh's (a MeshBuffers'); capacity and pointCapacity how many of each there is room for.",
+  "tags": [
+    "instancer",
+    "instances",
+    "cull",
+    "frustum",
+    "lod",
+    "level of detail",
+    "points",
+    "gpu driven",
+    "indirect"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "instances",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "instances",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          130
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 100000
+        }
+      },
+      {
+        "id": "toClip",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          200
+        ],
+        "inputs": {
+          "name": "toClip",
+          "kind": "eValue"
+        }
+      },
+      {
+        "id": "height",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          270
+        ],
+        "inputs": {
+          "name": "height",
+          "kind": "eValue",
+          "default": 1080
+        }
+      },
+      {
+        "id": "meshRadius",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          340
+        ],
+        "inputs": {
+          "name": "meshRadius",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "pointDistance",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          410
+        ],
+        "inputs": {
+          "name": "pointDistance",
+          "kind": "eValue",
+          "default": 60
+        }
+      },
+      {
+        "id": "drawDistance",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          480
+        ],
+        "inputs": {
+          "name": "drawDistance",
+          "kind": "eValue",
+          "default": 100000
+        }
+      },
+      {
+        "id": "capacity",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          550
+        ],
+        "inputs": {
+          "name": "capacity",
+          "kind": "eValue",
+          "default": 1048576
+        }
+      },
+      {
+        "id": "pointCapacity",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          620
+        ],
+        "inputs": {
+          "name": "pointCapacity",
+          "kind": "eValue",
+          "default": 16777216
+        }
+      },
+      {
+        "id": "indexCount",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          690
+        ],
+        "inputs": {
+          "name": "indexCount",
+          "kind": "eValue",
+          "default": 36
+        }
+      },
+      {
+        "id": "firstIndex",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          760
+        ],
+        "inputs": {
+          "name": "firstIndex",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "vertexOffset",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          830
+        ],
+        "inputs": {
+          "name": "vertexOffset",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "per cluster",
+        "type": "Divide",
+        "at": [
+          220,
+          60
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "clusters",
+        "type": "Ceil",
+        "at": [
+          220,
+          130
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "per cluster",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "per group",
+        "type": "Divide",
+        "at": [
+          220,
+          200
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "clusters",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "cluster groups",
+        "type": "Ceil",
+        "at": [
+          220,
+          270
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "per group",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "along x",
+        "type": "Min",
+        "at": [
+          220,
+          340
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "cluster groups",
+              "out"
+            ]
+          },
+          "b": 65535
+        }
+      },
+      {
+        "id": "rows",
+        "type": "Divide",
+        "at": [
+          220,
+          410
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "cluster groups",
+              "out"
+            ]
+          },
+          "b": 65535
+        }
+      },
+      {
+        "id": "along y",
+        "type": "Ceil",
+        "at": [
+          220,
+          480
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "rows",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "half height",
+        "type": "Multiply",
+        "at": [
+          220,
+          550
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "height",
+              "out"
+            ]
+          },
+          "b": 0.5
+        }
+      },
+      {
+        "id": "listed bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          620
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "clusters",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "room for listed",
+        "type": "Max",
+        "at": [
+          220,
+          690
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "listed bytes",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "visible bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          760
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "capacity",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "points bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          830
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "counters",
+        "type": "Buffer",
+        "at": [
+          440,
+          60
+        ],
+        "inputs": {
+          "instanceCount": 32,
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "listed",
+        "type": "Buffer",
+        "at": [
+          440,
+          130
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "room for listed",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "visible",
+        "type": "Buffer",
+        "at": [
+          440,
+          200
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "visible bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "points",
+        "type": "Buffer",
+        "at": [
+          440,
+          270
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "points bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Buffer",
+        "at": [
+          440,
+          340
+        ],
+        "inputs": {
+          "instanceCount": 24,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "commands",
+        "type": "Buffer",
+        "at": [
+          440,
+          410
+        ],
+        "inputs": {
+          "instanceCount": 20,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "cluster culler",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_instance_cull",
+          "compute.entry": "cullClusters",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          },
+          "param.counters": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          },
+          "param.listed": {
+            "$link": [
+              "listed",
+              "out"
+            ]
+          },
+          "param.points": {
+            "$link": [
+              "points",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cluster counter",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          130
+        ],
+        "inputs": {
+          "compute.module": "koral_instance_cull",
+          "compute.entry": "clusterArgs",
+          "param.counters": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "instance culler",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          200
+        ],
+        "inputs": {
+          "compute.module": "koral_instance_cull",
+          "compute.entry": "cullInstances",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          },
+          "param.counters": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          },
+          "param.listed": {
+            "$link": [
+              "listed",
+              "out"
+            ]
+          },
+          "param.visible": {
+            "$link": [
+              "visible",
+              "out"
+            ]
+          },
+          "param.points": {
+            "$link": [
+              "points",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "finisher",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          270
+        ],
+        "inputs": {
+          "compute.module": "koral_instance_cull",
+          "compute.entry": "finish",
+          "param.counters": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "param.commands": {
+            "$link": [
+              "commands",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "start counting",
+        "type": "ClearBuffer",
+        "at": [
+          880,
+          60
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cull clusters",
+        "type": "Dispatch",
+        "at": [
+          880,
+          130
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "cluster culler",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "along x",
+              "out"
+            ]
+          },
+          "groups.y": {
+            "$link": [
+              "along y",
+              "out"
+            ]
+          },
+          "groups.z": 1,
+          "push.toClip": {
+            "$link": [
+              "toClip",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.pointDistance": {
+            "$link": [
+              "pointDistance",
+              "out"
+            ]
+          },
+          "push.drawDistance": {
+            "$link": [
+              "drawDistance",
+              "out"
+            ]
+          },
+          "push.meshRadius": {
+            "$link": [
+              "meshRadius",
+              "out"
+            ]
+          },
+          "push.halfHeight": {
+            "$link": [
+              "half height",
+              "out"
+            ]
+          },
+          "push.capacity": {
+            "$link": [
+              "capacity",
+              "out"
+            ]
+          },
+          "push.pointCapacity": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "push.indexCount": {
+            "$link": [
+              "indexCount",
+              "out"
+            ]
+          },
+          "push.firstIndex": {
+            "$link": [
+              "firstIndex",
+              "out"
+            ]
+          },
+          "push.vertexOffset": {
+            "$link": [
+              "vertexOffset",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "count clusters",
+        "type": "Dispatch",
+        "at": [
+          880,
+          200
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "cluster counter",
+              "out"
+            ]
+          },
+          "groups": [
+            1,
+            1,
+            1
+          ]
+        }
+      },
+      {
+        "id": "cull instances",
+        "type": "Dispatch",
+        "at": [
+          880,
+          270
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "instance culler",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "indirectOffset": 0,
+          "push.toClip": {
+            "$link": [
+              "toClip",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.pointDistance": {
+            "$link": [
+              "pointDistance",
+              "out"
+            ]
+          },
+          "push.drawDistance": {
+            "$link": [
+              "drawDistance",
+              "out"
+            ]
+          },
+          "push.meshRadius": {
+            "$link": [
+              "meshRadius",
+              "out"
+            ]
+          },
+          "push.halfHeight": {
+            "$link": [
+              "half height",
+              "out"
+            ]
+          },
+          "push.capacity": {
+            "$link": [
+              "capacity",
+              "out"
+            ]
+          },
+          "push.pointCapacity": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "push.indexCount": {
+            "$link": [
+              "indexCount",
+              "out"
+            ]
+          },
+          "push.firstIndex": {
+            "$link": [
+              "firstIndex",
+              "out"
+            ]
+          },
+          "push.vertexOffset": {
+            "$link": [
+              "vertexOffset",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "finish",
+        "type": "Dispatch",
+        "at": [
+          880,
+          340
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "finisher",
+              "out"
+            ]
+          },
+          "groups": [
+            1,
+            1,
+            1
+          ],
+          "push.toClip": {
+            "$link": [
+              "toClip",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.pointDistance": {
+            "$link": [
+              "pointDistance",
+              "out"
+            ]
+          },
+          "push.drawDistance": {
+            "$link": [
+              "drawDistance",
+              "out"
+            ]
+          },
+          "push.meshRadius": {
+            "$link": [
+              "meshRadius",
+              "out"
+            ]
+          },
+          "push.halfHeight": {
+            "$link": [
+              "half height",
+              "out"
+            ]
+          },
+          "push.capacity": {
+            "$link": [
+              "capacity",
+              "out"
+            ]
+          },
+          "push.pointCapacity": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "push.indexCount": {
+            "$link": [
+              "indexCount",
+              "out"
+            ]
+          },
+          "push.firstIndex": {
+            "$link": [
+              "firstIndex",
+              "out"
+            ]
+          },
+          "push.vertexOffset": {
+            "$link": [
+              "vertexOffset",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "commands out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          60
+        ],
+        "inputs": {
+          "name": "commands",
+          "value": {
+            "$link": [
+              "commands",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "visible out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          130
+        ],
+        "inputs": {
+          "name": "visible",
+          "value": {
+            "$link": [
+              "visible",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "points out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          200
+        ],
+        "inputs": {
+          "name": "points",
+          "value": {
+            "$link": [
+              "points",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "counters out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          270
+        ],
+        "inputs": {
+          "name": "counters",
+          "value": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "groups out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          340
+        ],
+        "inputs": {
+          "name": "groups",
+          "value": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

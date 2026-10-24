@@ -44,6 +44,7 @@
 #include <shader.h>
 #include <task.h>
 #include <context.h>
+#include <parallel.h>
 #include <vertexLayout.h>
 
 #include <debugDraw.h>
@@ -318,6 +319,14 @@ namespace kgraph
         /** A MeshPack's: which meshes it packed, in order — built again when they are other ones, or one arrives from its file. */
         struct MeshPacking {
             std::vector<const Resource*> of;
+            // What `of` was last found the same from: the list, its version, the changes of the component holding the meshes,
+            // and the resources made again in their places.
+            struct Seen {
+                const void* list = nullptr;
+                std::uint64_t listed = 0, changes = 0, replacements = 0;
+                bool operator==(const Seen&) const = default;
+            };
+            std::optional<Seen> seen;
         };
 
         /** A ForEach node's (or an Entities node's): who has its component now, and what of each of them it gives. */
@@ -432,23 +441,61 @@ namespace kgraph
             std::size_t capacity = 0;               // how many elements there is room for
             std::shared_ptr<const std::uint64_t> clock;     // the frames of the runtime that made it: another that follows it shares it
             std::uint64_t filled = 0;               // the frame it was last written in, by that clock: once a frame, whoever asks first
-            std::uint64_t written = 0;              // what was written then, made one number: from what it was written from
+            std::uint64_t written = 0;              // what was written, made one number: its version
             bool full = false;                      // outgrown: the next Draw built makes another
             std::vector<Member> pictures;           // what its TEXTURE fields name, once each: what the Draws read by index
-            std::vector<std::byte> staged;          // this frame's elements, laid out: written in as the frame begins
+            std::vector<std::byte> staged;          // every element, laid out: what changed is written in as the frame begins
+            // What each element was last laid out from, and when, by version: what is looked at to write only what changed.
+            std::uint64_t version = 0;              // goes up each time an element is laid out again; 0, never laid out
+            std::vector<std::uint64_t> rowKey;      // the entity in each element (KeyOf), 0 for none
+            std::vector<std::uint8_t> rowOwned;     // whether that entity had the pipeline's component
+            std::vector<std::uint64_t> rowChanged;  // the version each element was last laid out at
+            std::vector<const void*> rowPictures;   // what each element's TEXTURE fields name, a Member's id: so many an element
+            std::unordered_map<const void*, std::pair<Member, std::size_t>> pictureCount;     // each named, and how many times
+            std::size_t laid = 0;                   // how many elements entities were in
+            // What they were laid out from, when they last were.
+            const void* seenList = nullptr;
+            std::uint64_t seenListed = 0, seenMoves = 0, seenOwns = 0, seenReplacements = 0;
+            kecs::Tick seenTick = 0;
+            std::vector<std::uint64_t> synced;      // the version each of the buffer's copies holds, a copy a frame in flight
         };
 
         /**
          * A buffer of instances' elements, written into the copy of it the frame being made reads: as it begins (a pass's
          * Prepare), once the frame before with that copy is done. Laid out between frames, they would be written into the
          * copy of the frame just drawn — and the next frame read another, of a frame before: an index of a picture that
-         * is gone since among it.
+         * is gone since among it. Only what was laid out again since that copy was last written is written into it.
          */
         static void WriteStaged(Instances& instances)
         {
             if (instances.staged.empty() || !instances.buffer.Get()) return;
+            const std::size_t copies = std::max<std::size_t>(instances.buffer->CopyCount(), 1);
+            if (instances.synced.size() != copies) instances.synced.assign(copies, 0);
+            const std::size_t copy = copies > 1 ? kor::Context::Scheduler().CurrentImageIndex() % copies : 0;
+            std::uint64_t& synced = instances.synced[copy];
+            if (synced == instances.version) return;
+            const std::size_t stride = instances.instancing->stride;
             auto mapping = instances.buffer->Map<std::byte>(instances.staged.size(), 0);
-            std::memcpy(mapping.AsSpan().data(), instances.staged.data(), instances.staged.size());
+            std::byte* to = mapping.AsSpan().data();
+            // The changed elements, in runs: written as few copies as there are runs of them, a long run in parts, and
+            // the parts on every core when there are many.
+            constexpr std::size_t Part = 4096;
+            const std::size_t rows = instances.rowChanged.size();
+            std::vector<std::pair<std::size_t, std::size_t>> runs;
+            for (std::size_t row = 0; row < rows;) {
+                if (instances.rowChanged[row] <= synced) { ++row; continue; }
+                std::size_t end = row + 1;
+                while (end < rows && instances.rowChanged[end] > synced && end - row < Part) ++end;
+                runs.emplace_back(row, end);
+                row = end;
+            }
+            const auto write = [&](const std::size_t first, const std::size_t last) {
+                for (std::size_t i = first; i < last; ++i)
+                    std::memcpy(to + runs[i].first * stride, instances.staged.data() + runs[i].first * stride, (runs[i].second - runs[i].first) * stride);
+            };
+            if (runs.size() > 4) kor::ParallelForRanges(0, runs.size(), write, 1).Wait();
+            else write(0, runs.size());
+            synced = instances.version;
         }
 
         /** Bytes mixed into a number that is, as near as matters, another for any other bytes: what a Draw `whenChanged` compares. */
@@ -3950,6 +3997,7 @@ namespace kgraph
             Held real = MakeResource(std::move(image));
             real->node = id;
             standIn->replacedBy = real;
+            ++replacements;
             self->assets[id] = real;
             self->arrivedPictures.push_back(std::move(standIn));
         }
@@ -3976,7 +4024,7 @@ namespace kgraph
                 const auto made = MeshOf(ToVertexData(*ShapeData(name), wanted));
                 if (!made) continue;
                 (*made)->node = kept->node;
-                kept->replacedBy = *made;
+                { kept->replacedBy = *made; ++replacements; }
                 kept = *made;
             }
             for (auto& node : built | std::views::values)
@@ -4075,7 +4123,7 @@ namespace kgraph
                         part->source = *made;
                         // What held the stand-in, or this mesh as the file was read before, holds this one from here on.
                         Held& kept = assets[part->node];
-                        if (kept && kept != part) kept->replacedBy = part;
+                        if (kept && kept != part) { kept->replacedBy = part; ++replacements; }
                         kept = std::move(part);
                     }
                 }
@@ -6107,7 +6155,7 @@ namespace kgraph
                 for (const auto& [name, output] : out.outputs) {
                     if (!output.resource || output.resource->node != node->id) continue;
                     const auto now = fresh.outputs.find(name);
-                    if (now != fresh.outputs.end() && now->second.resource && now->second.resource != output.resource) output.resource->replacedBy = now->second.resource;
+                    if (now != fresh.outputs.end() && now->second.resource && now->second.resource != output.resource) { output.resource->replacedBy = now->second.resource; ++replacements; }
                 }
                 Retire(std::move(out));
                 out = std::move(fresh);
@@ -6254,95 +6302,217 @@ namespace kgraph
             return source;
         }
 
-        /** Each instance's element as its entity is now: where it is, which it is, and its own fields. Once a frame. */
+        /**
+         * Each instance's element as its entity is now: where it is, which it is, and its own fields. Once a frame, and
+         * only what changed: an element is written again when another entity is in its place, when its entity moved
+         * (kecs::World::MovedAt) or when its entity's own fields were written (ChangedTickOf) since it was last written.
+         * A frame in which nothing of theirs changed looks at none of them.
+         */
         void FillInstances(Instances& instances, const bool now = false)
         {
             const std::uint64_t frame = instances.clock ? *instances.clock : placedFrame;
             if (!now && instances.filled == frame) return;    // another Draw that shares it wrote it this frame
             instances.filled = frame;
             const std::size_t stride = instances.instancing->stride;
+            const std::size_t capacity = instances.capacity;
+            const auto& fields = instances.instancing->fields;
             // Every element there is room for is written, not only the list's: a GPU cull reads the buffer to its end,
             // and an element left as it was holds what the memory held before — of entities gone since, or of another
             // resource altogether, its pictures' indices among it. One no entity is in is nothing: nowhere, and no picture.
             const auto empty = [&](std::byte* element) {
                 std::memset(element, 0, stride);
-                for (const auto& field : instances.instancing->fields)
+                for (const auto& field : fields)
                     if (field.from == Instancing::Field::From::eTexture) std::memset(element + field.offset, 0xFF, 4);
             };
-            // Laid out here, between frames; written into the copy the frame reads as it begins (WriteStaged).
-            std::vector<std::byte> staged(instances.capacity * stride);
-            const std::span<std::byte> bytes(staged);
-            const auto found = built.find(instances.source);
-            if (found == built.end() || !found->second.status.ok || !found->second.listed || !world) {
-                for (std::size_t row = 0; row < instances.capacity; ++row) empty(bytes.data() + row * stride);
-                instances.pictures.clear();
-                instances.staged = std::move(staged);
-                return;
+            const auto pictured = static_cast<std::size_t>(std::ranges::count_if(fields, [](const auto& field) { return field.from == Instancing::Field::From::eTexture; }));
+            // Laid out here, between frames, and kept: what changed is written into the copy the frame reads as it begins
+            // (WriteStaged).
+            const bool fresh = instances.version == 0;
+            if (fresh) {
+                instances.staged.assign(capacity * stride, std::byte {});
+                instances.rowKey.assign(capacity, 0);
+                instances.rowOwned.assign(capacity, 0);
+                instances.rowChanged.assign(capacity, 0);
+                instances.rowPictures.assign(capacity * pictured, nullptr);
+                instances.pictureCount.clear();
             }
-            const EntityList& list = *found->second.listed;
-            const std::size_t rows = list.Rows();
+            const auto found = built.find(instances.source);
+            const EntityList* list = found != built.end() && found->second.status.ok && found->second.listed && world ? &*found->second.listed : nullptr;
+            const std::size_t rows = list ? list->Rows() : 0;
             // More than there is room for: another buffer, and every Draw that shares this one built again with it. Until
             // then, as many as there is room for: this frame's draws read this buffer still.
-            if (rows > instances.capacity) {
+            if (rows > capacity) {
                 instances.full = true;
                 for (const auto& id : instances.draws)
                     if (const auto draw = built.find(id); draw != built.end()) draw->second.signature.clear();
                 stale = true;
             }
-            const std::size_t laid = std::min(rows, instances.capacity);
-            std::uint64_t written = 1469598103934665603ull;
-            Mix(written, &rows, sizeof rows);
-            instances.written = written;
-            const bool pictured = std::ranges::any_of(instances.instancing->fields, [](const auto& field) { return field.from == Instancing::Field::From::eTexture; });
-            std::vector<Member> pictures;
-            for (std::size_t row = laid; row < instances.capacity; ++row) empty(bytes.data() + row * stride);
-            for (std::size_t row = 0; row < laid; ++row) {
-                const kecs::Entity entity = list.entities[row / list.repeat];
-                std::byte* element = bytes.data() + row * stride;
-                empty(element);
-                if (!world->Alive(entity)) continue;
-                const auto* own = instances.component == kecs::NoComponent ? nullptr : static_cast<const std::byte*>(std::as_const(*world).Get(entity, instances.component));
-                const std::uint64_t key = KeyOf(entity);
-                Mix(written, &key, sizeof key);
-                bool placed = false;
-                for (const auto& field : instances.instancing->fields) {
-                    std::byte* at = element + field.offset;
-                    if (field.from == Instancing::Field::From::eComponent && own) Mix(written, own + field.at, field.size);
-                    else if (field.from != Instancing::Field::From::eComponent && field.from != Instancing::Field::From::eId && field.from != Instancing::Field::From::eTexture && !placed) {
-                        Mix(written, Placed(entity).m.data(), 64);
-                        placed = true;
+            const std::size_t laid = std::min(rows, capacity);
+
+            // What could have changed since it was last written. Nothing: none of them is looked at.
+            const std::uint64_t moves = world ? world->MoveClock() : 0;
+            const bool owned = world && instances.component != kecs::NoComponent;
+            const std::uint64_t owns = owned ? world->ChangesOf(instances.component) : 0;
+            const std::uint64_t listed = list ? list->version : 0;
+            const bool replaced = pictured > 0 && replacements != instances.seenReplacements;
+            if (!fresh && !replaced && list == instances.seenList && listed == instances.seenListed && moves == instances.seenMoves
+                && owns == instances.seenOwns && laid == instances.laid)
+                return;
+            const bool lookMoved = moves != instances.seenMoves;
+            const bool lookOwn = owned && owns != instances.seenOwns;
+            const kecs::Tick ownSince = instances.seenTick;
+            // What is written from here on is written after this: at a tick of its own.
+            if (owned && (fresh || lookOwn)) {
+                instances.seenTick = world->CurrentTick();
+                world->AdvanceTick();
+            }
+
+            const std::uint64_t version = instances.version + 1;
+            bool changed = fresh, picturesChanged = false;
+            // What an element's TEXTURE field names, counted: the pictures the Draws read are those named at least once.
+            const auto picture = [&](const std::size_t slot, Member member) {
+                const void*& was = instances.rowPictures[slot];
+                if (was == member.id) return;
+                if (was)
+                    if (const auto counted = instances.pictureCount.find(was); counted != instances.pictureCount.end() && --counted->second.second == 0) {
+                        instances.pictureCount.erase(counted);
+                        picturesChanged = true;
                     }
-                    switch (field.from) {
-                    case Instancing::Field::From::eComponent:
-                        if (own) std::memcpy(at, own + field.at, field.size);
-                        break;
-                    case Instancing::Field::From::eMatrix: std::memcpy(at, Placed(entity).m.data(), 64); break;
-                    case Instancing::Field::From::eNormalMatrix: {
-                        const kecs::Mat4 inverse = kecs::Inverse(Placed(entity));
-                        kecs::Mat4 normal;
-                        for (int column = 0; column < 4; ++column)
-                            for (int r = 0; r < 4; ++r) normal.At(column, r) = inverse.At(r, column);
-                        std::memcpy(at, normal.m.data(), 64);
-                        break;
+                was = member.id;
+                if (member.id) {
+                    const auto [counted, added] = instances.pictureCount.try_emplace(member.id, std::move(member), 0);
+                    ++counted->second.second;
+                    picturesChanged = picturesChanged || added;
+                }
+            };
+            // An element no entity is in: nowhere, and no picture.
+            const auto unlay = [&](const std::size_t row) {
+                if (!fresh && instances.rowKey[row] == 0) return;
+                empty(instances.staged.data() + row * stride);
+                for (std::size_t p = 0; p < pictured; ++p) picture(row * pictured + p, {});
+                instances.rowKey[row] = 0;
+                instances.rowOwned[row] = 0;
+                instances.rowChanged[row] = version;
+                changed = true;
+            };
+            for (std::size_t row = laid; row < (fresh ? capacity : instances.laid); ++row) unlay(row);
+
+            // Which elements are to be laid out again, looked for on every core: what is looked at is only read. One whose
+            // entity is gone is marked so (Gone), to be laid out as no one's. And of theirs, whose place in the world is
+            // still to be worked out this frame: of those under nothing, on every core, each its own; of the rest, one at
+            // a time, since working one out works out what is above it, which another may share.
+            constexpr std::uint32_t Gone = 1u << 31;
+            constexpr std::size_t Grain = 8192;
+            const bool placing = std::ranges::any_of(fields, [](const auto& field) {
+                return field.from == Instancing::Field::From::eMatrix || field.from == Instancing::Field::From::eNormalMatrix || field.from == Instancing::Field::From::ePosition;
+            });
+            struct Looked {
+                std::vector<std::uint32_t> again;
+                std::vector<kecs::Entity> roots, nested;
+            };
+            const std::size_t parts = (laid + Grain - 1) / Grain;
+            std::vector<Looked> looked(parts);
+            const kecs::World& reading = *world;
+            const auto look = [&](const std::size_t index) {
+                Looked& part = looked[index];
+                for (std::size_t row = index * Grain; row < std::min(laid, (index + 1) * Grain); ++row) {
+                    const kecs::Entity entity = list->entities[row / list->repeat];
+                    if (!reading.Alive(entity)) { if (fresh || instances.rowKey[row] != 0) part.again.push_back(static_cast<std::uint32_t>(row) | Gone); continue; }
+                    bool due = fresh || replaced || instances.rowKey[row] != KeyOf(entity);
+                    if (!due && lookMoved) due = reading.MovedAt(entity) > instances.seenMoves;
+                    if (!due && lookOwn) {
+                        const void* own = reading.Get(entity, instances.component);
+                        due = (own != nullptr) != (instances.rowOwned[row] != 0) || (own && reading.ChangedTickOf(entity, instances.component) > ownSince);
                     }
-                    case Instancing::Field::From::ePosition: {
-                        const kecs::Mat4& placed = Placed(entity);
-                        const float position[4] { placed.At(3, 0), placed.At(3, 1), placed.At(3, 2), 1.f };
-                        std::memcpy(at, position, std::min<std::size_t>(field.size, 16));
-                        break;
+                    if (!due) continue;
+                    part.again.push_back(static_cast<std::uint32_t>(row));
+                    if (placing && (entity.index >= placedAt.size() || placedAt[entity.index] != placedFrame))
+                        (list->repeat == 1 && reading.ParentOf(entity).IsNull() ? part.roots : part.nested).push_back(entity);
+                }
+            };
+            if (parts > 1) kor::ParallelFor(0, parts, look, 1).Wait();
+            else if (parts == 1) look(0);
+            std::vector<std::uint32_t> again;
+            std::vector<kecs::Entity> roots, nested;
+            for (Looked& part : looked) {
+                for (const std::uint32_t row : part.again)
+                    if (row & Gone) unlay(row & ~Gone);
+                    else again.push_back(row);
+                roots.insert(roots.end(), part.roots.begin(), part.roots.end());
+                nested.insert(nested.end(), part.nested.begin(), part.nested.end());
+                part = {};
+            }
+            if (!again.empty()) changed = true;
+            // Room is made for all of them first: Placed grows its lists.
+            std::size_t room = placedAt.size();
+            for (const auto* placed : { &roots, &nested })
+                for (const kecs::Entity entity : *placed) room = std::max<std::size_t>(room, std::size_t { entity.index } + 1);
+            if (room > placedAt.size()) { placedAt.resize(room, 0); placedMatrices.resize(room); }
+            for (const kecs::Entity entity : nested) (void)Placed(entity);
+            const auto place = [&](const std::size_t first, const std::size_t last) { for (std::size_t i = first; i < last; ++i) (void)Placed(roots[i]); };
+            if (roots.size() > Grain) kor::ParallelForRanges(0, roots.size(), place, Grain).Wait();
+            else place(0, roots.size());
+            // Laid out on every core: each element is its own.
+            const auto layOut = [&](const std::size_t first, const std::size_t last) {
+                for (std::size_t i = first; i < last; ++i) {
+                    const std::uint32_t row = again[i];
+                    const kecs::Entity entity = list->entities[row / list->repeat];
+                    const auto* own = owned ? static_cast<const std::byte*>(reading.Get(entity, instances.component)) : nullptr;
+                    std::byte* element = instances.staged.data() + std::size_t { row } * stride;
+                    empty(element);
+                    instances.rowKey[row] = KeyOf(entity);
+                    instances.rowOwned[row] = own != nullptr;
+                    instances.rowChanged[row] = version;
+                    static const kecs::Mat4 nowhere {};
+                    const kecs::Mat4& placed = placing ? placedMatrices[entity.index] : nowhere;
+                    for (const auto& field : fields) {
+                        std::byte* at = element + field.offset;
+                        switch (field.from) {
+                        case Instancing::Field::From::eComponent:
+                            if (own) std::memcpy(at, own + field.at, field.size);
+                            break;
+                        case Instancing::Field::From::eMatrix: std::memcpy(at, placed.m.data(), 64); break;
+                        case Instancing::Field::From::eNormalMatrix: {
+                            const kecs::Mat4 inverse = kecs::Inverse(placed);
+                            kecs::Mat4 normal;
+                            for (int column = 0; column < 4; ++column)
+                                for (int r = 0; r < 4; ++r) normal.At(column, r) = inverse.At(r, column);
+                            std::memcpy(at, normal.m.data(), 64);
+                            break;
+                        }
+                        case Instancing::Field::From::ePosition: {
+                            const float position[4] { placed.At(3, 0), placed.At(3, 1), placed.At(3, 2), 1.f };
+                            std::memcpy(at, position, std::min<std::size_t>(field.size, 16));
+                            break;
+                        }
+                        case Instancing::Field::From::eId: {
+                            const std::uint32_t id = entity.index + 1;
+                            std::memcpy(at, &id, 4);
+                            break;
+                        }
+                        case Instancing::Field::From::eTexture: break;     // below, one at a time: what they name is counted
+                        }
                     }
-                    case Instancing::Field::From::eId: {
-                        const std::uint32_t id = entity.index + 1;
-                        std::memcpy(at, &id, 4);
-                        break;
-                    }
-                    case Instancing::Field::From::eTexture: {
-                        // The picture it holds there, by the index a shader reaches it at: ~0 for none.
+                }
+            };
+            if (again.size() > Grain) kor::ParallelForRanges(0, again.size(), layOut, Grain).Wait();
+            else layOut(0, again.size());
+
+            // The pictures they hold, by the index a shader reaches each at: ~0 for none.
+            if (pictured > 0)
+                for (const std::uint32_t row : again) {
+                    const kecs::Entity entity = list->entities[row / list->repeat];
+                    const auto* own = owned ? static_cast<const std::byte*>(reading.Get(entity, instances.component)) : nullptr;
+                    std::byte* element = instances.staged.data() + std::size_t { row } * stride;
+                    std::size_t texture = 0;
+                    for (const auto& field : fields) {
+                        if (field.from != Instancing::Field::From::eTexture) continue;
                         std::uint32_t index = ~0u;
                         const Held* held = own ? reinterpret_cast<const Held*>(own + field.at) : nullptr;
                         // A picture read since it was given is what was made in its place: its stand-in is what it was.
                         const Resource* now = held ? held->get() : nullptr;
                         while (now && now->replacedBy) now = now->replacedBy.get();
+                        Member member;
                         if (now && now->handle) {
                             const Resource& given = *now;
                             kor::DescriptorIndex handle;
@@ -6350,23 +6520,27 @@ namespace kgraph
                             else if (given.kind == "ImageView") handle = kor::Bindless::Sampled(kor::capi::ImageViewOf(given.handle));
                             if (handle.Valid()) {
                                 index = handle.index;
-                                if (Member member = MemberOf(now); member.id) pictures.push_back(std::move(member));
+                                member = MemberOf(now);
                             }
                         }
-                        Mix(written, &index, sizeof index);
-                        std::memcpy(at, &index, 4);
-                        break;
-                    }
+                        picture(std::size_t { row } * pictured + texture++, std::move(member));
+                        std::memcpy(element + field.offset, &index, 4);
                     }
                 }
-            }
-            instances.written = written;
-            instances.staged = std::move(staged);
-            if (pictured) {
+            instances.laid = laid;
+            instances.seenList = list;
+            instances.seenListed = listed;
+            instances.seenMoves = moves;
+            instances.seenOwns = owns;
+            instances.seenReplacements = replacements;
+            if (changed) instances.written = instances.version = version;
+            if (picturesChanged) {
+                std::vector<Member> pictures;
+                pictures.reserve(instances.pictureCount.size());
+                for (const auto& counted : instances.pictureCount | std::views::values) pictures.push_back(counted.first);
                 std::ranges::sort(pictures, {}, &Member::id);
-                pictures.erase(std::ranges::unique(pictures, {}, &Member::id).begin(), pictures.end());
+                instances.pictures = std::move(pictures);
             }
-            instances.pictures = std::move(pictures);
         }
 
         /**
@@ -6812,7 +6986,18 @@ namespace kgraph
             } else if (node->type == "MeshPack") {
                 // Other meshes than it packed — an entity given another, one arrived from its file: packed again.
                 if (!out.packing) return;
-                if (PackedNow(*node) != out.packing->of) { out.signature.clear(); stale = true; }
+                // Looked at again only when something they are found from could have changed: the entities, their meshes,
+                // a resource made again in its place. Otherwise thousands of entities are walked each frame for nothing.
+                const auto wired = node->inputs.find("meshes");
+                const Node* origin = wired != node->inputs.end() && wired->second.link ? Origin(wired->second.link->node) : nullptr;
+                const auto source = origin ? built.find(origin->id) : built.end();
+                const EntityList* list = source != built.end() && source->second.listed ? &*source->second.listed : nullptr;
+                const auto read = list ? std::ranges::find(list->fields, wired->second.link->output, &EntityList::Read::output) : std::vector<EntityList::Read>::const_iterator {};
+                const bool listed = list && read != list->fields.end() && read->resource && world;
+                const MeshPacking::Seen seen { list, list ? list->version : 0, listed ? world->ChangesOf(read->component) : 0, replacements };
+                if (listed && out.packing->seen == seen) return;
+                if (PackedNow(*node) != out.packing->of) { out.signature.clear(); stale = true; return; }
+                if (listed) out.packing->seen = seen;
             } else if (node->type == "IndirectDraws") {
                 if (!out.packed) return;
                 auto commands = IndirectCommands(*inputs, OnTheGpu(*inputs));
@@ -6943,6 +7128,8 @@ namespace kgraph
         std::vector<kecs::Mat4> placedMatrices;
         std::vector<std::uint64_t> placedAt;
         std::uint64_t placedFrame = 0;
+        // How many resources have been made again in their places, by any runtime: an index a picture is read by may be another.
+        static inline std::atomic<std::uint64_t> replacements = 0;
         const kecs::Mat4& Placed(const kecs::Entity entity)
         {
             if (entity.index >= placedAt.size()) { placedAt.resize(entity.index + 1, 0); placedMatrices.resize(entity.index + 1); }
@@ -7383,7 +7570,7 @@ namespace kgraph
         (*made)->node = id;
         (*made)->kind = "Mesh";
         Held& kept = files.assets[id];
-        if (kept && kept != *made) kept->replacedBy = *made;
+        if (kept && kept != *made) { kept->replacedBy = *made; ++Impl::replacements; }
         kept = std::move(*made);
         return true;
     }

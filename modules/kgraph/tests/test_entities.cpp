@@ -1509,6 +1509,103 @@ TEST_F(EntityTest, AShaderSaysWhatEachInstanceIsAndTheDrawFillsIt) {
     EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "outgrown, both have the one made in its place";
 }
 
+// A buffer of instances is written again an element at a time, only where something changed: an entity moved — by
+// itself or by what it is under — given, rid of or written its own fields, gone, or another in its place. Each is seen
+// in every copy of the buffer the frames in flight read, and what did not change stays as it was written.
+TEST_F(EntityTest, AnInstanceIsWrittenAgainWhenWhatItIsMadeOfChanges) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    const auto make = [&](const float x) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, 0, 0.5f });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        return entity;
+    };
+    const kecs::Entity left = make(-0.5f);
+    // The right one is under a parent of no mesh, which places it.
+    const kecs::Entity holder = world.Create();
+    const kecs::Entity right = make(0.f);
+    world.SetParent(right, holder, -1, false);
+    world.SetPosition(holder, { 0.5f, 0, 0 });
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const kecs::ComponentId tinted = world.Find("tinted");
+    ASSERT_NE(tinted, kecs::NoComponent);
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    // Enough frames for every copy of the buffer to have been read: what one copy missed, another would show.
+    const auto frames = [&] { for (int i = 0; i < 4; ++i) Frame(); for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem; };
+    support::Give(world, left, "tinted", { { "color", { 1, 0, 0, 1 } } });
+    support::Give(world, right, "tinted", { { "color", { 0, 1, 0, 1 } } });
+    frames();
+    EXPECT_TRUE(is(8, { 255, 0, 0 })) << "given their own colours";
+    EXPECT_TRUE(is(24, { 0, 255, 0 })) << "the right one where its parent places it";
+
+    // Its own field written in place: marked changed, and the next frames show it.
+    static_cast<float*>(world.Mutable(left, tinted))[2] = 1.f;
+    frames();
+    EXPECT_TRUE(is(8, { 255, 0, 255 })) << "written in place";
+    EXPECT_TRUE(is(24, { 0, 255, 0 })) << "the other as it was";
+
+    // The parent moved, and the child with it: only the parent's place changed, and the child is drawn where it is now.
+    world.SetPosition(holder, { 0.25f, 0, 0 });
+    frames();
+    EXPECT_TRUE(is(20, { 0, 255, 0 })) << "moved with what it is under";
+    EXPECT_TRUE(is(28, { 0, 0, 0 }));
+    world.SetPosition(holder, { 0.5f, 0, 0 });
+    world.SetPosition(holder, { 0.5f, 0, 0 });     // the same again: nothing more to do
+    frames();
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+
+    // Rid of its own fields: nothing of its own, which the shader draws as black; given them back: as they were given.
+    world.Remove(left, tinted);
+    frames();
+    EXPECT_TRUE(is(8, { 0, 0, 0 })) << "no component: nothing of its own";
+    support::Give(world, left, "tinted", { { "color", { 0, 0, 1, 1 } } });
+    frames();
+    EXPECT_TRUE(is(8, { 0, 0, 255 }));
+
+    // Gone, and another made in its place — in its element, maybe with its index: drawn as the new one is.
+    world.Destroy(left);
+    const kecs::Entity other = make(-0.5f);
+    support::Give(world, other, "tinted", { { "color", { 1, 1, 0, 1 } } });
+    frames();
+    EXPECT_TRUE(is(8, { 255, 255, 0 })) << "the one in its place";
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+
+    // Nothing changed: what is drawn stays as it is, frame after frame, every copy read in turn.
+    for (int i = 0; i < 6; ++i) {
+        Frame();
+        EXPECT_TRUE(is(8, { 255, 255, 0 })) << "frame " << i;
+        EXPECT_TRUE(is(24, { 0, 255, 0 })) << "frame " << i;
+    }
+}
+
 // A Draw that idles draws nothing, and its buffer of instances is kept as the entities are all the same: another pass
 // reads it — the meshlets read the forward Draw's while the forward Draw rests.
 TEST_F(EntityTest, AnIdleDrawsBufferOfInstancesFollowsTheEntitiesForWhatReadsIt) {
@@ -1635,14 +1732,13 @@ TEST_F(EntityTest, EachInstanceReadsItsOwnPictureByIndex) {
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_TRUE(is(24, { 0, 0, 255 }));
 
-    // Every element the buffer has room for is written each frame, not only the list's: a GPU cull reads it to its end.
-    // Past the list, and an entity's that is gone, is nothing — nowhere, and no picture — whatever the memory held: an
-    // index read from what was there before is a picture that is not there, and the GPU that samples it hangs.
+    // Every element the buffer has room for is written, not only the list's: a GPU cull reads it to its end. Past the
+    // list, and an entity's that is gone, is nothing — nowhere, and no picture — whatever the memory held: an index read
+    // from what was there before is a picture that is not there, and the GPU that samples it hangs. A buffer is written
+    // whole, into each of its copies, the first time; after that only the runtime writes it, an element when it changes.
     const auto buffer = kor::capi::BufferOf(runtime.ResourceOf("draw", "instances")->handle);
     const std::size_t words = buffer->size() / 4, stride = words / 64;   // room for 64: what a buffer of a few is made with
     ASSERT_EQ(words % 64, 0u);
-    // What another resource left in the memory: written past the runtime, which alone writes it otherwise.
-    const_cast<kor::Buffer&>(*buffer).Write(std::vector<std::uint32_t>(words, 0xABABABABu));
     world.Destroy(entities[1]);
     for (int i = 0; i < 3; ++i) Frame();
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;

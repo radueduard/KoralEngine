@@ -352,6 +352,8 @@ namespace kecs
         if (_nodes.size() <= index) _nodes.resize(index + 1);
         _nodes[index] = Node {};
         _nodes[index].name = "Entity";
+        if (_movedAt.size() <= index) _movedAt.resize(index + 1, 0);
+        _movedAt[index] = ++_moveClock;     // made: where it is has not been read
         const Entity entity { index, record.generation };
         _nodes[index].rootSlot = static_cast<std::uint32_t>(_roots.size());
         _roots.push_back(entity);
@@ -539,6 +541,14 @@ namespace kecs
         record->archetype->columns[static_cast<std::size_t>(column)].changed[record->row] = _tick;
         Changed(id);
         return true;
+    }
+
+    Tick World::ChangedTickOf(const Entity entity, const ComponentId id) const
+    {
+        const Record* record = RecordOf(entity);
+        if (!record || !record->archetype) return 0;
+        const int column = record->archetype->ColumnOf(id);
+        return column < 0 ? 0 : record->archetype->columns[static_cast<std::size_t>(column)].changed[record->row];
     }
 
     std::vector<ComponentId> World::ComponentsOf(const Entity entity) const
@@ -843,7 +853,11 @@ namespace kecs
     void World::MarkDirty(const Entity entity) const
     {
         Node& node = _nodes[entity.index];
-        // A stale node's descendants are stale already: one is made fresh only after everything above it.
+        // Stamped as moved even when stale already: it is moved again since whatever read it last, if anything did.
+        if (_movedAt.size() <= entity.index) _movedAt.resize(entity.index + 1, 0);
+        _movedAt[entity.index] = ++_moveClock;
+        // A stale node's descendants are stale already: one is made fresh only after everything above it, and each was
+        // stamped when it was made stale, and has not been read since.
         if (node.dirty) return;
         node.dirty = true;
         for (const Entity child : node.children) MarkDirty(child);

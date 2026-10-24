@@ -1,0 +1,494 @@
+{
+  "koral-function": 1,
+  "purpose": "Instancing",
+  "description": "What CullInstances found too far for its mesh, drawn as points: each written into a buffer of the picture's pixels with an atomic max — the nearest wins — then laid over target wherever it is nearer than depth says the scene is. No triangles: a point is as wide as its instance looks (meshRadius, as CullInstances has it), up to four pixels. target needs eStorage, depth eSampled; reversedZ as the lens has it.",
+  "tags": [
+    "instancer",
+    "instances",
+    "points",
+    "splat",
+    "far",
+    "level of detail",
+    "atomic"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "instances",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "instances",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "counters",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          130
+        ],
+        "inputs": {
+          "name": "counters",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "points",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          200
+        ],
+        "inputs": {
+          "name": "points",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          270
+        ],
+        "inputs": {
+          "name": "groups",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "target",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          340
+        ],
+        "inputs": {
+          "name": "target",
+          "kind": "eImage"
+        }
+      },
+      {
+        "id": "depth",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          410
+        ],
+        "inputs": {
+          "name": "depth",
+          "kind": "eImage"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          480
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 100000
+        }
+      },
+      {
+        "id": "toClip",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          550
+        ],
+        "inputs": {
+          "name": "toClip",
+          "kind": "eValue"
+        }
+      },
+      {
+        "id": "color",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          620
+        ],
+        "inputs": {
+          "name": "color",
+          "kind": "eValue",
+          "default": [
+            0.35,
+            0.55,
+            0.25
+          ]
+        }
+      },
+      {
+        "id": "width",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          690
+        ],
+        "inputs": {
+          "name": "width",
+          "kind": "eValue",
+          "default": 1920
+        }
+      },
+      {
+        "id": "height",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          760
+        ],
+        "inputs": {
+          "name": "height",
+          "kind": "eValue",
+          "default": 1080
+        }
+      },
+      {
+        "id": "pointCapacity",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          830
+        ],
+        "inputs": {
+          "name": "pointCapacity",
+          "kind": "eValue",
+          "default": 16777216
+        }
+      },
+      {
+        "id": "reversedZ",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          900
+        ],
+        "inputs": {
+          "name": "reversedZ",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "meshRadius",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          970
+        ],
+        "inputs": {
+          "name": "meshRadius",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "pixels",
+        "type": "Multiply",
+        "at": [
+          220,
+          60
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "width",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "height",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "splat bytes",
+        "type": "Multiply",
+        "at": [
+          220,
+          130
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "pixels",
+              "out"
+            ]
+          },
+          "b": 4
+        }
+      },
+      {
+        "id": "splat",
+        "type": "Buffer",
+        "at": [
+          440,
+          60
+        ],
+        "inputs": {
+          "instanceCount": {
+            "$link": [
+              "splat bytes",
+              "out"
+            ]
+          },
+          "usage": [
+            "eStorage",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "splatter",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_points",
+          "compute.entry": "splatPoints",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          },
+          "param.counters": {
+            "$link": [
+              "counters",
+              "out"
+            ]
+          },
+          "param.points": {
+            "$link": [
+              "points",
+              "out"
+            ]
+          },
+          "param.splat": {
+            "$link": [
+              "splat",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "resolver",
+        "type": "ComputePipeline",
+        "at": [
+          660,
+          130
+        ],
+        "inputs": {
+          "compute.module": "koral_points",
+          "compute.entry": "resolvePoints",
+          "param.splat": {
+            "$link": [
+              "splat",
+              "out"
+            ]
+          },
+          "param.target": {
+            "$link": [
+              "target",
+              "out"
+            ]
+          },
+          "param.depth": {
+            "$link": [
+              "depth",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "start splatting",
+        "type": "ClearBuffer",
+        "at": [
+          880,
+          60
+        ],
+        "inputs": {
+          "buffer": {
+            "$link": [
+              "splat",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "splat points",
+        "type": "Dispatch",
+        "at": [
+          880,
+          130
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "splatter",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "indirectOffset": 12,
+          "push.toClip": {
+            "$link": [
+              "toClip",
+              "out"
+            ]
+          },
+          "push.color": {
+            "$link": [
+              "color",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.width": {
+            "$link": [
+              "width",
+              "out"
+            ]
+          },
+          "push.height": {
+            "$link": [
+              "height",
+              "out"
+            ]
+          },
+          "push.pointCapacity": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "push.reversedZ": {
+            "$link": [
+              "reversedZ",
+              "out"
+            ]
+          },
+          "push.meshRadius": {
+            "$link": [
+              "meshRadius",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lay over",
+        "type": "Dispatch",
+        "at": [
+          880,
+          200
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "resolver",
+              "out"
+            ]
+          },
+          "cover": "target",
+          "push.toClip": {
+            "$link": [
+              "toClip",
+              "out"
+            ]
+          },
+          "push.color": {
+            "$link": [
+              "color",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.width": {
+            "$link": [
+              "width",
+              "out"
+            ]
+          },
+          "push.height": {
+            "$link": [
+              "height",
+              "out"
+            ]
+          },
+          "push.pointCapacity": {
+            "$link": [
+              "pointCapacity",
+              "out"
+            ]
+          },
+          "push.reversedZ": {
+            "$link": [
+              "reversedZ",
+              "out"
+            ]
+          },
+          "push.meshRadius": {
+            "$link": [
+              "meshRadius",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "splat out",
+        "type": "FunctionOutput",
+        "at": [
+          1320,
+          60
+        ],
+        "inputs": {
+          "name": "splat",
+          "value": {
+            "$link": [
+              "splat",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}
