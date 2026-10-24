@@ -297,11 +297,12 @@ past entities:
 
 - **What is in sight, on the GPU, for any indirect draw of entities:** the engine's CullInSight function, the frustum
   cull forward-plus had of its own made general — any buffer of instances, by its stride and where its matrix is —
-  with IndirectDraws in eGPU (see [kgraph.md](kgraph.md#many-meshes-in-one-indirect-draw)).
+  with IndirectDraws in eGPU (see [kgraph.md](kgraph.md#many-meshes-in-one-indirect-draw)). Forward-plus's prepass is
+  culled by it, seen with its unjittered `seen`, its element's size the forward Draw's `instanceStride`; its own
+  `frustumCull.slang` is gone.
 
-Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework;
-forward-plus moved onto CullInSight in place of its own frustum cull; and a batched Draw given `cull` culled on the GPU by
-itself, which needs its shader to find its instance through `visible`.
+Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
+a batched Draw given `cull` culled on the GPU by itself, which needs its shader to find its instance through `visible`.
 
 ### E8: A graph made both to try ideas in and to make them fast
 

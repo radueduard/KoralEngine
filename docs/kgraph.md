@@ -998,7 +998,7 @@ they show, and a buffer of commands saying how many of each to draw, from where.
 - **CullInSight**, one of the engine's functions, is that compute pass for what is in sight: a thread an instance
   tests its mesh's box (the pack's `rangeBuffer`), placed by its matrix, against `viewProjection`, and counts what is in
   sight into the eGPU commands and `visible`. `instances` is the Draw's buffer of instances (its `instances` output),
-  `stride` bytes an element with its `[entity("MATRIX")]` `matrixOffset` bytes in; how many there are it reads from
+  `stride` bytes an element (its `instanceStride`) with its `[entity("MATRIX")]` `matrixOffset` bytes in; how many there are it reads from
   `visible`'s size, on the GPU. The Draw is wired its `commands` as `indirect` and `visible` as a `param.`, and its shader
   finds its instance through that: `instances[visible[first + index]]`. A mesh whose box is not known is always drawn.
   (`ScaleTest.CullInSightDrawsOnlyWhatIsSeen`: of sixteen cubes, the eight in the picture are drawn, and one moved in or
@@ -1043,7 +1043,7 @@ A `param.` wired on the Draw is used as it is, and then nothing of the buffer is
 Draws that would write the same into their buffers share one, written once a frame: of the same Filter, an element
 laid out alike — field by field, where each is and what it is — and, when any field is the entity's own, the same
 pipeline's component. A shadow pass's turns share theirs; a pass whose element also has its entity's colour has its
-own. A Draw gives its buffer as `instances`, outgrown the buffer is made again for every Draw that shares it. It is
+own. A Draw gives its buffer as `instances`, and the bytes of an element of it as `instanceStride`; outgrown the buffer is made again for every Draw that shares it. It is
 kept up to date whether the Draw draws or idles: another pass may read it while the Draw rests (Forward+'s meshlets
 read the forward Draw's when the vertices are not drawn).
 

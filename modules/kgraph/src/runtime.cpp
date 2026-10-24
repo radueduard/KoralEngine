@@ -2697,7 +2697,10 @@ namespace kgraph
                 if (!made) return Fail(made.error());
                 const std::shared_ptr<EntityRun> run = std::move(*made);
                 // A TraceRays' buffer of each instance's, as a Draw's: a pass may read its material too.
-                if (!run->instances.empty()) out.outputs["instances"].resource = run->instances.front()->held;
+                if (!run->instances.empty()) {
+                    out.outputs["instances"].resource = run->instances.front()->held;
+                    out.outputs["instanceStride"].value = Value(static_cast<double>(run->instances.front()->instancing->stride));     // the bytes of an element of it
+                }
                 // A Dispatch of a Filter's entities: its groups once for each of them, one after another along z, in one dispatch.
                 if (!rays)
                     if (const auto entities = node.inputs.find("entities"); entities != node.inputs.end() && entities->second.link) {
@@ -2779,7 +2782,10 @@ namespace kgraph
                 if (!made) return Fail(made.error());
                 const std::shared_ptr<EntityRun> run = std::move(*made);
                 // Its buffer of each instance's, when it made or shares one: to be looked at like any buffer.
-                if (!run->instances.empty()) out.outputs["instances"].resource = run->instances.front()->held;
+                if (!run->instances.empty()) {
+                    out.outputs["instances"].resource = run->instances.front()->held;
+                    out.outputs["instanceStride"].value = Value(static_cast<double>(run->instances.front()->instancing->stride));     // the bytes of an element of it
+                }
                 run->tasks = tasks;
                 if (tasks && run->mesh.kind != Source::Kind::eNone) return Fail("mesh shaders make their own vertices: there is no 'mesh' to give them");
                 if (!tasks && run->mesh.kind == Source::Kind::eNone && (mustIndex || (*info)->vertexInputs))

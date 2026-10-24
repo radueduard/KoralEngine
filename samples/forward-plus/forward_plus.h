@@ -52,7 +52,7 @@ namespace forwardplus
     /** The shaders a project of it needs, by file name. Its bloom, its tone mapping and the sun's shadows are the engine's (koral_bloom, koral_tonemap, koral_shadow). */
     inline constexpr const char* Shaders[] {
         "forwardCommon.slang", "lightCulling.slang", "depth.slang", "forward.slang", "sky.slang",
-        "ambientOcclusion.slang", "reflections.slang", "clusterHeat.slang", "cullCommon.slang", "occlusionCull.slang", "frustumCull.slang", "taa.slang",
+        "ambientOcclusion.slang", "reflections.slang", "clusterHeat.slang", "cullCommon.slang", "occlusionCull.slang", "taa.slang",
         "meshletTasks.slang", "rayTraced.slang", "emitters.slang",
     };
 
@@ -373,14 +373,15 @@ namespace forwardplus
         wire("drawn meshes", "in sight", "ranges", "ranges");
         wire("drawn", "in sight", "groups", "groups");
         const std::string cameraData = bring("camera data");
-        compute("frustum", "frustumCull", "frustum", nullptr, 1320, 640);
-        wire(bring("frame state"), "frustum", "param.frameState");
-        wire("drawn meshes", "frustum", "param.ranges", "rangeBuffer");
-        wire("in sight", "frustum", "param.sightCommands", "commands");
-        wire("in sight", "frustum", "param.inSight", "visible");
-        set("run frustum", "groups.x", MostInstances / 64);
-        for (const char* axis : { "groups.y", "groups.z" }) set("run frustum", axis, 1);
-        wire("in sight", "run frustum", "push.sightCommandCount", "drawCount");
+        // What is in sight: the engine's CullInSight, seen as the camera sees it without the jitter (`seen`). Its
+        // instances are the forward Draw's, wired below.
+        node("Function", "frustum", 1320, 640);
+        set("frustum", "function", "CullInSight");
+        wire("drawn meshes", "frustum", "ranges", "rangeBuffer");
+        wire("in sight", "frustum", "commands", "commands");
+        wire("in sight", "frustum", "drawCount", "drawCount");
+        wire("in sight", "frustum", "visible", "visible");
+        wire(bring("seen"), "frustum", "viewProjection");
         node("GraphicsPipeline", "prepass", 760, 220);
         shaders("prepass", "depth", "prepassVertex", "prepassFragment");
         wire("drawn meshes", "prepass", "vertex.layout", "layout");
@@ -468,7 +469,8 @@ namespace forwardplus
         set("draw forward", "push.culled", 1);
         // The pre-pass draws with the forward Draw's buffer of instances: an instance is the same number in both.
         wire("draw forward", "draw depth", "param.instances", "instances");
-        wire("draw forward", "frustum", "param.instances", "instances");
+        wire("draw forward", "frustum", "instances", "instances");
+        wire("draw forward", "frustum", "stride", "instanceStride");
 
         // Glass and decals — what has the tag Blended — after everything solid, over it by how opaque each is: the same
         // shaders in a pipeline that blends, writes no depth, and leaves the three pictures beside the first as they
