@@ -521,3 +521,77 @@ TEST_F(ScaleTest, OneDispatchOfTenThousandEntitiesCostsLess) {
                 n, eachMs, eachRecordMs, batchMs, batchRecordMs);
     EXPECT_LT(batchMs + batchRecordMs, (eachMs + eachRecordMs) / 4) << "measurably faster";
 }
+
+// The engine's CullInSight: of an indirect draw of entities, only what is in sight is drawn, worked out on the GPU. Half
+// the cubes are in the picture and half beside it; the cull counts the first half into their mesh's command, and the
+// draw draws them, through `visible`. Moved into sight, one more is drawn.
+TEST_F(ScaleTest, CullInSightDrawsOnlyWhatIsSeen) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups").Set("mode", "eGPU");
+    graph.Add("culled", "GraphicsPipeline").Set("vertex.module", "instancedCulled").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instancedCulled").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    // The matrices place them in the picture as they are: what they are seen with is the identity.
+    const Value::List identity { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    graph.Add("cull", "Function").Set("function", "CullInSight").Wire("instances", "draw", "instances").Set("stride", 80).Set("matrixOffset", 0)
+        .Wire("ranges", "pack", "rangeBuffer").Wire("commands", "commands", "commands")
+        .Wire("drawCount", "commands", "drawCount").Wire("visible", "commands", "visible").Set("viewProjection", identity);
+    graph.Add("draw", "Draw").Wire("pipeline", "culled").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "cull", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.visible", "cull", "visible");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    graph.functions["CullInSight"] = EngineFunction("CullInSight");
+
+    // Eight in the picture, along its middle; eight beside it, to the right.
+    std::vector<kecs::Entity> entities;
+    for (int i = 0; i < 16; ++i) {
+        const kecs::Entity entity = world.Create();
+        const float x = i < 8 ? -0.875f + 0.25f * static_cast<float>(i) : 2.f + 0.25f * static_cast<float>(i - 8);
+        world.SetPosition(entity, { x, 0.f, 0.5f });
+        world.SetScale(entity, { 0.2f, 0.2f, 0.2f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        entities.push_back(entity);
+    }
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (const kecs::Entity entity : entities) support::Give(world, entity, "culled", { { "color", { 1, 0, 0, 1 } } });
+
+    // How many the command says it draws: what the cull counted, read back.
+    runtime.Watch("commands");
+    const auto drawn = [&] {
+        for (int i = 0; i < 6; ++i) Frame();
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        const auto peek = runtime.Watched("commands");
+        if (!peek || peek->bytes.size() < 20) return -1;
+        std::uint32_t command[5];
+        std::memcpy(command, peek->bytes.data(), 20);
+        return static_cast<int>(command[1]);
+    };
+    EXPECT_EQ(drawn(), 8) << "those in sight, and none beside it";
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(2, { 255, 0, 0 })) << "the first, drawn";
+    EXPECT_TRUE(is(29, { 255, 0, 0 })) << "the last in sight, drawn";
+
+    world.SetPosition(entities[8], { 0.f, 0.5f, 0.5f });
+    EXPECT_EQ(drawn(), 9) << "moved into sight, it is drawn";
+    world.SetPosition(entities[0], { -3.f, 0.f, 0.5f });
+    EXPECT_EQ(drawn(), 8) << "and one moved out of it is not";
+    EXPECT_TRUE(is(2, { 0, 0, 0 })) << "where it was, nothing";
+}

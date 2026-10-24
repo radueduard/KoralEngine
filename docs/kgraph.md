@@ -995,6 +995,14 @@ they show, and a buffer of commands saying how many of each to draw, from where.
   it added. Looked at (`Runtime::Watch`, the editor's *Look at what it holds*), its `out` is the commands, a line
   each — `indexCount`, `instanceCount`, `firstIndex`, `vertexOffset`, `firstInstance`: which meshes are batched, and
   how many of each.
+- **CullInSight**, one of the engine's functions, is that compute pass for what is in sight: a thread an instance
+  tests its mesh's box (the pack's `rangeBuffer`), placed by its matrix, against `viewProjection`, and counts what is in
+  sight into the eGPU commands and `visible`. `instances` is the Draw's buffer of instances (its `instances` output),
+  `stride` bytes an element with its `[entity("MATRIX")]` `matrixOffset` bytes in; how many there are it reads from
+  `visible`'s size, on the GPU. The Draw is wired its `commands` as `indirect` and `visible` as a `param.`, and its shader
+  finds its instance through that: `instances[visible[first + index]]`. A mesh whose box is not known is always drawn.
+  (`ScaleTest.CullInSightDrawsOnlyWhatIsSeen`: of sixteen cubes, the eight in the picture are drawn, and one moved in or
+  out is drawn or not the next frame.)
 
 ```json
 { "id": "meshes", "type": "Filter", "inputs": { "entities": { "$link": ["all", "out"] }, "with": ["Mesh", "lit"], "groupBy": "Mesh" } },

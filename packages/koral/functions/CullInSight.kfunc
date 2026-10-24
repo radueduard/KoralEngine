@@ -1,0 +1,297 @@
+{
+  "koral-function": 1,
+  "purpose": "Culling",
+  "description": "What of an indirect draw of entities is in sight, on the GPU: each instance's mesh box, placed by its matrix, tested against viewProjection, and what is in sight counted into its mesh's command — an IndirectDraws' in eGPU, whose commands start with no instances each frame — and its number written into visible, where the Draw's shader finds it (instances[visible[first + index]]). instances is the Draw's [entity(\"PER_INSTANCE\")] buffer, stride bytes an element with its MATRIX matrixOffset bytes in; ranges a MeshPack's rangeBuffer. How many instances there are is how many visible has room for: nothing of them is counted on the CPU.",
+  "tags": [
+    "cull",
+    "frustum",
+    "in sight",
+    "visibility",
+    "gpu driven",
+    "indirect",
+    "instances"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "instances",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "instances",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "stride",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          130
+        ],
+        "inputs": {
+          "name": "stride",
+          "kind": "eValue",
+          "default": 64
+        }
+      },
+      {
+        "id": "matrixOffset",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          200
+        ],
+        "inputs": {
+          "name": "matrixOffset",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "ranges",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          270
+        ],
+        "inputs": {
+          "name": "ranges",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "commands",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          340
+        ],
+        "inputs": {
+          "name": "commands",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "drawCount",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          410
+        ],
+        "inputs": {
+          "name": "drawCount",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "visible",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          480
+        ],
+        "inputs": {
+          "name": "visible",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "viewProjection",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          550
+        ],
+        "inputs": {
+          "name": "viewProjection",
+          "kind": "eValue"
+        }
+      },
+      {
+        "id": "groups",
+        "type": "Buffer",
+        "at": [
+          220,
+          60
+        ],
+        "inputs": {
+          "instanceCount": 12,
+          "usage": [
+            "eStorage",
+            "eIndirect",
+            "eTransferSrc",
+            "eTransferDst"
+          ],
+          "type": "eDeviceLocal"
+        }
+      },
+      {
+        "id": "sizer",
+        "type": "ComputePipeline",
+        "at": [
+          440,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_cull",
+          "compute.entry": "size",
+          "param.visible": {
+            "$link": [
+              "visible",
+              "out"
+            ]
+          },
+          "param.args": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "size",
+        "type": "Dispatch",
+        "at": [
+          660,
+          60
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "sizer",
+              "out"
+            ]
+          },
+          "groups": [
+            1,
+            1,
+            1
+          ]
+        }
+      },
+      {
+        "id": "culler",
+        "type": "ComputePipeline",
+        "at": [
+          440,
+          130
+        ],
+        "inputs": {
+          "compute.module": "koral_cull",
+          "compute.entry": "cull",
+          "param.instances": {
+            "$link": [
+              "instances",
+              "out"
+            ]
+          },
+          "param.ranges": {
+            "$link": [
+              "ranges",
+              "out"
+            ]
+          },
+          "param.commands": {
+            "$link": [
+              "commands",
+              "out"
+            ]
+          },
+          "param.visible": {
+            "$link": [
+              "visible",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cull",
+        "type": "Dispatch",
+        "at": [
+          660,
+          130
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "culler",
+              "out"
+            ]
+          },
+          "indirect": {
+            "$link": [
+              "groups",
+              "out"
+            ]
+          },
+          "push.viewProjection": {
+            "$link": [
+              "viewProjection",
+              "out"
+            ]
+          },
+          "push.drawCount": {
+            "$link": [
+              "drawCount",
+              "out"
+            ]
+          },
+          "push.stride": {
+            "$link": [
+              "stride",
+              "out"
+            ]
+          },
+          "push.matrixOffset": {
+            "$link": [
+              "matrixOffset",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "commands out",
+        "type": "FunctionOutput",
+        "at": [
+          880,
+          60
+        ],
+        "inputs": {
+          "name": "commands",
+          "value": {
+            "$link": [
+              "commands",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "visible out",
+        "type": "FunctionOutput",
+        "at": [
+          880,
+          130
+        ],
+        "inputs": {
+          "name": "visible",
+          "value": {
+            "$link": [
+              "visible",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

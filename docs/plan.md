@@ -295,8 +295,13 @@ past entities:
   what it would take to be one (`Runtime::BatchingOf`); a Draw whose shader reads a buffer of instances already is
   offered `batched` at a click (see [editor.md](editor.md#a-node-in-the-inspector)).
 
-Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
-the culling the forward-plus sample does on the GPU made one of the engine's functions, for any indirect draw of entities.
+- **What is in sight, on the GPU, for any indirect draw of entities:** the engine's CullInSight function, the frustum
+  cull forward-plus had of its own made general — any buffer of instances, by its stride and where its matrix is —
+  with IndirectDraws in eGPU (see [kgraph.md](kgraph.md#many-meshes-in-one-indirect-draw)).
+
+Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework;
+forward-plus moved onto CullInSight in place of its own frustum cull; and a batched Draw given `cull` culled on the GPU by
+itself, which needs its shader to find its instance through `visible`.
 
 ### E8: A graph made both to try ideas in and to make them fast
 
