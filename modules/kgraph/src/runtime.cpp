@@ -592,6 +592,7 @@ namespace kgraph
             std::vector<Member> pictures;               // what its buffers of each instance's name by index: read, though no slot binds them
             std::vector<Member> storages;               // and write by index
             std::string batchOf;                        // a Dispatch's: the Filter it runs once for each of, along z, in one dispatch
+            Held drawn;                                 // a Draw `compacted`: the buffer its shader reads, of what is in sight, which a cull writes
             std::vector<std::pair<const void*, std::uint64_t>> namedSeen;  // the buffers of instances its pictures and storages were last gathered from, and when
             bool changed = true;                        // members changed since the frame graph was last told
             PassReport report;
@@ -2785,6 +2786,9 @@ namespace kgraph
                 if (!run->instances.empty()) {
                     out.outputs["instances"].resource = run->instances.front()->held;
                     out.outputs["instanceStride"].value = Value(static_cast<double>(run->instances.front()->instancing->stride));     // the bytes of an element of it
+                    for (const auto& field : run->instances.front()->instancing->fields)     // where in an element its MATRIX is
+                        if (field.from == Instancing::Field::From::eMatrix) { out.outputs["instanceMatrixOffset"].value = Value(static_cast<double>(field.offset)); break; }
+                    if (run->drawn) out.outputs["drawnInstances"].resource = run->drawn;     // compacted: what its shader reads, which a cull writes
                 }
                 run->tasks = tasks;
                 if (tasks && run->mesh.kind != Source::Kind::eNone) return Fail("mesh shaders make their own vertices: there is no 'mesh' to give them");
@@ -6312,14 +6316,30 @@ namespace kgraph
                 if (owner && !theirs)
                     if (const auto shared = owner->sharedInstances.find(key); shared != owner->sharedInstances.end())
                         if (auto found = shared->second.lock(); found && !found->full) theirs = std::move(found);
-            if (theirs) {
-                if (std::ranges::find(theirs->draws, draw.id) == theirs->draws.end()) theirs->draws.push_back(draw.id);
+            // Compacted: what its shader reads is another buffer as big, of what is in sight one after another, which a
+            // cull before it writes (CullInSight's `drawn`); the buffer of instances is filled all the same, for the cull.
+            const auto compacted = draw.inputs.find("compacted");
+            const bool compacts = !rays && compacted != draw.inputs.end() && compacted->second.value.Bool() && *compacted->second.value.Bool();
+            const auto bound = [&](const Instances& instances) -> Expected<Source> {
                 Source source;
                 source.kind = Source::Kind::eWired;
                 source.input = port;
-                source.resource = theirs->held;
-                run.instances.push_back(theirs);
+                source.resource = instances.held;
+                if (compacts) {
+                    auto drawn = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(instances.capacity * instances.instancing->stride))
+                        .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eStorage) | kor::Buffer::Usage::eTransferSrc | kor::Buffer::Usage::eTransferDst)
+                        .SetType(kor::Buffer::Type::eDeviceLocal).Build();
+                    if (!drawn.Valid()) return Fail(drawn.Failure() ? drawn.Failure()->message : std::format("'{}' could not be made a buffer of what is in sight", port));
+                    run.drawn = MakeResource(std::move(drawn));
+                    run.drawn->node = draw.id;
+                    source.resource = run.drawn;
+                }
                 return source;
+            };
+            if (theirs) {
+                if (std::ranges::find(theirs->draws, draw.id) == theirs->draws.end()) theirs->draws.push_back(draw.id);
+                run.instances.push_back(theirs);
+                return bound(*theirs);
             }
 
             auto instances = std::make_shared<Instances>();
@@ -6336,12 +6356,9 @@ namespace kgraph
             instances->buffer = kor::ResourceRef<kor::Buffer>(buffer);
             instances->held = MakeResource(std::move(buffer));
             instances->held->node = draw.id;
-            Source source;
-            source.kind = Source::Kind::eWired;
-            source.input = port;
-            source.resource = instances->held;
             FillInstances(*instances, true);
             sharedInstances[key] = instances;
+            auto source = bound(*instances);
             run.instances.push_back(std::move(instances));
             return source;
         }

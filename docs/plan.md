@@ -301,8 +301,12 @@ past entities:
   culled by it, seen with its unjittered `seen`, its element's size the forward Draw's `instanceStride`; its own
   `frustumCull.slang` is gone.
 
+- **A batched Draw given `cull` is culled on the GPU by itself**, its shader unchanged: CullInSight's passes written out
+  with it, and what its shader reads compacted to what is in sight (see
+  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)).
+
 Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
-a batched Draw given `cull` culled on the GPU by itself, which needs its shader to find its instance through `visible`.
+a `cull` of several matrices (`cullIndex`, a shadow's cascades) picked on the GPU.
 
 ### E8: A graph made both to try ideas in and to make them fast
 

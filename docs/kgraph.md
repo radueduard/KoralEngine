@@ -1076,7 +1076,17 @@ What each element is to the shader is then its `[entity("PER_INSTANCE")]` buffer
 A Draw that is wired a value of each element besides its mesh — a `push.model` from the element's `matrix`, straight
 or through Math — cannot be one draw: it draws one at a time, as it did, and its note says which inputs and why. So
 does one whose ForEach says `where`, `select`, `entityId` or `groupBy` (make it a Filter), and one whose `command` is
-another than eAuto or eDrawIndexed. A batch is drawn whole: `cull` is taken off it, being a draw at a time on the CPU.
+another than eAuto or eDrawIndexed.
+
+**Given `cull`, a batch is culled on the GPU.** Its IndirectDraws is in eGPU, and CullInSight's passes are written out
+with it — `<draw>/cull size` and `<draw>/cull`, their pipelines and a buffer of groups — reading its buffer of
+instances (`instances`, `instanceStride`, `instanceMatrixOffset`, which a Draw gives) and seeing as `cull` does. The
+Draw is `compacted`: its shader reads, in place of the buffer it fills, another as big (`drawnInstances`) into which
+the cull copies each element in sight, one after another as they are drawn. So a shader that reads its instance at
+`SV_StartInstanceLocation + SV_InstanceID`, as any of a buffer of instances does, draws only what is in sight with no
+change to it (`ScaleTest.ABatchedDrawGivenCullIsCulledOnTheGpu`). A `cull` of several matrices (`cullIndex`) is not
+picked on the GPU: such a batch is drawn whole, and its note says so.
+
 One whose shader has no buffer of instances draws every element alike, and says so. Ten thousand entities of two
 meshes draw the same picture, pixel for pixel, either way; a draw each costs the CPU about 7.8 ms a frame (readying 3.1,
 recording 4.7), and batched 0.19 ms (Release, `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess`).

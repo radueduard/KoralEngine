@@ -472,11 +472,41 @@ namespace kgraph
             commanded.type = "IndirectDraws";
             commanded.pass = draw.pass;
             commanded.Wire("ranges", pack, "ranges").Wire("groups", batch, "groups");
+            // Given `cull`: what is out of its sight left out on the GPU — CullInSight's passes, its commands starting with
+            // no instances each frame, and what its shader reads compacted, the elements in sight one after another as they
+            // are drawn, so that it reads its instance at first + index as it does unculled. Of several matrices, the
+            // `cullIndex`th is not picked on the GPU: such a batch is drawn whole, and says so.
+            const auto cull = draw.inputs.find("cull");
+            const bool sighted = cull != draw.inputs.end() && cull->second.link && !draw.inputs.contains("cullIndex");
+            if (cull != draw.inputs.end() && cull->second.link && !sighted)
+                out.notes[id] = "batched: its 'cull' is one of several matrices ('cullIndex'), which is not culled on the GPU: it is drawn whole";
+            if (sighted) commanded.Set("mode", "eGPU");
             made.push_back(std::move(commanded));
+            if (sighted) {
+                const std::string groups = id + "/cull groups", sizer = id + "/cull sizer", culler = id + "/culler";
+                const auto add = [&](const std::string& made_, const char* type) -> Node& {
+                    Node node;
+                    node.id = made_;
+                    node.type = type;
+                    node.pass = draw.pass;
+                    made.push_back(std::move(node));
+                    return made.back();
+                };
+                add(groups, "Buffer").Set("instanceCount", 12).Set("usage", Value::List { "eStorage", "eIndirect", "eTransferSrc", "eTransferDst" }).Set("type", "eDeviceLocal");
+                add(sizer, "ComputePipeline").Set("compute.module", "koral_cull").Set("compute.entry", "size").Wire("param.visible", commands, "visible").Wire("param.args", groups);
+                add(id + "/cull size", "Dispatch").Wire("pipeline", sizer).Set("groups", Value::List { 1, 1, 1 });
+                add(culler, "ComputePipeline").Set("compute.module", "koral_cull").Set("compute.entry", "cull").Wire("param.instances", id, "instances")
+                    .Wire("param.ranges", pack, "rangeBuffer").Wire("param.commands", commands, "commands").Wire("param.visible", commands, "visible")
+                    .Wire("param.drawn", id, "drawnInstances");
+                Node& culls = add(id + "/cull", "Dispatch").Wire("pipeline", culler).Wire("indirect", groups).Wire("push.drawCount", commands, "drawCount")
+                    .Wire("push.stride", id, "instanceStride").Wire("push.matrixOffset", id, "instanceMatrixOffset");
+                culls.inputs["push.viewProjection"] = cull->second;
+            }
 
             Node& written = *graph.Find(id);
             written.Wire("mesh", pack, "mesh").Set("command", "eDrawIndexedIndirect").Wire("indirect", commands, "commands").Wire("drawCount", commands, "drawCount");
-            // Left out of sight a draw at a time, on the CPU: a batch is drawn whole.
+            if (sighted) written.Set("compacted", true);
+            // Left out of sight a draw at a time, on the CPU: no more of a batch.
             written.inputs.erase("cull");
             const auto at = std::ranges::find(graph.nodes, id, &Node::id);
             graph.nodes.insert(at, std::make_move_iterator(made.begin()), std::make_move_iterator(made.end()));

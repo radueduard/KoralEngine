@@ -1,7 +1,7 @@
 {
   "koral-function": 1,
   "purpose": "Culling",
-  "description": "What of an indirect draw of entities is in sight, on the GPU: each instance's mesh box, placed by its matrix, tested against viewProjection, and what is in sight counted into its mesh's command — an IndirectDraws' in eGPU, whose commands start with no instances each frame — and its number written into visible, where the Draw's shader finds it (instances[visible[first + index]]). instances is the Draw's [entity(\"PER_INSTANCE\")] buffer, stride bytes an element with its MATRIX matrixOffset bytes in; ranges a MeshPack's rangeBuffer. How many instances there are is how many visible has room for: nothing of them is counted on the CPU.",
+  "description": "What of an indirect draw of entities is in sight, on the GPU: each instance's mesh box, placed by its matrix, tested against viewProjection, and what is in sight counted into its mesh's command — an IndirectDraws' in eGPU, whose commands start with no instances each frame — and its number written into visible, where the Draw's shader finds it (instances[visible[first + index]]). instances is the Draw's [entity(\"PER_INSTANCE\")] buffer, stride bytes an element with its MATRIX matrixOffset bytes in; ranges a MeshPack's rangeBuffer. How many instances there are is how many visible has room for: nothing of them is counted on the CPU. Given drawn, as big as instances, each element in sight is copied there where it is drawn too: a shader that reads its instance at first + index reads drawn as it is (what a batched Draw given cull does).",
   "tags": [
     "cull",
     "frustum",
@@ -114,6 +114,18 @@
         }
       },
       {
+        "id": "drawn",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          620
+        ],
+        "inputs": {
+          "name": "drawn",
+          "kind": "eBuffer"
+        }
+      },
+      {
         "id": "groups",
         "type": "Buffer",
         "at": [
@@ -209,6 +221,12 @@
               "visible",
               "out"
             ]
+          },
+          "param.drawn": {
+            "$link": [
+              "drawn",
+              "out"
+            ]
           }
         }
       },
@@ -287,6 +305,23 @@
           "value": {
             "$link": [
               "visible",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "drawn out",
+        "type": "FunctionOutput",
+        "at": [
+          880,
+          200
+        ],
+        "inputs": {
+          "name": "drawn",
+          "value": {
+            "$link": [
+              "drawn",
               "out"
             ]
           }

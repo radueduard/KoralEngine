@@ -595,3 +595,86 @@ TEST_F(ScaleTest, CullInSightDrawsOnlyWhatIsSeen) {
     EXPECT_EQ(drawn(), 8) << "and one moved out of it is not";
     EXPECT_TRUE(is(2, { 0, 0, 0 })) << "where it was, nothing";
 }
+
+// A batched Draw given `cull` is culled on the GPU by itself: CullInSight's passes are written out with it, and what
+// its shader reads is compacted — the elements in sight one after another — so that a shader of [entity("PER_INSTANCE")]
+// that reads its instance at first + index, and knows nothing of culling, draws only what is in sight, as it was.
+TEST_F(ScaleTest, ABatchedDrawGivenCullIsCulledOnTheGpu) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    std::vector<kecs::Entity> entities;
+    for (int i = 0; i < 16; ++i) {
+        const kecs::Entity entity = world.Create();
+        const float x = i < 8 ? -0.875f + 0.25f * static_cast<float>(i) : 2.f + 0.25f * static_cast<float>(i - 8);
+        world.SetPosition(entity, { x, 0.f, 0.5f });
+        world.SetScale(entity, { 0.2f, 0.2f, 0.2f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        entities.push_back(entity);
+    }
+    const auto make = [&](const bool culled) {
+        kgraph::Graph graph;
+        graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+            .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+        graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+        graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+        graph.Add("shape", "Primitive").Set("shape", "eCube");
+        graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+            .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+        graph.Add("drawn", "ForEach").Set("component", "Mesh");
+        // The matrices place them in the picture as they are: what they are seen with is the identity.
+        graph.Add("sight", "MatrixTranslate").Set("offset", Value::List { 0, 0, 0 });
+        kgraph::Node& draw = graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "drawn", "field.mesh").Set("batched", true);
+        if (culled) draw.Wire("cull", "sight");
+        graph.Add("screen", "Screen");
+        graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+        return graph;
+    };
+    const auto picture = [&] {
+        std::vector<kor::U8Vec4> pixels;
+        for (kor::u32 y = 0; y < support::Size; ++y)
+            for (kor::u32 x = 0; x < support::Size; ++x) pixels.push_back(scene->Pixel(x, y));
+        return pixels;
+    };
+    const auto frames = [&] { for (int i = 0; i < 6; ++i) Frame(); for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem; };
+
+    runtime.Set(make(false));
+    frames();
+    ASSERT_TRUE(runtime.Ok());
+    for (const kecs::Entity entity : entities) support::Give(world, entity, "tinted", { { "color", { 1, 0, 0, 1 } } });
+    frames();
+    const auto whole = picture();
+
+    runtime.Set(make(true));
+    frames();
+    ASSERT_TRUE(runtime.Ok());
+    ASSERT_NE(runtime.Status("draw"), nullptr);
+    EXPECT_TRUE(runtime.Status("draw")->note.empty()) << runtime.Status("draw")->note;
+    ASSERT_NE(runtime.Status("draw/cull"), nullptr) << "the cull, written out with it";
+    EXPECT_TRUE(runtime.Status("draw/cull")->ok) << runtime.Status("draw/cull")->error;
+    // How many its command draws: what the cull counted, read back.
+    runtime.Watch("draw/commands");
+    const auto drawn = [&] {
+        frames();
+        const auto peek = runtime.Watched("draw/commands");
+        if (!peek || peek->bytes.size() < 20) return -1;
+        std::uint32_t command[5];
+        std::memcpy(command, peek->bytes.data(), 20);
+        return static_cast<int>(command[1]);
+    };
+    EXPECT_EQ(drawn(), 8) << "those in sight, and none beside it";
+    const auto culled = picture();
+    int differing = 0;
+    for (std::size_t i = 0; i < whole.size(); ++i)
+        if (std::abs(whole[i].x - culled[i].x) > 1 || std::abs(whole[i].y - culled[i].y) > 1 || std::abs(whole[i].z - culled[i].z) > 1) ++differing;
+    EXPECT_EQ(differing, 0) << "the same picture: what was left out was not in it";
+
+    // One moved into sight is drawn, where it is, with what it holds.
+    world.SetPosition(entities[8], { 0.f, 0.5f, 0.5f });
+    EXPECT_EQ(drawn(), 9);
+    const auto p = scene->Pixel(16, 24);     // y down the picture, as Vulkan has it
+    EXPECT_GT(p.x, 200) << "red, drawn from its own element";
+    EXPECT_LT(p.z, 50) << "not the magenta of an element no entity is in";
+}

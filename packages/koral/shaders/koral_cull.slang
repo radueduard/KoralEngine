@@ -8,6 +8,10 @@
 //
 //     StructuredBuffer<uint> visible;          // IndirectDraws' `visible`, which this fills
 //     const Instance instance = instances[visible[first + index]];
+//
+// Or, given `drawn` — a buffer as big as the instances — each element in sight is copied there too, where it is drawn:
+// a shader that reads its instance at first + index, as any of [entity("PER_INSTANCE")] does, reads `drawn` as it is,
+// with no `visible` (what a batched Draw given `cull` does). Without room in it, nothing is copied.
 
 struct CullPush {
     float4x4 viewProjection;    // what the picture is seen with: a lens after a view
@@ -38,6 +42,7 @@ StructuredBuffer<MeshRange> ranges;         // the MeshPack's rangeBuffer: each 
 RWStructuredBuffer<Command> commands;       // IndirectDraws' commands: from no instances each frame
 RWStructuredBuffer<uint> visible;           // IndirectDraws' visible: which instance each drawn one is, a uint an instance
 RWStructuredBuffer<uint> args;              // how many groups `cull` runs: one thread an instance
+RWByteAddressBuffer drawn;                  // the elements in sight, one after another as they are drawn: when it has room
 
 /** How many groups of 64 cover the instances — as many as `visible` has room for — for `cull` to be dispatched by. */
 [shader("compute")]
@@ -103,5 +108,12 @@ void cull(uint3 id : SV_DispatchThreadID)
     if (instance < first || instance >= end) return;
     uint before;
     InterlockedAdd(commands[command].instanceCount, 1, before);
-    if (first + before < end) visible[first + before] = instance;
+    if (first + before >= end) return;
+    visible[first + before] = instance;
+    // Its element, where it is drawn, a word at a time.
+    uint room;
+    drawn.GetDimensions(room);
+    const uint to = (first + before) * push.stride;
+    if (to + push.stride <= room)
+        for (uint word = 0; word < push.stride; word += 4) drawn.Store(to + word, instances.Load(instance * push.stride + word));
 }

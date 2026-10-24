@@ -193,7 +193,7 @@ namespace kgraph
                 const Port::Condition counted { "command", { V("eDrawIndirectCount"), V("eDrawIndexedIndirectCount") }, "for draws counted by a buffer" };
                 const Port::Condition depth { "depthTest", { V(true) }, "while its depth test is on" };
                 const Port::Condition stencil { "stencilTest", { V(true) }, "while its stencil test is on" };
-                set("batched", "What is drawn");
+                for (const char* name : { "batched", "compacted" }) set(name, "What is drawn");
                 for (const char* name : { "vertexCount", "firstVertex", "instances", "firstInstance" }) set(name, "What is drawn", drawn);
                 set("vertexOffset", "What is drawn", indexed);
                 set("tasks", "What is drawn", tasks);
@@ -1233,7 +1233,10 @@ namespace kgraph
                     optional(ResourcePort("mesh", "Mesh", "What is drawn: a ForEach of Mesh's `field.mesh`, a mesh for each element — or one mesh, a Primitive's. None, for a vertex shader that makes its own vertices.")),
                     optional(Bool("batched", "True to draw every element of the Filter or ForEach its mesh is wired from in one indirect draw, rather than a draw each: their meshes packed "
                                              "as one, grouped by mesh. What each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's, not push constants; one that is wired a "
-                                             "value of each element otherwise is drawn one at a time, and its note says why.")),
+                                             "value of each element otherwise is drawn one at a time, and its note says why. Given `cull` too, what is out of its sight is "
+                                             "left out on the GPU.")),
+                    optional(Bool("compacted", "True to have its shader read its buffer of instances as a pass before it leaves it — what is in sight, one after another as "
+                                               "it is drawn (CullInSight's `drawn`) — rather than as it is filled: given as `drawnInstances`. A batched Draw given `cull` is.")),
                     optional(Choice("command", { "eAuto", "eDraw", "eDrawIndexed", "eDrawMeshTasks", "eDrawIndirect", "eDrawIndexedIndirect", "eDrawIndirectCount",
                                                  "eDrawIndexedIndirectCount", "eDrawMeshTasksIndirect" },
                                     "Which draw. eAuto: indexed when the mesh has indices, mesh tasks when the pipeline's stages is eMesh, and plain vertices otherwise. The Indirect ones read what to draw from the buffer wired to 'indirect'.")),
