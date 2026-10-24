@@ -305,3 +305,167 @@ TEST_F(ScaleTest, AnInstancersMillionsCostTheCpuNothing) {
                 count, (32.0 + 32.0 * std::ceil(count / 256.0) + 20.0 * count) / 1e6, firstMs, stillMs, movedMs, gpu, timings.c_str());
     EXPECT_LT(stillMs, 1.0) << "nothing a frame on the CPU is a number of instances";
 }
+
+// Ten thousand entities drawn by a Draw run once an element of a ForEach: a draw each, its matrix and colour as push
+// constants. What that costs the CPU a frame: readying the draws, and recording them.
+TEST_F(ScaleTest, TenThousandEntitiesDrawnOneByOne) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("shape", "Primitive").Set("shape", "eCube");
+    graph.Add("placed", "GraphicsPipeline").Set("vertex.module", "placed").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+        .Set("fragment.module", "placed").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("drawn", "ForEach").Set("component", "placed").Set("with", Value::List { "Mesh" });
+    graph.Add("draw", "Draw").Wire("pipeline", "placed").Wire("mesh", "drawn", "Mesh.mesh").Wire("push.model", "drawn", "matrix")
+        .Wire("push.color", "drawn", "field.color");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const kecs::ComponentId placed = world.Find("placed");
+    ASSERT_NE(placed, kecs::NoComponent);
+
+    const int n = std::getenv("KGRAPH_SCALE_ENTITIES") ? Count() : 10'000;
+    const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
+    const float cell = 2.f / static_cast<float>(side);
+    std::vector<kecs::Entity> entities;
+    for (int i = 0; i < n; ++i) {
+        const float x = -1.f + cell * (static_cast<float>(i % side) + 0.5f), y = -1.f + cell * (static_cast<float>(i / side) + 0.5f);
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, y, 0.f });
+        world.SetScale(entity, { 0.1f, 0.1f, 0.1f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        support::Give(world, entity, "placed", { { "color", x > 0.f ? std::vector { 1.f, 0.f, 0.f, 1.f } : std::vector { 0.f, 1.f, 0.f, 1.f } } });
+        entities.push_back(entity);
+    }
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto colour = [&](const kor::u32 x, const kor::u32 y) { const auto p = scene->Pixel(x, y); return std::array<int, 3> { p.x, p.y, p.z }; };
+    EXPECT_GT(colour(24, 16)[0], 200) << "the right half red";
+    EXPECT_GT(colour(8, 16)[1], 200) << "the left half green";
+
+    const double stillMs = Median(30, [](int) {});
+    const double allMs = Median(30, [&](const int frame) {
+        for (const kecs::Entity entity : entities) {
+            const kecs::Vec3 at = world.PositionOf(entity);
+            world.SetPosition(entity, { at.x, at.y, frame % 2 ? 0.f : 0.01f });
+        }
+    });
+    const auto timing = runtime.Timings().at("draw");
+    std::printf("%d entities drawn one by one: runtime Update, median a frame: nothing moving %.2f ms, all moving %.2f ms; "
+                "the Draw's recording %.2f ms, readying %.2f ms; GPU %.2f ms\n", n, stillMs, allMs, timing.recordMs, timing.prepareMs, timing.gpuMs);
+}
+
+// E7's gate: a Draw `batched` draws the same picture as a Draw each, and ten thousand entities cost the CPU far less. The
+// same ForEach, the same meshes; what each draw had as push constants, each instance has in its buffer. And one that is
+// wired a value of each element is drawn one at a time, and says why.
+TEST_F(ScaleTest, ABatchedDrawDrawsTheSamePictureForLess) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    const auto sphere = runtime.ResourceOf("$sphere");
+    ASSERT_TRUE(cube && sphere);
+
+    // A draw each, with placed.slang's push constants; batched, with placedInstanced.slang's buffer of instances; or
+    // asked to be batched with placed.slang's, wired each element's matrix and colour.
+    const auto make = [&](const bool batched, const bool wiredEach) {
+        kgraph::Graph graph;
+        graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+            .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+        graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+        graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+        graph.Add("shape", "Primitive").Set("shape", "eCube");
+        const char* module = batched && !wiredEach ? "placedInstanced" : "placed";
+        graph.Add("pipeline", "GraphicsPipeline").Set("vertex.module", module).Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
+            .Set("fragment.module", module).Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+        graph.Add("drawn", "ForEach").Set("component", "pipeline").Set("with", Value::List { "Mesh" });
+        kgraph::Node& draw = graph.Add("draw", "Draw").Wire("pipeline", "pipeline").Wire("mesh", "drawn", "Mesh.mesh");
+        if (!batched || wiredEach) draw.Wire("push.model", "drawn", "matrix").Wire("push.color", "drawn", "field.color");
+        if (batched) draw.Set("batched", true);
+        graph.Add("screen", "Screen");
+        graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+        return graph;
+    };
+    const auto picture = [&] {
+        std::vector<std::array<int, 3>> pixels;
+        for (kor::u32 y = 0; y < support::Size; ++y)
+            for (kor::u32 x = 0; x < support::Size; ++x) { const auto p = scene->Pixel(x, y); pixels.push_back({ p.x, p.y, p.z }); }
+        return pixels;
+    };
+
+    runtime.Set(make(false, false));
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const kecs::ComponentId own = world.Find("pipeline");
+    ASSERT_NE(own, kecs::NoComponent);
+
+    // Two meshes, every colour of a grid of them: what a batch groups by mesh, and draws in another order.
+    const int n = std::getenv("KGRAPH_SCALE_ENTITIES") ? Count() : 10'000;
+    const int side = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(n))));
+    const float cell = 2.f / static_cast<float>(side);
+    std::vector<kecs::Entity> entities;
+    for (int i = 0; i < n; ++i) {
+        const float x = -1.f + cell * (static_cast<float>(i % side) + 0.5f), y = -1.f + cell * (static_cast<float>(i / side) + 0.5f);
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, y, 0.f });
+        world.SetScale(entity, { cell * 0.8f, cell * 0.8f, cell * 0.8f });
+        world.Add<kgraph::Mesh>(entity, { i % 3 == 0 ? sphere : cube });
+        support::Give(world, entity, "pipeline", { { "color", { (x + 1.f) * 0.5f, (y + 1.f) * 0.5f, i % 3 == 0 ? 1.f : 0.f, 1.f } } });
+        entities.push_back(entity);
+    }
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto each = picture();
+    const double eachMs = Median(30, [](int) {});
+    const double eachRecordMs = runtime.Timings().at("draw").recordMs;
+
+    // Batched: the same pipeline's component, now each instance's — "pipeline" names both.
+    runtime.Set(make(true, false));
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    ASSERT_NE(runtime.Status("draw"), nullptr);
+    EXPECT_TRUE(runtime.Status("draw")->note.empty()) << runtime.Status("draw")->note;
+    EXPECT_EQ(runtime.ValueOf("draw/commands", "drawCount"), Value(2)) << "a command for each mesh";
+    const auto batch = picture();
+    int differing = 0;
+    for (std::size_t i = 0; i < each.size(); ++i)
+        if (std::abs(each[i][0] - batch[i][0]) > 1 || std::abs(each[i][1] - batch[i][1]) > 1 || std::abs(each[i][2] - batch[i][2]) > 1) ++differing;
+    EXPECT_EQ(differing, 0) << "the same picture, pixel for pixel";
+    const double batchMs = Median(30, [](int) {});
+    const double batchRecordMs = runtime.Timings().at("draw").recordMs;
+    // Moved, a batch draws them where they are now.
+    world.SetPosition(entities[0], { 0.f, 0.f, 0.f });
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    world.SetPosition(entities[0], { -1.f + cell * 0.5f, -1.f + cell * 0.5f, 0.f });
+
+    // Wired each element's matrix: one at a time, and it says so.
+    runtime.Set(make(true, true));
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_NE(runtime.Status("draw"), nullptr);
+    EXPECT_NE(runtime.Status("draw")->note.find("one at a time"), std::string::npos) << runtime.Status("draw")->note;
+    EXPECT_NE(runtime.Status("draw")->note.find("'push.model'"), std::string::npos) << runtime.Status("draw")->note;
+    const auto oneAtATime = picture();
+    differing = 0;
+    for (std::size_t i = 0; i < each.size(); ++i)
+        if (std::abs(each[i][0] - oneAtATime[i][0]) > 1 || std::abs(each[i][1] - oneAtATime[i][1]) > 1 || std::abs(each[i][2] - oneAtATime[i][2]) > 1) ++differing;
+    EXPECT_EQ(differing, 0) << "drawn one at a time, as it is wired";
+
+    std::printf("%d entities: a draw each, runtime Update %.2f ms and recording %.2f ms a frame; batched, %.3f ms and %.3f ms\n",
+                n, eachMs, eachRecordMs, batchMs, batchRecordMs);
+    EXPECT_LT(batchMs + batchRecordMs, (eachMs + eachRecordMs) / 4) << "measurably faster";
+}

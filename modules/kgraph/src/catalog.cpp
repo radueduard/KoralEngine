@@ -193,6 +193,7 @@ namespace kgraph
                 const Port::Condition counted { "command", { V("eDrawIndirectCount"), V("eDrawIndexedIndirectCount") }, "for draws counted by a buffer" };
                 const Port::Condition depth { "depthTest", { V(true) }, "while its depth test is on" };
                 const Port::Condition stencil { "stencilTest", { V(true) }, "while its stencil test is on" };
+                set("batched", "What is drawn");
                 for (const char* name : { "vertexCount", "firstVertex", "instances", "firstInstance" }) set(name, "What is drawn", drawn);
                 set("vertexOffset", "What is drawn", indexed);
                 set("tasks", "What is drawn", tasks);
@@ -1226,6 +1227,9 @@ namespace kgraph
                     ResourcePort("pipeline", "GraphicsPipeline"),
                     optional(ResourcePort("framebuffer", "Framebuffer", "What it draws into: the pipeline's own, when not wired.")),
                     optional(ResourcePort("mesh", "Mesh", "What is drawn: a ForEach of Mesh's `field.mesh`, a mesh for each element — or one mesh, a Primitive's. None, for a vertex shader that makes its own vertices.")),
+                    optional(Bool("batched", "True to draw every element of the Filter or ForEach its mesh is wired from in one indirect draw, rather than a draw each: their meshes packed "
+                                             "as one, grouped by mesh. What each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's, not push constants; one that is wired a "
+                                             "value of each element otherwise is drawn one at a time, and its note says why.")),
                     optional(Choice("command", { "eAuto", "eDraw", "eDrawIndexed", "eDrawMeshTasks", "eDrawIndirect", "eDrawIndexedIndirect", "eDrawIndirectCount",
                                                  "eDrawIndexedIndirectCount", "eDrawMeshTasksIndirect" },
                                     "Which draw. eAuto: indexed when the mesh has indices, mesh tasks when the pipeline's stages is eMesh, and plain vertices otherwise. The Indirect ones read what to draw from the buffer wired to 'indirect'.")),

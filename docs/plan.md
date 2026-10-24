@@ -277,9 +277,16 @@ past entities:
   the mesh near, points far, never many more points than pixels — and drawn on the GPU. 100 million cost the CPU 0.08
   ms a frame and the GPU 0.3 ms. 100 million entities could not be: kecs alone would need some 20 GB for them.
 
-Still to do for the gate: a Draw run per entity turned into the batched one by itself, and the editor saying why when it
-can't; a Dispatch batched by a dispatch dimension; and the culling the forward-plus sample does on the GPU made one of
-the engine's functions, for any indirect draw of entities.
+- **A Draw `batched`** of a Filter's or a ForEach's meshes is written out as one indirect draw of them all (a grouped
+  Filter, a MeshPack and an IndirectDraws, `<draw>/…`), its shader opting in with a `[entity("PER_INSTANCE")]` buffer;
+  one wired a value of each element draws one at a time and its note says why (see
+  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)). **The gate, for graphics:**
+  `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess` — ten thousand entities of two meshes, the same picture pixel for
+  pixel, 7.8 ms of CPU a frame a draw each and 0.19 ms batched.
+
+Still to do: a Dispatch batched by a dispatch dimension; the editor offering `batched` where a Draw could be (it says
+why only once asked); and the culling the forward-plus sample does on the GPU made one of the engine's functions, for any
+indirect draw of entities.
 
 ### E8: A graph made both to try ideas in and to make them fast
 
@@ -338,5 +345,5 @@ and `PassRate` become `pages` and `PageRate` in one change later, writing `"page
 
 ## First steps
 
-The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, is begun:
-next is a per-entity Draw batched by itself.
+The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, is begun, and its gate for graphics passed:
+next is a Dispatch batched by a dispatch dimension.

@@ -1038,6 +1038,28 @@ one mesh, in two buffers (a pass and its prepass), cost the runtime about 0.04 m
 when a thousand do and 3.3 ms when all of them do (Release, `ScaleTest` in `test_scale.cpp`); it was 13 ms in every case
 before. Nothing but the runtime writes the buffer: what else wrote into it would stay until its elements change.
 
+#### Batched: a Draw of each element, as one
+
+A Draw whose `mesh` is each element's — a Filter's `Mesh.mesh`, or a ForEach's, or a ForEach of Mesh's `field.mesh` —
+draws once for each element. Given `batched`, it is written out before it runs as one indirect draw of all of them,
+with no node in the graph for it: `<draw>/batch`, a Filter of the same entities grouped by mesh (of a ForEach, a
+Filter of an Entities node, `<draw>/all`, with what the ForEach is of and its `with` and `without`); `<draw>/pack`, a
+MeshPack of their meshes; and `<draw>/commands`, an IndirectDraws of them, which the Draw draws `eDrawIndexedIndirect`.
+What each element is to the shader is then its `[entity("PER_INSTANCE")]` buffer's, filled in the batch's order:
+
+```json
+{ "id": "drawn", "type": "ForEach", "inputs": { "component": "lit", "with": ["Mesh"] } },
+{ "id": "draw", "type": "Draw", "inputs": { "pipeline": { "$link": ["lit", "out"] }, "mesh": { "$link": ["drawn", "Mesh.mesh"] }, "batched": true } }
+```
+
+A Draw that is wired a value of each element besides its mesh — a `push.model` from the element's `matrix`, straight
+or through Math — cannot be one draw: it draws one at a time, as it did, and its note says which inputs and why. So
+does one whose ForEach says `where`, `select`, `entityId` or `groupBy` (make it a Filter), and one whose `command` is
+another than eAuto or eDrawIndexed. A batch is drawn whole: `cull` is taken off it, being a draw at a time on the CPU.
+One whose shader has no buffer of instances draws every element alike, and says so. Ten thousand entities of two
+meshes draw the same picture, pixel for pixel, either way; a draw each costs the CPU about 7.8 ms a frame (readying 3.1,
+recording 4.7), and batched 0.19 ms (Release, `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess`).
+
 The rest of a draw is the node's as well:
 
 - **What the framebuffer starts as and keeps:** `load` (true draws over what is there), or each of

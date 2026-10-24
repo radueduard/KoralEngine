@@ -1256,6 +1256,9 @@ namespace kgraph
         std::map<std::string, std::vector<std::pair<std::string, Input>>, std::less<>> bundles;
         std::map<std::string, std::set<std::string>, std::less<>> fromBundle;
         std::map<std::string, std::string, std::less<>> bundleNotes;
+        // The Draws `batched` written out as one indirect draw, and those that could not be, with why.
+        std::set<std::string, std::less<>> batched;
+        std::map<std::string, std::string, std::less<>> unbatched;
 
         /** Whether a Bundle gave node @p id its input @p name, rather than a wire or a value of its own. */
         [[nodiscard]] bool FromBundle(const std::string_view id, const std::string& name) const
@@ -6147,6 +6150,9 @@ namespace kgraph
                 AddOutputs(*node, inputs, fresh);
                 fresh.status.ok = true;
                 if (const auto note = BundleNote(*node, fresh); !note.empty()) fresh.status.note = note;
+                if (const auto why = unbatched.find(node->id); why != unbatched.end()) fresh.status.note = why->second;
+                if (batched.contains(node->id) && fresh.pass && fresh.pass->entities && fresh.pass->entities->instances.empty())
+                    fresh.status.note = "batched, and its shader has no [entity(\"PER_INSTANCE\")] buffer: every element is drawn with the same push constants";
                 fresh.signature = std::move(signature);
                 if (IsMadeResource(node->type)) fresh.madeWith = WiredValues(*node);
                 fresh.stamp = ++counter;
@@ -7909,6 +7915,8 @@ namespace kgraph
         _impl->bundles = std::move(expansion.bundles);
         _impl->fromBundle = std::move(expansion.fromBundle);
         _impl->bundleNotes = std::move(expansion.notes);
+        _impl->batched = std::move(expansion.batched);
+        _impl->unbatched = std::move(expansion.unbatched);
         _running = std::move(expansion.graph);
         _impl->Evaluate(_running);
     }
