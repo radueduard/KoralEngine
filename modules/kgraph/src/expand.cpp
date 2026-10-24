@@ -363,23 +363,24 @@ namespace kgraph
      * buffer's, filled in the batch's order. A Draw wired a value of each element otherwise — a `push.model` from the
      * element's matrix — cannot be one draw: it is left a draw each, and says why.
      */
-    static void WriteBatches(Expansion& out)
+    /** What a wire of @p graph comes from, past References. */
+    static const Node* OriginOf(const Graph& graph, const std::string_view id)
     {
-        Graph& graph = out.graph;
-        // What a wire comes from, past References.
-        const auto origin = [&](std::string id) -> const Node* {
-            const Node* node = graph.Find(id);
-            for (int hops = 0; node && node->type == "Reference" && hops < 16; ++hops) {
-                const auto named = node->inputs.find("node");
-                node = named != node->inputs.end() && named->second.value.String() ? graph.Find(*named->second.value.String()) : nullptr;
-            }
-            return node;
-        };
+        const Node* node = graph.Find(id);
+        for (int hops = 0; node && node->type == "Reference" && hops < 16; ++hops) {
+            const auto named = node->inputs.find("node");
+            node = named != node->inputs.end() && named->second.value.String() ? graph.Find(*named->second.value.String()) : nullptr;
+        }
+        return node;
+    }
+
+    std::string WhyNotBatched(const Graph& graph, const Node& draw, std::vector<std::string>* each)
+    {
         // Whether what a wire carries is each element's: an element's output of a node that is entities an element at a
         // time, or what is worked out of one. What is of them all — how many, their groups — is not.
         std::map<std::string, bool, std::less<>> eachOf;
-        std::function<bool(const Link&)> each = [&](const Link& link) -> bool {
-            const Node* node = origin(link.node);
+        std::function<bool(const Link&)> ofEach = [&](const Link& link) -> bool {
+            const Node* node = OriginOf(graph, link.node);
             if (!node) return false;
             if (node->type == "Entities" || node->type == "Filter" || node->type == "ForEach")
                 return !std::ranges::contains(std::array<std::string_view, 5> { "out", "entities", "count", "groups", "groupCount" }, link.output);
@@ -387,10 +388,39 @@ namespace kgraph
             eachOf[node->id] = false;      // a loop of wires: not this way
             bool found = false;
             for (const auto& input : node->inputs | std::views::values)
-                if (input.link && each(*input.link)) { found = true; break; }
+                if (input.link && ofEach(*input.link)) { found = true; break; }
             return eachOf[node->id] = found;
         };
+        const auto mesh = draw.inputs.find("mesh");
+        const Node* source = mesh != draw.inputs.end() && mesh->second.link ? OriginOf(graph, mesh->second.link->node) : nullptr;
+        if (!source || (source->type != "Filter" && source->type != "ForEach")) return "'mesh' is not each element's of a Filter or a ForEach";
+        const std::string& output = mesh->second.link->output;
+        const auto component = source->inputs.find("component");
+        const bool ofMesh = component != source->inputs.end() && component->second.value.String() && *component->second.value.String() == "Mesh";
+        if (output != "Mesh.mesh" && !(ofMesh && output == "field.mesh")) return std::format("'mesh' is '{}' of '{}', not its Mesh's", output, source->id);
+        if (const auto command = draw.inputs.find("command"); command != draw.inputs.end() && command->second.value.String()
+            && *command->second.value.String() != "eAuto" && *command->second.value.String() != "eDrawIndexed")
+            return std::format("'command' is {}: a batch is drawn indexed and indirect", *command->second.value.String());
+        std::vector<std::string> theirs;
+        for (const auto& [name, input] : draw.inputs)
+            if (name != "mesh" && input.link && ofEach(*input.link)) theirs.push_back(name);
+        if (each) *each = theirs;
+        if (!theirs.empty()) {
+            std::string list;
+            for (const auto& name : theirs) list += std::format("{}'{}'", list.empty() ? "" : ", ", name);
+            return std::format("{} {} each element's — what each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's when it is one draw",
+                               list, theirs.size() == 1 ? "is" : "are");
+        }
+        if (source->type == "ForEach")
+            for (const char* name : { "where", "select", "entityId", "groupBy" })
+                if (source->inputs.contains(name)) return std::format("'{}' says '{}', which a batch of it does not: make it a Filter", source->id, name);
+        return {};
+    }
 
+    static void WriteBatches(Expansion& out)
+    {
+        Graph& graph = out.graph;
+        const auto origin = [&](const std::string& id) { return OriginOf(graph, id); };
         std::vector<std::string> draws;
         for (const Node& node : graph.nodes)
             if (node.type == "Draw")
@@ -398,33 +428,14 @@ namespace kgraph
                     draws.push_back(node.id);
         for (const std::string& id : draws) {
             Node draw = *graph.Find(id);
-            const auto refuse = [&](std::string why) { out.unbatched[id] = std::format("batched: {}, so it draws one at a time", why); };
+            if (const std::string why = WhyNotBatched(graph, draw); !why.empty()) {
+                out.unbatched[id] = std::format("batched: {}, so it draws one at a time", why);
+                continue;
+            }
             const auto mesh = draw.inputs.find("mesh");
-            const Node* source = mesh != draw.inputs.end() && mesh->second.link ? origin(mesh->second.link->node) : nullptr;
-            if (!source || (source->type != "Filter" && source->type != "ForEach")) { refuse("'mesh' is not each element's of a Filter or a ForEach"); continue; }
-            const std::string& output = mesh->second.link->output;
+            const Node* source = origin(mesh->second.link->node);
             const auto component = source->inputs.find("component");
             const bool ofMesh = component != source->inputs.end() && component->second.value.String() && *component->second.value.String() == "Mesh";
-            if (output != "Mesh.mesh" && !(ofMesh && output == "field.mesh")) { refuse(std::format("'mesh' is '{}' of '{}', not its Mesh's", output, source->id)); continue; }
-            if (const auto command = draw.inputs.find("command"); command != draw.inputs.end() && command->second.value.String()
-                && *command->second.value.String() != "eAuto" && *command->second.value.String() != "eDrawIndexed") {
-                refuse(std::format("'command' is {}: a batch is drawn indexed and indirect", *command->second.value.String()));
-                continue;
-            }
-            std::vector<std::string> theirs;
-            for (const auto& [name, input] : draw.inputs)
-                if (name != "mesh" && input.link && each(*input.link)) theirs.push_back(std::format("'{}'", name));
-            if (!theirs.empty()) {
-                std::string list;
-                for (const auto& name : theirs) list += (list.empty() ? "" : ", ") + name;
-                refuse(std::format("{} {} each element's — what each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's when it is one draw",
-                                   list, theirs.size() == 1 ? "is" : "are"));
-                continue;
-            }
-            if (source->type == "ForEach")
-                for (const char* name : { "where", "select", "entityId", "groupBy" })
-                    if (source->inputs.contains(name)) { theirs.push_back(name); break; }
-            if (!theirs.empty()) { refuse(std::format("'{}' says '{}', which a batch of it does not: make it a Filter", source->id, theirs.front())); continue; }
 
             // The same entities, grouped by mesh: of a Filter, those it keeps; of a ForEach, those with what it says.
             std::vector<Node> made;

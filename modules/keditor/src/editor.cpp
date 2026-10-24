@@ -429,6 +429,11 @@ namespace keditor
         ++_went;
     }
 
+    void Session::Batch(const std::string& id)
+    {
+        if (Doc().SetInput(id, "batched", kgraph::Value(true))) ++_changes;
+    }
+
     void Session::CopyNodes(const std::vector<std::string>& ids)
     {
         std::vector<kgraph::Node> nodes;
@@ -7464,6 +7469,25 @@ class $NAME : ResourceScript() {
                 }
                 if (const auto* status = runtime.Status(id); status && !status->ok) rows.push_back(Problem(status->error));
                 else if (status && !status->note.empty()) rows.push_back(kgui::Muted(status->note, 11.f));
+                // A Draw or a Dispatch of many elements: one of them all, or what it would take to be.
+                if (const auto batching = runtime.BatchingOf(id)) {
+                    const char* one = node.type == "Draw" ? "draw" : "dispatch";
+                    if (batching->batched) {
+                        rows.push_back(kgui::Muted(std::format("Batched: one {} of {} {}.", one, batching->elements, batching->elements == 1 ? "element" : "elements"), 11.f));
+                    } else {
+                        const kui::Theme& t = kui::Theme::Current();
+                        std::vector<kui::Widget> said { kui::Text(std::format("{} {} a frame, one an element.", batching->elements, node.type == "Draw" ? "draws" : "dispatches"),
+                                                                  kui::TextStyle {}.SetSize(12.5f).SetColor(t.text)) };
+                        const auto* status = runtime.Status(id);
+                        if (batching->offered)
+                            said.push_back(kui::Row({ Small(std::format("Batch: one {} of them all", one), [this, id] { _session->Batch(id); }) }));
+                        else if (!batching->why.empty() && !(status && status->note == batching->why))
+                            said.push_back(kgui::Muted(batching->why, 11.f));
+                        rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(10.f))
+                                                          .SetDecoration(kui::Decoration {}.SetColor(t.primary.WithAlpha(0.10f)).SetRadius(6.f)),
+                                                      Rows(std::move(said), 4.f)));
+                    }
+                }
                 // What a pass costs, followed as it runs: the GPU's time, and the CPU's recording it.
                 if (const kgraph::NodeType* type = kgraph::FindType(node.type); type && type->category == "Passes")
                     rows.push_back(kui::Tooltip("Averaged over recent frames. The GPU's time arrives a few frames late; a fixed page's steps are added together.",

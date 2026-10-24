@@ -321,6 +321,14 @@ stencil, line width).
 
 ### A node in the inspector
 
+**A Draw or a Dispatch of many elements** says, under its name, how many it runs a frame — *4 draws a frame, one an
+element* — and what it would take to be one of them all (`kgraph::Runtime::BatchingOf`). A Draw whose shader reads each
+element from its `[entity("PER_INSTANCE")]` buffer already, and is wired nothing of each element but its mesh, is
+offered **Batch: one draw of them all**, which sets its `batched` (`Session::Batch`). Any other says which of its inputs
+are each element's — what its shader would read from that buffer instead — or why it cannot be one, by the same rules
+as `batched` itself goes by (`kgraph::WhyNotBatched`). A Dispatch is told of `entities`, a Filter's. Batched, it says
+*Batched: one draw of 4 elements*. See [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one).
+
 The inspector shows every input a node has, in the order its type lists them: the ones it has been given with their
 names lit, the rest dimmed and showing what they start as — set one, and it is given. An input given in parts
 (`extent`, `groups`) is one line of its parts, and its `o` wires it whole instead. `x` takes an input back to nothing

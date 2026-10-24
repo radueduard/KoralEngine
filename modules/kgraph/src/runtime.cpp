@@ -8633,5 +8633,63 @@ namespace kgraph
         return run.each.empty() && run.report.skipped == 0 ? nullptr : &run.report;
     }
 
+    std::optional<Runtime::Batching> Runtime::BatchingOf(const std::string_view id) const
+    {
+        const Node* node = _running.Find(id);
+        if (!node || (node->type != "Draw" && node->type != "Dispatch")) return std::nullopt;
+        const auto rowsOf = [&](const std::string& filter) -> std::size_t {
+            const auto* built = _impl->Find(filter);
+            return built && built->listed ? built->listed->Rows() : 0;
+        };
+        const auto* built = _impl->Find(id);
+        const EntityRun* run = built && built->status.ok && built->pass ? built->pass->entities.get() : nullptr;
+        Batching batching;
+        if (node->type == "Dispatch") {
+            if (run && !run->batchOf.empty()) {
+                batching.batched = true;
+                batching.elements = rowsOf(run->batchOf);
+                return batching;
+            }
+            if (!run || run->each.empty()) return std::nullopt;
+            batching.elements = run->report.ran + run->report.skipped;
+            if (batching.elements < 2) return std::nullopt;
+            batching.why = std::format("wired to a Filter's entities ('entities'), it would run once for all of them, one after another along z, each "
+                                       "element SV_GroupID.z: what it is wired of each of '{}' its shader would read from its [entity(\"PER_INSTANCE\")] buffer "
+                                       "instead, and the images each holds by their bindless indices (TEXTURE, STORAGE)", run->each);
+            return batching;
+        }
+        if (_impl->batched.contains(id)) {
+            batching.batched = true;
+            batching.elements = rowsOf(std::string(id) + "/batch");
+            return batching;
+        }
+        // Of how many: what it drew one at a time; or, one that could not draw them so, the Filter or ForEach its mesh is of.
+        const auto mesh = node->inputs.find("mesh");
+        const Node* source = mesh != node->inputs.end() && mesh->second.link ? _impl->Origin(mesh->second.link->node) : nullptr;
+        batching.elements = run && !run->each.empty() ? run->report.ran + run->report.culled + run->report.skipped : source ? rowsOf(source->id) : 0;
+        if (batching.elements < 2 || !source || (source->type != "Filter" && source->type != "ForEach")) return std::nullopt;
+        // Whether its shader reads each instance's from a buffer of them: then `batched` is all it takes.
+        bool perInstance = false;
+        if (const auto pipeline = node->inputs.find("pipeline"); pipeline != node->inputs.end() && pipeline->second.link)
+            if (const Node* origin = _impl->Origin(pipeline->second.link->node))
+                if (const auto* made = _impl->Find(origin->id); made && made->pipeline)
+                    perInstance = std::ranges::any_of(made->pipeline->slots, [](const Slot& slot) { return slot.instancing != nullptr; });
+        std::vector<std::string> each;
+        const std::string why = WhyNotBatched(_running, *node, &each);
+        if (const auto asked = _impl->unbatched.find(id); asked != _impl->unbatched.end()) {
+            batching.why = asked->second;
+        } else if (why.empty() && perInstance) {
+            batching.offered = true;
+        } else if (!each.empty() || why.empty()) {
+            std::string list;
+            for (const auto& name : each) list += std::format("{}'{}'", list.empty() ? "" : ", ", name);
+            batching.why = std::format("batched, it would be one draw: {}its shader would read what each element is from a [entity(\"PER_INSTANCE\")] buffer — "
+                                       "where it is as [entity(\"MATRIX\")], its own fields as they are", list.empty() ? std::string() : list + (each.size() == 1 ? ", which is each element's now — " : ", which are each element's now — "));
+        } else {
+            batching.why = why;
+        }
+        return batching;
+    }
+
     std::vector<std::string> Runtime::TakeReset() { return std::exchange(_impl->reset, {}); }
 }

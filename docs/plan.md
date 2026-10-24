@@ -291,8 +291,11 @@ past entities:
   `ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`: ten thousand entities, an image each, 14 ms of CPU a frame a
   Dispatch each and 0.3 ms as one.
 
-Still to do: the editor offering `batched` and `entities` where a Draw or a Dispatch could take them (it says why only
-once asked); more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
+- **The editor says it**: a Draw or a Dispatch of many elements says in the inspector how many it runs a frame, and
+  what it would take to be one (`Runtime::BatchingOf`); a Draw whose shader reads a buffer of instances already is
+  offered `batched` at a click (see [editor.md](editor.md#a-node-in-the-inspector)).
+
+Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
 the culling the forward-plus sample does on the GPU made one of the engine's functions, for any indirect draw of entities.
 
 ### E8: A graph made both to try ideas in and to make them fast

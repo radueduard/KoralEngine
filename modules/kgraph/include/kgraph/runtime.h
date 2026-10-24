@@ -521,6 +521,18 @@ namespace kgraph
          *        of node, and for one that draws once and drew.
          */
         [[nodiscard]] const PassReport* ReportOf(std::string_view id) const;
+        /** @brief Whether a Draw or a Dispatch runs its elements as one, could, or what it would take. */
+        struct Batching {
+            bool batched = false;           ///< One draw, or one dispatch, of every element.
+            std::size_t elements = 0;       ///< How many elements it has: draws or dispatches a frame, when it is not batched.
+            bool offered = false;           ///< A Draw that `batched`, and nothing more, would make one draw of them all.
+            std::string why;                ///< When it is not batched and not offered: what it would take, or why it cannot be.
+        };
+        /**
+         * @brief How a Draw or a Dispatch of many elements is batched: null for another kind of node, and for one of a
+         *        single element, which there is nothing to batch of.
+         */
+        [[nodiscard]] std::optional<Batching> BatchingOf(std::string_view id) const;
         /**
          * @brief The pass nodes that use what node @p id made — an image or a buffer, or a view of one, which is a use
          *        of what it views — in the order of their pages, and in a page the order of the graph: so what wrote it

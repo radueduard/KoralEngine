@@ -184,6 +184,39 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     Sheet("entity");
 }
 
+// A Draw or a Dispatch run once an element says how many it runs a frame, and what it would take to be one: what of it is
+// each element's, which its shader would read from a buffer of instances. One whose shader reads them so already is
+// offered `batched`, and taken up it is one draw of them all.
+TEST_F(EditorTest, ADrawOfEachElementIsOfferedBeingOne) {
+    scene::MakeProject("editor");
+    Open();
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+
+    Session().Select(std::string("draw"));
+    EXPECT_TRUE(Shows("4 draws a frame, one an element."));
+    EXPECT_TRUE(Shows("'param.source', 'push.offset', which are each element's now")) << "what its shader takes of each, by name";
+    EXPECT_FALSE(Shows("Batch: one draw of them all")) << "not offered: its shader takes them as parameters and push constants";
+
+    Session().Select(std::string("run"));
+    EXPECT_TRUE(Shows("4 dispatches a frame, one an element."));
+    EXPECT_TRUE(Shows("wired to a Filter's entities ('entities'), it would run once for all of them"));
+
+    // Its shader made to read each instance's from a buffer of them, and nothing of each element wired but its mesh.
+    Doc().SetInput("show", "vertex.module", "showBatched");
+    Doc().SetInput("show", "fragment.module", "showBatched");
+    EXPECT_TRUE(Doc().ClearInput("draw", "param.source"));
+    EXPECT_TRUE(Doc().ClearInput("draw", "push.offset"));
+    Session().Select(std::string("draw"));
+    EXPECT_TRUE(Shows("Batch: one draw of them all")) << "offered, at a click";
+    Session().Batch("draw");
+    EXPECT_EQ(Doc().Graph().Find("draw")->inputs.at("batched").value, kgraph::Value(true));
+    EXPECT_TRUE(Shows("Batched: one draw of 4 elements."));
+    EXPECT_FALSE(Shows("Batch: one draw of them all"));
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+}
+
 TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
     const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "from-the-editor";
     std::filesystem::remove_all(directory);

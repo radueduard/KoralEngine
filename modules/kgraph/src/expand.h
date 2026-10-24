@@ -64,4 +64,11 @@ namespace kgraph
     /** @brief What a node of a loop is called on turn @p turn. */
     [[nodiscard]] std::string TurnId(std::string_view id, int turn);
     [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {});
+    /**
+     * @brief Why the Draw @p draw of @p graph (a graph as it runs: its calls and Bundles written out) cannot be written out
+     *        as one indirect draw of every element — `batched` — or nothing when it can. @p each, when given, is the
+     *        inputs it is wired a value of each element at, besides its mesh: what its shader would read from its
+     *        [entity("PER_INSTANCE")] buffer instead.
+     */
+    [[nodiscard]] std::string WhyNotBatched(const Graph& graph, const Node& draw, std::vector<std::string>* each = nullptr);
 }
