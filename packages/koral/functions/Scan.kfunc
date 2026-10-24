@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Sort and scan",
+  "description": "Each value made the sum of those before it (an exclusive prefix sum), in place, and their total.",
+  "tags": ["prefix sum", "exclusive scan", "sum", "gpu"],
   "graph": {
     "kgraph": 1,
     "nodes": [

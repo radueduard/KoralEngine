@@ -19,6 +19,12 @@ namespace keditor
 
     const std::vector<std::pair<std::string, std::string>>& StandardShaders()
     {
+        static const std::vector<std::pair<std::string, std::string>> shaders { { "default.slang", detail::DefaultSlang } };
+        return shaders;
+    }
+
+    const std::vector<std::pair<std::string, std::string>>& LitShaders()
+    {
         static const std::vector<std::pair<std::string, std::string>> shaders {
             { "engineCommon.slang", detail::EngineCommonSlang }, { "lit.slang", detail::LitSlang },
             { "sky.slang", detail::SkySlang },
@@ -26,12 +32,12 @@ namespace keditor
         return shaders;
     }
 
-    std::vector<std::string> WriteStandardShaders(const std::filesystem::path& directory)
+    std::vector<std::string> WriteShaders(const std::filesystem::path& directory, const std::vector<std::pair<std::string, std::string>>& shaders)
     {
         std::vector<std::string> written;
         std::error_code ignored;
         std::filesystem::create_directories(directory, ignored);
-        for (const auto& [name, source] : StandardShaders()) {
+        for (const auto& [name, source] : shaders) {
             if (std::filesystem::exists(directory / name)) continue;
             std::ofstream(directory / name, std::ios::binary) << source;
             written.push_back(name);
@@ -39,9 +45,12 @@ namespace keditor
         return written;
     }
 
+    std::vector<std::string> WriteStandardShaders(const std::filesystem::path& directory) { return WriteShaders(directory, StandardShaders()); }
+    std::vector<std::string> WriteLitShaders(const std::filesystem::path& directory) { return WriteShaders(directory, LitShaders()); }
+
     const std::vector<std::pair<std::string, std::string>>& StandardObjects()
     {
-        // What draws a mesh is the standard graph's `lit` pipeline: a Mesh, and the component the pipeline's shader makes.
+        // What draws a mesh is the standard graph's `default` pipeline: a Mesh, and the component the pipeline's shader makes.
         static const std::vector<std::pair<std::string, std::string>> objects {
             { "Cube.json", R"json({
   "template": "Cube",
@@ -49,7 +58,7 @@ namespace keditor
   "name": "Cube",
   "components": {
     "Mesh": { "mesh": "$cube" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -59,7 +68,7 @@ namespace keditor
   "name": "Sphere",
   "components": {
     "Mesh": { "mesh": "$sphere" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -69,7 +78,7 @@ namespace keditor
   "name": "Plane",
   "components": {
     "Mesh": { "mesh": "$plane" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -79,7 +88,7 @@ namespace keditor
   "name": "Cylinder",
   "components": {
     "Mesh": { "mesh": "$cylinder" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -89,7 +98,7 @@ namespace keditor
   "name": "Cone",
   "components": {
     "Mesh": { "mesh": "$cone" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -99,7 +108,7 @@ namespace keditor
   "name": "Capsule",
   "components": {
     "Mesh": { "mesh": "$capsule" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -109,7 +118,7 @@ namespace keditor
   "name": "Torus",
   "components": {
     "Mesh": { "mesh": "$torus" },
-    "lit": { "albedo": [0.85, 0.6, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.85, 0.6, 1] }
   }
 }
 )json" },
@@ -120,7 +129,7 @@ namespace keditor
   "name": "Planet",
   "components": {
     "Mesh": { "mesh": "$sphere" },
-    "lit": { "albedo": [0.3, 0.55, 1], "metallic": 0, "roughness": 0.5, "emission": [0, 0, 0] }
+    "default": { "color": [0.3, 0.55, 1] }
   },
   "children": [
     {
@@ -129,7 +138,7 @@ namespace keditor
       "scale": [0.3, 0.3, 0.3],
       "components": {
         "Mesh": { "mesh": "$sphere" },
-        "lit": { "albedo": [0.8, 0.8, 0.75], "metallic": 0, "roughness": 0.8, "emission": [0, 0, 0] }
+        "default": { "color": [0.8, 0.8, 0.75] }
       }
     }
   ]
@@ -377,6 +386,135 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         };
         const auto set = [&](const std::string& id, const char* input, Value value) { ok = doc.SetInput(id, input, std::move(value)) && ok; };
         const auto wire = [&](const std::string& from, const std::string& id, const char* input, const char* output = "out") { ok = doc.Connect(from, output, id, input) && ok; };
+        const auto bring = [&](const char* id, const double x, const double y) {
+            const std::string made = doc.Import(id, pass, x, y);
+            if (made.empty()) { ok = false; error = std::format("there is no node '{}' to bring in", id); }
+            return made;
+        };
+
+        // ---- Draw: every entity with a Mesh and the pipeline's component, seen by the camera and lit by the sun ------
+        pass = "Draw";
+        doc.AddPass(pass);
+        node("Screen", "screen", 320, 580);
+        // A picture the size of the window, and how far each pixel of it is.
+        const auto picture = [&](const char* id, const char* format, Value::List usage, const double y) {
+            node("Image", id, 620, y);
+            set(id, "format", format);
+            set(id, "usage", Value(std::move(usage)));
+            doc.ClearInput(id, "extent.x");
+            doc.ClearInput(id, "extent.y");
+            wire("screen", id, "extent", "extent");
+        };
+        picture("color", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferDst", "eTransferSrc" }, 40);
+        picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment", "eSampled", "eTransferDst", "eTransferSrc" }, 360);
+        node("Framebuffer", "target", 1020, 300);
+        wire("color", "target", "color[0].view");
+        wire("depth", "target", "depthStencil.view");
+        node("VertexLayout", "layout", 1020, 140);
+        set("layout", "attributes", Value::List {
+            Value::Members { { "semantic", "POSITION" }, { "type", "eFloat" }, { "count", 3 } },
+            Value::Members { { "semantic", "NORMAL" }, { "type", "eFloat" }, { "count", 3 } },
+        });
+        // The camera: a view from where its entity is, towards a step along the way it faces; a lens of its field of
+        // view, near and far. In the editor, the editor's view. The shader's `camera`, a field each.
+        node("Entity", "eye", 40, 1240);
+        set("eye", "component", "Camera");
+        node("Add", "looking at", 400, 1300);
+        wire("eye", "looking at", "a", "worldPosition");
+        wire("eye", "looking at", "b", "forward");
+        node("View", "view", 660, 1400);
+        set("view", "main", true);
+        wire("eye", "view", "position", "worldPosition");
+        wire("looking at", "view", "target");
+        wire("eye", "view", "up", "up");
+        node("Perspective", "lens", 660, 1100);
+        set("lens", "main", true);
+        wire("screen", "lens", "aspect", "aspect");
+        wire("eye", "lens", "fieldOfView", "field.fieldOfView");
+        wire("eye", "lens", "near", "field.near");
+        wire("eye", "lens", "far", "field.far");
+        node("ShaderBuffer", "camera data", 1020, 820);
+        set("camera data", "module", "default");
+        set("camera data", "entry", "fragment");
+        set("camera data", "parameter", "camera");
+        wire("view", "camera data", "field.view");
+        wire("lens", "camera data", "field.projection");
+        wire("eye", "camera data", "field.eye", "worldPosition");
+        // The sun: the shader's `light`.
+        node("ForEach", "sun", 620, 700);
+        set("sun", "component", "DirectionalLight");
+        node("ShaderBuffer", "light data", 1020, 540);
+        set("light data", "module", "default");
+        set("light data", "entry", "fragment");
+        set("light data", "parameter", "light");
+        wire("sun", "light data", "field.direction", "forward");
+        wire("sun", "light data", "field.intensity", "field.intensity");
+        wire("sun", "light data", "field.color", "field.color");
+        // The pipeline, and a draw of each entity with a Mesh and its component — the shader's `color`, which nothing
+        // else gives — where the entity is.
+        node("GraphicsPipeline", "default", 1300, 300);
+        set("default", "stages", "eVertex");
+        set("default", "vertex.module", "default");
+        set("default", "vertex.entry", "vertex");
+        set("default", "fragment.module", "default");
+        set("default", "fragment.entry", "fragment");
+        wire("layout", "default", "vertex.layout");
+        wire("target", "default", "framebuffer");
+        wire("camera data", "default", "param.camera");
+        wire("light data", "default", "param.light");
+        node("ForEach", "drawn", 1340, 640);
+        set("drawn", "component", "Mesh");
+        set("drawn", "with", Value::List { "default", "Mesh" });
+        node("Draw", "draw", 1660, 640);
+        wire("default", "draw", "pipeline");
+        wire("drawn", "draw", "mesh", "field.mesh");
+        wire("drawn", "draw", "push.model", "matrix");
+        wire("drawn", "draw", "push.color", "default.color");
+
+        // ---- Blit: the picture, in the window ----------------------------------------------------------------------
+        pass = "Blit";
+        doc.AddPass(pass);
+        node("Blit", "show", 500, 40);
+        wire(bring("color", 40, 40), "show", "source");
+        wire(bring("screen", 40, 360), "show", "destination");
+
+        if (!ok && error.empty()) error = "a node of the standard graph could not be set up";
+        return ok;
+    }
+
+    kecs::Entity AddStandardScene(Document& doc)
+    {
+        const auto vec = [](const float x, const float y, const float z) { return Value(Value::List { x, y, z }); };
+        const kecs::Entity camera = doc.CreateEntity("Camera");
+        doc.AddComponent(camera, "Camera");
+        doc.SetPosition(camera, { 2.f, 1.5f, 3.f });
+        doc.SetRotation(camera, { -20.f, 34.f, 0.f });
+        const kecs::Entity sun = doc.CreateEntity("Sun");
+        doc.AddComponent(sun, "DirectionalLight");
+        doc.SetField(sun, "DirectionalLight", "color", vec(1.f, 0.96f, 0.9f));
+        doc.SetPosition(sun, { 0.f, 3.f, 0.f });
+        doc.SetRotation(sun, { -50.f, 30.f, 0.f });
+        const kecs::Entity sphere = doc.CreateEntity("Sphere");
+        doc.AddComponent(sphere, "Mesh");
+        doc.SetField(sphere, "Mesh", "mesh", Value(kgraph::DefaultMeshId("sphere")));
+        if (doc.AddComponent(sphere, "default")) doc.SetField(sphere, "default", "color", vec(0.81f, 0.19f, 0.19f));
+        const kecs::Entity stand = doc.CreateEntity("Cylinder");
+        doc.AddComponent(stand, "Mesh");
+        doc.SetField(stand, "Mesh", "mesh", Value(kgraph::DefaultMeshId("cylinder")));
+        doc.SetPosition(stand, { 0.f, -1.f, 0.f });
+        if (doc.AddComponent(stand, "default")) doc.SetField(stand, "default", "color", vec(0.f, 1.f, 0.53f));
+        return sphere;
+    }
+
+    bool AddLitGraph(Document& doc, std::string& error)
+    {
+        bool ok = true;
+        std::string pass;       // the pass whose page the nodes being made go on
+        const auto node = [&](const char* type, const char* id, const double x, const double y) {
+            if (doc.AddNode(type, x, y, id, pass) != id) { ok = false; error = std::format("there is a node '{}' already", id); }
+        };
+        const auto set = [&](const std::string& id, const char* input, Value value) { ok = doc.SetInput(id, input, std::move(value)) && ok; };
+        const auto wire = [&](const std::string& from, const std::string& id, const char* input, const char* output = "out") { ok = doc.Connect(from, output, id, input) && ok; };
         // What an earlier pass made, brought into this one: a node here that stands for it.
         const auto bring = [&](const char* id, const double x, const double y) {
             const std::string made = doc.Import(id, pass, x, y);
@@ -535,13 +673,10 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
             doc.ClearInput(id, "extent.x");
             doc.ClearInput(id, "extent.y");
             wire(screen, id, "extent", "extent");
-            const std::string view = std::string(id) + " view";
-            node("ImageView", view.c_str(), 520, y);
-            wire(id, view, "image");
         };
         picture("color", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc", "eTransferDst" }, 40);
         picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" }, 360);
-        target("scene target", "color view", "depth view", 760, 40);
+        target("scene target", "color", "depth", 760, 40);
         set("scene target", "color[0].clear", Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 1 } } } } });
         // The pipeline is what every draw shares: the frame's values and the lights. What each draw has of its own —
         // its mesh, where it is, an albedo, how metallic and how rough it is, what light it gives off — is wired to the
@@ -567,7 +702,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         // ---- sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn -----------
         pass = "sky";
         doc.AddPass(pass);
-        target("sky target", bring("color view", 40, 40), bring("depth view", 40, 160), 320, 40);
+        target("sky target", bring("color", 40, 40), bring("depth", 40, 160), 320, 40);
         node("GraphicsPipeline", "sky", 600, 40);
         shaders("sky", "sky");
         wire("sky target", "sky", "framebuffer");
@@ -584,11 +719,11 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         wire(bring("color", 40, 40), "show", "source");
         wire(bring("screen", 40, 300), "show", "destination");     // under the picture's: a card as tall as its picture
 
-        if (!ok && error.empty()) error = "a node of the standard graph could not be set up";
+        if (!ok && error.empty()) error = "a node of the lit graph could not be set up";
         return ok;
     }
 
-    kecs::Entity AddStandardScene(Document& doc)
+    kecs::Entity AddLitScene(Document& doc)
     {
         const auto vec = [](const float x, const float y, const float z) { return Value(Value::List { x, y, z }); };
         const kecs::Entity sky = doc.CreateEntity("Sky");

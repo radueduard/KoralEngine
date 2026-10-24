@@ -1,0 +1,141 @@
+{
+  "koral-function": 1,
+  "purpose": "Post",
+  "description": "A picture as light made a picture as the display shows it: exposed by `exposure`, tone mapped (Narkowicz's fit of ACES) so that brighter than white rolls off rather than clipping, and encoded for the display's curve \u2014 into an image of eight bits a channel the window's size.",
+  "tags": [
+    "tonemap",
+    "tone mapping",
+    "aces",
+    "exposure",
+    "ldr",
+    "hdr",
+    "post",
+    "display"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "picture",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "picture",
+          "kind": "eImage"
+        }
+      },
+      {
+        "id": "exposure",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "exposure",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "screen",
+        "type": "Screen",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {}
+      },
+      {
+        "id": "ldr",
+        "type": "Image",
+        "at": [
+          250,
+          200
+        ],
+        "inputs": {
+          "extent": {
+            "$link": [
+              "screen",
+              "extent"
+            ]
+          },
+          "format": "eRGBA8_UNORM",
+          "usage": [
+            "eStorage",
+            "eSampled",
+            "eTransferSrc"
+          ]
+        }
+      },
+      {
+        "id": "tone map",
+        "type": "ComputePipeline",
+        "at": [
+          500,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_tonemap",
+          "compute.entry": "computeMain",
+          "param.hdrImage": {
+            "$link": [
+              "picture",
+              "out"
+            ]
+          },
+          "param.ldrImage": {
+            "$link": [
+              "ldr",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run tone map",
+        "type": "Dispatch",
+        "at": [
+          750,
+          60
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "tone map",
+              "out"
+            ]
+          },
+          "cover": "ldrImage",
+          "push.exposure": {
+            "$link": [
+              "exposure",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out picture",
+        "type": "FunctionOutput",
+        "at": [
+          1000,
+          60
+        ],
+        "inputs": {
+          "name": "picture",
+          "kind": "eImage",
+          "value": {
+            "$link": [
+              "ldr",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

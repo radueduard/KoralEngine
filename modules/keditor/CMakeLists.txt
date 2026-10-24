@@ -1,9 +1,10 @@
 # keditor: a scene being worked on, the project it is in, and the editor over them. Needs the framework and its
 # interface modules.
-# The standard shaders, as text in the library: what a new project's shaders folder is given.
+# The standard shaders, as text in the library: what a new project's shaders folder is given (default), and the lit
+# graph's (engineCommon, lit, sky).
 set(KEDITOR_SHADER_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/standard_shaders.h)
 set(KEDITOR_SHADER_TEXT "#pragma once\n\nnamespace keditor::detail\n{\n")
-foreach(shader engineCommon lit sky)
+foreach(shader default engineCommon lit sky)
     set(path ${CMAKE_CURRENT_SOURCE_DIR}/shaders/scene/${shader}.slang)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${path})
     file(READ ${path} source)
@@ -31,7 +32,7 @@ if(KORAL_ENGINE_BUILD_TESTS)
         KGRAPH_PACKAGE_SHADERS="${CMAKE_SOURCE_DIR}/packages/koral/shaders"
         KEDITOR_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders"
         # Forward+ made with nodes: its shaders, and where the project the test makes of it is left to be opened.
-        KEDITOR_FORWARD_PLUS_SHADERS="${CMAKE_SOURCE_DIR}/projects/forward-plus/shaders"
+        KEDITOR_FORWARD_PLUS_SHADERS="${CMAKE_SOURCE_DIR}/samples/forward-plus/shaders"
         KEDITOR_FORWARD_PLUS_PROJECT="${CMAKE_BINARY_DIR}/forward-plus-project")
     # Freed memory is filled with a pattern, and a test that never ends is stopped: an edit that frees what a frame
     # is still drawing with reads what it freed, and shows as a crash or a wait that never ends rather than as luck.

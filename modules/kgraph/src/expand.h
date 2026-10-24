@@ -7,6 +7,7 @@
 
 #pragma once
 
+#include <functional>
 #include <map>
 #include <string>
 #include <vector>
@@ -34,12 +35,28 @@ namespace kgraph
         std::map<std::string, Call, std::less<>> calls;
         /// FunctionInput and FunctionOutput nodes of the graph itself — a function opened in place — and what each is.
         std::map<std::string, Input, std::less<>> aliases;
+        /// What each Bundle there is holds, by `<node>.<output>` (a Bundle node's `out`, a ForEach's `element`, an Unbundle's `of`): each
+        /// member's name and what it is — a wire, or a value given.
+        std::map<std::string, std::vector<std::pair<std::string, Input>>, std::less<>> bundles;
+        /// The inputs of each node a Bundle filled, by name: a node that has no such input lets them pass, and says so.
+        std::map<std::string, std::set<std::string>, std::less<>> fromBundle;
+        /// What a node that takes a Bundle says of it as it is: the names that matched nothing, on either side.
+        std::map<std::string, std::string, std::less<>> notes;
     };
+
+    /**
+     * @brief What a ForEach's (an Entity's, an Entities node's, a Filter's) `element` holds: each member's name, and which
+     *        of the node's outputs it is. The runtime's to say: it knows the components' fields.
+     */
+    using ElementOf = std::function<std::vector<std::pair<std::string, std::string>>(const Node&)>;
+
+    /** @brief Where a Bundle taken at input @p input of a node of type @p type goes: the prefix of the inputs it fills. Empty: none. */
+    [[nodiscard]] std::string BundleTaken(std::string_view type, std::string_view input);
 
     /** @brief The port a FunctionInput or FunctionOutput of kind @p kind (eValue, eEntities, eMesh, eBuffer, eImage, eResource) is. */
     [[nodiscard]] Port FunctionPort(std::string name, std::string_view kind, std::string doc = {});
 
     /** @brief What a node of a loop is called on turn @p turn. */
     [[nodiscard]] std::string TurnId(std::string_view id, int turn);
-    [[nodiscard]] Expansion Expand(const Graph& written);
+    [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {});
 }

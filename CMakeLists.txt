@@ -140,9 +140,9 @@ if(Koral_FOUND)
     target_link_libraries(koral-editor PRIVATE keditor)
     add_executable(koral-play apps/player/main.cpp)
     target_link_libraries(koral-play PRIVATE keditor)
-    # The project either opens when it is given none: Forward+, made with nodes (projects/forward-plus).
+    # The project either opens when it is given none: Forward+, made with nodes, in the projects folder (forward-plus).
     foreach(app koral-editor koral-play)
-        target_compile_definitions(${app} PRIVATE KORAL_ENGINE_DEFAULT_PROJECT="${CMAKE_SOURCE_DIR}/projects/forward-plus")
+        target_compile_definitions(${app} PRIVATE KORAL_ENGINE_DEFAULT_PROJECT="${KORAL_ENGINE_PROJECTS}/forward-plus")
     endforeach()
 else()
     message(STATUS "Koral not found (set CMAKE_PREFIX_PATH to an SDK): building kecs alone")

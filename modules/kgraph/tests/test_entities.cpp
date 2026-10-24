@@ -1309,6 +1309,28 @@ TEST_F(EntityTest, EntitiesGroupedByMeshAreDrawnByOneIndirectDraw) {
     EXPECT_EQ(kor::capi::BufferOf(runtime.ResourceOf("commands", "commands")->handle)->Read<std::uint32_t>()[1], 0u);
     EXPECT_TRUE(is(4, { 0, 0, 0 })) << "no cull ran: nothing counted, nothing drawn";
 
+    // A pass that counts them: every frame from none, however many frames there are — not what the frames before
+    // counted into the copy of the buffer it is given, added up.
+    kgraph::Graph counting = graph;
+    counting.Add("count", "ComputePipeline").Set("compute.module", "countAll").Set("compute.entry", "countAll")
+        .Wire("param.commands", "commands", "commands").Wire("param.visible", "commands", "visible");
+    counting.Add("run count", "Dispatch").Wire("pipeline", "count").Set("groups.x", 1).Set("groups.y", 1).Set("groups.z", 1)
+        .Set("push.instances", 4).Wire("push.commandCount", "commands", "drawCount");
+    runtime.Set(counting);
+    for (int i = 0; i < 12; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "counted, drawn";
+    runtime.Watch("commands");
+    std::optional<kgraph::Peek> counted;
+    for (int i = 0; i < 8 && !(counted = runtime.Watched("commands")); ++i) Frame();
+    ASSERT_TRUE(counted) << runtime.WatchProblem("commands");
+    const auto countedWord = [&](const std::size_t at) { std::uint32_t v = 0; std::memcpy(&v, counted->bytes.data() + at, 4); return v; };
+    EXPECT_EQ(countedWord(4), 3u) << "the three cubes, counted this frame and no other";
+    EXPECT_EQ(countedWord(24), 1u);
+    runtime.Unwatch("commands");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+
     // Meshes whose vertices are not laid out alike are not one mesh, and it says so.
     kgraph::VertexData flat;
     flat.vertexCount = 3;
@@ -1318,6 +1340,25 @@ TEST_F(EntityTest, EntitiesGroupedByMeshAreDrawnByOneIndirectDraw) {
     world.Mutable<kgraph::Mesh>(entities[3])->mesh = runtime.ResourceOf("$script/flat");
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_NE(runtime.Status("pack")->error.find("not laid out alike"), std::string::npos) << runtime.Status("pack")->error;
+
+    // Told which of them to pack, it packs those of each, whatever else each has: zeros where one has not.
+    graph.Find("pack")->Set("attributes", Value::List { "POSITION", "NORMAL", "UV" });
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    ASSERT_TRUE(runtime.Status("pack")->ok) << runtime.Status("pack")->error;
+    const Value layout = runtime.ValueOf("pack", "layout");
+    const auto* bindings = layout.Find("bindings") ? layout.Find("bindings")->Items() : nullptr;
+    ASSERT_NE(bindings, nullptr) << layout.ToJson();
+    EXPECT_EQ(bindings->size(), 3u) << "a buffer each: " << layout.ToJson();
+    const auto* attributes = layout.Find("attributes") ? layout.Find("attributes")->Items() : nullptr;
+    ASSERT_NE(attributes, nullptr);
+    ASSERT_EQ(attributes->size(), 3u);
+    EXPECT_EQ(*(*attributes)[2].Find("semantic")->String(), "UV");
+    EXPECT_EQ(*(*attributes)[2].Find("channelCount")->Number(), 2.0);
+    graph.Find("pack")->Set("attributes", Value::List { "COLOR7" });
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_NE(runtime.Status("pack")->error.find("COLOR7"), std::string::npos) << "what no mesh has: " << runtime.Status("pack")->error;
 }
 
 // Nothing yet to draw — the scene's meshes made by a script once it plays — is no problem: the pack is an empty mesh,
@@ -1468,6 +1509,155 @@ TEST_F(EntityTest, AShaderSaysWhatEachInstanceIsAndTheDrawFillsIt) {
     EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "outgrown, both have the one made in its place";
 }
 
+// A Draw that idles draws nothing, and its buffer of instances is kept as the entities are all the same: another pass
+// reads it — the meshlets read the forward Draw's while the forward Draw rests.
+TEST_F(EntityTest, AnIdleDrawsBufferOfInstancesFollowsTheEntitiesForWhatReadsIt) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    const kecs::Entity entity = world.Create();
+    world.SetPosition(entity, { 0, 0, 0.5f });
+    world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+    world.Add<kgraph::Mesh>(entity, { cube });
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    // Resting, always — told so by a value, as a branch not chosen is: its buffer is what the other reads.
+    graph.Add("rest", "Number").Set("value", 1);
+    graph.Add("resting", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("idle", "rest");
+    graph.Add("reader", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target")
+        .Wire("param.instances", "resting", "instances");
+    graph.Add("draw", "Draw").Wire("pipeline", "reader").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const auto is = [&](const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(16, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    support::Give(world, entity, "tinted", { { "color", { 1, 0, 0, 1 } } });
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is({ 255, 0, 0 })) << "given its colour while the Draw whose buffer it is rests";
+    support::Give(world, entity, "tinted", { { "color", { 0, 0, 1, 1 } } });
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is({ 0, 0, 255 })) << "and changed";
+}
+
+// A field of each instance's marked [entity("TEXTURE")] is a picture the entity holds, read by its bindless index: one
+// indirect draw of entities that each have pictures of their own. What the draw reads by index is still read: the
+// frame graph is told, so a picture last written as a copy's destination is ready to be sampled.
+TEST_F(EntityTest, EachInstanceReadsItsOwnPictureByIndex) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    std::vector<kecs::Entity> entities;
+    for (const float x : { -0.5f, 0.5f }) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, 0, 0.5f });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        entities.push_back(entity);
+    }
+    // A picture of one colour: cleared, and left as a copy's destination.
+    const auto solid = [](const kor::Vec4 color) {
+        auto image = kor::Image::Builder {}.SetType(kor::Image::Type::e2D).SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2 { 4, 4 })
+            .SetUsage(kor::Image::Usage::eSampled | kor::Image::Usage::eTransferDst).Build();
+        kor::CommandBuffer::SingleTimeCommand([&](kor::CommandBuffer& cb) { cb.ClearColorImage(image, color); }, kor::CommandBuffer::Usage::eGraphics).Wait();
+        return kgraph::MakeResource(std::move(image));
+    };
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("pictured", "GraphicsPipeline").Set("vertex.module", "pictured").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "pictured").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "pictured").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    // The picture is the component's: a field that holds an image, as a parameter's would be.
+    const kecs::ComponentId pictured = world.Find("pictured");
+    ASSERT_NE(pictured, kecs::NoComponent);
+    const kecs::FieldDescription* field = world.Describe(pictured).FindField("picture");
+    ASSERT_NE(field, nullptr);
+    EXPECT_EQ(field->type, "Image");
+    EXPECT_EQ(world.Describe(pictured).fields.size(), 1u) << "not the matrix, not the buffer";
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(8, { 255, 0, 255 })) << "without the component it holds no picture: the shader is told so (~0)";
+    world.Add(entities[0], pictured);
+    world.Add(entities[1], pictured);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(8, { 255, 0, 255 })) << "with it, and no picture given: none, as well";
+    kgraph::Parameters(world, entities[0], pictured).Set("picture", solid({ 1, 0, 0, 1 }));
+    kgraph::Parameters(world, entities[1], pictured).Set("picture", solid({ 0, 1, 0, 1 }));
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(is(8, { 255, 0, 0 })) << "each in its own picture's colour, in one draw";
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+    EXPECT_EQ(runtime.ValueOf("commands", "drawCount"), Value(1)) << "one mesh: one command";
+
+    // Another picture given: the next frame reads it.
+    kgraph::Parameters(world, entities[1], pictured).Set("picture", solid({ 0, 0, 1, 1 }));
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(24, { 0, 0, 255 }));
+
+    // Every element the buffer has room for is written each frame, not only the list's: a GPU cull reads it to its end.
+    // Past the list, and an entity's that is gone, is nothing — nowhere, and no picture — whatever the memory held: an
+    // index read from what was there before is a picture that is not there, and the GPU that samples it hangs.
+    const auto buffer = kor::capi::BufferOf(runtime.ResourceOf("draw", "instances")->handle);
+    const std::size_t words = buffer->size() / 4, stride = words / 64;   // room for 64: what a buffer of a few is made with
+    ASSERT_EQ(words % 64, 0u);
+    // What another resource left in the memory: written past the runtime, which alone writes it otherwise.
+    const_cast<kor::Buffer&>(*buffer).Write(std::vector<std::uint32_t>(words, 0xABABABABu));
+    world.Destroy(entities[1]);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto read = buffer->Read<std::uint32_t>();
+    ASSERT_EQ(read.size(), words);
+    EXPECT_EQ(read[15], std::bit_cast<std::uint32_t>(1.0f)) << "the one left is where it is";
+    EXPECT_NE(read[16], ~0u) << "and holds its picture";
+    for (std::size_t row = 1; row < 64; ++row) {
+        EXPECT_EQ(read[row * stride + 15], 0u) << "row " << row << ": nowhere";
+        EXPECT_EQ(read[row * stride + 16], ~0u) << "row " << row << ": no picture";
+    }
+    EXPECT_TRUE(is(8, { 255, 0, 0 }));
+    EXPECT_TRUE(is(24, { 0, 0, 0 })) << "the one gone is not drawn";
+}
+
 // A function is nodes as one: each call written out into them, given what the call is given and giving what they give.
 TEST_F(EntityTest, AFunctionsCallsAreItsNodesWrittenOut) {
     using kgraph::Value;
@@ -1568,4 +1758,215 @@ TEST_F(EntityTest, ABufferSizedByACountOfEntitiesIsMadeAgainWhenTheCountChanges)
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_EQ(scene->runtime->ValueOf("bodies", "instanceCount"), kgraph::Value(4)) << "made again for four";
     EXPECT_GT(scene->runtime->Status("bodies")->builds, builds);
+}
+
+// The same entities drawn by meshlets: the pack cut into runs of a few dozen vertices, a task shader's group for each
+// instance sending a mesh shader's group for each meshlet of its mesh. Every triangle is in one meshlet, and each is
+// drawn where its entity is, in its colour.
+TEST_F(EntityTest, EntitiesAreDrawnByMeshletsOfTheirPack) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube"), sphere = runtime.ResourceOf("$sphere");
+    ASSERT_TRUE(cube && sphere);
+    const std::array<std::pair<std::shared_ptr<kgraph::Resource>, std::vector<float>>, 4> made { {
+        { cube, { 1, 0, 0 } }, { sphere, { 0, 1, 0 } }, { cube, { 0, 0, 1 } }, { sphere, { 1, 1, 1 } } } };
+    for (std::size_t i = 0; i < made.size(); ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { -0.75f + 0.5f * static_cast<float>(i), 0, 0 });
+        world.Add<kgraph::Mesh>(entity, { made[i].first });
+        support::Give(world, entity, "PointLight", { { "color", made[i].second } });
+    }
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
+    graph.Add("place", "Append").Wire("a", "meshes", "worldPosition").Set("b", 0.4);
+    graph.Add("tint", "Append").Wire("a", "meshes", "PointLight.color").Wire("b", "meshes", "group");
+    graph.Add("instances", "BufferBuilder")
+        .Set("layout", Value::List { Value::Members { { "name", "place" }, { "type", "eVec4" } }, Value::Members { { "name", "color" }, { "type", "eVec4" } } })
+        .Wire("field.place", "place").Wire("field.color", "tint");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh").Set("attributes", Value::List { "POSITION", "NORMAL", "UV" });
+    graph.Add("cut", "Meshlets").Wire("mesh", "pack", "mesh").Wire("ranges", "pack", "ranges");
+    graph.Add("buffers", "MeshBuffers").Wire("mesh", "pack", "mesh");
+    graph.Add("drawer", "GraphicsPipeline").Set("stages", "eMesh").Set("task.module", "meshlets").Set("task.entry", "taskMain")
+        .Set("mesh.module", "meshlets").Set("mesh.entry", "meshMain").Set("fragment.module", "meshlets").Set("fragment.entry", "fragmentMain")
+        .Wire("framebuffer", "target").Wire("param.instances", "instances").Wire("param.meshlets", "cut", "meshlets")
+        .Wire("param.meshletVertices", "cut", "vertices").Wire("param.meshletTriangles", "cut", "triangles").Wire("param.meshRanges", "cut", "meshRanges")
+        .Wire("param.positions", "buffers", "vertices");
+    graph.Add("draw", "Draw").Wire("pipeline", "drawer").Set("command", "eDrawMeshTasks").Wire("tasks.x", "meshes", "count").Set("tasks.y", 1).Set("tasks.z", 1)
+        .Wire("push.stride", "buffers", "stride").Wire("push.offset", "buffers", "position");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    if (const auto* status = runtime.Status("drawer"); status && !status->ok && status->error.find("mesh shader") != std::string::npos) GTEST_SKIP() << status->error;
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    // Every triangle of both meshes is in one meshlet, none has more than it may, and its corners are its own.
+    const auto read = [&](const char* output) { return kor::capi::BufferOf(runtime.ResourceOf("cut", output)->handle)->Read<std::uint32_t>(); };
+    const auto meshlets = read("meshlets"), triangles = read("triangles"), ranges = read("meshRanges");
+    const auto count = static_cast<std::size_t>(*runtime.ValueOf("cut", "count").Number());
+    ASSERT_GE(meshlets.size(), count * 12);
+    std::size_t covered = 0;
+    for (std::size_t m = 0; m < count; ++m) {
+        const std::uint32_t vertexCount = meshlets[m * 12 + 1], triangleOffset = meshlets[m * 12 + 2], triangleCount = meshlets[m * 12 + 3];
+        EXPECT_LE(vertexCount, 64u);
+        EXPECT_LE(triangleCount, 124u);
+        for (std::uint32_t t = 0; t < triangleCount; ++t)
+            for (int c = 0; c < 3; ++c) EXPECT_LT((triangles[triangleOffset + t] >> (8 * c)) & 255u, vertexCount);
+        covered += triangleCount;
+    }
+    const Value packedRanges = runtime.ValueOf("pack", "ranges");
+    std::size_t expected = 0;
+    for (const auto& range : *packedRanges.Items()) expected += static_cast<std::size_t>(*range.Find("indexCount")->Number()) / 3;
+    EXPECT_EQ(covered, expected) << "every triangle, once";
+    EXPECT_EQ(ranges[0], 0u);
+    EXPECT_EQ(ranges[4], ranges[1]) << "the second mesh's meshlets after the first's";
+    EXPECT_EQ(ranges[1] + ranges[5], count);
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(4, { 255, 0, 0 })) << "the red cube";
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "the green sphere";
+    EXPECT_TRUE(is(20, { 0, 0, 255 })) << "the blue cube";
+    EXPECT_TRUE(is(28, { 255, 255, 255 })) << "the white sphere";
+    EXPECT_TRUE(is(8, { 0, 0, 0 })) << "and nothing between them";
+}
+
+// The same entities as a scene rays are traced through: a structure for each mesh of their pack, an instance of it
+// where each entity is, InstanceID() its row. A ray a pixel sees each in its colour; one moved, the scene is made again
+// and the rays see it where it went — read by its bindless index, so nothing is built again for it.
+TEST_F(EntityTest, EntitiesAreASceneRaysAreTracedThrough) {
+    using kgraph::Value;
+    if (!kor::Context::SupportsRayTracing()) GTEST_SKIP() << "no ray tracing here";
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube"), sphere = runtime.ResourceOf("$sphere");
+    ASSERT_TRUE(cube && sphere);
+    const std::array<std::pair<std::shared_ptr<kgraph::Resource>, std::vector<float>>, 4> made { {
+        { cube, { 1, 0, 0 } }, { sphere, { 0, 1, 0 } }, { cube, { 0, 0, 1 } }, { sphere, { 1, 1, 1 } } } };
+    std::vector<kecs::Entity> entities;
+    for (std::size_t i = 0; i < made.size(); ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { -0.75f + 0.5f * static_cast<float>(i), 0, 0 });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { made[i].first });
+        support::Give(world, entity, "PointLight", { { "color", made[i].second } });
+        entities.push_back(entity);
+    }
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc" });
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
+    graph.Add("tint", "Append").Wire("a", "meshes", "PointLight.color").Wire("b", "meshes", "group");
+    graph.Add("instances", "BufferBuilder")
+        .Set("layout", Value::List { Value::Members { { "name", "place" }, { "type", "eVec4" } }, Value::Members { { "name", "color" }, { "type", "eVec4" } } })
+        .Wire("field.color", "tint");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh").Set("attributes", Value::List { "POSITION", "NORMAL", "UV" });
+    graph.Add("rays", "RayScene").Wire("meshes", "meshes", "Mesh.mesh").Wire("mesh", "pack", "mesh").Wire("ranges", "pack", "ranges");
+    graph.Add("tracer", "RayTracingPipeline").Set("raygen.module", "rayScene").Set("raygen.entry", "raygenMain")
+        .Set("miss[0].module", "rayScene").Set("miss[0].entry", "missMain")
+        .Set("hitGroup[0].closestHit.module", "rayScene").Set("hitGroup[0].closestHit.entry", "hitMain")
+        .Wire("param.instances", "instances").Wire("param.scene", "rays", "scene").Wire("param.target", "canvas");
+    graph.Add("trace", "TraceRays").Wire("pipeline", "tracer").Wire("size", "canvas", "extent");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ValueOf("rays", "count"), Value(4));
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(4, { 255, 0, 0 })) << "the red cube";
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "the green sphere";
+    EXPECT_TRUE(is(20, { 0, 0, 255 })) << "the blue cube";
+    EXPECT_TRUE(is(28, { 255, 255, 255 })) << "the white sphere";
+    EXPECT_TRUE(is(8, { 0, 0, 0 })) << "and nothing between them";
+
+    // The red cube moved down, out of the row looked at: the rays find it gone, and the pipeline was not made again.
+    const std::uint64_t built = runtime.Status("tracer")->builds;
+    world.SetPosition(entities[0], { -0.75f, 0.8f, 0 });
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(is(4, { 0, 0, 0 })) << "where it was, nothing";
+    const auto p = scene->Pixel(4, 29);
+    EXPECT_TRUE(p.x > 250 && p.y < 4 && p.z < 4) << "where it went: " << int(p.x) << " " << int(p.y) << " " << int(p.z);
+    EXPECT_EQ(runtime.Status("tracer")->builds, built) << "read by its index, nothing of it is built again";
+}
+
+// A ray tracing pipeline has a material too: the buffer its shader marks [entity("PER_INSTANCE")] is filled by the
+// TraceRays, an element for each entity of the Filter wired to its `entities` — the same rows a RayScene of that Filter
+// numbers its instances by — from the pipeline's component, which the entities hold as a Draw's hold theirs.
+TEST_F(EntityTest, RaysAreShadedByTheirPipelinesOwnMaterial) {
+    using kgraph::Value;
+    if (!kor::Context::SupportsRayTracing()) GTEST_SKIP() << "no ray tracing here";
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube"), sphere = runtime.ResourceOf("$sphere");
+    ASSERT_TRUE(cube && sphere);
+    const std::array<std::shared_ptr<kgraph::Resource>, 4> meshes { cube, sphere, cube, sphere };
+    std::vector<kecs::Entity> entities;
+    for (std::size_t i = 0; i < meshes.size(); ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { -0.75f + 0.5f * static_cast<float>(i), 0, 0 });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { meshes[i] });
+        entities.push_back(entity);
+    }
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc" });
+    graph.Add("all", "Entities");
+    graph.Add("solids", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "solids", "Mesh.mesh").Set("attributes", Value::List { "POSITION", "NORMAL", "UV" });
+    graph.Add("rays", "RayScene").Wire("meshes", "solids", "Mesh.mesh").Wire("mesh", "pack", "mesh").Wire("ranges", "pack", "ranges");
+    graph.Add("tracer", "RayTracingPipeline").Set("raygen.module", "rayMaterial").Set("raygen.entry", "raygenMain")
+        .Set("miss[0].module", "rayMaterial").Set("miss[0].entry", "missMain")
+        .Set("hitGroup[0].closestHit.module", "rayMaterial").Set("hitGroup[0].closestHit.entry", "hitMain")
+        .Wire("param.scene", "rays", "scene").Wire("param.target", "canvas");
+    graph.Add("trace", "TraceRays").Wire("pipeline", "tracer").Wire("size", "canvas", "extent").Wire("entities", "solids");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    Frame();
+    const kecs::ComponentId material = runtime.ComponentOf("tracer");
+    ASSERT_NE(material, kecs::NoComponent) << "the pipeline has a component: its material";
+    EXPECT_TRUE(world.Describe(material).FindField("tint"));
+    EXPECT_FALSE(world.Describe(material).FindField("id")) << "which entity it is is the world's, not the material's";
+    const std::array<kor::Vec4, 4> tints { kor::Vec4 { 1, 0, 0, 1 }, kor::Vec4 { 0, 1, 0, 1 }, kor::Vec4 { 0, 0, 1, 1 }, kor::Vec4 { 1, 1, 1, 1 } };
+    for (std::size_t i = 0; i < entities.size(); ++i) {
+        world.Add(entities[i], material);
+        kgraph::Parameters(world, entities[i], material).Set("tint", tints[i]);
+    }
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(4, { 255, 0, 0 })) << "the red cube";
+    EXPECT_TRUE(is(12, { 0, 255, 0 })) << "the green sphere";
+    EXPECT_TRUE(is(20, { 0, 0, 255 })) << "the blue cube";
+    EXPECT_TRUE(is(28, { 255, 255, 255 })) << "the white sphere";
+    EXPECT_NE(runtime.ResourceOf("trace", "instances"), nullptr) << "its buffer of materials, for a pass to read as a Draw's is";
+
+    // Its material changed: the rays see it so the next frame, and nothing is built again.
+    const std::uint64_t built = runtime.Status("tracer")->builds;
+    kgraph::Parameters(world, entities[0], material).Set("tint", kor::Vec4 { 1, 1, 0, 1 });
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(4, { 255, 255, 0 })) << "the cube made yellow";
+    EXPECT_EQ(runtime.Status("tracer")->builds, built);
 }

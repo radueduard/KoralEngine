@@ -1,0 +1,178 @@
+// Forward+: what every pass of it shares. The camera's block, the lights, and the sun with its cascades — each
+// declared here once and filled by a ShaderBuffer node of the graph, a field at a time by name.
+//
+// Koral's matrices are a column after another and Slang reads a row after another, so a vector goes first:
+// mul(vector, matrix). A matrix's fourth row is then where it puts the origin.
+
+__exported import entity;
+__exported import koral_bindless;
+
+public struct Camera {
+    public float4x4 view;
+    public float4x4 projection;
+    public float4x4 inverseView;
+    public float4x4 inverseProjection;
+    public float4x4 viewProjection;
+    public float3 position;
+    public float zNear;
+    public float2 screenSize;
+    public float zFar;
+    public uint lightCount;         // how many point lights there are
+    public uint3 gridSize;          // the clusters lights are sorted into: across, down, and into the picture
+};
+public ConstantBuffer<Camera> camera;
+
+public struct PointLight {
+    public float3 position;
+    public float radius;            // where its light ends
+    public float3 color;
+    public float intensity;
+};
+
+public static const uint CascadeCount = 4;
+public static const uint LampShadowMost = 24;       // how many point lights have a shadow map: the first that many
+
+// The point lights' shadow maps: a cube round each, its six faces one after another in an image of as many layers.
+public struct LampShadows {
+    public float4x4 faces[144];     // the world, as each face of each light's cube has it: towards +x, -x, +y, -y, +z, -z
+    public float count;             // how many lights have a cube
+    public float texel;             // one over a face's resolution
+    public float bias;              // what is nearer the light by less than this, as the map counts depth, casts no shadow on itself
+    public float softness;          // how soft a shadow's edge is, in pixels of a face
+}
+
+public struct Sun {
+    public float4x4 lightViewProj[4];   // the world, as each cascade's shadow map has it
+    public float4 splits;               // how far from the camera each cascade reaches
+    public float4 worldTexel;           // how much of the world a pixel of each cascade's map covers
+    public float3 direction;            // the way the light travels
+    public float present;               // 1 when there is a sun
+    public float3 color;                // times its intensity
+    public float bias;                  // what is nearer the light by less than this casts no shadow on itself
+    public float pcfRadius;             // how soft a shadow's edge is, in pixels of the nearest cascade
+    public float tileTexel;             // one over a cascade's resolution
+    public float blend;                 // the part of each cascade, before its end, faded into the next
+    public float ambient;               // how much light the sky gives all round
+    public float3 skyZenith;
+    public float sunCosine;             // the cosine of the sun disc's radius
+    public float3 skyHorizon;
+    public float3 skyGround;
+};
+
+/**
+ * An entity the pre-pass and the forward pass draw, one indirect draw for them all: where it is, and the fields of its
+ * `forward` component — its pictures by the bindless index the engine gives each (~0 for none).
+ */
+public struct Instance {
+    [entity("MATRIX")] public float4x4 model;
+    public float3 albedo;       // its colour, as picked
+    public float metallic;
+    public float3 emission;     // the light it gives off itself, as light: above 1 it blooms
+    public float roughness;
+    public float alphaCutoff;   // above 0: where its albedoMap is less opaque than this, nothing is drawn
+    public float transparency;  // how much of what is behind it shows through, over what its albedoMap lets: 0 none, 1 all of it — glass
+    [entity("TEXTURE")] public uint albedoMap;      // its colour; a: how opaque
+    [entity("TEXTURE")] public uint normalMap;      // which way its surface faces, texel by texel, relative to the mesh's own
+    [entity("TEXTURE")] public uint roughnessMap;   // g: how rough; b: how much a metal
+    [entity("TEXTURE")] public uint emissiveMap;
+    public float translucency;  // how much light falling on its back shows through on its front, tinted by its colour: cloth, a leaf, paper
+};
+
+/**
+ * What a surface is made of, as rays see it: the ray tracer's own material — its component, which each entity holds as
+ * it holds the forward pass's — an element an entity of the TraceRays' `entities`, InstanceID() in the scene. Its fields
+ * are the forward pass's of the same names, and one of its own.
+ */
+public struct RayMaterial {
+    [entity("MATRIX")] public float4x4 model;
+    public float3 albedo;              // its colour, as picked
+    public float metallic;
+    public float3 emission;            // the light it gives off itself
+    public float roughness;
+    public float alphaCutoff;          // above 0: where its albedoMap is less opaque than this, rays pass through
+    public float reflectionBlur;       // how much more its reflection rays spread than its roughness says: 0 as rough as it is
+    [entity("TEXTURE")] public uint albedoMap;
+    [entity("TEXTURE")] public uint normalMap;
+    [entity("TEXTURE")] public uint roughnessMap;      // g: how rough; b: how much a metal
+    [entity("TEXTURE")] public uint emissiveMap;
+    public float translucency;         // how much light falling on its back shows through on its front, tinted by its colour
+};
+/**
+ * Something that gives off light, as the ray tracer finds it: an instance of its scene whose material's `emission` is
+ * more than nothing — emitters.slang lists them each frame — with how many triangles it has to give it off from, how
+ * much it gives off (its emission's brightness by how big it is) and the sphere it is in, to judge from afar.
+ */
+public struct Emitter {
+    public uint instance;       // its row of the ray tracer's materials: InstanceID() in the scene
+    public uint triangles;
+    public float power;
+    public float radius;
+    public float3 center;
+    public float unused;
+};
+
+/** One of an instance's pictures at @p uv: @p none where it has no picture there. */
+public float4 pictureOf(uint index, SamplerState sampler, float2 uv, float4 none = float4(1.0, 1.0, 1.0, 1.0))
+{
+    return index == ~0u ? none : kor::texture2D(index).Sample(sampler, uv);
+}
+
+/**
+ * What the frame carries over from the last one, for the temporal antialiasing: the camera's matrix without the
+ * jitter this frame and the last, and the jitter — a different fraction of a pixel each frame, which the pre-pass and
+ * the forward pass move the picture by. Written once a frame by taa.slang's `advance`.
+ */
+public struct FrameState {
+    public float4x4 viewProjection;             // this frame's, without the jitter
+    public float4x4 previousViewProjection;     // last frame's, without the jitter
+    public float2 jitter;                       // this frame's, in clip space: two over the picture's size, times a fraction of a pixel
+    public uint frame;                          // how many frames there have been
+    public uint history;                        // 1 when last frame's picture is there to be blended with
+    public float2 size;                         // the picture's size, in pixels
+    public uint begun;                          // Begun once it has been written: before, what is in it is nothing
+};
+public static const uint Begun = 0x7A11u;
+
+/** Where a point of the world is in the picture this frame: moved by the frame's jitter, for the antialiasing to gather. */
+public float4 toPicture(float3 world, FrameState state)
+{
+    float4 clip = toClip(world);
+    if (state.begun == Begun) clip.xy += state.jitter * clip.w;
+    return clip;
+}
+
+/** Where a point of the world is in the picture. One function for every pass, so that each draws a thing at the very same depth. */
+public float4 toClip(float3 world)
+{
+    return mul(float4(world, 1.0), camera.viewProjection);
+}
+
+/** How far in front of the camera a point of the world is. */
+public float viewDepth(float3 world)
+{
+    return -mul(float4(world, 1.0), camera.view).z;
+}
+
+/** The sky seen along a direction: the ground below the horizon, the zenith above it, and the sun. */
+public float3 skyColor(Sun sun, float3 direction)
+{
+    float y = direction.y;
+    float3 color = y >= 0.0
+        ? lerp(sun.skyHorizon, sun.skyZenith, pow(saturate(y), 0.45))
+        : lerp(sun.skyHorizon, sun.skyGround, pow(saturate(-y * 4.0), 0.6));
+    if (sun.present > 0.0) {
+        float facing = dot(direction, -sun.direction);
+        float disc = smoothstep(sun.sunCosine - 0.00002, sun.sunCosine + 0.00002, facing);
+        float glow = pow(saturate(facing), 400.0) * 0.6 + pow(saturate(facing), 12.0) * 0.12;
+        color += sun.color * (disc * 8.0 + glow);
+    }
+    return color;
+}
+
+/** The light the sky gives a surface facing [normal]: the ground's from below, the zenith's from above. */
+public float3 skyLight(Sun sun, float3 normal)
+{
+    float up = normal.y * 0.5 + 0.5;
+    float3 sky = lerp(sun.skyHorizon, sun.skyZenith, saturate(normal.y));
+    return lerp(sun.skyGround, sky, smoothstep(0.0, 1.0, up)) * sun.ambient;
+}

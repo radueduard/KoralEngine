@@ -196,3 +196,57 @@ TEST_F(BufferTest, WhatTheShaderDoesNotHaveIsSaid) {
     EXPECT_TRUE(Has(runtime.OutputsOf("lamps"), "field.strength"));
     EXPECT_EQ(runtime.ValueOf("lamps", "field.strength"), Value(3));
 }
+
+// A Bundle fills a buffer's fields by name: a ForEach's element is each entity's fields and where it is, a Bundle node
+// what it is given. A field wired by itself takes its own wire, and what matches nothing is said on the node.
+TEST_F(BufferTest, ABundleFillsTheFieldsOfItsNames) {
+    Lamp({ 1, 0, 0 }, 0.5f, 1.f, { 0, 4, 0 });
+    Lamp({ 0, 1, 0 }, 0.25f, 2.f, { 7, 0, 0 });
+    Lamp({ 0, 0, 1 }, 1.f, 0.25f);
+    support::Give(scene->world, scene->world.Create(), "SpotLight", { { "color", { 1, 1, 1 } } });
+
+    kgraph::Graph graph = Lights();
+    kgraph::Node& lamps = *graph.Find("lamp data");
+    lamps.inputs.erase("field.position");
+    lamps.inputs.erase("field.range");
+    lamps.Wire("fields", "lamps", "element");     // its position and its range, by name; its colour is wired by itself
+    // The view's block, of a Bundle node made of the camera's matrix and where it is.
+    graph.Add("camera bundle", "Bundle").Set("names", Value::List { "viewProjection", "eye" }).Wire("field.viewProjection", "seen").Wire("field.eye", "camera", "position");
+    kgraph::Node& view = *graph.Find("view data");
+    view.inputs.erase("field.viewProjection");
+    view.inputs.erase("field.eye");
+    view.Wire("fields", "camera bundle");
+    graph.Add("parts", "Unbundle").Wire("of", "camera bundle");
+    // A layout with a name the element has not.
+    graph.Add("misspelled", "BufferBuilder").Set("layout", Value::List { Value::Members { { "name", "rnage" }, { "type", "eFloat" } },
+                                                                         Value::Members { { "name", "color" }, { "type", "eVec3" } } })
+        .Wire("fields", "lamps", "element");
+
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    Frame();
+    Frame();
+    const auto lights = Floats("light data");
+    ASSERT_GE(lights.size(), 4u * 12u);
+    EXPECT_EQ(lights[1], 4.f) << "the first lamp's place, from its element";
+    EXPECT_EQ(lights[3], 1.f) << "its range, from its element";
+    EXPECT_EQ(lights[4], 0.5f) << "its colour wired by itself, times its intensity: not the element's own";
+    EXPECT_EQ(lights[12], 7.f);
+    const auto pixel = scene->Pixel(16, 16);
+    EXPECT_NEAR(pixel.x, 128, 1) << "drawn as the same buffers wired a field at a time draw";
+    EXPECT_NEAR(pixel.z, 64, 1);
+
+    EXPECT_NE(runtime.Status("lamp data")->note.find("'intensity'"), std::string::npos) << "what the struct has no field for: " << runtime.Status("lamp data")->note;
+    EXPECT_NE(runtime.Status("misspelled")->note.find("'rnage'"), std::string::npos) << runtime.Status("misspelled")->note;
+    EXPECT_EQ(runtime.BundleOf("parts", "of"), (std::vector<std::string> { "viewProjection", "eye" }));
+    EXPECT_TRUE(Has(runtime.OutputsOf("parts"), "eye"));
+    EXPECT_TRUE(Has(runtime.PortsOf("camera bundle"), "field.viewProjection")) << "an input for each of its names";
+
+    // Wired from what is no Bundle, it says so.
+    graph.Find("view data")->Wire("fields", "seen");
+    runtime.Set(graph);
+    ASSERT_FALSE(runtime.Status("view data")->ok);
+    EXPECT_NE(runtime.Status("view data")->error.find("takes a Bundle"), std::string::npos) << runtime.Status("view data")->error;
+}

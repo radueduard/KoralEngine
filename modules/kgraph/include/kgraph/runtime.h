@@ -96,6 +96,8 @@ namespace kgraph
         std::string component;      ///< The component it is of. Empty for a Script node of a ResourceScript.
         std::string doc;
         std::vector<std::pair<std::string, Value>> inputs;  ///< What the node is given to start with.
+        std::string group;          ///< What it is for, to be offered under: a function's purpose ("Physics"). Empty: by its kind.
+        std::string keywords;       ///< More words it is found by: a function's tags.
     };
 
     /** @brief How a node fared when the graph was last set. */
@@ -205,6 +207,13 @@ namespace kgraph
         [[nodiscard]] std::size_t Bytes() const { return static_cast<std::size_t>(channels * bits / 8); }
     };
     [[nodiscard]] TexelLayout TexelLayoutOf(std::string_view format);
+
+    /** @brief The specialization constant a shader declares to show a channel of its material (koral_debug.slang). */
+    inline constexpr const char* ShaderDebugConstant = "koralDebugView";
+    /** @brief What `koralDebugView` is, as koral_debug.slang names them: 0 is the lit colour, as without it. */
+    enum class ShaderDebugChannel : int {
+        eLit = 0, eAlbedo = 1, eNormal = 2, eRoughness = 3, eMetallic = 4, eEmissive = 5, eOcclusion = 6, eLighting = 7,
+    };
 
     class Runtime {
     public:
@@ -352,6 +361,39 @@ namespace kgraph
         void Share(const std::set<std::string>& nodes);
         /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
         void SetSelected(kecs::Entity entity);
+
+        // ---- what an editor's scene view looks at the scene by --------------------------------------------------
+
+        /**
+         * @brief Whether this is an editor's scene view of the scene rather than the game's: a pass whose `views` is
+         *        "game" is left out of it, and one whose `views` is "editor" is run only in it. False, the default:
+         *        what is run, and an editor's Game panel.
+         */
+        void SetEditorView(bool editor);
+        [[nodiscard]] bool EditorView() const;
+        /** @brief One of the graph's DebugView nodes: its id, and what it is listed as. */
+        struct DebugViewOf {
+            std::string id;
+            std::string name;
+        };
+        /** @brief Every DebugView of the graph as it runs, in the graph's order. */
+        [[nodiscard]] std::vector<DebugViewOf> DebugViews() const;
+        /**
+         * @brief Shows the DebugView @p id: its `shown` is true, so the passes wired from it run, and its `out` is the
+         *        picture to show (ImageOf). Empty: none — what the graph shows. Taken up at the start of the next frame.
+         */
+        void ShowDebugView(std::string id);
+        [[nodiscard]] const std::string& ShownDebugView() const;
+        /**
+         * @brief What every pipeline whose shaders declare the specialization constant `koralDebugView`
+         *        (ShaderDebugConstant) is built with, unless its node gives it: which channel of its material it shows in
+         *        place of its lit colour (ShaderDebugChannel). 0, the default, shows what it shows. Taken up at the start
+         *        of the next frame, rebuilding only those pipelines.
+         */
+        void SetShaderDebugView(int channel);
+        [[nodiscard]] int ShaderDebugView() const;
+        /** @brief The graphics pipelines, by id, that draw colour and whose shaders do not declare `koralDebugView`: drawn as they are whatever it is. */
+        [[nodiscard]] std::vector<std::string> WithoutShaderDebugView() const;
         /**
          * @brief A fixed step has been taken, of @p seconds: called by whoever runs the scene, once for each (a scene's
          *        FixedUpdate, while it plays). A frame with one or more in it runs the passes of the fixed pages; one with
@@ -366,6 +408,26 @@ namespace kgraph
         };
         /** @brief Each pass node's Timing, by its id: a fixed page's every step's added together. */
         [[nodiscard]] std::map<std::string, Timing, std::less<>> Timings() const;
+
+        /** @brief The frame as it runs: this graph's passes in the order the frame graph schedules them, and what is left out. */
+        struct FrameReport {
+            struct Pass {
+                std::string name;           ///< The frame graph's: the node's id, or `<id>\nstep 2` for a further fixed step's.
+                std::string node;           ///< The pass node it is, by id as it runs: `<call>/<node>`, `<node> [n]`.
+                std::uint32_t level = 0;    ///< How deep in what it depends on: passes of one level depend on none of each other.
+                bool async = false;         ///< On the async compute queue.
+                double gpuMs = 0.0, recordMs = 0.0;
+                bool gpuMeasured = false;
+                /// What it uses, by the node that made each (or the entities' set it is): 'r' read, 'w' written, 'b' both.
+                std::vector<std::pair<std::string, char>> uses;
+            };
+            std::vector<Pass> passes;
+            /// Passes of this graph's that did not run, by node: skipped (what they need a pass left out makes) or culled (nothing needs what they make).
+            std::vector<std::pair<std::string, std::string>> leftOut;
+            std::uint64_t bytes = 0;            ///< What the frame graph allocated for what it makes itself.
+            std::uint64_t unsharedBytes = 0;    ///< What that would be with nothing sharing memory.
+        };
+        [[nodiscard]] FrameReport Frame() const;
         /** @brief How far the frame being made is from the last fixed step to the next, 0 to 1: a FixedStep's `alpha`. */
         void SetFixedFraction(float fraction);
         /** @brief How many fixed steps the frame being made has in it: what its fixed pages are run for. */
@@ -430,6 +492,11 @@ namespace kgraph
          *        of its component, once it is built.
          */
         [[nodiscard]] std::vector<Port> OutputsOf(std::string_view id) const;
+        /**
+         * @brief What a Bundle holds, by its members' names, in order: of a Bundle node's `out`, a ForEach's `element`, an
+         *        Unbundle's `of`. Known for those that something takes, once the graph is set; empty otherwise.
+         */
+        [[nodiscard]] std::vector<std::string> BundleOf(std::string_view id, std::string_view output) const;
         /**
          * @brief A pipeline node's parameters nobody wired: the ones each entity that runs it will supply.
          *        Empty when everything is set, and the pipeline runs once.

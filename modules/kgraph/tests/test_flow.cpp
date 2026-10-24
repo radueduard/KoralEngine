@@ -73,6 +73,29 @@ TEST_F(FlowTest, CallsAreWiredToOneAnotherAndAnElementTakesATurnOfOne) {
     EXPECT_FALSE(runtime.Ok()) << "given an output its function has not";
 }
 
+// A loop in a function: its Previous and its Elements name its nodes, and name them as the call has them written out.
+TEST_F(FlowTest, ALoopInAFunctionNamesItsOwnNodes) {
+    auto& runtime = *scene->runtime;
+    auto summed = std::make_shared<kgraph::Graph>();
+    summed->Add("start", "FunctionInput").Set("name", "start").Set("kind", "eValue");
+    summed->Add("turns", "Repeat").Set("count", 3);
+    summed->Add("first", "Add").Wire("a", "start").Set("b", 0);
+    summed->Add("tens", "Multiply").Wire("a", "turns", "index").Set("b", 10);
+    summed->Add("before", "Previous").Set("of", "sum").Set("first", "first");
+    summed->Add("sum", "Add").Wire("a", "tens").Wire("b", "before");
+    summed->Add("last", "Element").Set("of", "sum");
+    summed->Add("total", "FunctionOutput").Set("name", "total").Wire("value", "last");
+    kgraph::Graph graph;
+    graph.functions = { { "summed", summed } };
+    graph.Add("call", "Function").Set("function", "summed").Set("start", 5);
+    graph.Add("again", "Function").Set("function", "summed").Set("start", 1);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ValueOf("call", "total"), Value(35)) << "5, then 10 more, then 20 more: each turn the one before";
+    EXPECT_EQ(runtime.ValueOf("again", "total"), Value(31)) << "each call its own loop";
+}
+
 // A node wired from a Repeat is there once a turn, each with the turn's number where it took the Repeat's. A
 // Previous is what a node made the turn before, and an Element what it made on one turn.
 TEST_F(FlowTest, ALoopIsWrittenOutATurnANode) {
@@ -277,4 +300,77 @@ TEST_F(FlowTest, APassIsLeftOutAndWhatANodeMadeIsLookedAt) {
     EXPECT_TRUE(runtime.Status("paint")->ok);
     EXPECT_FALSE(runtime.Watched("lights"));
     EXPECT_TRUE(runtime.Watched("picture")) << "what is still watched is still copied out, whatever the graph is set to";
+}
+
+// A DebugView is a picture an editor's scene view can show in place of the graph's: listed by its name, its passes run
+// only while it is shown, and only in the runtime that shows it. A pass is for every view, the game's or the editor's;
+// and a pipeline whose shader declares `koralDebugView` is built with the channel the view asks for.
+TEST_F(FlowTest, ADebugViewIsShownInTheViewThatAsksForIt) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    const auto image = [&](const char* id) {
+        graph.Add(id, "Image").Set("format", "eRGBA8_UNORM").Set("extent.x", 8).Set("extent.y", 8)
+            .Set("usage", Value::List { "eTransferDst", "eTransferSrc", "eSampled", "eStorage" });
+    };
+    image("picture");
+    image("heat");
+    image("editor only");
+    image("game only");
+    image("channel");
+    graph.Add("paint", "Clear").Wire("image", "picture").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("heat view", "DebugView").Set("name", "Heat").Wire("picture", "heat");
+    graph.Add("warm", "Clear").Wire("image", "heat").Set("color", Value::List { 0, 1, 0, 1 }).Wire("enabled", "heat view", "shown");
+    graph.Add("for the editor", "Clear").Wire("image", "editor only").Set("views", "editor");
+    graph.Add("for the game", "Clear").Wire("image", "game only").Set("views", "game");
+    graph.Add("channel pipeline", "ComputePipeline").Set("compute.module", "debugChannel").Set("compute.entry", "computeMain").Wire("param.target", "channel");
+    graph.Add("show channel", "Dispatch").Wire("pipeline", "channel pipeline").Set("groups", Value::List { 1, 1, 1 });
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+
+    const auto runs = [&](const char* pass) { const auto order = scene->Schedule(); return std::ranges::find(order, pass) != order.end(); };
+    const auto views = runtime.DebugViews();
+    ASSERT_EQ(views.size(), 1u);
+    EXPECT_EQ(views.front().id, "heat view");
+    EXPECT_EQ(views.front().name, "Heat");
+    Frame();
+    Frame();
+    EXPECT_TRUE(runs("paint"));
+    EXPECT_FALSE(runs("warm")) << "nothing makes a debug view's picture while it is not shown";
+    EXPECT_TRUE(runs("for the game")) << "a runtime is the game's view unless it is told otherwise";
+    EXPECT_FALSE(runs("for the editor"));
+
+    runtime.ShowDebugView("heat view");
+    runtime.SetEditorView(true);
+    runtime.Watch("channel");
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(runtime.ShownDebugView(), "heat view");
+    EXPECT_TRUE(runs("warm"));
+    EXPECT_EQ(runtime.ResourceOf("heat view"), runtime.ResourceOf("heat")) << "what it shows is its picture";
+    EXPECT_FALSE(runs("for the game"));
+    EXPECT_TRUE(runs("for the editor"));
+    EXPECT_EQ(runtime.Current(), graph) << "what is shown is the view's, not the graph's";
+    auto channel = runtime.Watched("channel");
+    ASSERT_TRUE(channel);
+    EXPECT_EQ(channel->bytes[1], std::byte { 0 }) << "the lit colour, as without it";
+
+    runtime.SetShaderDebugView(static_cast<int>(kgraph::ShaderDebugChannel::eEmissive));
+    for (int i = 0; i < 4; ++i) Frame();
+    channel = runtime.Watched("channel");
+    ASSERT_TRUE(channel);
+    EXPECT_NEAR(static_cast<int>(channel->bytes[1]), 128, 1) << "built again with the channel asked for";
+
+    // Given on the node, the graph's own says.
+    graph.Find("channel pipeline")->Set("constant.koralDebugView", 2);
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    channel = runtime.Watched("channel");
+    ASSERT_TRUE(channel);
+    EXPECT_NEAR(static_cast<int>(channel->bytes[1]), 51, 1);
+
+    runtime.ShowDebugView({});
+    runtime.SetEditorView(false);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_FALSE(runs("warm"));
+    EXPECT_TRUE(runs("for the game"));
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
 }

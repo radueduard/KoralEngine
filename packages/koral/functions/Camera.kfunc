@@ -1,0 +1,287 @@
+{
+  "koral-function": 1,
+  "purpose": "Camera",
+  "description": "The scene's camera: the first entity with a Camera, seen from where it is the way it faces, through a perspective of its field of view, near and far at the window's aspect. It is the main View and lens, which an editor looks through in its place. Gives every matrix of it, and all of them as one Bundle by the names a camera block has.",
+  "tags": [
+    "camera",
+    "view",
+    "projection",
+    "perspective",
+    "eye",
+    "main view",
+    "matrices"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "screen",
+        "type": "Screen",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {}
+      },
+      {
+        "id": "eye",
+        "type": "Entity",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "component": "Camera"
+        }
+      },
+      {
+        "id": "looking at",
+        "type": "Add",
+        "at": [
+          250,
+          160
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "eye",
+              "worldPosition"
+            ]
+          },
+          "b": {
+            "$link": [
+              "eye",
+              "forward"
+            ]
+          }
+        }
+      },
+      {
+        "id": "view",
+        "type": "View",
+        "at": [
+          500,
+          60
+        ],
+        "inputs": {
+          "main": true,
+          "position": {
+            "$link": [
+              "eye",
+              "worldPosition"
+            ]
+          },
+          "target": {
+            "$link": [
+              "looking at",
+              "out"
+            ]
+          },
+          "up": {
+            "$link": [
+              "eye",
+              "up"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens",
+        "type": "Perspective",
+        "at": [
+          500,
+          260
+        ],
+        "inputs": {
+          "main": true,
+          "aspect": {
+            "$link": [
+              "screen",
+              "aspect"
+            ]
+          },
+          "fieldOfView": {
+            "$link": [
+              "eye",
+              "field.fieldOfView"
+            ]
+          },
+          "near": {
+            "$link": [
+              "eye",
+              "field.near"
+            ]
+          },
+          "far": {
+            "$link": [
+              "eye",
+              "field.far"
+            ]
+          }
+        }
+      },
+      {
+        "id": "seen",
+        "type": "MatrixMultiply",
+        "at": [
+          750,
+          200
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "lens",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "view",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "bundle",
+        "type": "Bundle",
+        "at": [
+          1000,
+          60
+        ],
+        "inputs": {
+          "names": [
+            "view",
+            "projection",
+            "inverseView",
+            "inverseProjection",
+            "viewProjection",
+            "position",
+            "zNear",
+            "zFar"
+          ],
+          "field.view": {
+            "$link": [
+              "view",
+              "view"
+            ]
+          },
+          "field.projection": {
+            "$link": [
+              "lens",
+              "projection"
+            ]
+          },
+          "field.inverseView": {
+            "$link": [
+              "view",
+              "inverseView"
+            ]
+          },
+          "field.inverseProjection": {
+            "$link": [
+              "lens",
+              "inverseProjection"
+            ]
+          },
+          "field.viewProjection": {
+            "$link": [
+              "seen",
+              "out"
+            ]
+          },
+          "field.position": {
+            "$link": [
+              "view",
+              "position"
+            ]
+          },
+          "field.zNear": {
+            "$link": [
+              "lens",
+              "near"
+            ]
+          },
+          "field.zFar": {
+            "$link": [
+              "lens",
+              "far"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out camera",
+        "type": "FunctionOutput",
+        "at": [
+          1400,
+          60
+        ],
+        "inputs": {
+          "name": "camera",
+          "kind": "eValue",
+          "value": {
+            "$link": [
+              "bundle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out view",
+        "type": "FunctionOutput",
+        "at": [
+          1400,
+          160
+        ],
+        "inputs": {
+          "name": "view",
+          "kind": "eValue",
+          "value": {
+            "$link": [
+              "view",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out projection",
+        "type": "FunctionOutput",
+        "at": [
+          1400,
+          260
+        ],
+        "inputs": {
+          "name": "projection",
+          "kind": "eValue",
+          "value": {
+            "$link": [
+              "lens",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out viewProjection",
+        "type": "FunctionOutput",
+        "at": [
+          1400,
+          360
+        ],
+        "inputs": {
+          "name": "viewProjection",
+          "kind": "eValue",
+          "value": {
+            "$link": [
+              "seen",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

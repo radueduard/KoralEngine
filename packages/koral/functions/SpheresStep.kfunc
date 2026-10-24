@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Physics",
+  "description": "One fixed step of spheres on the GPU: sequential impulses over a hashed grid.",
+  "tags": ["physics", "rigid body", "spheres", "impulse", "simulation"],
   "graph": {
     "kgraph": 1,
     "nodes": [

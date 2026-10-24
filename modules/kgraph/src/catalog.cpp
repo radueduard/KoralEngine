@@ -159,6 +159,20 @@ namespace kgraph
          * is drawn, from what buffer, into what, how — a Sampler's likewise; a builder's struct a part of its own, and
          * what several inputs share the start of the name of (`color[].view`, `.load`, `.store`), a part of their own.
          */
+        /**
+         * How abstract a type is: by its category, but for those whose category says what they make rather than what
+         * they are about — a pack of the scene's meshes is a resource, and about the scene.
+         */
+        Level LevelOf(const NodeType& type)
+        {
+            static const std::set<std::string_view> scene { "MeshPack", "IndirectDraws", "Meshlets", "RayScene", "ShaderBuffer", "BufferBuilder" };
+            if (scene.contains(type.name) || type.category == "Scene") return Level::eScene;
+            if (type.category == "Functions") return type.name == "Function" ? Level::eTechnique : Level::eValue;   // its inputs and outputs are a function's ends
+            if (type.category == "Passes") return Level::eCommand;
+            if (type.category == "Resources" || type.category == "Pipelines") return type.name == "Reference" ? Level::eValue : Level::eResource;
+            return Level::eValue;      // Values, Math, Vectors, Logic, Cameras, Flow
+        }
+
         void Group(NodeType& type)
         {
             using V = Value;
@@ -349,6 +363,8 @@ namespace kgraph
                 { "ForEach", "each every all loop iterate list component lights ecs world query scene entities instances" },
                 { "BufferBuilder", "ssbo struct storage structured uniform constant buffer layout fields instances array lights cameras pack" },
                 { "MeshPack", "pack merge combine batch meshes one mesh geometry indirect gpu driven bindless vertices indices" },
+                { "Meshlets", "meshlet cluster mesh shader task shader amplification cull cone bounds nanite" },
+                { "RayScene", "ray tracing raytracing tlas blas acceleration structure scene instances bvh rtx" },
                 { "Function", "call subgraph group macro reuse function nodes as one" }, { "FunctionInput", "parameter argument port edge in" },
                 { "FunctionOutput", "result return port edge out" },
                 { "IndirectDraws", "indirect draw commands multi draw gpu driven culling batch instances drawcount args arguments" },
@@ -360,12 +376,13 @@ namespace kgraph
                 { "Paraboloid", "dual paraboloid hemisphere environment shadow point light projection" },
                 { "CubeFace", "cube map face direction point light shadow environment probe six" },
                 { "Linear", "colour color gamma srgb linear convert" }, { "Collect", "gather list array all elements foreach values" },
+                { "Bundle", "bundle struct record make pack group named values camera" }, { "Unbundle", "unbundle split unpack struct members fields" },
                 { "ShadowCascades", "csm cascaded shadow map sun directional light matrices" },
                 { "PointShadows", "cube map omnidirectional shadow point light lamp six faces matrices" },
                 { "ImageFile", "texture picture png jpg hdr environment map load import asset" },
                 { "Script", "fill init initial data cpu generate noise table lut bytes texels code" },
                 { "Repeat", "loop for each times iterate count mip chain" }, { "Previous", "loop last turn before feedback chain" },
-                { "Element", "loop index pick one turn result" }, { "Note", "comment text label remark annotate" }, { "Switch", "branch choose select if either option toggle" },
+                { "Element", "loop index pick one turn result" }, { "Note", "comment text label remark annotate" }, { "Switch", "branch choose select if either option toggle" }, { "DebugView", "debug view visualize visualise buffer inspect scene view editor heat" },
                 { "ShaderBuffer", "ssbo struct storage structured uniform constant buffer map fields entities array lights" },
                 { "Append", "join concatenate vec4 combine" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
                 { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
@@ -416,7 +433,7 @@ namespace kgraph
                 { "Image", "image" }, { "ImageView", "crop" }, { "Buffer", "storage" }, { "BufferView", "view_list" }, { "Sampler", "texture" },
                 { "Framebuffer", "layers" }, { "Mesh", "category" }, { "Shader", "code" }, { "AccelerationStructure", "account_tree" },
                 { "Primitive", "view_in_ar" }, { "ImageFile", "insert_photo" }, { "Script", "code" }, { "Screen", "monitor" }, { "Reference", "link" },
-                { "VertexLayout", "reorder" }, { "DataBuffer", "dns" }, { "ShaderBuffer", "table_chart" }, { "BufferBuilder", "view_module" }, { "MeshPack", "inventory_2" }, { "Function", "functions" }, { "FunctionInput", "login" }, { "FunctionOutput", "logout" }, { "IndirectDraws", "format_list_numbered" },
+                { "VertexLayout", "reorder" }, { "DataBuffer", "dns" }, { "ShaderBuffer", "table_chart" }, { "BufferBuilder", "view_module" }, { "MeshPack", "inventory_2" }, { "Meshlets", "grid_view" }, { "RayScene", "flare" }, { "Function", "functions" }, { "FunctionInput", "login" }, { "FunctionOutput", "logout" }, { "IndirectDraws", "format_list_numbered" },
                 { "ComputePipeline", "memory" }, { "GraphicsPipeline", "brush" }, { "RayTracingPipeline", "flare" },
                 // What is run.
                 { "Clear", "format_color_reset" }, { "Blit", "open_in_full" }, { "Resolve", "blur_on" }, { "Copy", "content_copy" },
@@ -436,9 +453,9 @@ namespace kgraph
                 { "PointShadows", "lightbulb" },
                 // The world.
                 { "Entities", "public" }, { "Filter", "filter_alt" }, { "ForEach", "loop" }, { "Entity", "place" }, { "ComponentValue", "input" },
-                { "EntityTransform", "3d_rotation" }, { "Selected", "near_me" }, { "FixedStep", "timer" }, { "WriteBack", "move_down" }, { "Collect", "collections" },
+                { "EntityTransform", "3d_rotation" }, { "Selected", "near_me" }, { "FixedStep", "timer" }, { "WriteBack", "move_down" }, { "Collect", "collections" }, { "Bundle", "inventory_2" }, { "Unbundle", "unarchive" },
                 // What is done more than once, and one of several ways.
-                { "Repeat", "repeat" }, { "Previous", "skip_previous" }, { "Element", "format_list_numbered" }, { "Switch", "call_split" },
+                { "Repeat", "repeat" }, { "Previous", "skip_previous" }, { "Element", "format_list_numbered" }, { "Switch", "call_split" }, { "DebugView", "visibility" },
                 { "Note", "sticky_note_2" },
             };
             if (const auto it = icons.find(type); it != icons.end()) return std::string(it->second);
@@ -826,7 +843,9 @@ namespace kgraph
                         out("position", "vector", "Where it is, relative to what it is under."), out("rotation", "vector", "How it is turned, in degrees."),
                                     out("orientation", "vector", "How it is turned, as a quaternion: x, y, z, w — relative to what it is under, as a WriteBack's `rotation` is written."),
                         out("scale", "vector", {}),
-                        out("present", "number", "1 when there is such an element, 0 when there is none.") };
+                        out("present", "number", "1 when there is such an element, 0 when there is none."),
+                        out("element", "bundle", "The element as one Bundle: its component's fields and `with`'s, by their names, and where it is (matrix, "
+                                                 "worldPosition, forward...). Wired to a buffer's `fields`, it fills each field of the same name.") };
                     types.push_back({ "ForEach", "Scene", { component, with, without, where, repeat }, each,
                                       "Every entity that has a component, an element at a time: each field of it, its index, and where the entity is. "
                                       "Every node wired from it is worked out once an element, and a BufferBuilder or ShaderBuffer wired from those holds an element for each.", nullptr });
@@ -872,7 +891,10 @@ namespace kgraph
                     Port parameter { "parameter", PortKind::eValue, "string", false, "What the shader calls the buffer: the `lights` of `StructuredBuffer<Light> lights`.", nullptr };
                     Port after = ResourcePort("after", "Buffer", "Another ShaderBuffer of the same struct, whose elements come first in this one: several kinds of entity in one buffer.");
                     after.optional = true;
-                    types.push_back({ "ShaderBuffer", "Resources", { std::move(module), std::move(entry), std::move(parameter), std::move(after) },
+                    Port fields { "fields", PortKind::eValue, "bundle", false, "A Bundle — a ForEach's element, a Bundle node's — that fills each field of the same name. "
+                                  "A field wired by itself takes its own wire; what has no field of its name is said on the node.", nullptr };
+                    fields.optional = true;
+                    types.push_back({ "ShaderBuffer", "Resources", { std::move(module), std::move(entry), std::move(parameter), std::move(after), fields },
                                       { ResourcePort("out", "Buffer"), out("count", "number", "How many elements it holds: what the shader loops to."),
                                         out("stride", "number", "The size of one element, in bytes.") },
                                       "A buffer a shader declares, laid out as the shader lays it out: an input for each field of its struct, by name. With fields wired from "
@@ -906,7 +928,10 @@ namespace kgraph
                     rules.initial = Value("eStorage");
                     Port after = ResourcePort("after", "Buffer", "Another BufferBuilder of the same layout, whose elements come first in this one: several kinds of entity in one buffer.");
                     after.optional = true;
-                    types.push_back({ "BufferBuilder", "Resources", { std::move(layout), std::move(count), std::move(rules), std::move(after) },
+                    Port fields { "fields", PortKind::eValue, "bundle", false, "A Bundle — a ForEach's element, a Bundle node's — that fills each field of the "
+                                  "layout of the same name. A field wired by itself takes its own wire; what matches nothing, on either side, is said on the node.", nullptr };
+                    fields.optional = true;
+                    types.push_back({ "BufferBuilder", "Resources", { std::move(layout), std::move(count), std::move(rules), std::move(after), std::move(fields) },
                                       { ResourcePort("out", "Buffer"), out("count", "number", "How many elements it holds: what the shader loops to.", true),
                                         out("stride", "number", "The size of one element, in bytes."), out("bytes", "number", "The size of the whole buffer, in bytes.") },
                                       "A buffer of elements laid out on the node: an input for each field, `field.<name>`. "
@@ -919,7 +944,9 @@ namespace kgraph
                                 Number("stride", "How many bytes a vertex is, in that buffer."), Number("position", "Where in a vertex its position is, in bytes: three floats."),
                                 Number("vertexCount"), Number("indexCount"),
                                 Number("firstIndex", "Of a model's mesh, which is a part of the one buffer its model is on the device: the first of its indices."),
-                                Number("vertexOffset", "...and what they count from.") },
+                                Number("vertexOffset", "...and what they count from."),
+                                ResourcePort("normals", "Buffer", "The vertex buffer its normals are in, when it has them."), Number("normalsStride"), Number("normalsOffset"),
+                                ResourcePort("uvs", "Buffer", "The vertex buffer its first UVs are in, when it has them."), Number("uvsStride"), Number("uvsOffset") },
                               "A mesh's buffers, as buffers: for a compute shader to read its triangles — a mesh collider, a mesh to scatter on.", nullptr });
             types.push_back({ "Primitive", "Resources",
                               { chosen({ "shape", PortKind::eValue, "string", false,
@@ -939,7 +966,11 @@ namespace kgraph
                 Port meshes = ResourcePort("meshes", "Mesh", "Each element's mesh: a Filter's `Mesh.mesh`. The distinct ones are packed, in the order the Filter has them first — grouped by Mesh, a group's.");
                 Port positions { "positions", PortKind::eValue, "bool", false, "Only where their vertices are: three floats each, whatever else each mesh has and however it lays them out "
                                  "— for a compute shader that reads triangles (a mesh collider), not for drawing. Read back and packed on the CPU when it is built.", nullptr };
-                types.push_back({ "MeshPack", "Resources", { std::move(meshes), std::move(positions) },
+                Port attributes { "attributes", PortKind::eValue, "list", false, "Only these of their vertices, by semantic (\"POSITION\", \"NORMAL\", \"UV\"): a buffer each, as the first mesh "
+                                  "that has it has it, and zeros where a mesh has not — so that meshes laid out otherwise, of other files, are one. What the pipeline reads. "
+                                  "Read back and packed on the CPU when it is built.", nullptr };
+                attributes.optional = true;
+                types.push_back({ "MeshPack", "Resources", { std::move(meshes), std::move(positions), std::move(attributes) },
                                   { ResourcePort("mesh", "Mesh", "All of them as one mesh: what an indirect Draw draws."),
                                     { "layout", PortKind::eValue, "struct KoralVertexLayout", false, "Its vertices, as the meshes have them: what a pipeline that draws it takes as vertex.layout.", nullptr },
                                     { "ranges", PortKind::eValue, "list", false, "Each mesh's part of it: { firstIndex, indexCount, vertexOffset, boundsMin, boundsMax }, in order. What an IndirectDraws takes.", nullptr },
@@ -947,6 +978,49 @@ namespace kgraph
                                     { "count", PortKind::eValue, "number", false, "How many meshes it holds.", nullptr } },
                                   "Many meshes as one: their vertices one after another in one buffer, and their indices in another, each mesh copied once on the device. "
                                   "Built again when the meshes are other ones. Their vertices must be laid out alike, unless only their positions are packed.", nullptr });
+                // ---- the same meshes cut into meshlets, for task and mesh shaders ----------------------------------------
+                {
+                    Port packed = ResourcePort("mesh", "Mesh", "The meshes as one: a MeshPack's mesh. Its POSITION and its indices are read back.");
+                    Port packedRanges { "ranges", PortKind::eValue, "list", false, "Each mesh's part of it: the MeshPack's ranges. Each mesh is cut apart from the rest.", nullptr };
+                    Port mostVertices { "maxVertices", PortKind::eValue, "number", false, "The most vertices a meshlet has: what a mesh shader's group writes out.", nullptr };
+                    mostVertices.optional = true;
+                    mostVertices.initial = Value(64);
+                    Port mostTriangles { "maxTriangles", PortKind::eValue, "number", false, "The most triangles a meshlet has.", nullptr };
+                    mostTriangles.optional = true;
+                    mostTriangles.initial = Value(124);
+                    types.push_back({ "Meshlets", "Resources", { std::move(packed), std::move(packedRanges), std::move(mostVertices), std::move(mostTriangles) },
+                                      { ResourcePort("meshlets", "Buffer", "48 bytes a meshlet: uint vertexOffset, vertexCount, triangleOffset, triangleCount; float4 sphere (its middle "
+                                                     "and how far it reaches); float4 cone (the way most of its triangles face, and the cosine past which none faces the eye)."),
+                                        ResourcePort("vertices", "Buffer", "A uint a vertex of a meshlet: which vertex of the mesh it is, its mesh's vertexOffset in it."),
+                                        ResourcePort("triangles", "Buffer", "A uint a triangle of a meshlet: its three corners, among the meshlet's vertices, a byte each."),
+                                        ResourcePort("meshRanges", "Buffer", "16 bytes a mesh, in the pack's order: uint firstMeshlet, meshletCount; and two left over."),
+                                        { "count", PortKind::eValue, "number", false, "How many meshlets there are.", nullptr },
+                                        { "most", PortKind::eValue, "number", false, "How many meshlets the mesh with the most has.", nullptr } },
+                                      "The meshes of a MeshPack cut into meshlets: runs of their triangles of a few dozen vertices each, each with a sphere round it and a cone of "
+                                      "the ways it faces — what a task shader culls and a mesh shader draws. Cut again when the pack is packed again.", nullptr });
+                }
+                // ---- the same entities as a scene rays are traced through ----------------------------------------------
+                {
+                    Port each = ResourcePort("meshes", "Mesh", "Each element's mesh: the same Filter's `Mesh.mesh` the MeshPack packs, grouped by Mesh. Its elements are the instances, "
+                                             "in its order: the rows of the buffer of instances a Draw of the pack fills.");
+                    Port packed = ResourcePort("mesh", "Mesh", "The meshes as one: the MeshPack's mesh. Each of its meshes is a bottom-level structure of its own.");
+                    Port packedRanges { "ranges", PortKind::eValue, "list", false, "Each mesh's part of it: the MeshPack's ranges.", nullptr };
+                    Port masked { "masked", PortKind::eValue, "string", false, "A component — a tag — whose entities are cut out by a picture's alpha: their triangles are not opaque, "
+                                  "and an any-hit shader runs for each. The rest are opaque.", nullptr };
+                    masked.optional = true;
+                    Port unshadowing { "noShadow", PortKind::eValue, "string", false, "A component whose entities cast no shadow — a lamp's own ball: their instances' mask is 2, "
+                                       "so that a ray traced with a mask of 1 (a shadow's, an occlusion's) passes through them. Every other's is 3.", nullptr };
+                    unshadowing.optional = true;
+                    types.push_back({ "RayScene", "Resources", { std::move(each), std::move(packed), std::move(packedRanges), std::move(masked), std::move(unshadowing) },
+                                      { ResourcePort("structure", "AccelerationStructure", "The top-level structure: every instance, where its entity is. Made again when one moves "
+                                                     "— what is wired to it is built again then; a shader that reads it by its bindless index from `scene` is not."),
+                                        ResourcePort("scene", "Buffer", "16 bytes: uint the structure's bindless index (kor::accelerationStructure), uint how many instances; two left over. "
+                                                     "Written again whenever the structure is made again."),
+                                        ResourcePort("meshOf", "Buffer", "A uint an instance, by its row (InstanceID()): which mesh of the pack it is — its range, its meshlets."),
+                                        { "count", PortKind::eValue, "number", false, "How many instances there are.", nullptr } },
+                                      "The entities of a Filter as a scene rays are traced through: a bottom-level structure for each mesh of their pack, and a top-level one placing "
+                                      "an instance of it where each entity is — its InstanceID() its row among the Filter's elements. Made again when one moves, comes or goes.", nullptr });
+                }
                 Port ranges { "ranges", PortKind::eValue, "list", false, "Each mesh's part of the mesh drawn: a MeshPack's ranges.", nullptr };
                 Port groups { "groups", PortKind::eValue, "list", false, "How many of each to draw, and from where: a Filter's groups, grouped by Mesh, so its groups and the pack's meshes are in one order.", nullptr };
                 Port mode { "mode", PortKind::eValue, "string", false, "eCPU: each command draws its whole group. eGPU: each command starts at 0 instances every frame, for a compute pass to count the ones it draws, "
@@ -1024,12 +1098,31 @@ namespace kgraph
                                     given("count", "number", "How many elements there are.") },
                                   "Every element's value at once: what is worked out once an element of a ForEach, as one list — the lights' places, for a node that "
                                   "takes them all.", nullptr });
+                Port names = hinted({ "names", PortKind::eValue, "list", false, "Its members' names, in order: an input of each, `field.<name>`, to wire or to give.", nullptr }, "names");
+                names.initial = Value(Value::List {});
+                Port base { "base", PortKind::eValue, "bundle", false, "Another Bundle it is made on: its members, with this one's own in place of those of the same name.", nullptr };
+                base.optional = true;
+                types.push_back({ "Bundle", "Flow", { std::move(names), std::move(base) },
+                                  { { "out", PortKind::eValue, "bundle", false, "The Bundle: every member, by its name.", nullptr } },
+                                  "Many values as one wire, each by its name: a camera's view, projection and position, for a buffer whose fields have those names. "
+                                  "A buffer's `fields`, or a draw's `push`, takes it and fills what has the same name.", nullptr });
+                Port taken { "of", PortKind::eValue, "bundle", false, "The Bundle to take apart: a Bundle node's, a ForEach's element, a function's.", nullptr };
+                types.push_back({ "Unbundle", "Flow", { std::move(taken) }, {},
+                                  "A Bundle taken apart: an output for each of its members, by its name.", nullptr });
                 types.push_back({ "Note", "Flow", { std::move(text) }, {}, "Words on the graph, beside what they are about: why a pass is there, what a number means. It makes nothing.", nullptr });
                 Port index { "index", PortKind::eValue, "number", false, "Which of the options, from 0. True is 1 and false 0.", nullptr };
                 index.initial = Value(0);
                 Port option { "option[]", PortKind::eResource, "Resource", true, "One of the things it can be: a resource, or a value.", nullptr };
                 types.push_back({ "Switch", "Flow", { std::move(index), std::move(option) }, { ResourcePort("out", "Resource") },
                                   "One of several things wired to it, by number: a picture or another to show, a pass's way of working or another.", nullptr });
+                Port viewName { "name", PortKind::eValue, "string", false, "What an editor's scene view lists it as: \"Cluster heat\". Not given, the node's id.", nullptr };
+                viewName.optional = true;
+                Port viewPicture { "picture", PortKind::eResource, "Image", false, "The picture shown in its place while it is chosen.", nullptr };
+                types.push_back({ "DebugView", "Flow", { std::move(viewName), std::move(viewPicture) },
+                                  { ResourcePort("out", "Image"), { "shown", PortKind::eValue, "bool", false, "True while an editor shows it: wired to the 'enabled' of the passes "
+                                                                    "that make its picture, they run only then.", nullptr } },
+                                  "A picture an editor's scene view can be switched to, in place of what the graph shows: the clusters' heat, a buffer of normals. "
+                                  "It is chosen in that view alone — the game, and a project that is run, never show it.", nullptr });
             }
             types.push_back({ "ImageFile", "Resources",
                               { { "file", PortKind::eValue, "string", false, "The picture's file — png, jpg, hdr and the like: under the project's assets folder, or by its whole path.", nullptr } },
@@ -1114,13 +1207,17 @@ namespace kgraph
                                 optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: as many groups as cover it — each element's own image, when it is given here from a ForEach. Instead of groups.", nullptr }, "parameter")),
                                 optional(Number("groupSize.x", "How much of the covered image one group works on: the pipeline's numThreads, when not given.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
                                 optional(ResourcePort("indirect", "Buffer", "A buffer that says how many groups, three numbers of 32 bits, written by a pass before this one: instead of groups. It needs eIndirect among its usage.")),
-                                optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) }, {},
+                                optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")),
+                                optional({ "push", PortKind::eValue, "bundle", false, "A Bundle that gives each `push.<name>` of the same name the pipeline leaves it: a ForEach's element gives a draw its `matrix`, its `entityId`. One given by itself takes its own.", nullptr }) }, {},
                               "Runs a compute pipeline. What its pipeline leaves unwired is given here, `param.<name>` and `push.<name>`: wired from a ForEach, it "
                               "runs once for each of its elements, and otherwise once.", nullptr });
             types.push_back({ "TraceRays", "Passes",
                               { ResourcePort("pipeline", "RayTracingPipeline"),
                                 optional(Number("size.x", "How many rays, each way: one for each pixel of the image they are for.")), optional(Number("size.y")), optional(Number("size.z")),
-                                optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: a ray for each of its pixels. Instead of size.", nullptr }, "parameter")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) }, {},
+                                optional(hinted({ "cover", PortKind::eValue, "string", false, "One of the pipeline's image parameters, by name: a ray for each of its pixels. Instead of size.", nullptr }, "parameter")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")),
+                                optional({ "push", PortKind::eValue, "bundle", false, "A Bundle that gives each `push.<name>` of the same name the pipeline leaves it: a ForEach's element gives a draw its `matrix`, its `entityId`. One given by itself takes its own.", nullptr }),
+                                optional({ "entities", PortKind::eValue, "entities", false, "The entities its rays hit: a Filter's, the one a RayScene of them is of. A buffer the shader marks "
+                                          "`[entity(\"PER_INSTANCE\")]` and nothing is wired to has an element for each, in the Filter's order — InstanceID() — filled from the pipeline's component: its material.", nullptr }) }, {},
                               "Runs a ray tracing pipeline. What its pipeline leaves unwired is given here, as a Dispatch's is: once, or once for each element of a ForEach.", nullptr });
             {
                 const std::vector<std::string> loads { "eClear", "eLoad", "eDontCare" }, stores { "eStore", "eDontCare" };
@@ -1176,7 +1273,8 @@ namespace kgraph
                     optional(Bool("whenChanged", "True to draw only when what it would draw is not what it drew last — the same entities' meshes, where they are, with the same "
                                                  "'cull' matrix, sets and push constants — leaving what it draws into as it was otherwise: a shadow map of what holds still. "
                                                  "What the buffers it reads hold is not looked at: a matrix it is seen by is to be its 'cull' too. Drawn again into what "
-                                                 "another Draw started over this frame.")) };
+                                                 "another Draw started over this frame.")),
+                    optional({ "push", PortKind::eValue, "bundle", false, "A Bundle that gives each `push.<name>` of the same name the pipeline leaves it: a ForEach's element gives a draw its `matrix`, its `entityId`. One given by itself takes its own.", nullptr }) };
                 types.push_back({ "Draw", "Passes", std::move(ports), {},
                                   "Draws with a graphics pipeline into a framebuffer. What a draw has of its own is given here — its `mesh`, and what the pipeline leaves "
                                   "unwired as `param.<name>` and `push.<name>`, a model matrix among them: wired from a ForEach, a draw for each of its elements; "
@@ -1194,6 +1292,8 @@ namespace kgraph
                     type.category = vectors.contains(type.name) || matrices.contains(type.name) ? "Vectors" : logic.contains(type.name) ? "Logic" : "Math";
                 type.keywords = Keywords(type.name);
                 type.icon = IconOf(type.name, type.category);
+                type.level = LevelOf(type);
+                type.composite = type.name == "Function";
                 for (auto& port : type.inputs) Limit(type.name, port);
                 Group(type);
                 // A number or a vector said of no kind: kept, for the graphs made with it, and offered as the kinds there are.
@@ -1203,6 +1303,22 @@ namespace kgraph
                     enabled.optional = true;
                     enabled.initial = Value(true);
                     type.inputs.push_back(std::move(enabled));
+                    Port views { "views", PortKind::eValue, "string", false, "Which views of the scene run it: every one, the game's only (what is run, and an "
+                                 "editor's Game panel) — a vignette, a screen's words — or an editor's scene view only: what is drawn there to look at the scene by.", nullptr };
+                    views.optional = true;
+                    views.choices = { "all", "game", "editor" };
+                    views.initial = Value("all");
+                    type.inputs.push_back(std::move(views));
+                    // What records compute dispatches and copies only may run on the async compute queue, beside the
+                    // graphics passes it does not depend on (kor::PassBuilder::AsyncCompute).
+                    if (RunsAsync(type.name)) {
+                        Port async { "async", PortKind::eValue, "bool", false,
+                                     "True to run it on the async compute queue, beside the graphics passes it does not depend on. On a device with "
+                                     "no second queue it runs on the graphics queue, in order, which is always correct.", nullptr };
+                        async.optional = true;
+                        async.initial = Value(false);
+                        type.inputs.push_back(std::move(async));
+                    }
                 }
                 if (!type.builder)
                     for (auto& port : type.inputs)
@@ -1216,11 +1332,11 @@ namespace kgraph
                     if (port.kind != PortKind::eValue) continue;
                     const bool small = port.type == "number" || port.type == "bool" || port.type == "vector" || port.type == "value" || port.editor == "color";
                     if (port.type == "struct KoralVertexLayout") { port.place = Placement::eWire; port.companion = "VertexLayout"; }
-                    else if (port.type == "struct" || port.type == "matrix" || port.type == "entities") port.place = Placement::eWire;
+                    else if (port.type == "struct" || port.type == "matrix" || port.type == "entities" || port.type == "bundle") port.place = Placement::eWire;
                     else if (lenses.contains(type.name)) port.place = Placement::eInspector;
                     else if (worked.contains(type.category) && type.name != "VertexLayout" && (small || !port.choices.empty() || type.name == "String")) port.place = Placement::eNode;
                     else if ((type.name == "Repeat" && port.name == "count") || (type.name == "Switch" && port.name == "index")
-                             || (type.name == "Clear" && port.name == "color")) port.place = Placement::eNode;
+                             || (type.name == "Clear" && port.name == "color") || (type.name == "DebugView" && port.name == "name")) port.place = Placement::eNode;
                 }
                 if (type.name == "Collect")
                     for (auto& port : type.inputs) port.place = Placement::eWire;
@@ -1290,6 +1406,11 @@ namespace kgraph
         }
     }
 
+    bool RunsAsync(const std::string_view type)
+    {
+        return type == "Dispatch" || type == "CopyBuffer" || type == "ClearBuffer" || type == "Copy" || type == "CopyBufferToImage" || type == "CopyImageToBuffer";
+    }
+
     bool Applies(const Port& port, const Node& node)
     {
         if (port.when.input.empty()) return true;
@@ -1332,6 +1453,18 @@ namespace kgraph
         return types;
     }
 
+    std::string_view LevelName(const Level level)
+    {
+        switch (level) {
+        case Level::eValue: return "value";
+        case Level::eResource: return "resource";
+        case Level::eCommand: return "command";
+        case Level::eScene: return "scene";
+        case Level::eTechnique: return "technique";
+        }
+        return "value";
+    }
+
     const NodeType* FindType(const std::string_view name)
     {
         const auto& types = Catalog();
@@ -1371,6 +1504,16 @@ namespace kgraph
         const std::string stages = type.name == "GraphicsPipeline" ? StagesOf(node) : std::string();
         for (const auto& port : type.inputs)
             if (port.mode.empty() || port.mode == stages) ports.push_back(port);
+        // A Bundle node has an input for each of its members' names.
+        if (type.name == "Bundle")
+            if (const auto names = node.inputs.find("names"); names != node.inputs.end() && names->second.value.Items())
+                for (const auto& name : *names->second.value.Items())
+                    if (name.String() && !name.String()->empty()) {
+                        Port member { "field." + *name.String(), PortKind::eValue, "value", false, std::format("The member '{}': a value, or a wire.", *name.String()), nullptr };
+                        member.optional = true;
+                        member.place = Placement::eNode;
+                        ports.push_back(std::move(member));
+                    }
         return ports;
     }
 }

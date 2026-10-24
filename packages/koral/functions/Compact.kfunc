@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Sort and scan",
+  "description": "The values whose flag is not 0, one after another in their order, and how many.",
+  "tags": ["compact", "stream compaction", "filter", "cull", "select"],
   "graph": {
     "kgraph": 1,
     "nodes": [

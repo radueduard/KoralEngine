@@ -1,0 +1,304 @@
+{
+  "koral-function": 1,
+  "purpose": "Shadows",
+  "description": "A sun's shadow maps, four cascades of `size` each in one atlas two by two: every entity with a Mesh among `entities` (but those of `without`) drawn as each cascade sees it, and only again when what it would draw has changed. `cascades` is a buffer whose first four matrices are the cascades' and `matrices` the same four, for leaving out what a cascade cannot see: a ShadowCascades node's `matrices`.",
+  "tags": [
+    "shadow",
+    "shadows",
+    "sun",
+    "cascades",
+    "csm",
+    "directional",
+    "shadow map",
+    "atlas"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "entities",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "entities",
+          "kind": "eEntities"
+        }
+      },
+      {
+        "id": "cascades",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "cascades",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "matrices",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "matrices",
+          "kind": "eValue"
+        }
+      },
+      {
+        "id": "layout",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "layout",
+          "kind": "eValue"
+        }
+      },
+      {
+        "id": "size",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {
+          "name": "size",
+          "kind": "eValue",
+          "default": 4096
+        }
+      },
+      {
+        "id": "without",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          360
+        ],
+        "inputs": {
+          "name": "without",
+          "kind": "eValue",
+          "default": [
+            "PointLight"
+          ]
+        }
+      },
+      {
+        "id": "shadow atlas",
+        "type": "Image",
+        "at": [
+          250,
+          60
+        ],
+        "inputs": {
+          "format": "eD32_SFLOAT",
+          "usage": [
+            "eDepthStencilAttachment",
+            "eSampled",
+            "eTransferSrc"
+          ],
+          "extent.x": {
+            "$link": [
+              "size",
+              "out"
+            ]
+          },
+          "extent.y": {
+            "$link": [
+              "size",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "shadow target",
+        "type": "Framebuffer",
+        "at": [
+          750,
+          60
+        ],
+        "inputs": {
+          "depthStencil.view": {
+            "$link": [
+              "shadow atlas",
+              "out"
+            ]
+          },
+          "depthStencil.depth": 1,
+          "depthStencil.name": "depth",
+          "depthStencil.which": "Depth"
+        }
+      },
+      {
+        "id": "cascade",
+        "type": "Repeat",
+        "at": [
+          250,
+          420
+        ],
+        "inputs": {
+          "count": 4
+        }
+      },
+      {
+        "id": "after the first",
+        "type": "Not",
+        "at": [
+          500,
+          420
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "cascade",
+              "first"
+            ]
+          }
+        }
+      },
+      {
+        "id": "shadow",
+        "type": "GraphicsPipeline",
+        "at": [
+          1000,
+          60
+        ],
+        "inputs": {
+          "stages": "eVertex",
+          "vertex.module": "koral_shadow",
+          "vertex.entry": "shadowVertex",
+          "fragment.module": "koral_shadow",
+          "fragment.entry": "shadowFragment",
+          "vertex.layout": {
+            "$link": [
+              "layout",
+              "out"
+            ]
+          },
+          "framebuffer": {
+            "$link": [
+              "shadow target",
+              "out"
+            ]
+          },
+          "param.cascades": {
+            "$link": [
+              "cascades",
+              "out"
+            ]
+          },
+          "depthStencilState": {
+            "depthTestEnable": true,
+            "depthWriteEnable": true,
+            "depthCompareOp": "eLessOrEqual"
+          }
+        }
+      },
+      {
+        "id": "casters",
+        "type": "Filter",
+        "at": [
+          250,
+          260
+        ],
+        "inputs": {
+          "entities": {
+            "$link": [
+              "entities",
+              "out"
+            ]
+          },
+          "with": [
+            "Mesh"
+          ],
+          "without": {
+            "$link": [
+              "without",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "cast",
+        "type": "Draw",
+        "at": [
+          1200,
+          260
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "shadow",
+              "out"
+            ]
+          },
+          "mesh": {
+            "$link": [
+              "casters",
+              "Mesh.mesh"
+            ]
+          },
+          "cull": {
+            "$link": [
+              "matrices",
+              "out"
+            ]
+          },
+          "cullIndex": {
+            "$link": [
+              "cascade",
+              "index"
+            ]
+          },
+          "load": {
+            "$link": [
+              "after the first",
+              "out"
+            ]
+          },
+          "whenChanged": true,
+          "push.model": {
+            "$link": [
+              "casters",
+              "matrix"
+            ]
+          },
+          "push.cascade": {
+            "$link": [
+              "cascade",
+              "index"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out atlas",
+        "type": "FunctionOutput",
+        "at": [
+          1400,
+          60
+        ],
+        "inputs": {
+          "name": "atlas",
+          "kind": "eResource",
+          "value": {
+            "$link": [
+              "shadow atlas",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

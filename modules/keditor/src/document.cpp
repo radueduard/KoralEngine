@@ -1425,6 +1425,9 @@ namespace keditor
                 give(entity, component, "roughness", Value(material.roughness));
                 give(entity, component, "emission", vec(material.emission));
                 give(entity, component, "alphaCutoff", Value(material.alphaCutoff));
+                // What is drawn over what is behind it lets that through by as much as its colour is not opaque: a decal at a
+                // third of its picture's opacity.
+                if (material.blended) give(entity, component, "transparency", Value(std::clamp(1.0 - material.albedo[3], 0.0, 1.0)));
                 // A picture the material has not is white, which leaves what it is multiplied by as it is.
                 const auto picture = [](const std::string& map) { return Value(map.empty() ? std::string("$white") : map); };
                 give(entity, component, "albedoMap", picture(material.albedoMap));
@@ -1487,13 +1490,41 @@ namespace keditor
             return kgraph::Graph::FromJson(graph->raw, out, error);
         }
 
-        bool WriteFunction(const std::filesystem::path& file, const kgraph::Graph& graph, std::string& error)
+        /** What a function's file says it is for, besides its graph. Nothing, for one that says nothing or can't be read. */
+        FunctionAbout ReadAbout(const std::filesystem::path& file)
+        {
+            FunctionAbout about;
+            std::ifstream in(file, std::ios::binary);
+            if (!in) return about;
+            std::stringstream read;
+            read << in.rdbuf();
+            const std::string text = read.str();
+            kecs::json::Value parsed;
+            std::string error;
+            if (!kecs::json::Parse(text, parsed, error)) return about;
+            if (const auto* purpose = parsed.Find("purpose")) about.purpose = purpose->string;
+            if (const auto* description = parsed.Find("description")) about.description = description->string;
+            if (const auto* tags = parsed.Find("tags"))
+                for (const auto& tag : tags->items) about.tags.push_back(tag.string);
+            return about;
+        }
+
+        bool WriteFunction(const std::filesystem::path& file, const kgraph::Graph& graph, const FunctionAbout& about, std::string& error)
         {
             std::error_code ec;
             std::filesystem::create_directories(file.parent_path(), ec);
             std::ofstream out(file, std::ios::binary | std::ios::trunc);
             if (!out) { error = std::format("'{}' cannot be written", file.generic_string()); return false; }
-            out << std::format("{{\n\"koral-function\": 1,\n\"graph\": {}\n}}\n", graph.ToJson());
+            // What it is for goes before its graph, where someone reading the file finds it first.
+            std::string said;
+            if (!about.purpose.empty()) said += std::format("\"purpose\": {},\n", kecs::json::Quote(about.purpose));
+            if (!about.description.empty()) said += std::format("\"description\": {},\n", kecs::json::Quote(about.description));
+            if (!about.tags.empty()) {
+                std::string tags;
+                for (const auto& tag : about.tags) tags += (tags.empty() ? "" : ", ") + kecs::json::Quote(tag);
+                said += std::format("\"tags\": [{}],\n", tags);
+            }
+            out << std::format("{{\n\"koral-function\": 1,\n{}\"graph\": {}\n}}\n", said, graph.ToJson());
             if (!out.flush()) { error = std::format("'{}' could not be written whole", file.generic_string()); return false; }
             return true;
         }
@@ -1565,6 +1596,12 @@ namespace keditor
         return std::filesystem::exists(EngineFunctionsDirectory() / file, ignored);
     }
 
+    FunctionAbout Document::AboutFunction(const std::string_view name) const
+    {
+        const std::string file = std::string(name) + FunctionEnding;
+        return ReadAbout(IsEngineFunction(name) ? EngineFunctionsDirectory() / file : FunctionsDirectory() / file);
+    }
+
     std::vector<kgraph::Preset> Document::Presets() const
     {
         std::vector<kgraph::Preset> presets = _runtime->Presets();
@@ -1572,8 +1609,12 @@ namespace keditor
             kgraph::Preset call;
             call.name = kgraph::FindType(name) ? std::format("{} (function)", name) : name;
             call.type = "Function";
-            call.doc = IsEngineFunction(name) ? std::format("A call of the engine's function {}: its nodes, as one. Pressed twice, it is opened; changed, it is saved as the project's own.", name)
-                                              : std::format("A call of the project's function {}: its nodes, as one. Pressed twice, it is opened.", name);
+            const FunctionAbout about = AboutFunction(name);
+            const std::string what = about.description.empty() ? std::string() : about.description + " ";
+            call.doc = IsEngineFunction(name) ? std::format("{}A call of the engine's function {}: its nodes, as one. Pressed twice, it is opened; changed, it is saved as the project's own.", what, name)
+                                              : std::format("{}A call of the project's function {}: its nodes, as one. Pressed twice, it is opened.", what, name);
+            call.group = about.purpose;
+            for (const auto& tag : about.tags) call.keywords += (call.keywords.empty() ? "" : " ") + tag;
             call.inputs = { { "function", kgraph::Value(name) } };
             presets.push_back(std::move(call));
         }
@@ -1733,7 +1774,7 @@ namespace keditor
         graph.nodes.push_back(std::move(call));
         const std::string made = graph.nodes.back().id;
         std::string why;
-        if (!WriteFunction(file, function, why)) return fail(why);
+        if (!WriteFunction(file, function, {}, why)) return fail(why);
         _functionFiles.erase(name);
         WireAcrossPasses(graph, { made });
         Apply(std::move(graph));
@@ -1745,11 +1786,14 @@ namespace keditor
         const auto fail = [&](std::string why) { if (error) *error = std::move(why); return std::string(); };
         if (_opened) return fail(std::format("'{}' is open already: close it first", _opened->function));
         kgraph::Graph graph = Graph();
-        const kgraph::Node* node = graph.Find(call);
-        if (!node || node->type != "Function") return fail(std::format("'{}' is no call of a function", call));
+        const kgraph::Node* found = graph.Find(call);
+        if (!found || found->type != "Function") return fail(std::format("'{}' is no call of a function", call));
+        // A copy: the function's nodes are added to the graph below, which moves the call.
+        const kgraph::Node at = *found;
+        const kgraph::Node* node = &at;
         const std::string* name = TextOf(*node, "function");
-        const auto found = name ? graph.functions.find(*name) : graph.functions.end();
-        if (found == graph.functions.end() || !found->second) return fail(name ? std::format("there is no function '{}' among the project's functions", *name) : std::string("it calls no function yet"));
+        const auto function = name ? graph.functions.find(*name) : graph.functions.end();
+        if (function == graph.functions.end() || !function->second) return fail(name ? std::format("there is no function '{}' among the project's functions", *name) : std::string("it calls no function yet"));
         _beforeOpened = graph;
         OpenedFunction opened { *node, *name, {}, std::string(call) + "/" };
         // Its page: a pass of its own, after the call's.
@@ -1761,7 +1805,7 @@ namespace keditor
         else if (graph.IsFixed(node->pass)) graph.fixed.push_back(opened.pass);
         RatesInOrder(graph);
         std::map<std::string, std::string> outputEdge;      // a port of the call, the FunctionOutput it is
-        for (const auto& inner : found->second->nodes) {
+        for (const auto& inner : function->second->nodes) {
             kgraph::Node copy = inner;
             copy.id = opened.prefix + inner.id;
             copy.pass = opened.pass;
@@ -1887,7 +1931,8 @@ namespace keditor
         std::string why;
         // Into the project, always: one of the engine's changed is the project's own from then on.
         if (FunctionsDirectory().empty()) return fail("a function is kept in a project, and this scene is in none");
-        if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, why)) return fail(why);
+        // What it says it is for goes with it: the engine's, for one of the engine's saved as the project's own.
+        if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, AboutFunction(opened.function), why)) return fail(why);
         _functionFiles.erase(opened.function);
         WireAcrossPasses(graph, { call.id });
         Apply(std::move(graph));

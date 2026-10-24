@@ -84,6 +84,20 @@ namespace kgraph
         } when {};
     };
 
+    /**
+     * @brief How abstract a node is: what one works at, placing it — from a number to a whole way of drawing. Each
+     *        level is made of those below it, as a technique is of passes, a pass of resources, a resource of values.
+     */
+    enum class Level : std::uint8_t {
+        eValue = 0,         ///< A value worked out on the CPU: a number, a vector, a matrix, a camera's lens; and what routes them (Switch, Bundle).
+        eResource = 1,      ///< A GPU object: an image, a buffer, a sampler, a view, a pipeline, a mesh.
+        eCommand = 2,       ///< One thing done on the GPU: a draw, a dispatch, rays traced, a copy, a clear.
+        eScene = 3,         ///< What is read of the scene's entities, and assembled of them: who, where, their meshes packed, a scene for rays.
+        eTechnique = 4,     ///< A way of drawing or working, whole: a function's call — bloom, a sort, the sun's shadows.
+    };
+    /** @brief What a level is called, for an editor: "value", "resource", "command", "scene", "technique". */
+    [[nodiscard]] std::string_view LevelName(Level level);
+
     struct NodeType {
         std::string name {};
         std::string category {};       ///< "Resources", "Pipelines", "Values", "Passes".
@@ -97,6 +111,10 @@ namespace kgraph
         std::string keywords {};
         /// What an editor draws in its title bar: a Material icon, by name ("image", "functions").
         std::string icon {};
+        /// How abstract it is (Level).
+        Level level = Level::eValue;
+        /// Made of other nodes: a function's call, written out as the function's nodes before the graph runs.
+        bool composite = false;
     };
 
     struct Node;
@@ -121,6 +139,8 @@ namespace kgraph
      *        starts as anything might: it does.
      */
     [[nodiscard]] bool Applies(const Port& port, const Node& node);
+    /** @brief Whether a pass node of @p type may run on the async compute queue: what records compute dispatches and copies only. */
+    [[nodiscard]] bool RunsAsync(std::string_view type);
 
     /** @brief What an editor keeps a number within, and how it is dragged. */
     struct NumberLimits {

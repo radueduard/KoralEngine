@@ -6,11 +6,15 @@
 //   frame     the camera, the sun and its cascades, the sky and the point lights, as the buffers the shaders declare
 //   lights    the point lights sorted into clusters: a compute pass, a work group a cluster
 //   shadows   what the sun sees, four cascades into a quarter each of one depth image
-//   prepass   how far everything is from the camera, before anything is shaded
-//   forward   every entity with a Mesh and the `forward` component, lit by its cluster's lights and the sun
+//   prepass   how far everything is from the camera, before anything is shaded: what is in sight of it, in one
+//             indirect draw, and which instance each pixel shows
+//   culling   what some pixel of the pre-pass showed: all the forward pass draws
+//   forward   every entity with a Mesh and the `forward` component, lit by its cluster's lights and the sun: one
+//             indirect draw, each instance's pictures by their bindless indices
 //   occlusion what is in a corner is darker: horizon-based ambient occlusion, blurred, over the picture
 //   sky       the sky, where nothing was drawn
 //   reflections  what a polished surface mirrors of the picture, traced through it
+//   antialias each frame, moved by a fraction of a pixel, blended into the ones before it
 //   bloom     what is brighter than white bleeds light round it
 //   show      the picture as light, tone mapped, in the window — or, with `debug view` at 1, how many lights each
 //             pixel's cluster holds
@@ -18,7 +22,9 @@
 
 #pragma once
 
+#include <array>
 #include <cmath>
+#include <map>
 #include <filesystem>
 #include <format>
 #include <string>
@@ -38,14 +44,24 @@ namespace forwardplus
     /// How big one cascade's shadow map is: the atlas is two of them each way.
     inline constexpr int ShadowTile = 2048;
     inline constexpr int BloomLevels = 6;
+    /// The most instances the culls count: the `seen` buffer's room, and the groups the culls are dispatched in (64 each).
+    inline constexpr int MostInstances = 65536;
+    /// What the shaders read of each vertex: the packs take only these, so that meshes of other files are packed as one.
+    inline const kgraph::Value::List Read { "POSITION", "NORMAL", "UV" };
 
-    /** The shaders a project of it needs, by file name. */
+    /** The shaders a project of it needs, by file name. Its bloom, its tone mapping and the sun's shadows are the engine's (koral_bloom, koral_tonemap, koral_shadow). */
     inline constexpr const char* Shaders[] {
-        "forwardCommon.slang", "lightCulling.slang", "depth.slang", "forward.slang", "sky.slang", "toneMapping.slang",
-        "ambientOcclusion.slang", "reflections.slang", "bloom.slang", "clusterHeat.slang",
+        "forwardCommon.slang", "lightCulling.slang", "depth.slang", "forward.slang", "sky.slang",
+        "ambientOcclusion.slang", "reflections.slang", "clusterHeat.slang", "cullCommon.slang", "occlusionCull.slang", "frustumCull.slang", "taa.slang",
+        "meshletTasks.slang", "rayTraced.slang", "emitters.slang",
     };
 
     inline bool AddLampShadows(keditor::Document& doc, std::string& error);
+    inline bool AddBranches(keditor::Document& doc, std::string& error);
+    inline bool AddBlendedToBranches(keditor::Document& doc, std::string& error);
+    inline void IdleUnchosen(keditor::Document& doc);
+    inline void GiveRayMaterials(keditor::Document& doc);
+    inline bool AddEmitters(keditor::Document& doc, std::string& error);
 
     /**
      * Adds the graph to @p doc. False, with @p error, when a node could not be added, set or wired.
@@ -78,7 +94,8 @@ namespace forwardplus
             broughtAt = 0;
             doc.AddPass(pass);
         };
-        // An image, sized by the window (divided by `shrink`) or as given, and a view of all of it.
+        // An image, sized by the window (divided by `shrink`) or as given. Wired as it is where a view of all of it is
+        // wanted: what reads or draws into it takes its default view, of the shape the shader declares.
         const auto image = [&](const std::string& id, const char* format, Value::List usage, const double x, const double y, const std::string& sizedBy, const int width = 0, const int height = 0,
                                const char* sizeOutput = "extent") {
             node("Image", id, x, y);
@@ -92,8 +109,6 @@ namespace forwardplus
                 doc.ClearInput(id, "extent.y");
                 wire(sizedBy, id, "extent", sizeOutput);
             }
-            node("ImageView", id + " view", x + 220, y);
-            wire(id, id + " view", "image");
         };
         const auto sampler = [&](const std::string& id, const char* filter, const double x, const double y) {
             node("Sampler", id, x, y);
@@ -263,6 +278,16 @@ namespace forwardplus
         field("sun data", "skyGround", "ground");
         field("sun data", "sunCosine", "sun cosine");
 
+        // What the frame carries over from the last, for the antialiasing: the camera's matrix this frame and the last,
+        // and the fraction of a pixel the pre-pass and the forward pass move the picture by. Advanced once a frame.
+        node("Buffer", "frame state", 40, 1700);
+        set("frame state", "instanceCount", 256);
+        set("frame state", "usage", Value::List { "eStorage", "eTransferSrc" });
+        compute("advance frame", "taa", "advance", nullptr, 580, 1700);
+        wire("camera data", "advance frame", "param.camera");
+        wire("frame state", "advance frame", "param.state");
+        for (const char* axis : { "groups.x", "groups.y", "groups.z" }) set("run advance frame", axis, 1);
+
         // ---- lights: the point lights, sorted into clusters -----------------------------------------------------------
         // The grid says, for each cluster, which run of the index list is its lights. The counter is how much of the
         // list is claimed: cleared, then added to by each cluster's work group as it claims its run.
@@ -296,14 +321,14 @@ namespace forwardplus
         page("shadows");
         image("shadow atlas", "eD32_SFLOAT", { "eDepthStencilAttachment", "eSampled", "eTransferSrc" }, 320, 40, {}, ShadowTile * 2, ShadowTile * 2);
         node("Framebuffer", "shadow target", 760, 40);
-        depthTarget("shadow target", "shadow atlas view");
+        depthTarget("shadow target", "shadow atlas");
         node("Repeat", "cascade", 320, 240);
         set("cascade", "count", 4);
         node("GraphicsPipeline", "shadow", 760, 240);
-        shaders("shadow", "depth", "shadowVertex", "shadowFragment");
+        shaders("shadow", "koral_shadow", "shadowVertex", "shadowFragment");
         wire(bring("shape"), "shadow", "vertex.layout", "layout");
         wire("shadow target", "shadow", "framebuffer");
-        wire(bring("sun data"), "shadow", "param.sun");
+        wire(bring("sun data"), "shadow", "param.cascades");     // its first four matrices are the cascades'
         set("shadow", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLessOrEqual" } });
         node("Not", "after the first", 760, 480);
         wire("cascade", "after the first", "a", "first");
@@ -320,25 +345,87 @@ namespace forwardplus
         drawEach("cast", "casters", nullptr, {}, { "PointLight", "Blended" });     // a lamp's own ball casts nothing, and nor does a decal
 
         // ---- prepass: depth, before anything is shaded -------------------------------------------------------------------
+        // Every entity with a Mesh but glass and decals, grouped by mesh and drawn by one indirect draw: first what of
+        // them is in sight, each instance's box tested against the camera on the GPU and counted into the commands. Each
+        // pixel says which instance it shows (one more than its number), for the occlusion cull; a cut-out leaves out
+        // where its picture is clear. Its buffer of instances is the forward Draw's, so an instance is one number in both.
         page("prepass");
         const std::string screen = bring("screen");
         image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment", "eSampled", "eTransferSrc" }, 320, 40, screen);
+        image("visibility", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" }, 320, 180, screen);
         node("Framebuffer", "prepass target", 760, 40);
-        depthTarget("prepass target", "depth view");
+        depthTarget("prepass target", "depth");
+        wire("visibility", "prepass target", "color[0].view");
+        set("prepass target", "color[0].name", "visibility");
+        set("prepass target", "color[0].clear", Value::Members { { "scalarType", "UInt" }, { "components", 4 }, { "value", Value::Members { { "u", Value::List { 0, 0, 0, 0 } } } } });
+        // Not `forward` among its `with`: that is the forward pipeline's component, whose vertex layout comes from this
+        // Filter's pack. Every mesh but glass has it.
+        node("Filter", "drawn", 1040, 420);
+        wire(bring("all entities"), "drawn", "entities");
+        set("drawn", "with", Value::List { "Mesh" });
+        set("drawn", "without", Value::List { "Blended" });
+        set("drawn", "groupBy", "Mesh");
+        node("MeshPack", "drawn meshes", 1320, 420);
+        wire("drawn", "drawn meshes", "meshes", "Mesh.mesh");
+        set("drawn meshes", "attributes", Value(Read));
+        node("IndirectDraws", "in sight", 1600, 420);
+        set("in sight", "mode", "eGPU");
+        wire("drawn meshes", "in sight", "ranges", "ranges");
+        wire("drawn", "in sight", "groups", "groups");
+        const std::string cameraData = bring("camera data");
+        compute("frustum", "frustumCull", "frustum", nullptr, 1320, 640);
+        wire(bring("frame state"), "frustum", "param.frameState");
+        wire("drawn meshes", "frustum", "param.ranges", "rangeBuffer");
+        wire("in sight", "frustum", "param.sightCommands", "commands");
+        wire("in sight", "frustum", "param.inSight", "visible");
+        set("run frustum", "groups.x", MostInstances / 64);
+        for (const char* axis : { "groups.y", "groups.z" }) set("run frustum", axis, 1);
+        wire("in sight", "run frustum", "push.sightCommandCount", "drawCount");
         node("GraphicsPipeline", "prepass", 760, 220);
         shaders("prepass", "depth", "prepassVertex", "prepassFragment");
-        wire(bring("shape"), "prepass", "vertex.layout", "layout");
+        wire("drawn meshes", "prepass", "vertex.layout", "layout");
         wire("prepass target", "prepass", "framebuffer");
-        wire(bring("camera data"), "prepass", "param.camera");
+        wire(cameraData, "prepass", "param.camera");
+        wire(bring("frame state"), "prepass", "param.frameState");
+        wire(bring("texture sampler"), "prepass", "param.textureSampler");
+        wire("in sight", "prepass", "param.drawnInstances", "visible");
         node("Draw", "draw depth", 1040, 220);
         wire("prepass", "draw depth", "pipeline");
-        wire(bring("seen"), "draw depth", "cull");      // what the camera cannot see is not drawn
-        // What has a cut-out is left to the forward pass, which reads its picture: here it would be drawn whole.
-        drawEach("draw depth", "solid meshes", nullptr, { "forward" }, { "Masked", "Blended" });
+        wire("drawn meshes", "draw depth", "mesh", "mesh");
+        set("draw depth", "command", "eDrawIndexedIndirect");
+        wire("in sight", "draw depth", "indirect", "commands");
+        wire("in sight", "draw depth", "drawCount", "drawCount");
 
-        // ---- forward: every entity with the pipeline's component and a Mesh, lit -------------------------------------
+        // ---- culling: what some pixel of the pre-pass showed, counted into the forward pass's commands -----------------
+        // `mark` notes each instance a pixel shows; `gather` counts each noted one into its mesh's command, which
+        // starts at none each frame, and writes where the forward pass finds it which instance it is.
+        page("culling");
+        {
+            const std::string drawn = bring("drawn"), meshes = bring("drawn meshes");
+            node("IndirectDraws", "seen instances", 320, 40);
+            set("seen instances", "mode", "eGPU");
+            wire(meshes, "seen instances", "ranges", "ranges");
+            wire(drawn, "seen instances", "groups", "groups");
+            node("Buffer", "seen flags", 320, 260);
+            set("seen flags", "instanceCount", MostInstances * 4);
+            set("seen flags", "usage", Value::List { "eStorage", "eTransferSrc" });
+            compute("mark seen", "occlusionCull", "mark", "visibility", 600, 260);
+            wire(bring("visibility"), "mark seen", "param.visibility");
+            wire("seen flags", "mark seen", "param.seen");
+            compute("gather seen", "occlusionCull", "gather", nullptr, 600, 40);
+            wire("seen flags", "gather seen", "param.seen");
+            wire("seen instances", "gather seen", "param.commands", "commands");
+            wire("seen instances", "gather seen", "param.visible", "visible");
+            set("run gather seen", "groups.x", MostInstances / 64);
+            for (const char* axis : { "groups.y", "groups.z" }) set("run gather seen", axis, 1);
+            wire("seen instances", "run gather seen", "push.commandCount", "drawCount");
+        }
+
+        // ---- forward: what was seen, in one indirect draw, lit -----------------------------------------------------------
         // Four pictures: the scene as light, and where each pixel's surface is, which way it faces, and how it mirrors.
-        // The depth is the pre-pass's, tested against and kept.
+        // The depth is the pre-pass's, tested against and not written: so even what it cuts out is tested before it
+        // is shaded. Each instance's matrix and the fields of its `forward` component — its pictures by their bindless
+        // indices — are in the buffer the Draw makes.
         page("forward");
         const std::string forwardScreen = bring("screen");
         const Value::List target { "eColorAttachment", "eSampled", "eStorage", "eTransferSrc" };
@@ -349,43 +436,60 @@ namespace forwardplus
         node("Framebuffer", "forward target", 760, 40);
         int attachment = 0;
         for (const char* name : { "hdr", "position", "normal", "specular" }) {
-            wire(std::string(name) + " view", "forward target", std::format("color[{}].view", attachment));
+            wire(std::string(name), "forward target", std::format("color[{}].view", attachment));
             set("forward target", std::format("color[{}].name", attachment), name);
             set("forward target", std::format("color[{}].clear", attachment), clearToNothing);
             ++attachment;
         }
-        depthTarget("forward target", bring("depth view"));
+        depthTarget("forward target", bring("depth"));
+        const std::string packed = bring("drawn meshes"), seen = bring("seen instances"), state = bring("frame state");
         node("GraphicsPipeline", "forward", 1040, 40);
         shaders("forward", "forward", "vertex", "fragment");
-        wire(bring("shape"), "forward", "vertex.layout", "layout");
+        wire(packed, "forward", "vertex.layout", "layout");
         wire("forward target", "forward", "framebuffer");
         wire(bring("camera data"), "forward", "param.camera");
         wire(bring("sun data"), "forward", "param.sun");
         wire(bring("light data"), "forward", "param.lights");
         wire(bring("light grid"), "forward", "param.lightGrid");
         wire(bring("light indices"), "forward", "param.lightIndices");
-        wire(bring("shadow atlas view"), "forward", "param.shadowMap");
+        wire(bring("shadow atlas"), "forward", "param.shadowMap");
         wire(bring("nearest"), "forward", "param.shadowMap.sampler");
-        // The pictures themselves are left to each draw: each entity's own, in its `forward` component.
-        const std::string textures = bring("texture sampler");
-        for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) wire(textures, "forward", std::format("param.{}.sampler", map));
-        set("forward", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLessOrEqual" } });
+        wire(bring("texture sampler"), "forward", "param.textureSampler");
+        wire(seen, "forward", "param.drawnInstances", "visible");
+        wire(state, "forward", "param.frameState");
+        set("forward", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", false }, { "depthCompareOp", "eLessOrEqual" } });
         node("Draw", "draw forward", 1320, 40);
         wire("forward", "draw forward", "pipeline");
         set("draw forward", "depthLoad", "eLoad");
-        const std::string seenBy = bring("seen");
-        wire(seenBy, "draw forward", "cull");
-        drawEach("draw forward", "solids", "forward", {}, { "Blended" });
+        wire(packed, "draw forward", "mesh", "mesh");
+        set("draw forward", "command", "eDrawIndexedIndirect");
+        wire(seen, "draw forward", "indirect", "commands");
+        wire(seen, "draw forward", "drawCount", "drawCount");
+        set("draw forward", "push.culled", 1);
+        // The pre-pass draws with the forward Draw's buffer of instances: an instance is the same number in both.
+        wire("draw forward", "draw depth", "param.instances", "instances");
+        wire("draw forward", "frustum", "param.instances", "instances");
 
-        // Glass and decals — what has the tag Blended — after everything solid, over it by how opaque each is. The
-        // same shaders in a pipeline that blends, writes no depth, and leaves the three pictures beside the first as
-        // they are: those go on saying what the solid surface behind is. Its component has the same fields as
-        // `forward`'s, and an importer fills both.
+        // Glass and decals — what has the tag Blended — after everything solid, over it by how opaque each is: the same
+        // shaders in a pipeline that blends, writes no depth, and leaves the three pictures beside the first as they
+        // are, which go on saying what the solid surface behind is. Its own pack, drawn whole: none of it is in the
+        // pre-pass to be culled by. Its component has the same fields as `forward`'s, and an importer fills both.
+        node("Filter", "glass", 1320, 640);
+        wire(bring("all entities"), "glass", "entities");
+        set("glass", "with", Value::List { "Mesh", "Blended" });
+        set("glass", "groupBy", "Mesh");
+        node("MeshPack", "glass meshes", 1600, 640);
+        wire("glass", "glass meshes", "meshes", "Mesh.mesh");
+        set("glass meshes", "attributes", Value(Read));
+        node("IndirectDraws", "glass instances", 1880, 640);
+        wire("glass meshes", "glass instances", "ranges", "ranges");
+        wire("glass", "glass instances", "groups", "groups");
         node("GraphicsPipeline", "forward blended", 1040, 420);
         shaders("forward blended", "forward", "vertex", "fragment");
         const auto wired = doc.Graph().Find("forward")->inputs;     // (a copy: wiring makes the graph anew)
         for (const auto& [input, from] : wired)
-            if (from.link && (input.starts_with("param.") || input == "vertex.layout" || input == "framebuffer")) wire(from.link->node, "forward blended", input, from.link->output);
+            if (from.link && (input.starts_with("param.") || input == "framebuffer")) wire(from.link->node, "forward blended", input, from.link->output);
+        wire("glass meshes", "forward blended", "vertex.layout", "layout");
         set("forward blended", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", false }, { "depthCompareOp", "eLessOrEqual" } });
         {
             const Value keep = Value::Members { { "blendEnable", false }, { "colorWriteMask", Value::List {} } };
@@ -397,15 +501,18 @@ namespace forwardplus
         node("Draw", "draw blended", 1320, 420);
         wire("forward blended", "draw blended", "pipeline");
         set("draw blended", "load", true);
-        wire(seenBy, "draw blended", "cull");
-        drawEach("draw blended", "glass", "forward blended", { "Blended" }, {});
+        wire("glass meshes", "draw blended", "mesh", "mesh");
+        set("draw blended", "command", "eDrawIndexedIndirect");
+        wire("glass instances", "draw blended", "indirect", "commands");
+        wire("glass instances", "draw blended", "drawCount", "drawCount");
+        set("draw blended", "push.culled", 0);
 
         // ---- occlusion: what is in a corner is darker ---------------------------------------------------------------------
         // How occluded each pixel is, worked out of where its surface and its neighbours' are; that blurred, keeping
         // to each surface; and the picture multiplied by it.
         page("occlusion");
         {
-            const std::string screen = bring("screen"), camera = bring("camera data"), position = bring("position view");
+            const std::string screen = bring("screen"), camera = bring("camera data"), position = bring("position"), normal = bring("normal");
             const std::string nearest = bring("nearest"), linear = bring("linear");
             image("occlusion raw", "eR8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, screen);
             image("occlusion", "eR8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 180, screen);
@@ -413,19 +520,23 @@ namespace forwardplus
             wire(camera, "occlusion pass", "param.camera");
             wire(position, "occlusion pass", "param.positionTex");
             wire(nearest, "occlusion pass", "param.positionTex.sampler");
+            wire(normal, "occlusion pass", "param.normalTex");
+            wire(nearest, "occlusion pass", "param.normalTex.sampler");
             wire("occlusion raw", "occlusion pass", "param.occlusionOut");
-            set("run occlusion pass", "push.radius", 0.5);
+            set("run occlusion pass", "push.radius", 1.0);
             set("run occlusion pass", "push.intensity", 1.5);
             set("run occlusion pass", "push.bias", 0.1);
             compute("blur occlusion", "ambientOcclusion", "blur", "occlusionOut", 760, 240);
             wire(camera, "blur occlusion", "param.camera");
             wire(position, "blur occlusion", "param.positionTex");
             wire(nearest, "blur occlusion", "param.positionTex.sampler");
-            wire("occlusion raw view", "blur occlusion", "param.occlusionIn");
+            wire(normal, "blur occlusion", "param.normalTex");
+            wire(nearest, "blur occlusion", "param.normalTex.sampler");
+            wire("occlusion raw", "blur occlusion", "param.occlusionIn");
             wire(linear, "blur occlusion", "param.occlusionIn.sampler");
             wire("occlusion", "blur occlusion", "param.occlusionOut");
             compute("apply occlusion", "ambientOcclusion", "compose", "hdrImage", 760, 440);
-            wire("occlusion view", "apply occlusion", "param.occlusionIn");
+            wire("occlusion", "apply occlusion", "param.occlusionIn");
             wire(linear, "apply occlusion", "param.occlusionIn.sampler");
             wire(bring("hdr"), "apply occlusion", "param.hdrImage");
         }
@@ -447,7 +558,7 @@ namespace forwardplus
         }
         wire(bring("camera data"), "sky", "param.camera");
         if (environment.empty()) wire(bring("sun data"), "sky", "param.sun");
-        wire(bring("depth view"), "sky", "param.depthTex");
+        wire(bring("depth"), "sky", "param.depthTex");
         wire(bring("nearest"), "sky", "param.depthTex.sampler");
         wire(bring("hdr"), "sky", "param.hdrImage");
 
@@ -460,10 +571,10 @@ namespace forwardplus
             image("reflection", "eRGBA16_SFLOAT", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, screen);
             compute("trace reflections", "reflections", "trace", "reflection", 760, 40);
             wire(bring("camera data"), "trace reflections", "param.camera");
-            wire(bring("hdr view"), "trace reflections", "param.hdr");
+            wire(bring("hdr"), "trace reflections", "param.hdr");
             wire(bring("linear"), "trace reflections", "param.hdr.sampler");
             for (const char* name : { "position", "normal", "specular" }) {
-                wire(bring(std::string(name) + " view"), "trace reflections", std::format("param.{}Tex", name));
+                wire(bring(std::string(name)), "trace reflections", std::format("param.{}Tex", name));
                 wire(nearest, "trace reflections", std::format("param.{}Tex.sampler", name));
             }
             wire("reflection", "trace reflections", "param.reflection");
@@ -472,9 +583,33 @@ namespace forwardplus
             set("run trace reflections", "push.maxRoughness", 0.5);
             set("run trace reflections", "push.intensity", 1.0);
             compute("add reflections", "reflections", "compose", "hdrImage", 760, 300);
-            wire("reflection view", "add reflections", "param.traced");
+            wire("reflection", "add reflections", "param.traced");
             wire(nearest, "add reflections", "param.traced.sampler");
             wire(hdr, "add reflections", "param.hdrImage");
+        }
+
+        // ---- antialias: this frame blended into the ones before it -----------------------------------------------------
+        // The picture was moved by a fraction of a pixel, another each frame: each pixel is blended into what the frames
+        // before came to where it was last frame, that clamped to the colours round it now, so that what has moved
+        // leaves no trail. Then the picture is that, and so is the history the next frame blends into.
+        page("antialias");
+        {
+            const std::string screen = bring("screen");
+            image("antialiased", "eRGBA16_SFLOAT", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, screen);
+            image("history", "eRGBA16_SFLOAT", { "eStorage", "eSampled", "eTransferSrc" }, 320, 260, screen);
+            compute("resolve", "taa", "resolve", "resolved", 760, 40);
+            wire(bring("camera data"), "resolve", "param.camera");
+            wire(bring("hdr"), "resolve", "param.current");
+            wire(bring("position"), "resolve", "param.positionTex");
+            wire("history", "resolve", "param.history");
+            wire(bring("linear"), "resolve", "param.linearSampler");
+            wire(bring("frame state"), "resolve", "param.frameState");
+            wire("antialiased", "resolve", "param.resolved");
+            set("run resolve", "push.blend", 0.1);
+            compute("keep", "taa", "keep", "hdrImage", 760, 260);
+            wire("antialiased", "keep", "param.resolvedTex");
+            wire(bring("hdr"), "keep", "param.hdrImage");
+            wire("history", "keep", "param.historyImage");
         }
 
         // ---- bloom: what is brighter than white bleeds light round it ----------------------------------------------------
@@ -506,8 +641,8 @@ namespace forwardplus
             level("down level", "bloom down", "down levels", "index", 800, 180);
             node("Previous", "level above", 800, 340);
             set("level above", "of", "down level");
-            set("level above", "first", bring("hdr view"));
-            compute("down", "bloom", "downsample", "target", 1080, 180);
+            set("level above", "first", bring("hdr"));
+            compute("down", "koral_bloom", "downsample", "target", 1080, 180);
             wire("level above", "down", "param.source");
             wire(linear, "down", "param.source.sampler");
             wire("down level", "down", "param.target");
@@ -528,7 +663,7 @@ namespace forwardplus
             node("Element", "as it came down", 800, 1200);
             set("as it came down", "of", "down level");
             wire("up levels", "as it came down", "index", "reverse");
-            compute("up", "bloom", "upsample", "target", 1080, 760);
+            compute("up", "koral_bloom", "upsample", "target", 1080, 760);
             wire("level below", "up", "param.source");
             wire(linear, "up", "param.source.sampler");
             wire("as it came down", "up", "param.detail");
@@ -538,7 +673,7 @@ namespace forwardplus
             node("Element", "bloom", 1640, 620);
             set("bloom", "of", "up level");
             // Each level of the way up added its own light, so the top holds about as many times it as there are levels.
-            compute("add bloom", "bloom", "composite", "hdrImage", 1640, 180);
+            compute("add bloom", "koral_bloom", "composite", "hdrImage", 1640, 180);
             wire("bloom", "add bloom", "param.source");
             wire(linear, "add bloom", "param.source.sampler");
             wire(hdr, "add bloom", "param.hdrImage");
@@ -549,36 +684,33 @@ namespace forwardplus
         page("show");
         const std::string showScreen = bring("screen");
         image("ldr", "eRGBA8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, showScreen);
-        compute("tone map", "toneMapping", "computeMain", "ldrImage", 760, 40);
+        compute("tone map", "koral_tonemap", "computeMain", "ldrImage", 760, 40);
         wire(bring("hdr"), "tone map", "param.hdrImage");
         wire("ldr", "tone map", "param.ldrImage");
         set("run tone map", "push.exposure", 1.0);
-        // To look at instead: how many lights each pixel's cluster holds. 'debug view' is 0 for the picture and 1 for
-        // that; the pass that makes it is left out while it is not shown.
-        node("Number", "debug view", 320, 420);
-        set("debug view", "value", 0);
+        // To look at instead, in the editor's scene view: how many lights each pixel's cluster holds. Its pass runs only
+        // while the view shows it, and never in the game.
         image("cluster heat", "eRGBA8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 560, showScreen);
+        node("DebugView", "debug view", 320, 420);
+        set("debug view", "name", "Cluster heat");
+        wire("cluster heat", "debug view", "picture");
         compute("heat", "clusterHeat", "computeMain", "heat", 760, 420);
         wire(bring("camera data"), "heat", "param.camera");
-        wire(bring("depth view"), "heat", "param.depthTex");
+        wire(bring("depth"), "heat", "param.depthTex");
         wire(bring("nearest"), "heat", "param.depthTex.sampler");
-        wire("ldr view", "heat", "param.picture");
+        wire("ldr", "heat", "param.picture");
         wire(bring("nearest"), "heat", "param.picture.sampler");
         wire(bring("light grid"), "heat", "param.lightGrid");
         wire("cluster heat", "heat", "param.heat");
         set("run heat", "push.most", 24.0);
-        wire("debug view", "run heat", "enabled");
-        node("Switch", "picture", 1040, 420);
-        wire("debug view", "picture", "index");
-        wire("ldr", "picture", "option[0]");
-        wire("cluster heat", "picture", "option[1]");
+        wire("debug view", "run heat", "enabled", "shown");
         node("Blit", "show", 1320, 420);
-        wire("picture", "show", "source");
+        wire("ldr", "show", "source");
         wire(showScreen, "show", "destination");
         set("show", "filter", "eLinear");
 
         if (!ok && error.empty()) error = "a node of the graph could not be set up";
-        return ok && AddLampShadows(doc, error);
+        return ok && AddLampShadows(doc, error) && AddBranches(doc, error);
     }
 
     /// How big one face of a point light's shadow cube is, and how many lights have one (the shaders' LampShadowMost).
@@ -640,10 +772,6 @@ namespace forwardplus
         set("lamp shadow maps", "extent.x", LampShadowFace);
         set("lamp shadow maps", "extent.y", LampShadowFace);
         set("lamp shadow maps", "arrayLayers", LampShadowMost * 6);
-        node("ImageView", "lamp shadow maps view", 560, 40, pass);
-        wire("lamp shadow maps", "lamp shadow maps view", "image");
-        set("lamp shadow maps view", "viewType", "e2DArray");
-        set("lamp shadow maps view", "arrayLayerCount", LampShadowMost * 6);
         node("Repeat", "lamp face", 320, 260, pass);
         set("lamp face", "count", LampShadowMost * 6);
         node("ImageView", "lamp face view", 560, 260, pass);
@@ -687,7 +815,7 @@ namespace forwardplus
         std::string nearest;
         if (const auto& inputs = doc.Graph().Find("forward")->inputs; inputs.contains("param.shadowMap.sampler") && inputs.at("param.shadowMap.sampler").link)
             nearest = inputs.at("param.shadowMap.sampler").link->node;
-        const std::string maps = bring("lamp shadow maps view", shading, 1500), data = bring("lamp shadow data", shading, 1610);
+        const std::string maps = bring("lamp shadow maps", shading, 1500), data = bring("lamp shadow data", shading, 1610);
         if (nearest.empty()) nearest = bring("nearest", shading, 1720);
         for (const char* pipeline : { "forward", "forward blended" }) {
             wire(maps, pipeline, "param.lampShadowMaps");
@@ -702,6 +830,20 @@ namespace forwardplus
      * polished and from plastic to metal, and @p lamps point lights of every colour scattered low over them — each a
      * small glowing ball, so that it is seen where it is.
      */
+    /**
+     * How much light a lamp's glowing part gives off — its material's `emission` — for it to light what is round it as
+     * much as its point light does: its light's colour, made as bright as a ball of @p radius has to be to give as much
+     * a third of its light's @p range away. What the ray tracer lights the scene by, in place of the point light.
+     */
+    inline Value LampEmission(const Value& color, const double intensity, const double range, const double radius)
+    {
+        const double away = range / 3.0, falloff = (1.0 - 1.0 / 9.0) * (1.0 - 1.0 / 9.0);
+        const double bright = intensity * falloff * away * away / (3.14159265358979 * radius * radius);
+        Value::List given;
+        for (const auto& channel : *color.Items()) given.push_back(Value(std::pow(std::max(*channel.Number(), 0.0), 2.2) * bright));
+        return Value(std::move(given));
+    }
+
     inline void BuildScene(keditor::Document& doc, const int lamps = 96)
     {
         const auto vec = [](const double x, const double y, const double z) { return Value(Value::List { x, y, z }); };
@@ -761,13 +903,14 @@ namespace forwardplus
             const kecs::Entity lamp = drawn(std::format("Lamp {}", i), "sphere",
                                             { static_cast<float>(std::cos(turn) * away), 0.45f + 0.9f * static_cast<float>(i % 3), static_cast<float>(std::sin(turn) * away - 2.0) },
                                             { 0.16f, 0.16f, 0.16f }, vec(0, 0, 0), 0.0, 1.0);
-            const auto& glow = *color.Items();
-            doc.SetField(lamp, "forward", "emission", vec(*glow[0].Number() * 6.0, *glow[1].Number() * 6.0, *glow[2].Number() * 6.0));
+            // A ball of the sphere's half a unit across, made 0.16 of that.
+            doc.SetField(lamp, "forward", "emission", LampEmission(color, 3.0, 3.5, 0.08));
             doc.AddComponent(lamp, "PointLight");
             doc.SetField(lamp, "PointLight", "color", color);
             doc.SetField(lamp, "PointLight", "intensity", Value(3.0));
             doc.SetField(lamp, "PointLight", "range", Value(3.5));
         }
+        GiveRayMaterials(doc);
     }
 
     /**
@@ -808,10 +951,9 @@ namespace forwardplus
             doc.AddComponent(lamp, "Mesh");
             doc.SetField(lamp, "Mesh", "mesh", Value(kgraph::DefaultMeshId("sphere")));
             if (doc.AddComponent(lamp, "forward")) {
-                const auto& glow = *color.Items();
                 for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(lamp, "forward", map, Value("$white"));
                 doc.SetField(lamp, "forward", "albedo", vec(0, 0, 0));
-                doc.SetField(lamp, "forward", "emission", vec(*glow[0].Number() * 6.0, *glow[1].Number() * 6.0, *glow[2].Number() * 6.0));
+                doc.SetField(lamp, "forward", "emission", LampEmission(color, 3.0, 3.5, 0.05));
             }
             doc.AddComponent(lamp, "PointLight");
             doc.SetField(lamp, "PointLight", "color", color);
@@ -819,5 +961,605 @@ namespace forwardplus
             doc.SetField(lamp, "PointLight", "range", Value(3.5));
         }
         return true;
+    }
+
+    /// How many tasks of up to 32 meshlets the meshlet branch has room for in a frame.
+    inline constexpr int MostMeshletTasks = 262144;
+    /// The most things that give off light the ray tracer lists: the `emitters` buffer's room.
+    inline constexpr int MostEmitters = 4096;
+    /// What `renderer` is: which of the three ways the scene is drawn.
+    inline constexpr const char* Renderers[] { "vertex", "meshlets", "rays" };
+
+    /**
+     * The ray tracer's material — its component, `ray tracer` — given to every entity the forward pass draws that has
+     * none yet: each field the two have of the same name as the forward pass's is. A model imported after the graph is
+     * made has both from the importer; this is for entities made before it, or by hand.
+     */
+    inline void GiveRayMaterials(keditor::Document& doc)
+    {
+        const kecs::World& world = doc.World();
+        const kecs::ComponentId rays = world.Find("ray tracer"), forward = world.Find("forward");
+        if (rays == kecs::NoComponent || forward == kecs::NoComponent) return;
+        std::vector<std::string> shared;
+        for (const auto& field : world.Describe(rays).fields)
+            if (world.Describe(forward).FindField(field.name)) shared.push_back(field.name);
+        for (const kecs::Entity entity : doc.Entities()) {
+            const auto has = doc.ComponentsOf(entity);
+            if (!std::ranges::contains(has, std::string("forward")) || std::ranges::contains(has, std::string("ray tracer"))) continue;
+            doc.AddComponent(entity, "ray tracer");
+            for (const auto& field : shared) doc.SetField(entity, "ray tracer", field, doc.Field(entity, "forward", field));
+        }
+    }
+
+    /**
+     * The ray tracer given a material of its own, in a graph whose ray tracer read the forward pass's (a project made
+     * before): `trace rays` wired from the entities it traces, and every entity given `ray tracer` as the forward pass's
+     * material is. True, and nothing done, when it has one.
+     */
+    inline bool AddRayMaterial(keditor::Document& doc, std::string& error)
+    {
+        const kgraph::Node* trace = doc.Graph().Find("trace rays");
+        if (!trace) { error = "there is no 'trace rays' to give a material"; return false; }
+        if (const auto wired = trace->inputs.find("entities"); wired != trace->inputs.end() && wired->second.link) { GiveRayMaterials(doc); return true; }
+        doc.ClearInput("ray tracer", "param.instances");
+        const kgraph::Node* drawn = doc.Graph().Find("drawn");
+        if (!drawn) { error = "there is no 'drawn' Filter to trace"; return false; }
+        const std::string made = doc.Import("drawn", doc.Graph().Find("trace rays")->pass, 40, 1400);
+        if (made.empty() || !doc.Connect(made, "out", "trace rays", "entities")) { error = "'trace rays' could not be wired from 'drawn'"; return false; }
+        GiveRayMaterials(doc);
+        return true;
+    }
+
+    /**
+     * The ray tracer lit by what gives off light — what has an emissive material — and not by the point lights: what
+     * emits listed each frame from its materials (emitters.slang, after the rays are traced: the next frame's are lit by
+     * it), and the ray tracer given the list, the point lights' buffers taken off it. Added to a graph that has the rays
+     * and not these yet (a project made before them); true, and nothing done, when it has them.
+     */
+    inline bool AddEmitters(keditor::Document& doc, std::string& error)
+    {
+        if (const kgraph::Node* gather = doc.Graph().Find("gather emitters")) {
+            // One made before it measured each emitter's reach from its corners: given the pack's, as now.
+            if (gather->inputs.contains("param.meshIndices")) return true;
+            const std::string pass = gather->pass;
+            const std::string buffers = doc.Import("pack buffers", pass, 40, 2100);
+            if (buffers.empty() || !doc.Connect(buffers, "indices", "gather emitters", "param.meshIndices") || !doc.Connect(buffers, "vertices", "gather emitters", "param.meshPositions")) {
+                error = "'gather emitters' could not be given the pack's corners";
+                return false;
+            }
+            return true;
+        }
+        if (!doc.Graph().Find("trace rays")) { error = "there is no 'trace rays' to light by what gives off light"; return false; }
+        bool ok = true;
+        const std::string pass = doc.Graph().Find("trace rays")->pass;
+        const auto failed = [&](const std::string& what) { ok = false; if (error.empty()) error = what; };
+        const auto node = [&](const char* type, const std::string& id, const double x, const double y) {
+            if (doc.AddNode(type, x, y, id, pass) != id) failed(std::format("there is a node '{}' already", id));
+        };
+        const auto set = [&](const std::string& id, const std::string& input, Value value) {
+            if (!doc.SetInput(id, input, std::move(value))) failed(std::format("'{}' could not be given '{}'", id, input));
+        };
+        const auto wire = [&](const std::string& from, const std::string& id, const std::string& input, const std::string& output = "out") {
+            if (!doc.Connect(from, output, id, input)) failed(std::format("'{}' could not be wired to '{}.{}'", from, id, input));
+        };
+        double broughtAt = 0;
+        const auto bring = [&](const std::string& id) {
+            const std::string made = doc.Import(id, pass, 40, 1700 + (broughtAt += 110));
+            if (made.empty()) failed(std::format("there is no node '{}' to bring in", id));
+            return made;
+        };
+        // The point lights are the raster passes': the rays have none of them.
+        for (const char* gone : { "param.lights", "param.lightGrid", "param.lightIndices" }) doc.ClearInput("ray tracer", gone);
+
+        node("Buffer", "emitters", 320, 1700);
+        set("emitters", "instanceCount", MostEmitters * 32);
+        set("emitters", "usage", Value(Value::List { "eStorage", "eTransferSrc" }));
+        node("Buffer", "emitter count", 320, 1840);
+        set("emitter count", "instanceCount", 16);
+        set("emitter count", "usage", Value(Value::List { "eStorage", "eTransferDst", "eTransferSrc" }));
+        // After the rays: counted from none, and listed.
+        node("ClearBuffer", "reset emitters", 600, 1840);
+        wire("emitter count", "reset emitters", "buffer");
+        node("ComputePipeline", "gather emitters", 600, 1700);
+        set("gather emitters", "compute.module", "emitters");
+        set("gather emitters", "compute.entry", "gather");
+        wire("trace rays", "gather emitters", "param.instances", "instances");
+        wire(bring("ray scene"), "gather emitters", "param.meshOf", "meshOf");
+        wire(bring("drawn meshes"), "gather emitters", "param.ranges", "rangeBuffer");
+        const std::string buffers = bring("pack buffers");
+        wire(buffers, "gather emitters", "param.meshIndices", "indices");
+        wire(buffers, "gather emitters", "param.meshPositions", "vertices");
+        wire("emitters", "gather emitters", "param.emitters");
+        wire("emitter count", "gather emitters", "param.emitterCount");
+        node("Dispatch", "run gather emitters", 880, 1700);
+        wire("gather emitters", "run gather emitters", "pipeline");
+        set("run gather emitters", "groups.x", MostInstances / 64);
+        for (const char* axis : { "groups.y", "groups.z" }) set("run gather emitters", axis, 1);
+        // What the rays are lit by.
+        wire("emitters", "ray tracer", "param.emitters");
+        wire("emitter count", "ray tracer", "param.emitterCount");
+        set("trace rays", "push.emitterCandidates", 32);
+        set("trace rays", "push.emitterSamples", 2);
+
+        IdleUnchosen(doc);
+        if (!ok && error.empty()) error = "the emitters could not be set up";
+        return ok;
+    }
+
+    /**
+     * The branches not chosen idle: their passes are there, built, and do nothing. Each page of a branch is given what
+     * says it is not chosen (a Reference to it), and each of its passes wired from that — its `idle`, or, for one that
+     * cannot idle, its `enabled` (none of those is read by another). A pass wired so already is left as it is: run again
+     * after passes were added, only those are wired. One edit for them all.
+     */
+    inline void IdleUnchosen(keditor::Document& doc)
+    {
+        kgraph::Graph graph = doc.Graph();
+        const auto idleWith = [&](const std::string& page, const std::string& condition) {
+            std::vector<std::string> ids;
+            for (const auto& each : graph.nodes)
+                if (each.pass == page)
+                    if (const kgraph::NodeType* type = kgraph::FindType(each.type); type && type->category == "Passes") ids.push_back(each.id);
+            if (ids.empty()) return;
+            const std::string why = std::format("{} (in {})", condition, page);
+            if (!graph.Find(why)) {
+                kgraph::Node& reference = graph.Add(why, "Reference").Set("node", condition);
+                reference.pass = page;
+                reference.x = 40;
+                reference.y = -120;
+            }
+            const auto from = [&](const kgraph::Node& node, const char* input) {
+                const auto it = node.inputs.find(input);
+                return it != node.inputs.end() && it->second.link ? it->second.link->node : std::string();
+            };
+            for (const auto& id : ids) {
+                const kgraph::Node& pass = *graph.Find(id);
+                if (from(pass, "enabled") == why || from(pass, "idle") == why || from(pass, "idle") == id + " or not chosen") continue;
+                const kgraph::NodeType* type = kgraph::FindType(pass.type);
+                const bool idles = std::ranges::any_of(type->inputs, [](const kgraph::Port& port) { return port.name == "idle"; });
+                if (!idles) { graph.Find(id)->Wire("enabled", why); continue; }
+                const auto had = pass.inputs.find("idle");
+                if (had != pass.inputs.end() && had->second.link) {
+                    // Idle already for a reason of its own (a shadow drawn only when it changed): idle for either.
+                    const kgraph::Link already = *had->second.link;
+                    const double x = pass.x, y = pass.y;
+                    kgraph::Node& either = graph.Add(id + " or not chosen", "Max").Wire("a", already.node, already.output).Wire("b", why);
+                    either.pass = page;
+                    either.x = x;
+                    either.y = y + 120;
+                    graph.Find(id)->Wire("idle", either.id);
+                } else {
+                    graph.Find(id)->Wire("idle", why);
+                }
+            }
+        };
+        for (const char* page : { "prepass", "culling", "forward", "occlusion", "sky", "reflections" }) idleWith(page, "not vertex");
+        for (const char* page : { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" }) idleWith(page, "not meshlets");
+        for (const char* page : { "ray scene", "ray trace" }) idleWith(page, "not rays");
+        for (const char* page : { "shadows", "lamp shadows" }) idleWith(page, "tracing rays");
+        doc.SetGraph(std::move(graph));
+    }
+
+    /**
+     * Glass and decals — what has the tag Blended, the vertex branch's `glass meshes` — drawn by the other two branches
+     * as well. The meshlets': their pack cut into meshlets too, its instances in sight listed as tasks as the solid
+     * ones' are, and drawn by the same task and mesh shaders over the solid picture by how opaque each is, writing no
+     * depth. The rays': a RayScene of their own, which each pixel's ray looks through up to the solid surface it hits —
+     * every layer of glass on the way shaded, and the nearest laid over the rest. Added to a graph that has the branches
+     * and not these yet (a project made before them); true, and nothing done, when it has them.
+     */
+    inline bool AddBlendedToBranches(keditor::Document& doc, std::string& error)
+    {
+        if (doc.Graph().Find("glass meshlets")) return true;       // it has them already
+        if (!doc.Graph().Find("renderer") || !doc.Graph().Find("glass meshes")) { error = "there are no branches, or no glass, to draw it in"; return false; }
+        bool ok = true;
+        std::string pass;
+        const auto failed = [&](const std::string& what) { ok = false; if (error.empty()) error = what; };
+        const auto node = [&](const char* type, const std::string& id, const double x, const double y) {
+            if (doc.AddNode(type, x, y, id, pass) != id) failed(std::format("there is a node '{}' already", id));
+        };
+        const auto set = [&](const std::string& id, const std::string& input, Value value) {
+            if (!doc.SetInput(id, input, std::move(value))) failed(std::format("'{}' could not be given '{}'", id, input));
+        };
+        const auto wire = [&](const std::string& from, const std::string& id, const std::string& input, const std::string& output = "out") {
+            if (!doc.Connect(from, output, id, input)) failed(std::format("'{}' could not be wired to '{}.{}'", from, id, input));
+        };
+        // Brought in below what the page has: a page that had nodes keeps them where they were.
+        double broughtAt = 0;
+        const auto bring = [&](const std::string& id) {
+            const std::string made = doc.Import(id, pass, 40, 1400 + (broughtAt += 110));
+            if (made.empty()) failed(std::format("there is no node '{}' to bring in", id));
+            return made;
+        };
+        const auto onPage = [&](const std::string& name) { pass = name; broughtAt = 0; };
+        const auto buffer = [&](const std::string& id, const int bytes, Value::List usage, const double x, const double y) {
+            node("Buffer", id, x, y);
+            set(id, "instanceCount", bytes);
+            set(id, "usage", Value(std::move(usage)));
+        };
+        const auto compute = [&](const std::string& id, const char* module, const char* entry, const double x, const double y) {
+            node("ComputePipeline", id, x, y);
+            set(id, "compute.module", module);
+            set(id, "compute.entry", entry);
+            node("Dispatch", "run " + id, x + 260, y);
+            wire(id, "run " + id, "pipeline");
+        };
+        // What a pipeline is wired with, as a copy: wiring makes the graph anew.
+        const auto inputsOf = [&](const std::string& id) { return doc.Graph().Find(id)->inputs; };
+
+        // ---- meshlets: the glass's pack cut, its instances in sight listed as tasks ---------------------------------------
+        onPage("meshlet tasks");
+        {
+            const std::string glass = bring("glass meshes"), instances = bring("glass instances");
+            node("Meshlets", "glass meshlets", 320, 1400);
+            wire(glass, "glass meshlets", "mesh", "mesh");
+            wire(glass, "glass meshlets", "ranges", "ranges");
+            node("MeshBuffers", "glass buffers", 320, 1660);
+            wire(glass, "glass buffers", "mesh", "mesh");
+            buffer("glass task list", MostMeshletTasks * 4, { "eStorage", "eTransferSrc" }, 600, 1660);
+            buffer("glass task count", 16, { "eStorage", "eIndirect", "eTransferDst", "eTransferSrc" }, 600, 1800);
+            node("ClearBuffer", "reset glass tasks", 880, 1800);
+            wire("glass task count", "reset glass tasks", "buffer");
+            compute("expand glass meshlets", "meshletTasks", "expand", 880, 1400);
+            wire(bring("draw blended"), "expand glass meshlets", "param.instances", "instances");
+            wire(glass, "expand glass meshlets", "param.ranges", "rangeBuffer");
+            wire(instances, "expand glass meshlets", "param.meshCommands", "commands");
+            wire("glass meshlets", "expand glass meshlets", "param.meshRanges", "meshRanges");
+            wire("glass task list", "expand glass meshlets", "param.tasks");
+            wire("glass task count", "expand glass meshlets", "param.taskArgs");
+            wire(bring("frame state"), "expand glass meshlets", "param.frameState");
+            set("run expand glass meshlets", "groups.x", MostInstances / 64);
+            for (const char* axis : { "groups.y", "groups.z" }) set("run expand glass meshlets", axis, 1);
+            wire(instances, "run expand glass meshlets", "push.commandCount", "drawCount");
+            compute("bound glass tasks", "meshletTasks", "bound", 880, 1580);
+            wire("glass task list", "bound glass tasks", "param.tasks");
+            wire("glass task count", "bound glass tasks", "param.taskArgs");
+            for (const char* axis : { "groups.x", "groups.y", "groups.z" }) set("run bound glass tasks", axis, 1);
+        }
+        // ---- meshlets: drawn over the solid picture, as the vertex branch's blended pipeline draws them ------------------
+        onPage("meshlet forward");
+        {
+            node("GraphicsPipeline", "meshlet blended", 1040, 1400);
+            set("meshlet blended", "stages", "eMesh");
+            for (const char* stage : { "task", "mesh", "fragment" }) set("meshlet blended", std::format("{}.module", stage), "forward");
+            set("meshlet blended", "task.entry", "meshletTask");
+            set("meshlet blended", "mesh.entry", "meshletMesh");
+            set("meshlet blended", "fragment.entry", "fragment");
+            // Lit as the solid meshlets are; what says which instances and meshlets, the glass's.
+            const std::map<std::string, std::pair<std::string, std::string>> glass {
+                { "param.instances", { bring("draw blended"), "instances" } },
+                { "param.meshlets", { bring("glass meshlets"), "meshlets" } },
+                { "param.meshletVertices", { bring("glass meshlets"), "vertices" } },
+                { "param.meshletTriangles", { bring("glass meshlets"), "triangles" } },
+                { "param.meshletTasks", { bring("glass task list"), "out" } },
+                { "param.meshPositions", { bring("glass buffers"), "vertices" } },
+                { "param.meshNormals", { bring("glass buffers"), "normals" } },
+                { "param.meshUVs", { bring("glass buffers"), "uvs" } } };
+            for (const auto& [input, from] : inputsOf("meshlet forward")) {
+                if (!from.link || !(input.starts_with("param.") || input == "framebuffer")) continue;
+                if (const auto swapped = glass.find(input); swapped != glass.end()) wire(swapped->second.first, "meshlet blended", input, swapped->second.second);
+                else wire(from.link->node, "meshlet blended", input, from.link->output);
+            }
+            // Blended as the vertex branch's are: over the picture, the three beside it left saying what is behind.
+            const auto blended = inputsOf("forward blended");
+            for (const char* state : { "depthStencilState", "colorBlendState" })
+                if (const auto it = blended.find(state); it != blended.end()) set("meshlet blended", state, it->second.value);
+            node("Draw", "draw meshlet blended", 1320, 1400);
+            wire("meshlet blended", "draw meshlet blended", "pipeline");
+            set("draw meshlet blended", "load", true);
+            set("draw meshlet blended", "command", "eDrawMeshTasksIndirect");
+            wire(bring("glass task count"), "draw meshlet blended", "indirect");
+            set("draw meshlet blended", "drawCount", 1);
+            set("draw meshlet blended", "stride", 12);
+        }
+
+        // ---- rays: the glass a scene of its own, looked through ----------------------------------------------------------
+        onPage("ray scene");
+        {
+            const std::string glass = bring("glass"), meshes = bring("glass meshes");
+            node("RayScene", "glass ray scene", 320, 1400);
+            wire(glass, "glass ray scene", "meshes", "Mesh.mesh");
+            wire(meshes, "glass ray scene", "mesh", "mesh");
+            wire(meshes, "glass ray scene", "ranges", "ranges");
+        }
+        onPage("ray trace");
+        {
+            const std::string scene = bring("glass ray scene"), meshes = bring("glass meshes"), buffers = bring("glass buffers");
+            wire(bring("draw blended"), "ray tracer", "param.glassInstances", "instances");
+            wire(scene, "ray tracer", "param.glassMeshOf", "meshOf");
+            wire(scene, "ray tracer", "param.glassScene", "scene");
+            wire(meshes, "ray tracer", "param.glassRanges", "rangeBuffer");
+            wire(buffers, "ray tracer", "param.glassIndices", "indices");
+            wire(buffers, "ray tracer", "param.glassPositions", "vertices");
+            wire(buffers, "ray tracer", "param.glassNormals", "normals");
+            wire(buffers, "ray tracer", "param.glassUVs", "uvs");
+            set("trace rays", "push.glassLayers", 4);
+        }
+
+        IdleUnchosen(doc);
+        if (!ok && error.empty()) error = "a node of the blended branches could not be set up";
+        return ok;
+    }
+
+    /**
+     * Adds to a graph BuildGraph made — or a project's made from it, of the same names — two more ways of drawing the
+     * scene beside the first, each a branch of pages that ends in a lit picture, and a Switch of the three before the
+     * pages that make the picture shown (antialias, bloom, show):
+     *
+     *   vertex    what BuildGraph made: a depth pre-pass, an occlusion cull, a forward pass by vertex shaders over the
+     *             pack, then occlusion, the sky and reflections in screen space
+     *   meshlets  the same pack cut into meshlets, drawn by task and mesh shaders — what is in sight of the camera found
+     *             an instance and then a meshlet at a time — and the same occlusion, sky and reflections after it
+     *   rays      the entities as a scene rays are traced through: shaded where a ray a pixel hits, its shadows, its
+     *             occlusion and what it mirrors each found by more rays
+     *
+     * `renderer` (on the frame page: 0, 1 or 2) says which: the Switches take its picture, its depth and where its
+     * surfaces are on to the rest, and the passes of the other two branches idle — as do the shadow maps' while rays
+     * are traced, which find their own shadows. False, with @p error, when a node could not be added, set or wired.
+     */
+    inline bool AddBranches(keditor::Document& doc, std::string& error)
+    {
+        if (doc.Graph().Find("renderer")) return true;      // it has them already
+        bool ok = true;
+        std::string pass;
+        const auto failed = [&](const std::string& what) { ok = false; if (error.empty()) error = what; };
+        const auto node = [&](const char* type, const std::string& id, const double x, const double y) {
+            if (doc.AddNode(type, x, y, id, pass) != id) failed(std::format("there is a node '{}' already", id));
+        };
+        const auto set = [&](const std::string& id, const std::string& input, Value value) {
+            if (!doc.SetInput(id, input, std::move(value))) failed(std::format("'{}' could not be given '{}'", id, input));
+        };
+        const auto wire = [&](const std::string& from, const std::string& id, const std::string& input, const std::string& output = "out") {
+            if (!doc.Connect(from, output, id, input)) failed(std::format("'{}' could not be wired to '{}.{}'", from, id, input));
+        };
+        double broughtAt = 0;
+        const auto bring = [&](const std::string& id) {
+            const std::string made = doc.Import(id, pass, 40, 40 + (broughtAt += 110));
+            if (made.empty()) failed(std::format("there is no node '{}' to bring in", id));
+            return made;
+        };
+        // A page of a branch, before the pages that make the picture shown.
+        const auto page = [&](const std::string& name) {
+            pass = name;
+            broughtAt = 0;
+            const auto& passes = doc.Passes();
+            const auto antialias = std::ranges::find(passes, std::string("antialias"));
+            doc.AddPass(pass, antialias == passes.end() ? -1 : static_cast<int>(antialias - passes.begin()));
+        };
+        const auto image = [&](const std::string& id, const char* format, Value::List usage, const double x, const double y, const std::string& sizedBy) {
+            node("Image", id, x, y);
+            set(id, "format", format);
+            set(id, "usage", Value(std::move(usage)));
+            doc.ClearInput(id, "extent.x");
+            doc.ClearInput(id, "extent.y");
+            wire(sizedBy, id, "extent", "extent");
+        };
+        const auto buffer = [&](const std::string& id, const int bytes, Value::List usage, const double x, const double y) {
+            node("Buffer", id, x, y);
+            set(id, "instanceCount", bytes);
+            set(id, "usage", Value(std::move(usage)));
+        };
+        const auto compute = [&](const std::string& id, const char* module, const char* entry, const double x, const double y) {
+            node("ComputePipeline", id, x, y);
+            set(id, "compute.module", module);
+            set(id, "compute.entry", entry);
+            node("Dispatch", "run " + id, x + 260, y);
+            wire(id, "run " + id, "pipeline");
+        };
+        const Value clearToNothing = Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 0 } } } } };
+
+        // ---- which: a number, and whether each branch is not the one it says -------------------------------------------
+        pass = "frame";
+        node("Number", "renderer", 40, 1900);
+        set("renderer", "value", 0);
+        for (int branch = 0; branch < 3; ++branch) {
+            const std::string id = std::format("not {}", Renderers[branch]);
+            node("NotEqual", id, 220, 1900 + branch * 60);
+            wire("renderer", id, "a");
+            set(id, "b", branch);
+        }
+        node("Equal", "tracing rays", 220, 2080);
+        wire("renderer", "tracing rays", "a");
+        set("tracing rays", "b", 2);
+
+        // ---- meshlets: the pack cut into meshlets, what is in sight of them listed, drawn by task and mesh shaders ------
+        page("meshlet tasks");
+        {
+            const std::string drawn = bring("drawn"), meshes = bring("drawn meshes");
+            node("Meshlets", "meshlets", 320, 40);
+            wire(meshes, "meshlets", "mesh", "mesh");
+            wire(meshes, "meshlets", "ranges", "ranges");
+            node("MeshBuffers", "pack buffers", 320, 300);
+            wire(meshes, "pack buffers", "mesh", "mesh");
+            // A command a mesh, each with its instances' first and count: what tells which mesh an instance is.
+            node("IndirectDraws", "mesh of instance", 320, 520);
+            wire(meshes, "mesh of instance", "ranges", "ranges");
+            wire(drawn, "mesh of instance", "groups", "groups");
+            buffer("meshlet task list", MostMeshletTasks * 16, { "eStorage", "eTransferSrc" }, 600, 300);
+            buffer("meshlet task count", 16, { "eStorage", "eIndirect", "eTransferDst", "eTransferSrc" }, 600, 440);
+            node("ClearBuffer", "reset meshlet tasks", 880, 440);
+            wire("meshlet task count", "reset meshlet tasks", "buffer");
+            compute("expand meshlets", "meshletTasks", "expand", 880, 40);
+            wire(bring("draw forward"), "expand meshlets", "param.instances", "instances");
+            wire(meshes, "expand meshlets", "param.ranges", "rangeBuffer");
+            wire("mesh of instance", "expand meshlets", "param.meshCommands", "commands");
+            wire("meshlets", "expand meshlets", "param.meshRanges", "meshRanges");
+            wire("meshlet task list", "expand meshlets", "param.tasks");
+            wire("meshlet task count", "expand meshlets", "param.taskArgs");
+            wire(bring("frame state"), "expand meshlets", "param.frameState");
+            set("run expand meshlets", "groups.x", MostInstances / 64);
+            for (const char* axis : { "groups.y", "groups.z" }) set("run expand meshlets", axis, 1);
+            wire("mesh of instance", "run expand meshlets", "push.commandCount", "drawCount");
+            compute("bound meshlet tasks", "meshletTasks", "bound", 880, 220);
+            wire("meshlet task list", "bound meshlet tasks", "param.tasks");
+            wire("meshlet task count", "bound meshlet tasks", "param.taskArgs");
+            for (const char* axis : { "groups.x", "groups.y", "groups.z" }) set("run bound meshlet tasks", axis, 1);
+        }
+        page("meshlet forward");
+        {
+            const std::string screen = bring("screen");
+            const Value::List target { "eColorAttachment", "eSampled", "eStorage", "eTransferSrc" };
+            image("meshlet hdr", "eRGBA16_SFLOAT", target, 320, 40, screen);
+            image("meshlet position", "eRGBA32_SFLOAT", target, 320, 180, screen);
+            image("meshlet normal", "eRGBA16_SFLOAT", target, 320, 320, screen);
+            image("meshlet specular", "eRGBA8_UNORM", target, 320, 460, screen);
+            image("meshlet depth", "eD32_SFLOAT", { "eDepthStencilAttachment", "eSampled", "eTransferSrc" }, 320, 600, screen);
+            node("Framebuffer", "meshlet target", 760, 40);
+            int attachment = 0;
+            for (const char* name : { "hdr", "position", "normal", "specular" }) {
+                wire(std::format("meshlet {}", name), "meshlet target", std::format("color[{}].view", attachment));
+                set("meshlet target", std::format("color[{}].name", attachment), name);
+                set("meshlet target", std::format("color[{}].clear", attachment), clearToNothing);
+                ++attachment;
+            }
+            wire("meshlet depth", "meshlet target", "depthStencil.view");
+            set("meshlet target", "depthStencil.which", "Depth");
+            set("meshlet target", "depthStencil.name", "depth");
+            set("meshlet target", "depthStencil.depth", 1);
+            node("GraphicsPipeline", "meshlet forward", 1040, 40);
+            set("meshlet forward", "stages", "eMesh");
+            for (const char* stage : { "task", "mesh", "fragment" }) set("meshlet forward", std::format("{}.module", stage), "forward");
+            set("meshlet forward", "task.entry", "meshletTask");
+            set("meshlet forward", "mesh.entry", "meshletMesh");
+            set("meshlet forward", "fragment.entry", "fragment");
+            wire("meshlet target", "meshlet forward", "framebuffer");
+            // Lit as the forward pass is: what its pipeline is given that this one's shaders read too.
+            std::vector<std::string> takes;
+            for (const auto& port : doc.Runtime().PortsOf("meshlet forward")) takes.push_back(port.name);
+            const auto wired = doc.Graph().Find("forward")->inputs;     // (a copy: wiring makes the graph anew)
+            for (const auto& [input, from] : wired) {
+                if (!from.link || !input.starts_with("param.") || std::ranges::find(takes, input) == takes.end()) continue;
+                const kgraph::Node* source = doc.Graph().Find(from.link->node);
+                // What the forward page brought in, brought in here; what it made itself, brought in from it.
+                std::string id = from.link->node;
+                if (source && source->type == "Reference") if (const auto it = source->inputs.find("node"); it != source->inputs.end() && it->second.value.String()) id = *it->second.value.String();
+                // A Function's call is written out before the graph runs: no Reference can stand for it, so it is wired
+                // as the forward pipeline has it, straight.
+                const kgraph::Node* origin = doc.Graph().Find(id);
+                if (origin && origin->type == "Function") wire(id, "meshlet forward", input, from.link->output);
+                else wire(bring(id), "meshlet forward", input, from.link->output);
+            }
+            const std::string meshlets = bring("meshlets"), buffers = bring("pack buffers");
+            wire(bring("draw forward"), "meshlet forward", "param.instances", "instances");
+            wire(meshlets, "meshlet forward", "param.meshlets", "meshlets");
+            wire(meshlets, "meshlet forward", "param.meshletVertices", "vertices");
+            wire(meshlets, "meshlet forward", "param.meshletTriangles", "triangles");
+            wire(bring("meshlet task list"), "meshlet forward", "param.meshletTasks");
+            wire(buffers, "meshlet forward", "param.meshPositions", "vertices");
+            wire(buffers, "meshlet forward", "param.meshNormals", "normals");
+            wire(buffers, "meshlet forward", "param.meshUVs", "uvs");
+            set("meshlet forward", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLess" } });
+            node("Draw", "draw meshlets", 1320, 40);
+            wire("meshlet forward", "draw meshlets", "pipeline");
+            set("draw meshlets", "command", "eDrawMeshTasksIndirect");
+            wire(bring("meshlet task count"), "draw meshlets", "indirect");
+            set("draw meshlets", "drawCount", 1);
+            set("draw meshlets", "stride", 12);
+        }
+        // Occlusion, the sky and reflections, as the vertex branch has them, over the meshlet branch's pictures: its
+        // pages copied, what they bring in of the forward pass's brought in of this one's instead.
+        const std::map<std::string, std::string> meshletImages {
+            { "hdr", "meshlet hdr" }, { "position", "meshlet position" }, { "normal", "meshlet normal" }, { "specular", "meshlet specular" }, { "depth", "meshlet depth" } };
+        std::map<std::string, std::vector<std::string>> copies;
+        for (const char* from : { "occlusion", "sky", "reflections" }) {
+            std::vector<kgraph::Node> nodes;
+            for (const auto& each : doc.Graph().nodes)
+                if (each.pass == from) nodes.push_back(each);
+            for (auto& each : nodes) {
+                if (each.type == "Reference")
+                    if (auto it = each.inputs.find("node"); it != each.inputs.end() && it->second.value.String())
+                        if (const auto swapped = meshletImages.find(*it->second.value.String()); swapped != meshletImages.end()) it->second.value = Value(swapped->second);
+                for (auto& [name, input] : each.inputs)
+                    if (input.link)
+                        if (const auto swapped = meshletImages.find(input.link->node); swapped != meshletImages.end()) input.link->node = swapped->second;
+            }
+            page(std::format("meshlet {}", from));
+            const std::string into = pass;
+            copies[from] = doc.PasteNodes(std::move(nodes), 40, 40, &into);
+            if (copies[from].empty()) failed(std::format("the page '{}' could not be copied", from));
+        }
+
+        // ---- rays: the entities as a scene, a ray a pixel traced through it ---------------------------------------------
+        page("ray scene");
+        {
+            const std::string drawn = bring("drawn"), meshes = bring("drawn meshes");
+            node("RayScene", "ray scene", 320, 40);
+            wire(drawn, "ray scene", "meshes", "Mesh.mesh");
+            wire(meshes, "ray scene", "mesh", "mesh");
+            wire(meshes, "ray scene", "ranges", "ranges");
+            set("ray scene", "masked", "Masked");
+            set("ray scene", "noShadow", "PointLight");     // a lamp's own ball casts nothing, as in the shadow maps
+        }
+        page("ray trace");
+        {
+            const std::string screen = bring("screen");
+            image("ray hdr", "eRGBA16_SFLOAT", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, screen);
+            image("ray position", "eRGBA32_SFLOAT", { "eStorage", "eSampled", "eTransferSrc" }, 320, 180, screen);
+            node("RayTracingPipeline", "ray tracer", 760, 40);
+            set("ray tracer", "raygen.module", "rayTraced");
+            set("ray tracer", "raygen.entry", "raygen");
+            set("ray tracer", "miss[0].module", "rayTraced");
+            set("ray tracer", "miss[0].entry", "missed");
+            set("ray tracer", "miss[1].module", "rayTraced");
+            set("ray tracer", "miss[1].entry", "shadowMissed");
+            set("ray tracer", "hitGroup[0].closestHit.module", "rayTraced");
+            set("ray tracer", "hitGroup[0].closestHit.entry", "hit");
+            set("ray tracer", "hitGroup[0].anyHit.module", "rayTraced");
+            set("ray tracer", "hitGroup[0].anyHit.entry", "cutOut");
+            const std::string scene = bring("ray scene"), meshes = bring("drawn meshes"), buffers = bring("pack buffers");
+            wire(bring("camera data"), "ray tracer", "param.camera");
+            wire(bring("sun data"), "ray tracer", "param.sun");
+            wire(scene, "ray tracer", "param.meshOf", "meshOf");
+            wire(scene, "ray tracer", "param.scene", "scene");
+            wire(meshes, "ray tracer", "param.ranges", "rangeBuffer");
+            wire(buffers, "ray tracer", "param.meshIndices", "indices");
+            wire(buffers, "ray tracer", "param.meshPositions", "vertices");
+            wire(buffers, "ray tracer", "param.meshNormals", "normals");
+            wire(buffers, "ray tracer", "param.meshUVs", "uvs");
+            wire(bring("texture sampler"), "ray tracer", "param.textureSampler");
+            wire(bring("frame state"), "ray tracer", "param.frameState");
+            wire("ray hdr", "ray tracer", "param.picture");
+            wire("ray position", "ray tracer", "param.positions");
+            node("TraceRays", "trace rays", 1040, 40);
+            wire("ray tracer", "trace rays", "pipeline");
+            // Its material each entity's own, as the RayScene numbers them: its component, `ray tracer`.
+            wire(bring("drawn"), "trace rays", "entities");
+            set("trace rays", "cover", "picture");
+            set("trace rays", "push.occlusionRadius", 1.0);
+            set("trace rays", "push.occlusionRays", 2);
+            set("trace rays", "push.reflectionRoughness", 0.6);
+            set("trace rays", "push.shadowsFrom", 0.01);
+        }
+
+        // ---- the three as one: what the pages after them use ----------------------------------------------------------
+        page("branches");
+        {
+            const auto choose = [&](const std::string& id, const std::array<std::string, 3>& options, const double y) {
+                node("Switch", id, 600, y);
+                wire(bring("renderer"), id, "index");
+                for (int i = 0; i < 3; ++i) wire(bring(options[static_cast<std::size_t>(i)]), id, std::format("option[{}]", i));
+            };
+            choose("final picture", { "hdr", "meshlet hdr", "ray hdr" }, 40);
+            choose("final position", { "position", "meshlet position", "ray position" }, 260);
+            // Rays make no depth: the cluster heat, the only page after that reads one, reads the vertex branch's.
+            choose("final depth", { "depth", "meshlet depth", "depth" }, 480);
+        }
+        // What the pages after the branches brought in of the vertex branch's pictures is the chosen branch's now.
+        const std::map<std::string, std::string> finals { { "hdr", "final picture" }, { "position", "final position" }, { "depth", "final depth" } };
+        const auto& passes = doc.Passes();
+        const auto after = std::ranges::find(passes, std::string("branches"));
+        const std::vector<std::string> later(after == passes.end() ? passes.end() : after + 1, passes.end());
+        std::vector<std::pair<std::string, std::string>> retarget;
+        for (const auto& each : doc.Graph().nodes) {
+            if (each.type != "Reference" || std::ranges::find(later, each.pass) == later.end()) continue;
+            const auto target = each.inputs.find("node");
+            if (target == each.inputs.end() || !target->second.value.String()) continue;
+            if (const auto chosen = finals.find(*target->second.value.String()); chosen != finals.end()) retarget.emplace_back(each.id, chosen->second);
+        }
+        for (const auto& [reference, chosen] : retarget) set(reference, "node", chosen);
+
+        IdleUnchosen(doc);
+        if (!ok && error.empty()) error = "a node of the branches could not be set up";
+        return ok && AddBlendedToBranches(doc, error) && AddEmitters(doc, error);
     }
 }

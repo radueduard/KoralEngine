@@ -1,0 +1,1113 @@
+{
+  "kgraph": 1,
+  "nodes": [
+    {
+      "id": "about",
+      "type": "Note",
+      "at": [
+        40,
+        -120
+      ],
+      "inputs": {
+        "text": "The editor's scene view, as the editor looks at a scene whatever its graph: its DebugViews are listed in the Scene panel (beside the scene graph's own), and 'grid' is drawn over whatever is shown while 'grid shown' is true. The editor sets 'grid shown' and the grid Draw's push.cell, push.major, push.fade, push.opacity and push.plane; and the main View is its own."
+      }
+    },
+    {
+      "id": "screen",
+      "type": "Screen",
+      "at": [
+        40,
+        40
+      ],
+      "inputs": {}
+    },
+    {
+      "id": "shape",
+      "type": "Primitive",
+      "at": [
+        40,
+        160
+      ],
+      "inputs": {}
+    },
+    {
+      "id": "camera",
+      "type": "View",
+      "at": [
+        40,
+        280
+      ],
+      "inputs": {
+        "main": true
+      }
+    },
+    {
+      "id": "lens",
+      "type": "Perspective",
+      "at": [
+        220,
+        280
+      ],
+      "inputs": {
+        "main": true,
+        "aspect": {
+          "$link": [
+            "screen",
+            "aspect"
+          ]
+        }
+      }
+    },
+    {
+      "id": "seen",
+      "type": "MatrixMultiply",
+      "at": [
+        400,
+        280
+      ],
+      "inputs": {
+        "a": {
+          "$link": [
+            "lens",
+            "out"
+          ]
+        },
+        "b": {
+          "$link": [
+            "camera",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "unseen",
+      "type": "MatrixInverse",
+      "at": [
+        580,
+        280
+      ],
+      "inputs": {
+        "a": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "view",
+      "type": "ShaderBuffer",
+      "at": [
+        580,
+        120
+      ],
+      "inputs": {
+        "module": "koral_editor_views",
+        "entry": "positionOnly",
+        "parameter": "view",
+        "field.viewProjection": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "field.view": {
+          "$link": [
+            "camera",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "grid view",
+      "type": "ShaderBuffer",
+      "at": [
+        760,
+        280
+      ],
+      "inputs": {
+        "module": "koral_editor_grid",
+        "entry": "fragment",
+        "parameter": "gridView",
+        "field.viewProjection": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "field.inverseViewProjection": {
+          "$link": [
+            "unseen",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "all",
+      "type": "Entities",
+      "at": [
+        40,
+        420
+      ],
+      "inputs": {}
+    },
+    {
+      "id": "drawn",
+      "type": "Filter",
+      "at": [
+        220,
+        420
+      ],
+      "inputs": {
+        "entities": {
+          "$link": [
+            "all",
+            "out"
+          ]
+        },
+        "with": [
+          "Mesh"
+        ]
+      }
+    },
+    {
+      "id": "picture",
+      "type": "Image",
+      "at": [
+        400,
+        560
+      ],
+      "inputs": {
+        "format": "eRGBA8_UNORM",
+        "usage": [
+          "eColorAttachment",
+          "eSampled",
+          "eTransferSrc"
+        ],
+        "extent": {
+          "$link": [
+            "screen",
+            "extent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "view depth",
+      "type": "Image",
+      "at": [
+        400,
+        440
+      ],
+      "inputs": {
+        "format": "eD32_SFLOAT",
+        "usage": [
+          "eDepthStencilAttachment"
+        ],
+        "extent": {
+          "$link": [
+            "screen",
+            "extent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "depth",
+      "type": "Image",
+      "at": [
+        400,
+        680
+      ],
+      "inputs": {
+        "format": "eD32_SFLOAT",
+        "usage": [
+          "eDepthStencilAttachment",
+          "eSampled"
+        ],
+        "extent": {
+          "$link": [
+            "screen",
+            "extent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "grid",
+      "type": "Image",
+      "at": [
+        400,
+        800
+      ],
+      "inputs": {
+        "format": "eRGBA8_UNORM",
+        "usage": [
+          "eColorAttachment",
+          "eSampled",
+          "eTransferSrc"
+        ],
+        "extent": {
+          "$link": [
+            "screen",
+            "extent"
+          ]
+        }
+      }
+    },
+    {
+      "id": "target",
+      "type": "Framebuffer",
+      "at": [
+        580,
+        560
+      ],
+      "inputs": {
+        "color[0].view": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        },
+        "color[0].name": "color",
+        "color[0].clear": {
+          "scalarType": "Float",
+          "components": 4,
+          "value": {
+            "f": [
+              0.105,
+              0.108,
+              0.118,
+              1
+            ]
+          }
+        },
+        "depthStencil.view": {
+          "$link": [
+            "view depth",
+            "out"
+          ]
+        },
+        "depthStencil.which": "Depth",
+        "depthStencil.name": "depth",
+        "depthStencil.depth": 1
+      }
+    },
+    {
+      "id": "depth target",
+      "type": "Framebuffer",
+      "at": [
+        580,
+        680
+      ],
+      "inputs": {
+        "depthStencil.view": {
+          "$link": [
+            "depth",
+            "out"
+          ]
+        },
+        "depthStencil.which": "Depth",
+        "depthStencil.name": "depth",
+        "depthStencil.depth": 1
+      }
+    },
+    {
+      "id": "grid target",
+      "type": "Framebuffer",
+      "at": [
+        580,
+        800
+      ],
+      "inputs": {
+        "color[0].view": {
+          "$link": [
+            "grid",
+            "out"
+          ]
+        },
+        "color[0].name": "color",
+        "color[0].clear": {
+          "scalarType": "Float",
+          "components": 4,
+          "value": {
+            "f": [
+              0,
+              0,
+              0,
+              0
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "grid shown",
+      "type": "Bool",
+      "at": [
+        40,
+        900
+      ],
+      "inputs": {
+        "value": false
+      }
+    },
+    {
+      "id": "depth only",
+      "type": "GraphicsPipeline",
+      "at": [
+        760,
+        680
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "positionOnly",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "depth target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "cullMode": []
+        }
+      }
+    },
+    {
+      "id": "draw depth",
+      "type": "Draw",
+      "at": [
+        940,
+        680
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "depth only",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "grid shown",
+            "out"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wireframe view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1040
+      ],
+      "inputs": {
+        "name": "Wireframe",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "wireframe pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1040
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "positionOnly",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "edges",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "polygonMode": "eLine",
+          "cullMode": []
+        }
+      }
+    },
+    {
+      "id": "draw wireframe",
+      "type": "Draw",
+      "at": [
+        760,
+        1040
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "wireframe pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "wireframe view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "clay view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1180
+      ],
+      "inputs": {
+        "name": "Clay",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "clay pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1180
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "withNormal",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "clay",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "cullMode": []
+        }
+      }
+    },
+    {
+      "id": "draw clay",
+      "type": "Draw",
+      "at": [
+        760,
+        1180
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "clay pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "clay view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "normals view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1320
+      ],
+      "inputs": {
+        "name": "Normals (geometry)",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "normals pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1320
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "withNormal",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "normals",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "cullMode": []
+        }
+      }
+    },
+    {
+      "id": "draw normals",
+      "type": "Draw",
+      "at": [
+        760,
+        1320
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "normals pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "normals view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "uvs view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1460
+      ],
+      "inputs": {
+        "name": "UV checker",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "uvs pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1460
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "withUV",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "uvChecker",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "cullMode": []
+        }
+      }
+    },
+    {
+      "id": "draw uvs",
+      "type": "Draw",
+      "at": [
+        760,
+        1460
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "uvs pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "uvs view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "overdraw view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1600
+      ],
+      "inputs": {
+        "name": "Overdraw",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "overdraw pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1600
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "positionOnly",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "overdraw",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        },
+        "rasterizationState": {
+          "cullMode": []
+        },
+        "depthStencilState": {
+          "depthTestEnable": false,
+          "depthWriteEnable": false
+        },
+        "colorBlendState": {
+          "attachments": [
+            {
+              "blendEnable": true,
+              "srcColorBlendFactor": "eOne",
+              "dstColorBlendFactor": "eOne",
+              "colorBlendOp": "eAdd",
+              "srcAlphaBlendFactor": "eOne",
+              "dstAlphaBlendFactor": "eZero",
+              "alphaBlendOp": "eAdd",
+              "colorWriteMask": [
+                "eR",
+                "eG",
+                "eB",
+                "eA"
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "draw overdraw",
+      "type": "Draw",
+      "at": [
+        760,
+        1600
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "overdraw pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "overdraw view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "entities view",
+      "type": "DebugView",
+      "at": [
+        40,
+        1740
+      ],
+      "inputs": {
+        "name": "Entities",
+        "picture": {
+          "$link": [
+            "picture",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "entities pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        400,
+        1740
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_views",
+        "vertex.entry": "positionOnly",
+        "fragment.module": "koral_editor_views",
+        "fragment.entry": "entities",
+        "vertex.layout": {
+          "$link": [
+            "shape",
+            "layout"
+          ]
+        },
+        "framebuffer": {
+          "$link": [
+            "target",
+            "out"
+          ]
+        },
+        "param.view": {
+          "$link": [
+            "view",
+            "out"
+          ]
+        }
+      }
+    },
+    {
+      "id": "draw entities",
+      "type": "Draw",
+      "at": [
+        760,
+        1740
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "entities pipeline",
+            "out"
+          ]
+        },
+        "mesh": {
+          "$link": [
+            "drawn",
+            "Mesh.mesh"
+          ]
+        },
+        "cull": {
+          "$link": [
+            "seen",
+            "out"
+          ]
+        },
+        "enabled": {
+          "$link": [
+            "entities view",
+            "shown"
+          ]
+        },
+        "push.model": {
+          "$link": [
+            "drawn",
+            "matrix"
+          ]
+        },
+        "push.entityId": {
+          "$link": [
+            "drawn",
+            "entityId"
+          ]
+        }
+      }
+    },
+    {
+      "id": "grid pipeline",
+      "type": "GraphicsPipeline",
+      "at": [
+        760,
+        900
+      ],
+      "inputs": {
+        "vertex.module": "koral_editor_grid",
+        "vertex.entry": "vertex",
+        "fragment.module": "koral_editor_grid",
+        "fragment.entry": "fragment",
+        "framebuffer": {
+          "$link": [
+            "grid target",
+            "out"
+          ]
+        },
+        "param.gridView": {
+          "$link": [
+            "grid view",
+            "out"
+          ]
+        },
+        "param.sceneDepth": {
+          "$link": [
+            "depth",
+            "out"
+          ]
+        },
+        "depthStencilState": {
+          "depthTestEnable": false,
+          "depthWriteEnable": false
+        }
+      }
+    },
+    {
+      "id": "draw grid",
+      "type": "Draw",
+      "at": [
+        940,
+        900
+      ],
+      "inputs": {
+        "pipeline": {
+          "$link": [
+            "grid pipeline",
+            "out"
+          ]
+        },
+        "vertexCount": 3,
+        "enabled": {
+          "$link": [
+            "grid shown",
+            "out"
+          ]
+        },
+        "push.cell": 1,
+        "push.major": 10,
+        "push.fade": 80,
+        "push.opacity": 1,
+        "push.plane": 0,
+        "push.depthTested": 1
+      }
+    }
+  ]
+}

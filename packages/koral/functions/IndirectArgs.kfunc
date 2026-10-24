@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Culling",
+  "description": "A Dispatch's indirect groups worked out from a count on the GPU.",
+  "tags": ["indirect", "dispatch", "args", "groups", "count"],
   "graph": {
     "kgraph": 1,
     "nodes": [

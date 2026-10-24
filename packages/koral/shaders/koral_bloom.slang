@@ -1,9 +1,12 @@
 // Bloom: what is brighter than the threshold bleeds light round it. The picture is filtered down a chain of images
 // each half the last (a 13-tap filter, the threshold on the first step), then back up it (a tent filter, each level
-// adding its own), and the top of that is added to the picture before it is tone mapped.
+// adding its own), and the top of that is added to the picture before it is tone mapped. The engine's Bloom function
+// runs it.
 //
-// `threshold` and `knee` are given on the downsample pipeline's node, and `level` is which turn of the way down it
-// is: the threshold is for the first. `strength` is given on the composite's.
+// `threshold` and `knee` are given on the downsample's Dispatch, and `level` is which turn of the way down it is: the
+// threshold is for the first. `strength` is given on the composite's.
+
+import koral_debug;
 
 Sampler2D<float4> source;
 Sampler2D<float4> detail;           // on the way up: this level as it was filtered down
@@ -76,6 +79,7 @@ void composite(uint3 id : SV_DispatchThreadID, uniform float strength)
     uint width, height;
     hdrImage.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
+    if (koralDebugShowing()) return;    // a channel of a material shown: nothing bleeds into it
     uint sourceWidth, sourceHeight;
     source.GetDimensions(sourceWidth, sourceHeight);
     float2 uv = (float2(id.xy) + 0.5) / float2(width, height);

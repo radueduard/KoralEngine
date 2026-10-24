@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Physics",
+  "description": "One fixed step of rigid bodies on the GPU by XPBD: contacts, joints, sleeping.",
+  "tags": ["physics", "rigid body", "xpbd", "joints", "contacts", "simulation"],
   "graph": {
     "kgraph": 1,
     "nodes": [

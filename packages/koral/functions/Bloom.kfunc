@@ -1,0 +1,500 @@
+{
+  "koral-function": 1,
+  "purpose": "Post",
+  "description": "What is brighter than `threshold` in a picture bleeds light round it: the picture filtered down a chain of six images each half the last, then back up it, and the top of that added to the picture in place, times `strength`. Put it before tone mapping. `sampler` filters linearly.",
+  "tags": [
+    "bloom",
+    "glow",
+    "blur",
+    "bright",
+    "post",
+    "hdr",
+    "halo"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "picture",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "picture",
+          "kind": "eImage"
+        }
+      },
+      {
+        "id": "sampler",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "sampler",
+          "kind": "eResource"
+        }
+      },
+      {
+        "id": "threshold",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "threshold",
+          "kind": "eValue",
+          "default": 1
+        }
+      },
+      {
+        "id": "knee",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "knee",
+          "kind": "eValue",
+          "default": 0.5
+        }
+      },
+      {
+        "id": "strength",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {
+          "name": "strength",
+          "kind": "eValue",
+          "default": 0.08333333333333333
+        }
+      },
+      {
+        "id": "screen",
+        "type": "Screen",
+        "at": [
+          0,
+          420
+        ],
+        "inputs": {}
+      },
+      {
+        "id": "bloom size",
+        "type": "Divide",
+        "at": [
+          250,
+          420
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "screen",
+              "extent"
+            ]
+          },
+          "b": [
+            2,
+            2,
+            1
+          ]
+        }
+      },
+      {
+        "id": "bloom down",
+        "type": "Image",
+        "at": [
+          500,
+          60
+        ],
+        "inputs": {
+          "extent": {
+            "$link": [
+              "bloom size",
+              "out"
+            ]
+          },
+          "format": "eRGBA16_SFLOAT",
+          "mipLevels": 6,
+          "usage": [
+            "eStorage",
+            "eSampled",
+            "eTransferSrc"
+          ]
+        }
+      },
+      {
+        "id": "bloom up",
+        "type": "Image",
+        "at": [
+          500,
+          560
+        ],
+        "inputs": {
+          "extent": {
+            "$link": [
+              "bloom size",
+              "out"
+            ]
+          },
+          "format": "eRGBA16_SFLOAT",
+          "mipLevels": 6,
+          "usage": [
+            "eStorage",
+            "eSampled",
+            "eTransferSrc"
+          ]
+        }
+      },
+      {
+        "id": "source view",
+        "type": "ImageView",
+        "at": [
+          250,
+          60
+        ],
+        "inputs": {
+          "image": {
+            "$link": [
+              "picture",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "down levels",
+        "type": "Repeat",
+        "at": [
+          250,
+          200
+        ],
+        "inputs": {
+          "count": 6
+        }
+      },
+      {
+        "id": "down level",
+        "type": "ImageView",
+        "at": [
+          750,
+          60
+        ],
+        "inputs": {
+          "image": {
+            "$link": [
+              "bloom down",
+              "out"
+            ]
+          },
+          "baseMipLevel": {
+            "$link": [
+              "down levels",
+              "index"
+            ]
+          },
+          "mipLevelCount": 1
+        }
+      },
+      {
+        "id": "level above",
+        "type": "Previous",
+        "at": [
+          750,
+          200
+        ],
+        "inputs": {
+          "of": "down level",
+          "first": "source view"
+        }
+      },
+      {
+        "id": "down",
+        "type": "ComputePipeline",
+        "at": [
+          1000,
+          60
+        ],
+        "inputs": {
+          "compute.module": "koral_bloom",
+          "compute.entry": "downsample",
+          "param.source": {
+            "$link": [
+              "level above",
+              "out"
+            ]
+          },
+          "param.source.sampler": {
+            "$link": [
+              "sampler",
+              "out"
+            ]
+          },
+          "param.target": {
+            "$link": [
+              "down level",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run down",
+        "type": "Dispatch",
+        "at": [
+          1250,
+          60
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "down",
+              "out"
+            ]
+          },
+          "cover": "target",
+          "push.threshold": {
+            "$link": [
+              "threshold",
+              "out"
+            ]
+          },
+          "push.knee": {
+            "$link": [
+              "knee",
+              "out"
+            ]
+          },
+          "push.level": {
+            "$link": [
+              "down levels",
+              "index"
+            ]
+          }
+        }
+      },
+      {
+        "id": "up levels",
+        "type": "Repeat",
+        "at": [
+          250,
+          700
+        ],
+        "inputs": {
+          "count": 5
+        }
+      },
+      {
+        "id": "up level",
+        "type": "ImageView",
+        "at": [
+          750,
+          560
+        ],
+        "inputs": {
+          "image": {
+            "$link": [
+              "bloom up",
+              "out"
+            ]
+          },
+          "baseMipLevel": {
+            "$link": [
+              "up levels",
+              "reverse"
+            ]
+          },
+          "mipLevelCount": 1
+        }
+      },
+      {
+        "id": "smallest",
+        "type": "Element",
+        "at": [
+          750,
+          700
+        ],
+        "inputs": {
+          "of": "down level"
+        }
+      },
+      {
+        "id": "level below",
+        "type": "Previous",
+        "at": [
+          750,
+          840
+        ],
+        "inputs": {
+          "of": "up level",
+          "first": "smallest"
+        }
+      },
+      {
+        "id": "as it came down",
+        "type": "Element",
+        "at": [
+          750,
+          980
+        ],
+        "inputs": {
+          "of": "down level",
+          "index": {
+            "$link": [
+              "up levels",
+              "reverse"
+            ]
+          }
+        }
+      },
+      {
+        "id": "up",
+        "type": "ComputePipeline",
+        "at": [
+          1000,
+          560
+        ],
+        "inputs": {
+          "compute.module": "koral_bloom",
+          "compute.entry": "upsample",
+          "param.source": {
+            "$link": [
+              "level below",
+              "out"
+            ]
+          },
+          "param.source.sampler": {
+            "$link": [
+              "sampler",
+              "out"
+            ]
+          },
+          "param.detail": {
+            "$link": [
+              "as it came down",
+              "out"
+            ]
+          },
+          "param.detail.sampler": {
+            "$link": [
+              "sampler",
+              "out"
+            ]
+          },
+          "param.target": {
+            "$link": [
+              "up level",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run up",
+        "type": "Dispatch",
+        "at": [
+          1250,
+          560
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "up",
+              "out"
+            ]
+          },
+          "cover": "target"
+        }
+      },
+      {
+        "id": "bloom",
+        "type": "Element",
+        "at": [
+          1000,
+          1100
+        ],
+        "inputs": {
+          "of": "up level"
+        }
+      },
+      {
+        "id": "add bloom",
+        "type": "ComputePipeline",
+        "at": [
+          1250,
+          1100
+        ],
+        "inputs": {
+          "compute.module": "koral_bloom",
+          "compute.entry": "composite",
+          "param.hdrImage": {
+            "$link": [
+              "picture",
+              "out"
+            ]
+          },
+          "param.source": {
+            "$link": [
+              "bloom",
+              "out"
+            ]
+          },
+          "param.source.sampler": {
+            "$link": [
+              "sampler",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run add bloom",
+        "type": "Dispatch",
+        "at": [
+          1500,
+          1100
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "add bloom",
+              "out"
+            ]
+          },
+          "cover": "hdrImage",
+          "push.strength": {
+            "$link": [
+              "strength",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "out picture",
+        "type": "FunctionOutput",
+        "at": [
+          1700,
+          60
+        ],
+        "inputs": {
+          "name": "picture",
+          "kind": "eImage",
+          "value": {
+            "$link": [
+              "picture",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Physics",
+  "description": "XpbdStep's bodies, materials and shared state made from RigidBody, Collider and Joint components.",
+  "tags": ["physics", "rigid body", "xpbd", "components", "colliders", "joints"],
   "graph": {
     "kgraph": 1,
     "nodes": [

@@ -3,9 +3,12 @@
 The framework's ForwardPlus project (`~/Koral/ForwardPlus`: C++ render passes and GLSL shaders) made as a Koral
 Engine scene: every pass a page of the graph, every buffer a node. Nothing in the engine knows of it.
 
-- `projects/forward-plus` is the project itself, and what `koral-editor` and `koral-play` open when they are
-  given none: its `shaders` folder — the original's shaders in Slang — and a scene made of the original's own
-  models, the three Sponza packages under `/mnt/w/Assets`, which it names by where they are.
+- `forward-plus` in the projects folder (`KORAL_ENGINE_PROJECTS`, `/mnt/w/EngineProjects` unless the build says
+  otherwise) is the project itself, and what `koral-editor` and `koral-play` open when they are given none: its
+  `shaders` folder — the original's shaders in Slang — and a scene made of the original's own models, the three
+  Sponza packages under `/mnt/w/Assets`, which it names by where they are. It is not in the repository.
+- `shaders` here are the sample's shaders, as the project started with them: what the tests copy into the projects
+  they make.
 - `forward_plus.h` is the graph and a scene for it to draw, added through the document as the editor's panels add
   them: `forwardplus::BuildGraph(doc, error)` and `forwardplus::BuildScene(doc)`. The camera has the engine's
   `FlyCamera`: hold the right button, and the mouse turns it and W A S D E Q move it.
@@ -38,9 +41,9 @@ cmake-build-debug/koral-editor cmake-build-debug/forward-plus-project
 
 ## Looking into it
 
-- `debug view`, a Number node on the `show` page: 0 shows the picture, 1 how many lights each pixel's cluster
-  holds (`clusterHeat.slang`) — grey for none, blue through green and yellow to red, with a line where a cluster
-  ends. The pass that makes it is left out while it is not shown.
+- `debug view`, a DebugView on the `show` page: **Cluster heat** in the editor's Scene panel, how many lights each
+  pixel's cluster holds (`clusterHeat.slang`) — grey for none, blue through green and yellow to red, with a line
+  where a cluster ends. The pass that makes it runs only while it is shown there, and never in the game.
 - In the editor, any image or buffer of the graph can be looked at from its node's inspector: the depth, the shadow
   atlas, a level of the bloom chain, the lights' buffer by field.
 
@@ -58,7 +61,7 @@ FORWARD_PLUS_MORE=/mnt/w/Assets/pkg_a_curtains/NewSponza_Curtains_glTF.gltf:/mnt
 cmake-build-debug/modules/keditor/keditor_tests --gtest_filter='ForwardPlus.AModel*'
 ```
 
-and its `scenes` folder and `project.json` are what `projects/forward-plus` has. The files are read off the frame:
+and its `scenes` folder and `project.json` are what the `forward-plus` project has. The files are read off the frame:
 the scene is there at once and fills in over ten seconds or so.
 In the editor, **File > Import model...** does the same for any scene.
 
@@ -86,7 +89,7 @@ entity with the `forward blended` component and the `Blended` tag. What it mirro
 clear it is, more so seen along itself.
 
 A model's file says which of its materials are blended, and the importer goes by that. The new Sponza's glass
-(`glass`, `lamp_glass_01`) is opaque in its glTF, so its 53 parts in `projects/forward-plus` were made clear by
+(`glass`, `lamp_glass_01`) is opaque in its glTF, so its 53 parts in the `forward-plus` project were made clear by
 hand: moved from `forward` to `forward blended`, tagged `Blended`, and given a transparency — 0.85 for the windows'
 panes, 0.5 for the lamps'.
 
@@ -109,7 +112,7 @@ drawn again a frame, one light after another, and the Draw's `idle` leaves the r
 light that moved, or reaches another distance, is drawn again at once; something that moves near a lamp has its
 shadow from that lamp catch up within as many frames as it takes to go round them all.
 
-`projects/forward-plus` has the lights its model came with and no others: the file's sun (given the brightness
+The `forward-plus` project has the lights its model came with and no others: the file's sun (given the brightness
 the file leaves at nothing) and its 22 lamps. The 64 lamps and the sun the sample put there are gone, and the
 model's stand-in for the sky all round is no longer a point light.
 

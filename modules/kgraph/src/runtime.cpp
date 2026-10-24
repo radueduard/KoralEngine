@@ -36,6 +36,7 @@
 #include <imageView.h>
 #include <buffer.h>
 #include <bufferView.h>
+#include <bindless.h>
 #include <koral_c.h>
 #include <log.h>
 #include <mesh.h>
@@ -137,16 +138,17 @@ namespace kgraph
         /**
          * A buffer its shader marks `[entity("PER_INSTANCE")]`: an element for each entity a draw draws, which the draw
          * makes and fills. A field marked `[entity("MATRIX")]` (or NORMAL_MATRIX, POSITION, ID) is where the entity is,
-         * or which; any other is the entity's own, a field of the pipeline's component.
+         * or which; one marked TEXTURE is a picture the entity holds, by its bindless index; any other is the entity's
+         * own, a field of the pipeline's component.
          */
         struct Instancing {
             struct Field {
-                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId };
+                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId, eTexture };
                 std::string name {};
                 std::uint32_t offset = 0, size = 0;     // in the element
                 From from = From::eComponent;
                 std::string type {};                       // eComponent: the component field's type
-                std::size_t at = 0;                     // eComponent: where it is in the pipeline's component
+                std::size_t at = 0;                     // eComponent, eTexture: where it is in the pipeline's component
             };
             std::uint32_t stride = 0;
             std::vector<Field> fields;
@@ -297,6 +299,22 @@ namespace kgraph
             bool everyFrame = false;        // written every frame, whether or not it changed (eGPU: from zero)
         };
 
+        /**
+         * A RayScene's: a bottom-level structure for each mesh of the pack, and the top-level one placing an instance
+         * of one where each of the Filter's entities is — made again when one moves, comes or goes.
+         */
+        struct RayState {
+            std::string filter;                         // the Filter whose elements the instances are
+            kecs::ComponentId masked = kecs::NoComponent;
+            kecs::ComponentId unshadowing = kecs::NoComponent;      // its entities cast no shadow: mask 2, not 3
+            std::vector<Held> bottoms;                  // by the pack's mesh; null for one with no triangles
+            Held top, scene, meshOf;
+            kor::ResourceRef<kor::Buffer> sceneWritten, meshOfWritten;     // the two, to write into
+            std::size_t meshOfRoom = 0;                 // how many instances meshOf has room for
+            std::uint64_t seen = 0;                     // what the instances were when the top was made
+            bool made = false;
+        };
+
         /** A MeshPack's: which meshes it packed, in order — built again when they are other ones, or one arrives from its file. */
         struct MeshPacking {
             std::vector<const Resource*> of;
@@ -416,7 +434,22 @@ namespace kgraph
             std::uint64_t filled = 0;               // the frame it was last written in, by that clock: once a frame, whoever asks first
             std::uint64_t written = 0;              // what was written then, made one number: from what it was written from
             bool full = false;                      // outgrown: the next Draw built makes another
+            std::vector<Member> pictures;           // what its TEXTURE fields name, once each: what the Draws read by index
+            std::vector<std::byte> staged;          // this frame's elements, laid out: written in as the frame begins
         };
+
+        /**
+         * A buffer of instances' elements, written into the copy of it the frame being made reads: as it begins (a pass's
+         * Prepare), once the frame before with that copy is done. Laid out between frames, they would be written into the
+         * copy of the frame just drawn — and the next frame read another, of a frame before: an index of a picture that
+         * is gone since among it.
+         */
+        static void WriteStaged(Instances& instances)
+        {
+            if (instances.staged.empty() || !instances.buffer.Get()) return;
+            auto mapping = instances.buffer->Map<std::byte>(instances.staged.size(), 0);
+            std::memcpy(mapping.AsSpan().data(), instances.staged.data(), instances.staged.size());
+        }
 
         /** Bytes mixed into a number that is, as near as matters, another for any other bytes: what a Draw `whenChanged` compares. */
         static void Mix(std::uint64_t& hash, const void* bytes, const std::size_t size)
@@ -439,7 +472,7 @@ namespace kgraph
             bool own = false;
             for (const auto& field : instancing.fields) {
                 key += std::format("|{}:{}:{}", field.offset, field.size, static_cast<int>(field.from));
-                if (field.from == Instancing::Field::From::eComponent) { key += std::format("@{}", field.at); own = true; }
+                if (field.from == Instancing::Field::From::eComponent || field.from == Instancing::Field::From::eTexture) { key += std::format("@{}", field.at); own = true; }
             }
             // Only fields of the entity's own are read from the component: without any, which component it is says nothing.
             if (own) key += std::format("|{}", component);
@@ -499,6 +532,7 @@ namespace kgraph
             std::vector<Item> items;
             std::vector<std::byte> pushed;
             std::vector<std::vector<Member>> members;   // a slot each: every entity's, once each
+            std::vector<Member> pictures;               // what its buffers of each instance's name by index: read, though no slot binds them
             bool changed = true;                        // members changed since the frame graph was last told
             PassReport report;
         };
@@ -517,6 +551,7 @@ namespace kgraph
             /// Set: the pass records nothing this frame — a watch's copy between the frames it is due on. It stays in the
             /// frame graph, with what it uses, so that leaving it out and putting it back builds nothing again.
             std::shared_ptr<std::atomic<bool>> resting = std::make_shared<std::atomic<bool>>(false);
+            bool async = false;     // run on the async compute queue (its node's `async`)
         };
 
         /** What a pass declares to the frame graph, under the name the resource — or the set it is in — is imported by. */
@@ -541,10 +576,16 @@ namespace kgraph
                 if (plan->readsScreen) builder.Read(kor::FrameGraph::Screen, kor::Image::Usage::eTransferSrc);
                 if (plan->writesScreen) builder.Write(kor::FrameGraph::Screen, kor::Image::Usage::eTransferDst);
                 if (!writes) builder.SideEffect();   // it only reads: kept all the same, since it was asked for
+                if (plan->async) builder.AsyncCompute();
             }
             void Initialize(const kor::PassResources& resources) override
             {
                 if (plan->readsScreen || plan->writesScreen) _context.screen = resources.ImageNamed(kor::FrameGraph::Screen);
+            }
+            void Prepare() override
+            {
+                if (plan->entities)
+                    for (const auto& instances : plan->entities->instances) WriteStaged(*instances);
             }
             void Record(kor::CommandBuffer& commands) const override
             {
@@ -702,8 +743,12 @@ namespace kgraph
                 } else if (member.semantic == "ID") {
                     if ((member.scalar != 1 && member.scalar != 2) || member.rows != 1 || member.columns != 1) return wrong("a uint: 0 for none, and one more than its index for an entity");
                     field.from = Instancing::Field::From::eId;
+                } else if (member.semantic == "TEXTURE") {
+                    if ((member.scalar != 1 && member.scalar != 2) || member.rows != 1 || member.columns != 1)
+                        return wrong("a uint: the bindless index of the picture the entity holds there, for kor::texture2D — ~0 for none");
+                    field.from = Instancing::Field::From::eTexture;
                 } else {
-                    parameter.problem = std::format("'{}.{}' is marked entity(\"{}\"): an instance's field is MATRIX, NORMAL_MATRIX, POSITION or ID", name, member.name, member.semantic);
+                    parameter.problem = std::format("'{}.{}' is marked entity(\"{}\"): an instance's field is MATRIX, NORMAL_MATRIX, POSITION, ID or TEXTURE", name, member.name, member.semantic);
                     return;
                 }
                 instancing->fields.push_back(std::move(field));
@@ -715,7 +760,8 @@ namespace kgraph
         {
             Interface out;
             for (const auto& shader : shaders) {
-                for (const auto& set : shader->BlockLayout().descriptorSets | std::views::values)
+                for (const auto& [number, set] : shader->BlockLayout().descriptorSets) {
+                    if (number == kor::BindlessSet) continue;   // the bindless tables (koral_bindless): the framework binds them
                     for (const auto& descriptor : set.descriptors | std::views::values) {
                         const std::string& name = descriptor.name.empty() ? descriptor.blockName : descriptor.name;
                         const auto known = std::ranges::find(out.parameters, name, &Parameter::name);
@@ -725,6 +771,7 @@ namespace kgraph
                         }
                         else if (known->access != descriptor.access) known->access = kor::Shader::AccessKind::eReadWrite;
                     }
+                }
                 for (const auto& constant : shader->BlockLayout().specializationConstants | std::views::values)
                     if (!constant.name.empty() && std::ranges::find(out.constants, constant.name, &kor::Shader::SpecializationConstant::name) == out.constants.end())
                         out.constants.push_back(constant);
@@ -1091,6 +1138,7 @@ namespace kgraph
             std::string madeWith {};                       // a resource's: the values wired into it as it was made — a size
             std::shared_ptr<Mapped> mapped {};             // a ShaderBuffer's or a BufferBuilder's
             std::shared_ptr<MeshPacking> packing {};       // a MeshPack's
+            std::shared_ptr<RayState> rays {};             // a RayScene's
             // What it has besides what its type lists: a ShaderBuffer's fields as inputs, an Entities node's as outputs.
             std::vector<Port> ports {}, gives {};
         };
@@ -1103,6 +1151,12 @@ namespace kgraph
         std::optional<View> viewOverride;
         kor::UVec2 screenExtent { 0, 0 };
         std::shared_ptr<std::atomic<kor::u32>> selectedId = std::make_shared<std::atomic<kor::u32>>(0);
+        // Whose view of the scene it is, and what that view looks at it by: its DebugView shown, and the channel of a
+        // material its shaders show through `koralDebugView`. Each as asked, and as built: what is asked is built at the
+        // start of a frame, never while one is recorded.
+        bool editorView = false, editorViewAsked = false;
+        std::string debugView, debugViewAsked;
+        int shaderDebug = 0, shaderDebugAsked = 0;
         // The fixed steps taken since the last frame was made, and how many the frame being made has: its fixed pages run
         // when it has any. The length of the last, and how many there have been.
         std::uint32_t fixedPending = 0, fixedSteps = 0, fixedLost = 0;
@@ -1117,6 +1171,10 @@ namespace kgraph
         float currentAspect = 1.f;
         std::shared_ptr<PickState> pick = std::make_shared<PickState>();
         const Graph* current = nullptr;         // the graph as last set: what the nodes that follow the world are found in
+        // Its nodes by id, and what each pipeline's draws take from elsewhere: worked out once for each graph evaluated,
+        // not once for each node that asks.
+        std::unordered_map<std::string_view, const Node*> currentById;
+        mutable std::optional<std::map<std::string, std::set<std::string>, std::less<>>> takenByPipeline;
         std::map<std::string, std::weak_ptr<Instances>> sharedInstances;    // buffers of instances, by what they hold (InstancesKey)
         std::shared_ptr<std::uint64_t> frames = std::make_shared<std::uint64_t>(0);     // goes up a frame: what a buffer of instances is filled by
         std::vector<std::string> live;          // those nodes, in the order they depend on one another
@@ -1147,6 +1205,17 @@ namespace kgraph
         std::map<std::string, Expansion::Call, std::less<>> calls;
         std::map<std::string, Input, std::less<>> aliases;
         std::map<std::string, NodeStatus, std::less<>> callStatus;
+        // The Bundles, as they were written out: what each holds, the inputs they filled, and what a node says of its.
+        std::map<std::string, std::vector<std::pair<std::string, Input>>, std::less<>> bundles;
+        std::map<std::string, std::set<std::string>, std::less<>> fromBundle;
+        std::map<std::string, std::string, std::less<>> bundleNotes;
+
+        /** Whether a Bundle gave node @p id its input @p name, rather than a wire or a value of its own. */
+        [[nodiscard]] bool FromBundle(const std::string_view id, const std::string& name) const
+        {
+            const auto it = fromBundle.find(id);
+            return it != fromBundle.end() && it->second.contains(name);
+        }
         std::uint64_t counter = 0;
         // What is looked at: each node, and how what copies it out was set up — its size and kind, as text — when
         // the graph was last written out. When that is no longer what the node is, the graph is written out again.
@@ -1818,8 +1887,10 @@ namespace kgraph
             }
             for (const auto& constant : interface.constants) {
                 const auto it = inputs.find("constant." + constant.name);
-                if (it == inputs.end() || it->second.value.IsNull()) continue;
-                const Value& value = it->second.value;
+                // What a material shows of itself, as the view asks — unless the graph says otherwise.
+                const bool shown = constant.name == ShaderDebugConstant && shaderDebug != 0 && (it == inputs.end() || it->second.value.IsNull());
+                if (!shown && (it == inputs.end() || it->second.value.IsNull())) continue;
+                const Value value = shown ? Value(shaderDebug) : it->second.value;
                 std::vector<std::byte> bytes(constant.size);
                 const double* number = value.Number();
                 const bool* flag = value.Bool();
@@ -1905,6 +1976,17 @@ namespace kgraph
             // A buffer of each instance's is the draw's to make: what is in the component is each instance's own fields.
             for (const Slot& slot : info->slots)
                 if (!taken.contains("param." + slot.field) && !slot.instancing) layout->slots.push_back(slot);
+            // A picture an instance reads by its bindless index is held by the entity, as a parameter's picture would be.
+            for (const Slot& slot : info->slots) {
+                if (!slot.instancing || taken.contains("param." + slot.field)) continue;
+                for (auto& field : slot.instancing->fields) {
+                    if (field.from != Instancing::Field::From::eTexture) continue;
+                    if (std::ranges::find(layout->slots, field.name, &Slot::field) != layout->slots.end())
+                        return Fail(std::format("'{}' is a picture of '{}' and of something else its draws take: the entity's own can be only one of them", field.name, slot.parameter));
+                    field.at = layout->slots.size() * sizeof(Held);
+                    layout->slots.push_back({ field.name, field.name, kor::DescriptorType::eSampledImage, false, true, false });
+                }
+            }
             for (std::size_t i = 0; i < layout->slots.size(); ++i)
                 layout->fields.push_back({ layout->slots[i].field, KindOf(layout->slots[i].type), i * sizeof(Held), sizeof(Held), &AssignHeld });
             const auto aligned = [](const std::size_t bytes) { return (bytes + 15) / 16 * 16; };
@@ -1959,10 +2041,18 @@ namespace kgraph
         /** What a link comes from, past the References between: the node, by id. */
         [[nodiscard]] const Node* Origin(const std::string& id) const
         {
-            const Node* from = current ? current->Find(id) : nullptr;
+            const auto find = [&](const std::string_view which) -> const Node* {
+                if (!current) return nullptr;
+                if (currentById.size() == current->nodes.size()) {
+                    const auto it = currentById.find(which);
+                    return it == currentById.end() ? nullptr : it->second;
+                }
+                return current->Find(which);
+            };
+            const Node* from = find(id);
             for (int hops = 0; from && from->type == "Reference" && hops < 16; ++hops) {
                 const auto target = from->inputs.find("node");
-                from = target != from->inputs.end() && target->second.value.String() ? current->Find(*target->second.value.String()) : nullptr;
+                from = target != from->inputs.end() && target->second.value.String() ? find(*target->second.value.String()) : nullptr;
             }
             return from;
         }
@@ -1974,14 +2064,25 @@ namespace kgraph
          */
         [[nodiscard]] std::set<std::string> TakenElsewhere(const std::string& id) const
         {
-            std::set<std::string> taken;
-            if (!current) return taken;
-            for (const Node& node : current->nodes) {
-                if (node.type != "Draw" && node.type != "Dispatch" && node.type != "TraceRays") continue;
-                const auto pipeline = node.inputs.find("pipeline");
-                if (pipeline == node.inputs.end() || !pipeline->second.link) continue;
-                const Node* of = Origin(pipeline->second.link->node);
-                if (!of || of->id != id) continue;
+            if (!current) return {};
+            // Every pipeline's at once, the first time one is asked of this graph.
+            if (!takenByPipeline) {
+                takenByPipeline.emplace();
+                for (const Node& node : current->nodes) {
+                    if (node.type != "Draw" && node.type != "Dispatch" && node.type != "TraceRays") continue;
+                    const auto pipeline = node.inputs.find("pipeline");
+                    if (pipeline == node.inputs.end() || !pipeline->second.link) continue;
+                    if (const Node* of = Origin(pipeline->second.link->node)) TakenBy(node, of->id, (*takenByPipeline)[of->id]);
+                }
+            }
+            const auto it = takenByPipeline->find(id);
+            return it == takenByPipeline->end() ? std::set<std::string>() : it->second;
+        }
+
+        /** What a draw of pipeline @p id takes from elsewhere than its component, added to @p taken. */
+        void TakenBy(const Node& node, const std::string& id, std::set<std::string>& taken) const
+        {
+            {
                 for (const auto& [name, input] : node.inputs) {
                     if (!name.starts_with("param.") && !name.starts_with("push.")) continue;
                     const std::string field = name.substr(name.find('.') + 1);
@@ -1994,7 +2095,6 @@ namespace kgraph
                     if (!own && !beside) taken.insert(name);
                 }
             }
-            return taken;
         }
 
         /** Makes the world's component of a pipeline's layout, or gives the one it has its new shape. */
@@ -2143,7 +2243,8 @@ namespace kgraph
                 if (has("with") || has("without"))
                     return Fail("'with' and 'without' are a ForEach's now: draw from a ForEach of Mesh, `with` what else an entity has to have");
                 for (const auto& name : inputs | std::views::keys)
-                    if ((name.starts_with("param.") || name.starts_with("push.")) && std::ranges::find(info->drawPorts, name, &Port::name) == info->drawPorts.end()) {
+                    if ((name.starts_with("param.") || name.starts_with("push.")) && std::ranges::find(info->drawPorts, name, &Port::name) == info->drawPorts.end()
+                        && !FromBundle(node.id, name)) {     // given by a Bundle, by name: let pass, and said on the node
                         std::string known;
                         for (const auto& port : info->drawPorts) known += std::format("{}{}", known.empty() ? "" : ", ", port.name);
                         return Fail(std::format("its pipeline leaves it no '{}': a parameter its node wires is the same for every draw. It leaves: {}", name, known.empty() ? "nothing" : known));
@@ -2526,6 +2627,8 @@ namespace kgraph
                 auto made = drawsOf(*info, false);
                 if (!made) return Fail(made.error());
                 const std::shared_ptr<EntityRun> run = std::move(*made);
+                // A TraceRays' buffer of each instance's, as a Draw's: a pass may read its material too.
+                if (!run->instances.empty()) out.outputs["instances"].resource = run->instances.front()->held;
                 // An image to cover: as many groups as it takes, each element's own image or one the pipeline wires.
                 if (const Value& cover = value("cover"); !cover.IsNull()) {
                     const std::string* name = cover.String();
@@ -2766,8 +2869,10 @@ namespace kgraph
             // read as the frame is readied. (A Draw's is its own: a number for each turn.)
             if (node.type != "Draw")
                 if (const auto idle = node.inputs.find("idle"); idle != node.inputs.end() && plan->record) {
-                    auto resting = std::make_shared<std::atomic<bool>>(false);
                     const auto said = [](const Value& value) { return value.Bool() ? *value.Bool() : value.Number() && *value.Number() != 0.0; };
+                    // Resting from the first frame as it is built to, before a frame has been readied to say so.
+                    const auto now = inputs.find("idle");
+                    auto resting = std::make_shared<std::atomic<bool>>(now != inputs.end() && said(now->second.value));
                     if (idle->second.link) {
                         plan->prepare = [this, before = std::move(plan->prepare), resting, said, from = *idle->second.link] {
                             if (before) before();
@@ -3738,6 +3843,10 @@ namespace kgraph
                 material.albedoMap = picture(from.albedoTexturePath ? from.albedoTexturePath : from.diffuseTexturePath);
                 material.normalMap = picture(from.normalTexturePath);
                 material.roughnessMap = picture(from.roughnessTexturePath ? from.roughnessTexturePath : from.metallicTexturePath);
+                // glTF's metallic factor is 1 when a file says none, and so is its roughness: a material that says neither and
+                // has no picture of them — a decal, a plain colour — is taken as what was meant, something not metal, rather
+                // than as a mirror. One that gives either, or a picture, is as it says.
+                if (material.roughnessMap.empty() && material.metallic >= 1.f && material.roughness >= 1.f) material.metallic = 0.f;
                 material.emissiveMap = picture(from.emissiveTexturePath);
                 // A file's emissive factor is what its emissive picture is multiplied by: with no picture, there is none.
                 if (!material.emissiveMap.empty()) for (int i = 0; i < 3; ++i) material.emission[i] = from.emissiveFactor[i];
@@ -4756,7 +4865,10 @@ namespace kgraph
             for (const auto& [name, input] : inputs) {
                 if (name == "instance") return Fail("'instance' is no more: wire each of its fields, `field.<name>`, from what holds it");
                 if (!name.starts_with("field.")) continue;
-                if (!layout.Find(std::string_view(name).substr(6))) return Fail(std::format("{} has no field '{}'. It has: {}", layout.type, name.substr(6), has));
+                if (!layout.Find(std::string_view(name).substr(6))) {
+                    if (FromBundle(node.id, name)) continue;     // given by a Bundle, by name: let pass, and said on the node
+                    return Fail(std::format("{} has no field '{}'. It has: {}", layout.type, name.substr(6), has));
+                }
                 if (input.resource) return Fail(std::format("'{}' takes a value, and was wired to a resource", name));
                 if (!input.value.IsNull() && !input.value.Bool() && !NumbersOf(input.value, name.c_str())) return Fail(std::format("'{}' is a number, or a list of them", name));
                 follows(name);
@@ -4972,12 +5084,42 @@ namespace kgraph
                 layout.attributes.emplace_back("POSITION", "", 0u, 0u, kor::ChannelType::eFloat, 3u);
                 layout.bindings.emplace_back(0u, 12u);
             }
+            // Only these, of every mesh: a buffer each, as the first mesh that has it has it — zeros where a mesh has not —
+            // whatever else each has and however it lays them out. Meshes of other files are then one.
+            std::vector<std::string> only;
+            if (const auto wanted = inputs.find("attributes"); wanted != inputs.end() && !wanted->second.value.IsNull()) {
+                const auto* items = wanted->second.value.Items();
+                if (!items || items->empty()) return Fail("'attributes' is the semantics to pack, each a buffer: [\"POSITION\", \"NORMAL\", \"UV\"]");
+                for (const auto& item : *items) {
+                    if (!item.String()) return Fail("'attributes' is the semantics to pack, each a buffer: [\"POSITION\", \"NORMAL\", \"UV\"]");
+                    only.push_back(*item.String());
+                }
+            }
+            if (!only.empty() && !positionsOnly) {
+                const kor::VertexLayout fallback = DefaultLayout(DefaultTangents());
+                kor::VertexLayout chosen;
+                for (std::size_t i = 0; i < only.size(); ++i) {
+                    std::optional<kor::VertexLayout::Attribute> found;
+                    for (const Resource* whole : wholes) {
+                        const auto& attributes = kor::capi::MeshOf(whole->handle)->Layout().attributes;
+                        if (const auto it = std::ranges::find(attributes, std::string_view(only[i]), [](const auto& a) { return std::string_view(a.semantic); }); it != attributes.end()) { found = *it; break; }
+                    }
+                    if (!found)
+                        if (const auto it = std::ranges::find(fallback.attributes, std::string_view(only[i]), [](const auto& a) { return std::string_view(a.semantic); }); it != fallback.attributes.end()) found = *it;
+                    if (!found) return Fail(std::format("no mesh it packs has {}", only[i]));
+                    if (found->channelType != kor::ChannelType::eFloat && found->channelType != kor::ChannelType::eUInt && found->channelType != kor::ChannelType::eInt)
+                        return Fail(std::format("{} is not of 32-bit numbers: only such attributes are packed", only[i]));
+                    chosen.attributes.emplace_back(only[i], "", static_cast<kor::u32>(i), 0u, found->channelType, found->channelCount);
+                    chosen.bindings.emplace_back(static_cast<kor::u32>(i), found->channelCount * 4u);
+                }
+                layout = std::move(chosen);
+            }
             const std::string shape = LayoutValueOf(layout).ToJson();
             std::vector<kor::u64> vertexBase, indexBase;
             kor::u64 vertices = 0, indices = 0;
             for (const Resource* whole : wholes) {
                 const auto mesh = kor::capi::MeshOf(whole->handle);
-                if (!positionsOnly && LayoutValueOf(mesh->Layout()).ToJson() != shape)
+                if (!positionsOnly && only.empty() && LayoutValueOf(mesh->Layout()).ToJson() != shape)
                     return Fail(std::format("its meshes' vertices are not laid out alike: '{}' and '{}' are not — a Filter of each kind, and a pack of each", wholes.front()->node, whole->node));
                 if (!mesh->IndexBuffer() || !mesh->IndexCount() || mesh->IndexType() != kor::ChannelType::eUInt)
                     return Fail(std::format("'{}' is not drawn by indices of 32 bits, and only such meshes are packed", whole->node));
@@ -4987,9 +5129,12 @@ namespace kgraph
                 indices += *mesh->IndexCount();
             }
             // One buffer for each of the layout's, and one of indices: each whole's after the last, copied on the device.
-            const auto made = [](const kor::u64 bytes, const kor::Flags<kor::Buffer::Usage> usage) {
+            // What rays can be traced through, where the device traces them: a RayScene's structures are made of these.
+            const kor::Flags<kor::Buffer::Usage> traced = kor::Context::SupportsRayTracing() ? kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eAccelerationStructureInput)
+                                                                                              : kor::Flags<kor::Buffer::Usage>();
+            const auto made = [traced](const kor::u64 bytes, const kor::Flags<kor::Buffer::Usage> usage) {
                 return kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<kor::u64>(bytes, 4)))
-                    .SetUsage(usage | kor::Buffer::Usage::eTransferDst | kor::Buffer::Usage::eTransferSrc | kor::Buffer::Usage::eStorage)
+                    .SetUsage(usage | traced | kor::Buffer::Usage::eTransferDst | kor::Buffer::Usage::eTransferSrc | kor::Buffer::Usage::eStorage)
                     .SetType(kor::Buffer::Type::eDeviceLocal).Build();
             };
             std::vector<kor::Resource<kor::Buffer>> buffers;
@@ -5023,11 +5168,37 @@ namespace kgraph
                 }
                 if (!positions.empty()) buffers[0]->Write(std::span<const float>(positions));
             }
+            if (!only.empty() && !positionsOnly) {
+                // Each attribute of each mesh read back, and laid one mesh after another in its own buffer.
+                std::vector<std::vector<std::uint32_t>> packedWords(layout.attributes.size());
+                for (std::size_t a = 0; a < layout.attributes.size(); ++a) packedWords[a].assign(vertices * layout.attributes[a].channelCount, 0u);
+                for (std::size_t w = 0; w < wholes.size(); ++w) {
+                    const auto mesh = kor::capi::MeshOf(wholes[w]->handle);
+                    const auto& from = mesh->Layout();
+                    const auto sources = mesh->VertexBuffers();
+                    std::map<kor::u32, std::vector<std::byte>> read;     // each binding of it, read back once
+                    for (std::size_t a = 0; a < layout.attributes.size(); ++a) {
+                        const auto& to = layout.attributes[a];
+                        const auto it = std::ranges::find(from.attributes, std::string_view(to.semantic), [](const auto& x) { return std::string_view(x.semantic); });
+                        if (it == from.attributes.end() || it->binding >= sources.size()) continue;      // it has none: zeros
+                        const auto binding = std::ranges::find(from.bindings, it->binding, &kor::VertexInputBindingDescription::binding);
+                        const kor::u64 stride = binding == from.bindings.end() ? it->channelCount * 4u : binding->stride;
+                        auto& bytes = read[it->binding];
+                        if (bytes.empty()) bytes = sources[it->binding]->Read<std::byte>(mesh->VertexCount() * stride, 0);
+                        if (bytes.size() < mesh->VertexCount() * stride) return Fail(std::format("'{}'s vertices could not be read back", wholes[w]->node));
+                        const kor::u32 words = std::min(to.channelCount, it->channelCount);
+                        for (kor::u64 v = 0; v < mesh->VertexCount(); ++v)
+                            std::memcpy(packedWords[a].data() + (vertexBase[w] + v) * to.channelCount, bytes.data() + v * stride + it->offset, words * 4u);
+                    }
+                }
+                for (std::size_t a = 0; a < layout.attributes.size(); ++a)
+                    if (!packedWords[a].empty()) buffers[a]->Write(std::span<const std::uint32_t>(packedWords[a]));
+            }
             if (!wholes.empty()) kor::CommandBuffer::SingleTimeCommand([&](kor::CommandBuffer& cb) {
                 for (std::size_t w = 0; w < wholes.size(); ++w) {
                     const auto mesh = kor::capi::MeshOf(wholes[w]->handle);
                     const auto from = mesh->VertexBuffers();
-                    for (std::size_t b = 0; b < layout.bindings.size() && !positionsOnly; ++b) {
+                    for (std::size_t b = 0; b < layout.bindings.size() && !positionsOnly && only.empty(); ++b) {
                         const kor::u32 binding = layout.bindings[b].binding, stride = layout.bindings[b].stride;
                         if (binding >= from.size()) continue;
                         cb.CopyBuffer(from[binding], kor::ResourceRef<const kor::Buffer>(buffers[b]), mesh->VertexCount() * stride, 0, vertexBase[w] * stride);
@@ -5101,6 +5272,255 @@ namespace kgraph
             return {};
         }
 
+        /**
+         * A MeshPack's meshes cut into meshlets on the CPU: each mesh's triangles taken in their order, a meshlet ending
+         * where one more would take it past so many vertices or triangles. Each has a sphere round its vertices and a
+         * cone of the ways its triangles face (Meshlets' doc says how a shader tests them).
+         */
+        Expected<void> BuildMeshlets(const Inputs& inputs, Built& out)
+        {
+            const auto given = inputs.find("mesh");
+            if (given == inputs.end() || !given->second.resource) return Fail("'mesh' is the meshes as one: a MeshPack's mesh");
+            Held held = given->second.resource;
+            while (held && held->replacedBy) held = held->replacedBy;
+            if (!held || held->kind != "Mesh" || !held->handle) return Fail("'mesh' is a mesh: a MeshPack's");
+            const auto rangesGiven = inputs.find("ranges");
+            const auto* ranges = rangesGiven == inputs.end() ? nullptr : rangesGiven->second.value.Items();
+            if (!ranges) return Fail("'ranges' is each mesh's part of it: the MeshPack's ranges");
+            const auto number = [&](const char* name, const double otherwise) {
+                const auto it = inputs.find(name);
+                return it != inputs.end() && it->second.value.Number() ? *it->second.value.Number() : otherwise;
+            };
+            const auto mostVertices = static_cast<std::uint32_t>(std::clamp(number("maxVertices", 64), 3.0, 256.0));
+            const auto mostTriangles = static_cast<std::uint32_t>(std::clamp(number("maxTriangles", 124), 1.0, 256.0));
+
+            // Where its vertices are, and its indices: read back once.
+            const auto mesh = kor::capi::MeshOf(held->handle);
+            const auto& layout = mesh->Layout();
+            const auto position = std::ranges::find(layout.attributes, std::string_view("POSITION"), [](const auto& a) { return std::string_view(a.semantic); });
+            const auto sources = mesh->VertexBuffers();
+            if (position == layout.attributes.end() || position->binding >= sources.size() || position->channelType != kor::ChannelType::eFloat || position->channelCount < 3)
+                return Fail("its mesh has no POSITION of three floats");
+            if (!mesh->IndexBuffer() || mesh->IndexType() != kor::ChannelType::eUInt) return Fail("its mesh is not drawn by indices of 32 bits");
+            const auto binding = std::ranges::find(layout.bindings, position->binding, &kor::VertexInputBindingDescription::binding);
+            const kor::u64 stride = binding == layout.bindings.end() ? 12 : binding->stride;
+            const kor::u64 vertexCount = mesh->VertexCount();
+            const std::vector<std::byte> vertexBytes = vertexCount ? sources[position->binding]->Read<std::byte>(vertexCount * stride, 0) : std::vector<std::byte>();
+            const kor::u64 indexCount = mesh->IndexCount().value_or(0);
+            const std::vector<std::uint32_t> indices = indexCount ? (*mesh->IndexBuffer())->Read<std::uint32_t>(indexCount, 0) : std::vector<std::uint32_t>();
+            if (vertexBytes.size() < vertexCount * stride || indices.size() < indexCount) return Fail("its mesh's vertices could not be read back");
+            const auto at = [&](const std::uint32_t vertex) {
+                float p[3] { 0.f, 0.f, 0.f };
+                if (vertex < vertexCount) std::memcpy(p, vertexBytes.data() + vertex * stride + position->offset, sizeof p);
+                return kor::Vec3(p[0], p[1], p[2]);
+            };
+
+            struct Meshlet { std::uint32_t vertexOffset, vertexCount, triangleOffset, triangleCount; float sphere[4]; float cone[4]; };
+            static_assert(sizeof(Meshlet) == 48);
+            std::vector<Meshlet> meshlets;
+            std::vector<std::uint32_t> vertices, triangles, meshRanges;
+            std::vector<std::uint32_t> local(vertexCount, ~0u);      // a mesh vertex's place in the meshlet being made
+            std::vector<std::uint32_t> made;                         // the vertices of the meshlet being made
+            std::vector<kor::Vec3> faces;                            // its triangles' normals
+            double most = 0;
+            const auto finish = [&](Meshlet meshlet) {
+                if (meshlet.triangleCount == 0) return;
+                kor::Vec3 low(1e30f), high(-1e30f);
+                for (const std::uint32_t v : made) { low = kor::Min(low, at(v)); high = kor::Max(high, at(v)); }
+                const kor::Vec3 middle = (low + high) * 0.5f;
+                float reach = 0.f;
+                for (const std::uint32_t v : made) reach = std::max(reach, kor::Length(at(v) - middle));
+                kor::Vec3 axis(0.f);
+                for (const auto& face : faces) axis = axis + face;
+                float cutoff = 1.f;     // no cone: never culled by it
+                if (const float length = kor::Length(axis); length > 1e-6f && !faces.empty()) {
+                    axis = axis / length;
+                    float least = 1.f;
+                    for (const auto& face : faces) least = std::min(least, kor::Dot(axis, face));
+                    if (least > 0.1f) cutoff = std::sqrt(1.f - least * least);
+                }
+                meshlet.sphere[0] = middle.x; meshlet.sphere[1] = middle.y; meshlet.sphere[2] = middle.z; meshlet.sphere[3] = reach;
+                meshlet.cone[0] = axis.x; meshlet.cone[1] = axis.y; meshlet.cone[2] = axis.z; meshlet.cone[3] = cutoff;
+                for (const std::uint32_t v : made) local[v] = ~0u;
+                made.clear();
+                faces.clear();
+                meshlets.push_back(meshlet);
+            };
+            for (const auto& range : *ranges) {
+                const auto field = [&](const char* name) { const Value* found = range.Find(name); return found && found->Number() ? *found->Number() : 0.0; };
+                const auto first = static_cast<std::uint64_t>(field("firstIndex")), count = static_cast<std::uint64_t>(field("indexCount"));
+                const auto offset = static_cast<std::int64_t>(field("vertexOffset"));
+                const auto firstMeshlet = static_cast<std::uint32_t>(meshlets.size());
+                Meshlet meshlet { static_cast<std::uint32_t>(vertices.size()), 0, static_cast<std::uint32_t>(triangles.size()), 0, {}, {} };
+                for (std::uint64_t t = 0; t + 3 <= count && first + t + 3 <= indices.size(); t += 3) {
+                    std::uint32_t corner[3];
+                    for (int c = 0; c < 3; ++c) corner[c] = static_cast<std::uint32_t>(static_cast<std::int64_t>(indices[first + t + c]) + offset);
+                    if (corner[0] >= vertexCount || corner[1] >= vertexCount || corner[2] >= vertexCount) continue;
+                    int fresh = 0;
+                    for (int c = 0; c < 3; ++c) fresh += local[corner[c]] == ~0u && (c == 0 || corner[c] != corner[0]) && (c < 2 || corner[c] != corner[1]) ? 1 : 0;
+                    if (meshlet.vertexCount + fresh > mostVertices || meshlet.triangleCount + 1 > mostTriangles) {
+                        finish(meshlet);
+                        meshlet = { static_cast<std::uint32_t>(vertices.size()), 0, static_cast<std::uint32_t>(triangles.size()), 0, {}, {} };
+                    }
+                    std::uint32_t packed = 0;
+                    for (int c = 0; c < 3; ++c) {
+                        if (local[corner[c]] == ~0u) {
+                            local[corner[c]] = meshlet.vertexCount++;
+                            vertices.push_back(corner[c]);
+                            made.push_back(corner[c]);
+                        }
+                        packed |= local[corner[c]] << (8 * c);
+                    }
+                    triangles.push_back(packed);
+                    ++meshlet.triangleCount;
+                    const kor::Vec3 a = at(corner[0]), b = at(corner[1]), c = at(corner[2]);
+                    const kor::Vec3 n = kor::Cross(b - a, c - a);
+                    if (const float length = kor::Length(n); length > 1e-12f) faces.push_back(n / length);
+                }
+                finish(meshlet);
+                const auto cut = static_cast<std::uint32_t>(meshlets.size()) - firstMeshlet;
+                most = std::max(most, static_cast<double>(cut));
+                meshRanges.insert(meshRanges.end(), { firstMeshlet, cut, 0u, 0u });
+            }
+            const auto buffer = [&](const std::span<const std::byte> bytes) -> Held {
+                auto made = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<std::size_t>(bytes.size(), 16)))
+                    .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eStorage) | kor::Buffer::Usage::eTransferDst | kor::Buffer::Usage::eTransferSrc)
+                    .SetType(kor::Buffer::Type::eDeviceLocal).Build();
+                if (!made.Valid()) return nullptr;
+                if (!bytes.empty()) made->Write(bytes);
+                return MakeResource(std::move(made));
+            };
+            Held meshletBuffer = buffer(std::as_bytes(std::span(meshlets))), vertexBuffer = buffer(std::as_bytes(std::span(vertices)));
+            Held triangleBuffer = buffer(std::as_bytes(std::span(triangles))), rangeBuffer = buffer(std::as_bytes(std::span(meshRanges)));
+            if (!meshletBuffer || !vertexBuffer || !triangleBuffer || !rangeBuffer) return Fail("its meshlets could not be made buffers");
+            out.outputs["meshlets"].resource = std::move(meshletBuffer);
+            out.outputs["vertices"].resource = std::move(vertexBuffer);
+            out.outputs["triangles"].resource = std::move(triangleBuffer);
+            out.outputs["meshRanges"].resource = std::move(rangeBuffer);
+            out.outputs["count"].value = static_cast<double>(meshlets.size());
+            out.outputs["most"].value = most;
+            return {};
+        }
+
+        /** A RayScene: its bottom-level structures, made now; its top-level one, made now and whenever its instances change. */
+        Expected<void> BuildRayScene(const Node& node, const Inputs& inputs, Built& out)
+        {
+            if (!kor::Context::SupportsRayTracing()) return Fail("this device has no ray tracing");
+            const auto wired = node.inputs.find("meshes");
+            if (wired == node.inputs.end() || !wired->second.link) return Fail("'meshes' is each element's mesh: wire the Filter's Mesh.mesh the MeshPack packs");
+            const Node* filter = Origin(wired->second.link->node);
+            if (!filter || !IsEach(filter->type)) return Fail("'meshes' comes from a Filter: its Mesh.mesh");
+            const auto given = inputs.find("mesh");
+            Held pack = given == inputs.end() ? nullptr : given->second.resource;
+            while (pack && pack->replacedBy) pack = pack->replacedBy;
+            if (!pack || pack->kind != "Mesh" || !pack->handle) return Fail("'mesh' is the meshes as one: the MeshPack's mesh");
+            const auto rangesGiven = inputs.find("ranges");
+            const auto* ranges = rangesGiven == inputs.end() ? nullptr : rangesGiven->second.value.Items();
+            if (!ranges) return Fail("'ranges' is each mesh's part of it: the MeshPack's ranges");
+
+            auto state = std::make_shared<RayState>();
+            state->filter = filter->id;
+            if (const auto it = inputs.find("masked"); it != inputs.end() && it->second.value.String() && !it->second.value.String()->empty() && world)
+                state->masked = world->Find(*it->second.value.String());
+            if (const auto it = inputs.find("noShadow"); it != inputs.end() && it->second.value.String() && !it->second.value.String()->empty() && world)
+                state->unshadowing = world->Find(*it->second.value.String());
+            const auto mesh = kor::capi::MeshOf(pack->handle);
+            for (const auto& range : *ranges) {
+                const auto field = [&](const char* name) { const Value* found = range.Find(name); return found && found->Number() ? *found->Number() : 0.0; };
+                const auto indexCount = static_cast<kor::u64>(field("indexCount"));
+                if (indexCount < 3) { state->bottoms.push_back(nullptr); continue; }
+                kor::AccelerationStructure::Builder builder;
+                builder.AddGeometry({ .mesh = mesh, .firstVertex = static_cast<kor::u64>(std::max(0.0, field("vertexOffset"))), .vertexCount = 0,
+                                      .firstIndex = static_cast<kor::u64>(field("firstIndex")), .indexCount = indexCount });
+                auto bottom = builder.Build();
+                if (!bottom.Valid()) return Fail(bottom.Failure() ? bottom.Failure()->message : std::string("a mesh's structure could not be made"));
+                state->bottoms.push_back(MakeResource(std::move(bottom)));
+            }
+            const auto buffer = [](const kor::u64 bytes, kor::ResourceRef<kor::Buffer>& written) -> Held {
+                auto made = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<kor::u64>(bytes, 16)))
+                    .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eStorage) | kor::Buffer::Usage::eTransferSrc).SetType(kor::Buffer::Type::eDynamic).Build();
+                if (!made.Valid()) return nullptr;
+                written = kor::ResourceRef<kor::Buffer>(made);
+                return MakeResource(std::move(made));
+            };
+            state->scene = buffer(16, state->sceneWritten);
+            const EntityList* list = built.contains(filter->id) ? built.at(filter->id).listed.get() : nullptr;
+            state->meshOfRoom = std::max<std::size_t>(64, list ? list->entities.size() * 2 : 0);
+            state->meshOf = buffer(state->meshOfRoom * 4, state->meshOfWritten);
+            if (!state->scene || !state->meshOf) return Fail("its buffers could not be made");
+            const std::uint32_t none[4] { ~0u, 0u, 0u, 0u };
+            state->sceneWritten->Write(std::span<const std::uint32_t>(none));
+            out.rays = state;
+            UpdateRays(node.id, out, true);
+            out.outputs["scene"].resource = state->scene;
+            out.outputs["meshOf"].resource = state->meshOf;
+            return {};
+        }
+
+        /** A RayScene's top-level structure made again, when its instances are not what they were: where each is, which, how many. */
+        void UpdateRays(const std::string& id, Built& node, const bool building = false)
+        {
+            RayState& state = *node.rays;
+            const auto found = built.find(state.filter);
+            const EntityList* list = found == built.end() ? nullptr : found->second.listed.get();
+            if (!list || !world) return;
+            // What the instances are now, as one number.
+            std::uint64_t now = 1469598103934665603ull;
+            const auto mix = [&](const void* data, const std::size_t size) {
+                const auto* bytes = static_cast<const unsigned char*>(data);
+                for (std::size_t i = 0; i < size; ++i) now = (now ^ bytes[i]) * 1099511628211ull;
+            };
+            std::vector<kecs::Mat4> placed;
+            placed.reserve(list->entities.size());
+            for (std::size_t i = 0; i < list->entities.size(); ++i) {
+                const kecs::Entity entity = list->entities[i];
+                placed.push_back(world->Alive(entity) ? world->WorldMatrix(entity) : kecs::Mat4 {});
+                mix(placed.back().m.data(), sizeof(float) * 16);
+                const std::uint32_t group = list->grouped && i < list->groupOf.size() ? list->groupOf[i] : 0u;
+                const bool masked = state.masked != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.masked);
+                const bool unshadowing = state.unshadowing != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.unshadowing);
+                mix(&group, sizeof group);
+                mix(&masked, sizeof masked);
+                mix(&unshadowing, sizeof unshadowing);
+            }
+            if (state.made && now == state.seen) return;
+            state.seen = now;
+            state.made = true;
+            kor::AccelerationStructure::Builder builder;
+            std::vector<std::uint32_t> meshOf(list->entities.size(), 0u);
+            for (std::size_t i = 0; i < list->entities.size(); ++i) {
+                const std::uint32_t group = list->grouped && i < list->groupOf.size() ? list->groupOf[i] : 0u;
+                meshOf[i] = group;
+                if (group >= state.bottoms.size() || !state.bottoms[group]) continue;
+                kor::Mat4 transform;
+                for (int column = 0; column < 4; ++column)
+                    for (int row = 0; row < 4; ++row) transform[column][row] = placed[i].At(column, row);
+                const kecs::Entity entity = list->entities[i];
+                builder.AddInstance({ .blas = kor::capi::AccelerationStructureOf(state.bottoms[group]->handle), .transform = transform,
+                                      .instanceCustomIndex = static_cast<kor::u32>(i), .hitGroupIndex = 0,
+                                      .opaque = !(state.masked != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.masked)),
+                                      .mask = static_cast<kor::u8>(state.unshadowing != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.unshadowing) ? 0x02 : 0x03) });
+            }
+            if (builder.instances.empty()) return;
+            auto top = builder.Build();
+            if (!top.Valid()) return;
+            if (state.top) retiredResources.push_back(std::move(state.top));
+            state.top = MakeResource(std::move(top));
+            const auto index = kor::Bindless::AccelerationStructure(kor::capi::AccelerationStructureOf(state.top->handle));
+            const std::uint32_t scene[4] { index.Valid() ? index.index : ~0u, static_cast<std::uint32_t>(list->entities.size()), 0u, 0u };
+            state.sceneWritten->Write(std::span<const std::uint32_t>(scene));
+            // More instances than its row buffer has room for: the node is made again, with more.
+            if (meshOf.size() > state.meshOfRoom) { node.signature.clear(); stale = true; }
+            else if (!meshOf.empty()) state.meshOfWritten->Write(std::span<const std::uint32_t>(meshOf));
+            node.outputs["structure"].resource = state.top;
+            node.outputs["count"].value = static_cast<double>(list->entities.size());
+            // What is wired to the structure itself is built again with the new one; what reads it by its index is not.
+            const bool direct = current && std::ranges::any_of(current->nodes, [&](const Node& other) {
+                return std::ranges::any_of(other.inputs, [&](const auto& input) { return input.second.link && input.second.link->node == id && input.second.link->output == "structure"; });
+            });
+            if (!building && direct) { node.stamp = ++counter; stale = true; }
+        }
+
         /** An IndirectDraws' commands, as their bytes, and how many instances its groups have. */
         static Expected<std::pair<std::vector<std::byte>, std::size_t>> IndirectCommands(const Inputs& inputs, const bool gpu)
         {
@@ -5142,17 +5562,22 @@ namespace kgraph
             auto commands = IndirectCommands(inputs, gpu);
             if (!commands) return Fail(commands.error());
             auto& [bytes, instances] = *commands;
-            // Written by the CPU each frame it changes — every frame, on the GPU's, for a pass to count from zero — and
-            // read as a draw's commands; each frame in flight its own.
-            auto buffer = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<std::size_t>(bytes.size(), 20)))
-                .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eIndirect) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc)
-                .SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
+            // Written by the CPU each frame it changes, and read as a draw's commands, each frame in flight its own. On the
+            // GPU's, one on the device: written in by a pass of its own each frame, for a pass after it to count into.
+            auto buffer = gpu
+                ? kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<std::size_t>(bytes.size(), 20)))
+                      .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eIndirect) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc
+                                | kor::Buffer::Usage::eTransferDst)
+                      .SetType(kor::Buffer::Type::eDeviceLocal).Build()
+                : kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(std::max<std::size_t>(bytes.size(), 20)))
+                      .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eIndirect) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc)
+                      .SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
             if (!buffer.Valid()) return Fail(buffer.Failure() ? buffer.Failure()->message : std::string("its buffer could not be made"));
             auto packed = std::make_shared<Packed>();
             packed->buffer = kor::ResourceRef<kor::Buffer>(buffer);
             packed->held = MakeResource(std::move(buffer));
             packed->held->node = node.id;
-            if (!bytes.empty()) packed->buffer->Write(std::span<const std::byte>(bytes));
+            if (!bytes.empty() && !gpu) packed->buffer->Write(std::span<const std::byte>(bytes));
             packed->bytes = std::move(bytes);
             packed->room = instances;
             packed->everyFrame = gpu;
@@ -5168,6 +5593,20 @@ namespace kgraph
                 Held held = MakeResource(std::move(visible));
                 held->node = node.id;
                 out.outputs["visible"].resource = std::move(held);
+                // Its commands start at none every frame on the GPU, written as the frame is recorded — a pass of its
+                // own, before anything counts into them. A buffer the CPU writes is copied to the other frames' copies
+                // after, what was counted into it with it.
+                auto plan = std::make_shared<PassPlan>();
+                plan->uses.push_back({ MemberOf(packed->held.get()), false, true });
+                auto now = std::make_shared<std::vector<std::byte>>(packed->bytes);
+                plan->prepare = [packed, now] { *now = packed->bytes; };
+                plan->record = [target = kor::ResourceRef<const kor::Buffer>(packed->buffer), now](kor::CommandBuffer& cb, const PassContext&) {
+                    // An update a command buffer carries is of 64 KiB at most: written in as many as it takes.
+                    constexpr std::size_t Most = 65536;
+                    for (std::size_t at = 0; at < now->size(); at += Most)
+                        cb.FillBuffer(target, now->data() + at, at, std::min(Most, now->size() - at));
+                };
+                out.pass = std::move(plan);
             }
             out.packed = std::move(packed);
             return {};
@@ -5214,10 +5653,35 @@ namespace kgraph
             return name;
         }
 
+        /**
+         * What a node a Bundle gave inputs to says of it: the names it had that the node has no input for, and the inputs of
+         * its kind the node has that it had not — what the expansion said, for a BufferBuilder, whose fields it knew.
+         */
+        std::string BundleNote(const Node& node, const Built& made) const
+        {
+            if (const auto said = bundleNotes.find(node.id); said != bundleNotes.end()) return said->second;
+            const auto filled = fromBundle.find(node.id);
+            if (filled == fromBundle.end() || filled->second.empty()) return {};
+            const std::string prefix = filled->second.begin()->substr(0, filled->second.begin()->find('.') + 1);
+            std::vector<Port> ports = made.ports;
+            if (made.pipeline) ports.insert(ports.end(), made.pipeline->ports.begin(), made.pipeline->ports.end());
+            std::string unmatched, missing;
+            for (const auto& name : filled->second)
+                if (std::ranges::find(ports, name, &Port::name) == ports.end()) unmatched += std::format("{}'{}'", unmatched.empty() ? "" : ", ", name.substr(prefix.size()));
+            for (const auto& port : ports)
+                if (port.name.starts_with(prefix) && !node.inputs.contains(port.name)) missing += std::format("{}'{}'", missing.empty() ? "" : ", ", port.name.substr(prefix.size()));
+            std::string note;
+            if (!unmatched.empty()) note = std::format("the bundle has {}, which it has not", unmatched);
+            if (!missing.empty()) note += std::format("{}it has {}, which the bundle has not", note.empty() ? "" : "; ", missing);
+            return note;
+        }
+
         Expected<void> Build(const Node& node, const Inputs& inputs, Built& out)
         {
             const NodeType* type = FindType(node.type);
             if (!type) return Fail(std::format("there is no node type '{}'", node.type));
+            // A Bundle is wiring, written out before anything runs: what makes one, or takes one apart, builds nothing.
+            if (node.type == "Bundle" || node.type == "Unbundle") return {};
             if (type->builder) {
                 return IsPipeline(type->name) ? BuildPipeline(node, *type->builder, inputs, out) : BuildBuilder(node, *type->builder, inputs, out);
             }
@@ -5238,17 +5702,38 @@ namespace kgraph
                 if (!(fields && name.starts_with("field.")) && !(script && name.find('.') != std::string::npos) && !own(name) && std::ranges::find(type->inputs, Listed(name), &Port::name) == type->inputs.end())
                     return Fail(std::format("a {} has no input '{}'", type->name, name));
             if (type->category == "Passes") {
+                const auto truthy = [](const Value& value) { return value.Bool() ? *value.Bool() : value.Number() && *value.Number() != 0.0; };
                 // Left out: there is the node, and no pass of it.
-                if (const auto enabled = inputs.find("enabled"); enabled != inputs.end()) {
-                    const Value& value = enabled->second.value;
-                    if (value.Bool() ? !*value.Bool() : value.Number() && *value.Number() == 0.0) return {};
-                    Inputs rest = inputs;
-                    rest.erase("enabled");
-                    return BuildPass(node, rest, out);
+                const auto enabled = inputs.find("enabled");
+                if (enabled != inputs.end() && !truthy(enabled->second.value)) return {};
+                // Left out of the views it is not for: the game's, or an editor's scene view.
+                if (const auto views = inputs.find("views"); views != inputs.end() && views->second.value.String()) {
+                    const std::string& which = *views->second.value.String();
+                    if (which != "all" && which != "game" && which != "editor") return Fail(std::format("'views' is all, game or editor, not '{}'", which));
+                    if ((which == "game" && editorView) || (which == "editor" && !editorView)) return {};
                 }
-                return BuildPass(node, inputs, out);
+                const auto async = inputs.find("async");
+                const bool onAsync = async != inputs.end() && truthy(async->second.value);
+                Inputs rest = inputs;
+                rest.erase("enabled");
+                rest.erase("async");
+                rest.erase("views");
+                auto built = BuildPass(node, rest, out);
+                if (built && onAsync && out.pass) {
+                    out.pass->async = true;
+                    if (!kor::Context::SupportsAsyncCompute()) out.status.note = "async: this device has no second queue, so it runs on the graphics queue, in order";
+                    else if (out.pass->readsScreen || out.pass->writesScreen) out.status.note = "async: it uses the screen, so it stays on the graphics queue";
+                }
+                return built;
             }
             if (node.type == "Note") return {};     // words: there is nothing of it to build
+            if (node.type == "DebugView") {
+                const auto picture = inputs.find("picture");
+                if (picture == inputs.end() || !picture->second.resource) return Fail("'picture' is the picture shown in its place: wire an image to it");
+                out.outputs["out"].resource = picture->second.resource;
+                out.outputs["shown"].value = Value(node.id == debugView);
+                return {};
+            }
             if (node.type == "Switch") {
                 const auto index = inputs.find("index");
                 const Value chosen = index == inputs.end() ? Value(0) : index->second.value;
@@ -5322,10 +5807,22 @@ namespace kgraph
                 out.outputs["indexCount"].value = static_cast<double>(mesh->part ? mesh->indexCount : indexed ? device->IndexCount().value_or(0) : 0);
                 out.outputs["firstIndex"].value = static_cast<double>(mesh->part ? mesh->firstIndex : 0);
                 out.outputs["vertexOffset"].value = static_cast<double>(mesh->part ? mesh->vertexOffset : 0);
+                // And where its normals and its first UVs are, when it has them: what a mesh shader or a hit shader reads
+                // of a vertex besides where it is.
+                for (const auto& [semantic, name] : { std::pair { "NORMAL", "normals" }, std::pair { "UV", "uvs" } }) {
+                    const auto it = std::ranges::find(layout.attributes, std::string_view(semantic), [](const auto& a) { return std::string_view(a.semantic); });
+                    if (it == layout.attributes.end() || it->binding >= whole->buffers.size()) continue;
+                    const auto bound = std::ranges::find(layout.bindings, it->binding, &kor::VertexInputBindingDescription::binding);
+                    out.outputs[name].resource = whole->buffers[it->binding];
+                    out.outputs[std::format("{}Stride", name)].value = static_cast<double>(bound == layout.bindings.end() ? 0 : bound->stride);
+                    out.outputs[std::format("{}Offset", name)].value = static_cast<double>(it->offset);
+                }
                 return {};
             }
             if (node.type == "DataBuffer") return BuildDataBuffer(node, inputs, out);
             if (node.type == "MeshPack") return BuildMeshPack(node, inputs, out);
+            if (node.type == "Meshlets") return BuildMeshlets(inputs, out);
+            if (node.type == "RayScene") return BuildRayScene(node, inputs, out);
             if (node.type == "IndirectDraws") return BuildIndirectDraws(node, inputs, out);
             if (node.type == "ShaderBuffer") return BuildShaderBuffer(node, inputs, out);
             if (node.type == "BufferBuilder") return BuildBufferBuilder(node, inputs, out);
@@ -5472,6 +5969,10 @@ namespace kgraph
             }
 
             current = &graph;
+            currentById.clear();
+            currentById.reserve(graph.nodes.size());
+            for (const Node& each : graph.nodes) currentById.emplace(each.id, &each);
+            takenByPipeline.reset();
             // What each node waits for: what it is wired to, and what it stands for.
             std::map<std::string, std::vector<std::string>> needs;
             for (const auto& node : graph.nodes) {
@@ -5541,6 +6042,11 @@ namespace kgraph
                     inputs.emplace(name, std::move(resolved));
                 }
                 if (node->type == "Screen") signature += std::format("|{}x{}", screenExtent.x, screenExtent.y);
+                // What the view looks at the scene by: built again when that changes.
+                if (node->type == "DebugView" && node->id == debugView) signature += "|shown";
+                if (node->inputs.contains("views")) signature += editorView ? "|editor view" : "|game view";
+                if (shaderDebug != 0 && out.pipeline && std::ranges::find(out.pipeline->ports, std::format("constant.{}", ShaderDebugConstant), &Port::name) != out.pipeline->ports.end())
+                    signature += std::format("|{}={}", ShaderDebugConstant, shaderDebug);
                 // A Script node is the script as it was set: made again when the script is set again — edited, loaded, run.
                 if (node->type == "Script")
                     if (const auto it = node->inputs.find("script"); it != node->inputs.end() && it->second.value.String())
@@ -5587,6 +6093,7 @@ namespace kgraph
                 }
                 AddOutputs(*node, inputs, fresh);
                 fresh.status.ok = true;
+                if (const auto note = BundleNote(*node, fresh); !note.empty()) fresh.status.note = note;
                 fresh.signature = std::move(signature);
                 if (IsMadeResource(node->type)) fresh.madeWith = WiredValues(*node);
                 fresh.stamp = ++counter;
@@ -5675,21 +6182,28 @@ namespace kgraph
         /**
          * A buffer of each instance's, for a Draw that is given nothing for it: made here, with room for more than there
          * are, and filled each frame from the entities of the Filter whose meshes the Draw's MeshPack packs — in the order
-         * the pack's indirect commands draw them.
+         * the pack's indirect commands draw them. A TraceRays' is of the Filter wired to its `entities`, in its order: the
+         * InstanceID() a RayScene of the same Filter gives each.
          */
         Expected<Source> InstancesFor(const Node& draw, const PipelineInfo& info, const Slot& slot, EntityRun& run)
         {
             const std::string port = "param." + slot.field;
             if (!world) return Fail(std::format("'{}' is each instance's, and there is no world for there to be instances of", port));
             if (!run.each.empty()) return Fail(std::format("'{}' is each instance's, and this draws one element of '{}' at a time: draw a MeshPack's mesh, or wire it", port, run.each));
-            const auto mesh = draw.inputs.find("mesh");
-            const Node* pack = mesh != draw.inputs.end() && mesh->second.link ? Origin(mesh->second.link->node) : nullptr;
+            const bool rays = draw.type == "TraceRays";
             const Node* filter = nullptr;
-            if (pack && pack->type == "MeshPack")
-                if (const auto meshes = pack->inputs.find("meshes"); meshes != pack->inputs.end() && meshes->second.link) filter = Origin(meshes->second.link->node);
+            if (rays) {
+                if (const auto entities = draw.inputs.find("entities"); entities != draw.inputs.end() && entities->second.link) filter = Origin(entities->second.link->node);
+            } else {
+                const auto mesh = draw.inputs.find("mesh");
+                const Node* pack = mesh != draw.inputs.end() && mesh->second.link ? Origin(mesh->second.link->node) : nullptr;
+                if (pack && pack->type == "MeshPack")
+                    if (const auto meshes = pack->inputs.find("meshes"); meshes != pack->inputs.end() && meshes->second.link) filter = Origin(meshes->second.link->node);
+            }
             const auto found = filter ? built.find(filter->id) : built.end();
             if (found == built.end() || !found->second.status.ok || !found->second.listed)
-                return Fail(std::format("'{}' is each instance's: they are the entities of the Filter whose Mesh.mesh the 'mesh' MeshPack packs — or wire it", port));
+                return Fail(rays ? std::format("'{}' is each instance's: they are the entities wired to 'entities', a Filter's — or wire it", port)
+                                 : std::format("'{}' is each instance's: they are the entities of the Filter whose Mesh.mesh the 'mesh' MeshPack packs — or wire it", port));
 
             // Another Draw's, when it would write the same: one buffer, written once a frame, for all of them.
             const std::string key = InstancesKey(filter->id, *slot.instancing, info.component);
@@ -5741,29 +6255,46 @@ namespace kgraph
             const std::uint64_t frame = instances.clock ? *instances.clock : placedFrame;
             if (!now && instances.filled == frame) return;    // another Draw that shares it wrote it this frame
             instances.filled = frame;
+            const std::size_t stride = instances.instancing->stride;
+            // Every element there is room for is written, not only the list's: a GPU cull reads the buffer to its end,
+            // and an element left as it was holds what the memory held before — of entities gone since, or of another
+            // resource altogether, its pictures' indices among it. One no entity is in is nothing: nowhere, and no picture.
+            const auto empty = [&](std::byte* element) {
+                std::memset(element, 0, stride);
+                for (const auto& field : instances.instancing->fields)
+                    if (field.from == Instancing::Field::From::eTexture) std::memset(element + field.offset, 0xFF, 4);
+            };
+            // Laid out here, between frames; written into the copy the frame reads as it begins (WriteStaged).
+            std::vector<std::byte> staged(instances.capacity * stride);
+            const std::span<std::byte> bytes(staged);
             const auto found = built.find(instances.source);
-            if (found == built.end() || !found->second.status.ok || !found->second.listed || !world) return;
+            if (found == built.end() || !found->second.status.ok || !found->second.listed || !world) {
+                for (std::size_t row = 0; row < instances.capacity; ++row) empty(bytes.data() + row * stride);
+                instances.pictures.clear();
+                instances.staged = std::move(staged);
+                return;
+            }
             const EntityList& list = *found->second.listed;
-            const std::size_t rows = list.Rows(), stride = instances.instancing->stride;
-            // More than there is room for: another buffer, and every Draw that shares this one built again with it.
+            const std::size_t rows = list.Rows();
+            // More than there is room for: another buffer, and every Draw that shares this one built again with it. Until
+            // then, as many as there is room for: this frame's draws read this buffer still.
             if (rows > instances.capacity) {
                 instances.full = true;
                 for (const auto& id : instances.draws)
                     if (const auto draw = built.find(id); draw != built.end()) draw->second.signature.clear();
                 stale = true;
-                return;
             }
+            const std::size_t laid = std::min(rows, instances.capacity);
             std::uint64_t written = 1469598103934665603ull;
             Mix(written, &rows, sizeof rows);
             instances.written = written;
-            if (rows == 0) return;
-            // Straight into this frame's copy: all of it is written each frame, so there is nothing to carry to the others.
-            auto mapping = instances.buffer->Map<std::byte>(rows * stride, 0);
-            const std::span<std::byte> bytes = mapping.AsSpan();
-            for (std::size_t row = 0; row < rows; ++row) {
+            const bool pictured = std::ranges::any_of(instances.instancing->fields, [](const auto& field) { return field.from == Instancing::Field::From::eTexture; });
+            std::vector<Member> pictures;
+            for (std::size_t row = laid; row < instances.capacity; ++row) empty(bytes.data() + row * stride);
+            for (std::size_t row = 0; row < laid; ++row) {
                 const kecs::Entity entity = list.entities[row / list.repeat];
                 std::byte* element = bytes.data() + row * stride;
-                std::memset(element, 0, stride);
+                empty(element);
                 if (!world->Alive(entity)) continue;
                 const auto* own = instances.component == kecs::NoComponent ? nullptr : static_cast<const std::byte*>(std::as_const(*world).Get(entity, instances.component));
                 const std::uint64_t key = KeyOf(entity);
@@ -5772,7 +6303,7 @@ namespace kgraph
                 for (const auto& field : instances.instancing->fields) {
                     std::byte* at = element + field.offset;
                     if (field.from == Instancing::Field::From::eComponent && own) Mix(written, own + field.at, field.size);
-                    else if (field.from != Instancing::Field::From::eComponent && field.from != Instancing::Field::From::eId && !placed) {
+                    else if (field.from != Instancing::Field::From::eComponent && field.from != Instancing::Field::From::eId && field.from != Instancing::Field::From::eTexture && !placed) {
                         Mix(written, Placed(entity).m.data(), 64);
                         placed = true;
                     }
@@ -5800,10 +6331,37 @@ namespace kgraph
                         std::memcpy(at, &id, 4);
                         break;
                     }
+                    case Instancing::Field::From::eTexture: {
+                        // The picture it holds there, by the index a shader reaches it at: ~0 for none.
+                        std::uint32_t index = ~0u;
+                        const Held* held = own ? reinterpret_cast<const Held*>(own + field.at) : nullptr;
+                        // A picture read since it was given is what was made in its place: its stand-in is what it was.
+                        const Resource* now = held ? held->get() : nullptr;
+                        while (now && now->replacedBy) now = now->replacedBy.get();
+                        if (now && now->handle) {
+                            const Resource& given = *now;
+                            kor::DescriptorIndex handle;
+                            if (given.kind == "Image") handle = kor::Bindless::Sampled(kor::capi::ImageOf(given.handle));
+                            else if (given.kind == "ImageView") handle = kor::Bindless::Sampled(kor::capi::ImageViewOf(given.handle));
+                            if (handle.Valid()) {
+                                index = handle.index;
+                                if (Member member = MemberOf(now); member.id) pictures.push_back(std::move(member));
+                            }
+                        }
+                        Mix(written, &index, sizeof index);
+                        std::memcpy(at, &index, 4);
+                        break;
+                    }
                     }
                 }
             }
             instances.written = written;
+            instances.staged = std::move(staged);
+            if (pictured) {
+                std::ranges::sort(pictures, {}, &Member::id);
+                pictures.erase(std::ranges::unique(pictures, {}, &Member::id).begin(), pictures.end());
+            }
+            instances.pictures = std::move(pictures);
         }
 
         /**
@@ -5887,8 +6445,30 @@ namespace kgraph
                     }
             run.items.clear();
             run.pushed.clear();
-            if (run.idle) return;
+            // Its buffer of instances follows the entities, idle or not: another pass may read it while this one rests
+            // (the meshlets read the forward Draw's). Whether it is due again is said by what it last drew, not by this.
             for (const auto& instances : run.instances) FillInstances(*instances);
+            if (run.idle) return;
+            // The pictures they name by index are read by the draws all the same: the frame graph is told of them. So are
+            // those of another Draw's buffer of instances, wired here: what samples them is this pass as much.
+            std::vector<const Instances*> named;
+            for (const auto& instances : run.instances) named.push_back(instances.get());
+            for (const Source& slot : run.slots)
+                if (slot.kind == Source::Kind::eWired && slot.resource)
+                    for (const Impl* owner : { static_cast<const Impl*>(source), static_cast<const Impl*>(this) })
+                        if (owner)
+                            for (const auto& entry : owner->sharedInstances | std::views::values)
+                                if (const auto shared = entry.lock(); shared && shared->held == slot.resource) named.push_back(shared.get());
+            if (!named.empty()) {
+                std::vector<Member> pictures;
+                for (const Instances* instances : named) pictures.insert(pictures.end(), instances->pictures.begin(), instances->pictures.end());
+                std::ranges::sort(pictures, {}, &Member::id);
+                pictures.erase(std::ranges::unique(pictures, {}, &Member::id).begin(), pictures.end());
+                if (!std::ranges::equal(pictures, run.pictures, {}, &Member::id, &Member::id)) {
+                    run.pictures = std::move(pictures);
+                    run.changed = true;
+                }
+            }
             run.report = {};
             const PipelineInfo& info = *run.info;
             const std::size_t slots = info.slots.size();
@@ -6236,7 +6816,8 @@ namespace kgraph
                 // More commands, or more instances than `visible` has room for: another buffer.
                 if (bytes.size() != out.packed->bytes.size() || (out.packed->everyFrame && instances > out.packed->room)) { out.signature.clear(); stale = true; return; }
                 if (!out.packed->everyFrame && bytes == out.packed->bytes) return;
-                if (!bytes.empty()) out.packed->buffer->Write(std::span<const std::byte>(bytes));
+                // On the GPU's, its pass writes them in each frame: what it writes is kept here.
+                if (!bytes.empty() && !out.packed->everyFrame) out.packed->buffer->Write(std::span<const std::byte>(bytes));
                 out.packed->bytes = std::move(bytes);
             } else if (node->type == "DataBuffer") {
                 if (!out.packed) return;
@@ -6346,6 +6927,9 @@ namespace kgraph
                 copy->second.pass->resting->store(rests);
             }
             RunLive();
+            // The scenes rays are traced through, made again where an entity of theirs moved, came or went.
+            for (auto& entry : built)
+                if (entry.second.rays && entry.second.status.ok) UpdateRays(entry.first, entry.second);
             for (const auto& id : wanted)
                 if (const auto& plan = built.at(id).pass; plan && plan->prepare) plan->prepare();
         }
@@ -6436,6 +7020,7 @@ namespace kgraph
                 const auto& slots = plan->entities->info->slots;
                 for (std::size_t i = 0; i < slots.size() && i < plan->entities->members.size(); ++i)
                     if (!slots[i].sampler) uses.push_back({ pass, slots[i].read, slots[i].write, true, plan->entities->members[i], wanted[pass] + "/" + slots[i].field });
+                if (!plan->entities->pictures.empty()) uses.push_back({ pass, true, false, true, plan->entities->pictures, wanted[pass] + "/pictures" });
             }
 
             // Uses with a resource in common, together.
@@ -6574,7 +7159,8 @@ namespace kgraph
                 GraphPass* pass = passes.at(order[i]);
                 const auto& plan = built.at(StepOf(order[i]).first).pass;
                 if (pass->plan != plan) {
-                    declarations = declarations || pass->plan->readsScreen != plan->readsScreen || pass->plan->writesScreen != plan->writesScreen;
+                    declarations = declarations || pass->plan->readsScreen != plan->readsScreen || pass->plan->writesScreen != plan->writesScreen
+                                || pass->plan->async != plan->async;   // which queue it is on is said in its Setup
                     pass->plan = plan;
                 }
                 if (pass->declared != ordered[i]) {
@@ -7044,7 +7630,36 @@ namespace kgraph
 
     void Runtime::Run()
     {
-        Expansion expansion = Expand(_graph);
+        // What a ForEach's element holds: where it is, and its component's fields — of `with`'s too, by their own names,
+        // its component's coming first — as the world describes them now.
+        const ElementOf elementOf = [this](const Node& node) {
+            std::vector<std::pair<std::string, std::string>> members;
+            for (const char* place : { "entityId", "matrix", "normalMatrix", "worldPosition", "forward", "up", "right", "position", "rotation", "orientation", "scale" })
+                members.emplace_back(place, place);
+            kecs::World* world = _impl->world;
+            if (!world) return members;
+            const auto add = [&](const std::string& component, const bool own) {
+                const kecs::ComponentId id = world->Find(component);
+                if (id == kecs::NoComponent) return;
+                const kecs::ComponentDescription& description = world->Describe(id);
+                for (const auto& field : description.fields) {
+                    if (field.type == "string") continue;   // nothing a buffer holds
+                    const std::string output = own ? "field." + field.name : description.name + "." + field.name;
+                    if (const auto had = std::ranges::find(members, field.name, &std::pair<std::string, std::string>::first); had != members.end()) {
+                        if (own) had->second = output;     // its own component's, before where it is
+                    } else {
+                        members.emplace_back(field.name, output);
+                    }
+                }
+            };
+            if (const auto component = node.inputs.find("component"); component != node.inputs.end() && component->second.value.String()) add(*component->second.value.String(), true);
+            for (const char* listed : { "with" })
+                if (const auto with = node.inputs.find(listed); with != node.inputs.end() && with->second.value.Items())
+                    for (const auto& name : *with->second.value.Items())
+                        if (name.String()) add(*name.String(), false);
+            return members;
+        };
+        Expansion expansion = Expand(_graph, elementOf);
         _impl->before.clear();
         // What is watched is copied out by two nodes more, sized by what the node made when last it was built.
         for (auto& [id, watching] : _impl->watched) {
@@ -7099,6 +7714,9 @@ namespace kgraph
         _impl->turns = std::move(expansion.turns);
         _impl->calls = std::move(expansion.calls);
         _impl->aliases = std::move(expansion.aliases);
+        _impl->bundles = std::move(expansion.bundles);
+        _impl->fromBundle = std::move(expansion.fromBundle);
+        _impl->bundleNotes = std::move(expansion.notes);
         _running = std::move(expansion.graph);
         _impl->Evaluate(_running);
     }
@@ -7136,6 +7754,13 @@ namespace kgraph
             return;
         }
         if (_impl->rewatch) { Run(); return; }
+        if (_impl->editorViewAsked != _impl->editorView || _impl->debugViewAsked != _impl->debugView || _impl->shaderDebugAsked != _impl->shaderDebug) {
+            _impl->editorView = _impl->editorViewAsked;
+            _impl->debugView = _impl->debugViewAsked;
+            _impl->shaderDebug = _impl->shaderDebugAsked;
+            _impl->Evaluate(_running);
+            return;
+        }
         // A resource script set again: what it fills is made and filled again — here, and in a runtime that follows this one.
         if (const std::uint64_t version = _impl->ScriptsVersion(); version != _impl->scriptsSeen) {
             _impl->scriptsSeen = version;
@@ -7290,6 +7915,38 @@ namespace kgraph
         _impl->stale = true;    // built again, next frame: those taken from the source, and the rest as their own
     }
     void Runtime::SetSelected(const kecs::Entity entity) { _impl->selectedId->store(entity.IsNull() ? 0 : entity.index + 1); }
+    void Runtime::SetEditorView(const bool editor) { _impl->editorViewAsked = editor; }
+    bool Runtime::EditorView() const { return _impl->editorViewAsked; }
+    void Runtime::ShowDebugView(std::string id) { _impl->debugViewAsked = std::move(id); }
+    const std::string& Runtime::ShownDebugView() const { return _impl->debugViewAsked; }
+    void Runtime::SetShaderDebugView(const int channel) { _impl->shaderDebugAsked = channel; }
+    int Runtime::ShaderDebugView() const { return _impl->shaderDebugAsked; }
+
+    std::vector<Runtime::DebugViewOf> Runtime::DebugViews() const
+    {
+        std::vector<DebugViewOf> views;
+        for (const auto& node : _running.nodes) {
+            if (node.type != "DebugView") continue;
+            const auto name = node.inputs.find("name");
+            const std::string* named = name != node.inputs.end() ? name->second.value.String() : nullptr;
+            views.push_back({ node.id, named && !named->empty() ? *named : node.id });
+        }
+        return views;
+    }
+
+    std::vector<std::string> Runtime::WithoutShaderDebugView() const
+    {
+        std::vector<std::string> without;
+        const std::string constant = std::format("constant.{}", ShaderDebugConstant);
+        for (const auto& [id, built] : _impl->built) {
+            if (!built.pipeline || !built.status.ok || built.pipeline->numThreads[0] != 0) continue;     // a graphics pipeline, built
+            // One that draws no colour — a depth prepass, a shadow — has nothing of a material to show.
+            const Held& target = built.pipeline->framebuffer;
+            if (!target || !target->handle || kor::capi::FramebufferOf(target->handle)->ColorAttachmentCount() == 0) continue;
+            if (std::ranges::find(built.pipeline->ports, constant, &Port::name) == built.pipeline->ports.end()) without.push_back(id);
+        }
+        return without;
+    }
     void Runtime::FixedStep(const float seconds)
     {
         ++_impl->fixedPending;
@@ -7311,6 +7968,52 @@ namespace kgraph
         }
         return timings;
     }
+    Runtime::FrameReport Runtime::Frame() const
+    {
+        FrameReport report;
+        const kor::FrameGraph& graph = _impl->frameGraph;
+        // What each resource the passes use is, by the node that made it: the frame graph knows it by where it is.
+        std::unordered_map<const void*, std::string> madeBy;
+        for (const auto& [id, made] : _impl->built)
+            for (const auto& output : made.outputs | std::views::values) {
+                if (!output.resource || output.resource->node != id) continue;
+                if (const auto image = ImageRefOf(output.resource.get()); image.Get()) madeBy.try_emplace(image.Get(), id);
+                else if (const auto buffer = BufferRefOf(output.resource.get()); buffer.Get()) madeBy.try_emplace(buffer.Get(), id);
+            }
+        const auto named = [&](const std::string& name) -> std::string {
+            if (name.starts_with("kgraph.set.")) return std::format("the entities' {}", name.substr(11));
+            if (name.starts_with("kgraph.")) {
+                const auto at = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(std::stoull(name.substr(7), nullptr, 16)));
+                if (const auto found = madeBy.find(at); found != madeBy.end()) return found->second;
+            }
+            return name;
+        };
+        std::map<std::string, kor::FrameGraph::PassTiming, std::less<>> timings;
+        for (auto& timing : graph.PassTimings()) timings.emplace(timing.name, timing);
+        for (const auto& scheduled : graph.Schedule()) {
+            const auto ours = _impl->passes.find(scheduled.name);
+            if (ours == _impl->passes.end()) continue;     // another's: not one of this graph's passes
+            FrameReport::Pass pass { scheduled.name, Impl::StepOf(scheduled.name).first, scheduled.level, scheduled.async };
+            if (const auto timing = timings.find(scheduled.name); timing != timings.end()) {
+                pass.gpuMs = timing->second.gpuMs;
+                pass.recordMs = timing->second.recordMs;
+                pass.gpuMeasured = timing->second.gpuMeasured;
+            }
+            for (const auto& use : ours->second->declared) pass.uses.emplace_back(named(use.name), use.read && use.write ? 'b' : use.write ? 'w' : 'r');
+            if (ours->second->plan->readsScreen || ours->second->plan->writesScreen)
+                pass.uses.emplace_back("the screen", ours->second->plan->readsScreen && ours->second->plan->writesScreen ? 'b' : ours->second->plan->writesScreen ? 'w' : 'r');
+            report.passes.push_back(std::move(pass));
+        }
+        for (const auto& skipped : graph.SkippedPasses())
+            if (_impl->passes.contains(skipped.name))
+                report.leftOut.emplace_back(Impl::StepOf(skipped.name).first, std::format("skipped: what it needs, {}, is made by {}, which is left out", named(skipped.resource), skipped.source));
+        for (const auto& culled : graph.CulledPasses())
+            if (_impl->passes.contains(culled)) report.leftOut.emplace_back(Impl::StepOf(culled).first, "culled: nothing needs what it makes");
+        report.bytes = graph.Memory().bytes;
+        report.unsharedBytes = graph.Memory().unsharedBytes;
+        return report;
+    }
+
     void Runtime::RunSetupAgain() { _impl->setupAgain = true; }
     void Runtime::SetDebugDraw(kor::DebugDraw* debug) { _impl->debug = debug; }
     kor::Mat4 Runtime::ViewProjection() const { return _impl->viewProjection; }
@@ -7552,10 +8255,24 @@ namespace kgraph
             return ports;
         }
         if (node->type == "FunctionInput" || node->type == "FunctionOutput") return { FunctionPort("out", KindOf(*node), "What it stands for: what it is given.") };
+        // An Unbundle gives each member of what it takes apart.
+        if (node->type == "Unbundle") {
+            for (const auto& name : BundleOf(id, "of")) ports.push_back({ name, PortKind::eValue, "value", false, std::format("The member '{}'.", name), nullptr });
+            return ports;
+        }
         // What a node says of itself comes first: an Entities node is its component's fields before anything else.
         if (const auto* made = _impl->Find(id)) ports = made->gives;
         if (const NodeType* type = FindType(node->type)) ports.insert(ports.end(), type->outputs.begin(), type->outputs.end());
         return ports;
+    }
+
+    std::vector<std::string> Runtime::BundleOf(const std::string_view id, const std::string_view output) const
+    {
+        std::vector<std::string> names;
+        const auto found = _impl->bundles.find(std::format("{}.{}", id, output));
+        if (found != _impl->bundles.end())
+            for (const auto& name : found->second | std::views::keys) names.push_back(name);
+        return names;
     }
 
     std::vector<std::string> Runtime::PerEntityParameters(const std::string_view id) const

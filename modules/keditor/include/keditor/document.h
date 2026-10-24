@@ -53,6 +53,13 @@ namespace keditor
         std::int32_t part = 0;
     };
 
+    /** @brief What a function says it is for, beside its graph in its file: what the list of nodes offers it under and finds it by. */
+    struct FunctionAbout {
+        std::string purpose;            ///< What it is for, as the list of nodes groups functions: "Physics", "Sort and scan".
+        std::string description;        ///< What it does, in a sentence or two.
+        std::vector<std::string> tags;  ///< More words it is found by: "blur", "prefix sum".
+    };
+
     class Document {
     public:
         /** @brief An empty scene, whose passes run in @p frameGraph. It must outlive the document. */
@@ -298,6 +305,8 @@ namespace keditor
         [[nodiscard]] static std::filesystem::path EngineFunctionsDirectory();
         /** @brief The functions there are to call, by name: the project's, and the engine's. */
         [[nodiscard]] std::vector<std::string> Functions() const;
+        /** @brief What function @p name says it is for (its file's `purpose`, `description` and `tags`): the project's, or the engine's. */
+        [[nodiscard]] FunctionAbout AboutFunction(std::string_view name) const;
         /** @brief Whether @p name is one of the engine's functions, and the project has none of its own so called. */
         [[nodiscard]] bool IsEngineFunction(std::string_view name) const;
         /**

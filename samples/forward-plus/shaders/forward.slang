@@ -5,6 +5,7 @@
 // The depth pre-pass has already laid the depth down, so this shades only what is seen.
 
 import forwardCommon;
+import koral_debug;     // what the editor's scene view shows of a material: its albedo, its normal after the map...
 
 ConstantBuffer<Sun> sun;
 StructuredBuffer<PointLight> lights;
@@ -14,13 +15,16 @@ Sampler2D<float> shadowMap;                 // the four cascades, two by two
 ConstantBuffer<LampShadows> lampShadows;
 Sampler2DArray<float> lampShadowMaps;       // each point light's cube: six layers a light, a face each
 
-// Each entity's own pictures: left unwired on the pipeline's node, so they are fields of its component, naming files
-// (`@textures/wall.png`) — or `$white` for one it has not, which leaves what it multiplies as it is. Their sampler
-// is the node's, the same for all.
-Sampler2D<float4> albedoMap;                // its colour; a: how opaque
-Sampler2D<float4> normalMap;                // which way its surface faces, texel by texel, relative to the mesh's own
-Sampler2D<float4> roughnessMap;             // g: how rough; b: how much a metal
-Sampler2D<float4> emissiveMap;
+// Every entity, in one indirect draw: each instance's matrix, and the fields of its component — the pictures by their
+// bindless indices (Instance). Each picture names a file (`@textures/wall.png`), or is `$white` for one it has not,
+// which leaves what it multiplies as it is. Their sampler is the node's, the same for all.
+[entity("PER_INSTANCE")] StructuredBuffer<Instance> instances;
+SamplerState textureSampler;
+// Which instances the occlusion cull kept, a command's from its first instance on — read when `culled` is 1. Without
+// a cull (the blended pass) each command draws its instances as they are.
+StructuredBuffer<uint> drawnInstances;
+StructuredBuffer<FrameState> frameState;
+[[vk::push_constant]] cbuffer Culling { uint culled; };
 
 struct Vertex {
     float3 position : POSITION;
@@ -33,20 +37,8 @@ struct RasterInfo {
     float3 worldPosition;
     float3 normal;
     float2 uv;
+    nointerpolation uint instance : INSTANCE;
 };
-
-// `model` is the engine's to give. The rest is the entity's own: the fields of the component this pipeline's node
-// makes, which is what makes an entity drawn.
-struct DrawData {
-    float4x4 model;
-    float3 albedo;      // its colour, as picked
-    float metallic;
-    float3 emission;    // the light it gives off itself, as light: above 1 it blooms
-    float roughness;
-    float alphaCutoff;  // above 0: where its albedoMap is less opaque than this, nothing is drawn
-    float transparency; // how much of what is behind it shows through, over what its albedoMap lets: 0 none, 1 all of it — glass
-};
-[[vk::push_constant]] ConstantBuffer<DrawData> draw;
 
 struct Output {
     float4 color : SV_Target0;
@@ -56,18 +48,117 @@ struct Output {
 };
 
 [shader("vertex")]
-RasterInfo vertex(Vertex vertex)
+RasterInfo vertex(Vertex vertex, uint index : SV_InstanceID, uint first : SV_StartInstanceLocation)
 {
-    float4x4 model = draw.model;
     RasterInfo raster;
+    // How many instances there are: culled, the list has room for each and no more (the buffer of them has room for
+    // more); not, each command draws its own, all of them there.
+    uint length, stride, listed;
+    instances.GetDimensions(length, stride);
+    drawnInstances.GetDimensions(listed, stride);
+    if (culled != 0) length = min(length, listed);
+    raster.instance = culled == 0 ? first + index : first + index < listed ? drawnInstances[first + index] : length;
+    // One the cull did not write — a list not counted into yet — is nowhere.
+    const bool known = raster.instance < length;
+    raster.instance = min(raster.instance, max(length, 1) - 1);
+    float4x4 model = instances[raster.instance].model;
     raster.worldPosition = mul(float4(vertex.position, 1.0), model).xyz;
-    raster.position = toClip(raster.worldPosition);
+    raster.position = known ? toPicture(raster.worldPosition, frameState[0]) : float4(0.0, 0.0, 0.0, 0.0);
     // The normal through the cofactors of the model's 3x3: square to the surface however unevenly it is scaled.
     float3 a0 = model[0].xyz, a1 = model[1].xyz, a2 = model[2].xyz;
     float3 normal = vertex.normal.x * cross(a1, a2) + vertex.normal.y * cross(a2, a0) + vertex.normal.z * cross(a0, a1);
     raster.normal = normal * sign(dot(a0, cross(a1, a2)));
     raster.uv = vertex.uv;
     return raster;
+}
+
+// ---- the same, drawn by meshlets: a task shader's group a task, a mesh shader's group a meshlet ---------------------
+// The pack's vertices, an attribute a buffer, tightly packed (a MeshPack given `attributes`): a position and a normal
+// 12 bytes, a UV 8. Each meshlet's vertices name the pack's, its mesh's vertexOffset in them.
+
+struct Meshlet {
+    uint vertexOffset, vertexCount, triangleOffset, triangleCount;
+    float4 sphere;      // its middle and how far it reaches, in its mesh's own space
+    float4 cone;        // not used: every surface is seen from both sides
+};
+StructuredBuffer<Meshlet> meshlets;
+StructuredBuffer<uint> meshletVertices;
+StructuredBuffer<uint> meshletTriangles;    // a triangle's corners among its meshlet's vertices, a byte each
+StructuredBuffer<uint4> meshletTasks;       // meshletTasks.slang's: instance, first meshlet, how many
+ByteAddressBuffer meshPositions;
+ByteAddressBuffer meshNormals;
+ByteAddressBuffer meshUVs;
+
+struct MeshletPayload {
+    uint instance;
+    uint meshlets[32];
+};
+groupshared MeshletPayload meshletPayload;
+groupshared uint meshletsSeen;
+
+/** Whether a sphere, moved by @p model, is wholly outside one of the camera's planes. */
+bool sphereOutOfSight(float3 middle, float reach, float4x4 model, float4x4 viewProjection)
+{
+    const float3 at = mul(float4(middle, 1.0), model).xyz;
+    const float scale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+    const float r = reach * scale;
+    // The planes of the frustum, from the matrix's columns (Gribb and Hartmann): each as a normal and a distance.
+    const float4x4 m = transpose(viewProjection);
+    const float4 planes[5] = { m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1], m[2] };
+    for (uint i = 0; i < 5; ++i)
+        if (dot(planes[i].xyz, at) + planes[i].w < -r * length(planes[i].xyz)) return true;
+    return false;
+}
+
+[shader("amplification")]
+[numthreads(32, 1, 1)]
+void meshletTask(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID)
+{
+    if (thread == 0) meshletsSeen = 0;
+    GroupMemoryBarrierWithGroupSync();
+    uint tasksLength, stride;
+    meshletTasks.GetDimensions(tasksLength, stride);
+    const uint4 task = group.x < tasksLength ? meshletTasks[group.x] : uint4(0, 0, 0, 0);
+    if (thread < task.z) {
+        const Meshlet meshlet = meshlets[task.y + thread];
+        const FrameState state = frameState[0];
+        if (state.begun != Begun || !sphereOutOfSight(meshlet.sphere.xyz, meshlet.sphere.w, instances[task.x].model, state.viewProjection)) {
+            uint slot;
+            InterlockedAdd(meshletsSeen, 1, slot);
+            meshletPayload.meshlets[slot] = task.y + thread;
+        }
+    }
+    if (thread == 0) meshletPayload.instance = task.x;
+    GroupMemoryBarrierWithGroupSync();
+    DispatchMesh(meshletsSeen, 1, 1, meshletPayload);
+}
+
+[shader("mesh")]
+[numthreads(64, 1, 1)]
+[outputtopology("triangle")]
+void meshletMesh(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID, in payload MeshletPayload task,
+                 out vertices RasterInfo corners[64], out indices uint3 triangles[124])
+{
+    const Meshlet meshlet = meshlets[task.meshlets[group.x]];
+    const float4x4 model = instances[task.instance].model;
+    SetMeshOutputCounts(meshlet.vertexCount, meshlet.triangleCount);
+    if (thread < meshlet.vertexCount) {
+        const uint v = meshletVertices[meshlet.vertexOffset + thread];
+        const float3 position = asfloat(meshPositions.Load3(v * 12));
+        const float3 normal = asfloat(meshNormals.Load3(v * 12));
+        RasterInfo raster;
+        raster.worldPosition = mul(float4(position, 1.0), model).xyz;
+        raster.position = toPicture(raster.worldPosition, frameState[0]);
+        float3 a0 = model[0].xyz, a1 = model[1].xyz, a2 = model[2].xyz;
+        raster.normal = (normal.x * cross(a1, a2) + normal.y * cross(a2, a0) + normal.z * cross(a0, a1)) * sign(dot(a0, cross(a1, a2)));
+        raster.uv = asfloat(meshUVs.Load2(v * 8));
+        raster.instance = task.instance;
+        corners[thread] = raster;
+    }
+    for (uint t = thread; t < meshlet.triangleCount; t += 64) {
+        const uint packed = meshletTriangles[meshlet.triangleOffset + t];
+        triangles[t] = uint3(packed & 255u, (packed >> 8) & 255u, (packed >> 16) & 255u);
+    }
 }
 
 static const float Pi = 3.14159265359;
@@ -117,6 +208,15 @@ float3 directLighting(Surface surface, float3 toLight, float3 radiance)
 }
 
 /** How much of the sun reaches a point through one cascade: 1 lit, 0 in shadow, and 1 outside the cascade. A 5x5 filter. */
+/**
+ * Light falling on a thin surface's back, let through to its front by @p through and scattered there evenly, tinted by
+ * its colour: what a curtain with the sun behind it glows with. @p facingBack is how squarely its back faces the light.
+ */
+float3 throughFrom(Surface surface, float through, float facingBack, float3 radiance)
+{
+    return surface.scattered / Pi * through * facingBack * radiance;
+}
+
 float sampleCascade(int cascade, float3 world, float3 normal, float facingLight)
 {
     // Moved off the surface by a pixel or so of this cascade's map, more at a glancing angle: nothing shadows itself.
@@ -196,16 +296,18 @@ float3 mapped(float3 normal, float3 world, float2 uv, float3 texel)
     float3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
     float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
     if (longest < 1e-20) return normal;
-    float scale = rsqrt(longest);
+    // Signed so the tangent runs the way u grows: across a pixel y runs down in Vulkan, which turns the frame over.
+    float scale = rsqrt(longest) * (dot(normal, cross(dp1, dp2)) < 0.0 ? -1.0 : 1.0);
     return normalize(tangent * scale * texel.x + bitangent * scale * texel.y + normal * texel.z);
 }
 
 [shader("fragment")]
 Output fragment(RasterInfo raster)
 {
-    float4 base = albedoMap.Sample(raster.uv);
+    const Instance draw = instances[raster.instance];
+    float4 base = pictureOf(draw.albedoMap, textureSampler, raster.uv);
     if (draw.alphaCutoff > 0.0 && base.a < draw.alphaCutoff) discard;
-    float4 material = roughnessMap.Sample(raster.uv);
+    float4 material = pictureOf(draw.roughnessMap, textureSampler, raster.uv);
     float3 albedo = pow(max(draw.albedo, 0.0), 2.2) * pow(base.rgb, 2.2);
     float roughness = saturate(draw.roughness * material.g);
     float3 world = raster.worldPosition;
@@ -214,7 +316,7 @@ Output fragment(RasterInfo raster)
     surface.normal = normalize(raster.normal);
     surface.toEye = normalize(camera.position - world);
     if (dot(surface.normal, surface.toEye) < 0.0) surface.normal = -surface.normal;    // seen from behind, it faces the eye
-    float3 texel = normalMap.Sample(raster.uv).xyz;
+    float3 texel = pictureOf(draw.normalMap, textureSampler, raster.uv).xyz;
     if (any(texel < 0.99)) surface.normal = mapped(surface.normal, world, raster.uv, normalize(texel * 2.0 - 1.0));   // (white: it has none)
     surface.metallic = saturate(draw.metallic * material.b);
     surface.alpha = max(roughness * roughness, 0.0001);
@@ -231,6 +333,8 @@ Output fragment(RasterInfo raster)
     uint3 cluster = min(uint3(uint2(raster.position.xy / camera.screenSize * float2(camera.gridSize.xy)), uint(max(slice, 0.0))), camera.gridSize - 1);
     uint2 run = lightGrid[cluster.x + cluster.y * camera.gridSize.x + cluster.z * camera.gridSize.x * camera.gridSize.y];
 
+    // A thin thing lit from behind lets some of it through: its back's light, scattered out of its front.
+    const float through = saturate(draw.translucency);
     float3 lit = 0.0;
     for (uint i = run.x; i < run.x + run.y; ++i) {
         uint index = lightIndices[i];
@@ -242,20 +346,25 @@ Output fragment(RasterInfo raster)
         float falloff = (1.0 - x * x) * (1.0 - x * x);
         float3 toLight = offset / max(distance, 1e-4);
         float facing = dot(surface.normal, toLight);
-        if (facing <= 0.0) continue;
-        lit += directLighting(surface, toLight, pow(max(light.color, 0.0), 2.2) * light.intensity * falloff) * lampShadow(index, light.position, world, surface.normal, facing);
+        float3 radiance = pow(max(light.color, 0.0), 2.2) * light.intensity * falloff;
+        if (facing > 0.0) lit += directLighting(surface, toLight, radiance) * lampShadow(index, light.position, world, surface.normal, facing);
+        else if (through > 0.0) lit += throughFrom(surface, through, -facing, radiance) * lampShadow(index, light.position, world, -surface.normal, -facing);
     }
 
     if (sun.present > 0.0) {
         float3 toSun = -sun.direction;
         float facing = dot(surface.normal, toSun);
         if (facing > 0.0) lit += directLighting(surface, toSun, sun.color * sunShadow(world, surface.normal, facing, depth));
+        else if (through > 0.0) lit += throughFrom(surface, through, -facing, sun.color * sunShadow(world, -surface.normal, -facing, depth));
     }
 
     // The sky's light from all round, scattered; and what of the sky it mirrors, the less the rougher it is.
     lit += skyLight(sun, surface.normal) * surface.scattered;
+    lit += skyLight(sun, -surface.normal) * surface.scattered * through;
     lit += skyLight(sun, reflect(-surface.toEye, surface.normal)) * fresnel(surface.facingEye, surface.straightOn) * (1.0 - roughness);
-    lit += draw.emission * pow(emissiveMap.Sample(raster.uv).rgb, 2.2);
+    const float3 emitted = draw.emission * pow(pictureOf(draw.emissiveMap, textureSampler, raster.uv).rgb, 2.2);
+    lit += emitted;
+    if (koralDebugShowing()) lit = koralDebugColor(KoralSurface(albedo, surface.normal, roughness, surface.metallic, emitted));
 
     Output output;
     // How opaque it is: what the blended pipeline draws it over the picture by. What it mirrors is on it however

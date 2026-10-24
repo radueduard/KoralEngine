@@ -37,11 +37,12 @@ the display's rate, and `--frames N` to stop after so many.
 | **Scene tree** | The entities, as a tree, and a button that makes one. Each is shown by what it is — a mesh, a light, a camera, a script's — and one with nothing of its own but what is under it by a group's mark. Right-clicked, an entity has a short menu: Rename, Duplicate, Delete; **Create under it ▸**, the objects there are, a submenu each for meshes, lights and cameras; how it is seen (framed, shown or hidden, moved to the top); and **Prefab ▸**, made one, or of an instance its prefab edited, applied, reverted or let go. Right-clicked where no entity is, it offers what can be made at the top. A submenu opens beside its menu as the pointer comes onto its line. |
 | **Inspector** | Whatever was picked last: a node's inputs, or an entity's components. |
 | **Problems** | Every node that failed and every pass that passed an entity by, with the reason. Click one to pick its node. |
+| **Frame** | The frame as it runs: the graph's passes in the order the frame graph schedules them — each with its dependency level, `async` when it is on the async compute queue, its GPU time as a bar against the longest's, and what it reads and writes, by the node that made each — then the passes left out, and why (`Runtime::Frame`). Read only: press one to go to its node. It is not a timeline of when each pass ran: the framework does not yet record when a pass starts. |
 
 The menus:
 
-- **File** makes a project, opens one, starts the standard scene over (**New scene**), reads the scene
-  again from its file (**Revert to saved**) and saves it (Control+S).
+- **File** makes a project, opens one, starts the standard scene over (**New scene**, or **New lit scene** for
+  the larger lit one), reads the scene again from its file (**Revert to saved**) and saves it (Control+S).
 - **Edit** duplicates, moves to the top, saves as an object, or deletes what is picked.
 - **Create** makes an entity from one of the project's objects, at the top or under what is picked.
 - **View** frames what is picked, looks through the scene's camera, and chooses the gizmo.
@@ -56,11 +57,13 @@ The menus:
   on such a project. A runner that stops with an error before it gets going (no JDK, no runner built) is said so
   there, and the project opens without its scripts. **Project, Open with its scripts** does the same by hand.
 - **Graph** and **Entity** add a node and an entity.
+- **Settings, Theme** draws the editor in Koral's design, Material's, Cupertino's or Windows', dark or light
+  (`kui::Theme::Of`). The choice is this user's, kept in `~/.config/koral-engine/theme` for the next run.
 
 ### Passes
 
 The graph is split into passes, listed in the **Passes** panel in the order they are drawn, each
-with how many nodes it has (and how many are wrong, in red). Press one to see its page: the nodes it makes
+with how many nodes it has (and how many are wrong). Its pills are all one grey: a pass that takes more of the frame says its time brighter, never in a colour of its own. Press one to see its page: the nodes it makes
 and runs, and nothing of any other pass. **Find a node**, at the top, goes to the first node whose name or
 kind has what is typed; Enter again goes on to the next.
 
@@ -68,6 +71,14 @@ The passes are under a tab for each rate they run at (see [kgraph: How often a p
 **Every frame**; **Fixed step**, the passes run on the fixed step while the scene plays; and **Setup**, the passes made
 once. Setup's run first, then the fixed step's, then every frame's, each in their own order. The tab follows the page
 shown: going to a node of a setup page turns to Setup.
+
+Only the pages of what the graph's choices choose are listed (`Session::PagesNotChosen`): a page each of whose passes
+idles — or is switched off — by a choice's value, a Switch's driver compared with an option (`NotEqual`, `Equal`,
+through `Max` or `Or`), is left out, and so is a page of no passes that only such pages use. With Forward+ drawing
+vertices, the meshlets' and the rays' pages are not listed; tracing rays, the vertices' and the meshlets' are not, nor
+the shadow maps rays need not. A pass idle for a reason of its own (a shadow drawn only when it changed) keeps its page.
+Each page keeps its number among them all; the line at the end says how many are left out, and **Show them** lists
+them too, dimmed. The page shown stays listed, dimmed, when another choice leaves it out.
 
 A pass node's inspector shows what it **takes**, followed as it runs: its GPU time and the CPU's recording it.
 
@@ -130,9 +141,17 @@ its inputs. Until something runs the script, what it makes is made with nothing 
 
 ### The standard scene
 
-**File, New scene** replaces the scene with one that draws meshes lit under a sky. It writes three shaders
-into the project's `shaders` (`engineCommon`, `lit`, `sky`; one already there is left alone) and
-builds the graph that uses them out of ordinary nodes, to be changed like any other:
+**File, New scene** replaces the scene with one that draws each mesh in a colour of its own, lit by the sun. It
+writes one shader into the project's `shaders` (`default`; one already there is left alone) and builds the graph
+that uses it out of ordinary nodes, to be changed like any other:
+
+| Pass | What is on its page |
+|---|---|
+| `Draw` | The Screen; `color` and `depth` images the size of it, and `target`, their Framebuffer; the first Camera's main View and main Perspective, with its place, as `camera data` (the shader's `camera`); a ForEach of the DirectionalLight as `light data` (its `light`); and `default`, the pipeline that draws meshes. `drawn`, a ForEach of every entity with a Mesh and the pipeline's component, is wired to the Draw: each entity's mesh, its matrix, and the component's `color`. |
+| `Blit` | The Blit of `color` to the Screen. |
+
+**File, New lit scene** is the larger one to start from instead: meshes lit by every light, under a sky. It writes
+three shaders (`engineCommon`, `lit`, `sky`) and builds:
 
 | Pass | What is on its page |
 |---|---|
@@ -141,16 +160,21 @@ builds the graph that uses them out of ordinary nodes, to be changed like any ot
 | `sky` | The sky, drawn where nothing nearer was. |
 | `show` | The Blit of `color` to the Screen. |
 
+The project's objects name the standard graph's `default` component: in a lit scene, a mesh made from one is
+given `lit` by hand (or a material dropped on it).
+
 Nothing of it is the editor's. Which entity is under the pointer, the line round the one that is picked, and the
 gizmo and the light and camera shapes are made by passes of the editor's own (`keditor::Overlay`), run beside the
 scene's whatever its graph is: from every entity with a Mesh, as the editor's view sees it, into a picture laid
 over the Scene panel. So any scene is picked from and outlined, and a project that is run has none of it.
 
 Each pass imports what it uses of the ones before it. To send something else to the shaders — a script's
-value, another entity's place — wire it into `frame data` as another field and declare it in the block.
+value, another entity's place — declare it in the shader's block and wire it into its buffer (`camera data`,
+`light data`; the lit graph's `frame data`) as another field.
 
-It also makes a sky, a camera, a sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`
-(`<keditor/starter.h>`) do the same from code.
+The standard scene also makes a camera, a sun, a sphere and a cylinder under it; the lit one a sky, a camera, a
+sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`, and `AddLitGraph` and `AddLitScene`
+(`<keditor/starter.h>`), do the same from code.
 
 ### The scene view
 
@@ -159,6 +183,28 @@ middle-drag moves it, the wheel zooms, and **Frame** points it at what is picked
 the scene's camera instead. Each entity with a field of view (a Camera) is drawn as the pyramid it sees through,
 and a picked light as its reach — a spot by its range and cone, a point light by its range, a light from far away
 by the way it shines: by what its component holds, as a View node goes, not by its name.
+
+**How the scene is shown** is the toolbar's list (the layers button, named for what it shows), the Scene panel's own —
+the Game panel, and the project when it is run, show the scene lit:
+
+- **Lit**: as its graph draws it.
+- **Material** — Unlit (albedo), Normals, Roughness, Metallic, Emissive, Occlusion: what each shader that imports
+  `koral_debug` shows of its material in place of its lit colour. The scene's runtime builds those pipelines with the
+  specialization constant `koralDebugView` set to the channel; a pass after them (a tone mapping, a bloom) that
+  imports it too leaves the picture as it is. A pipeline whose shaders do not import it is drawn lit, and the list
+  says which. The standard and lit graphs' shaders, the engine's Tonemap and Bloom, and Forward+'s import it.
+- **Editor** — Wireframe, Clay, Normals (geometry), UV checker, Overdraw, Entities: every entity with a Mesh, drawn by
+  the editor's own graph (`packages/koral/editor/scene-view.kgraph`, its shaders `koral_editor_views` and
+  `koral_editor_grid`) whatever the scene's graph and materials are. Each is a DebugView of that graph; a project's
+  `editor/*.kgraph` are run beside it, and their DebugViews listed after its own. A file written while the editor
+  is open is read again.
+- **Scene graph**: each DebugView node of the scene's graph — the Forward+ clusters' heat — its picture shown in
+  the scene's place. Its passes, wired from its `shown`, run only then, and never in the game.
+
+**The grid** (the grid button; its settings beside it) is a plane through the origin — the floor, XY or YZ — its
+lines a cell apart and stronger every so many, its axes in their colours, fading out so far off and hidden behind
+what is in front of it. It is drawn by the editor's graph over whatever is shown, and kept for this user in
+`~/.config/koral-engine/scene-grid`.
 
 A click on the picture picks the entity drawn there, through the graph's Pick node; what is picked is
 outlined and gets a gizmo (**Move**, **Rotate**, **Scale**, or **Select** for none) that changes its
@@ -174,7 +220,8 @@ with nothing picked, no outline and no gizmo, and a click in it picks nothing. A
 FlyCamera, `input` in a Kotlin script) reads the Game panel's keys and mouse: while the pointer is over it, or it
 was the last thing clicked. It is a tab beside the Scene panel to begin with; dragged to a part of the middle of
 its own, the two are seen side by side. While it is not seen, nothing of it is drawn. A buffer a graphics script
-writes into is the same buffer in both views: what it writes is seen in each. **Pause** holds it. **Step** (beside Pause) takes one fixed step and pauses: the scripts' `fixedUpdate` and the graph's fixed
+writes into is the same buffer in both views: what it writes is seen in each. Play, Pause, Step and Stop are in the
+middle of the window's title bar, on the theme's colour while it plays and a dimmer one while it is paused. **Pause** holds it. **Step** (beside Pause) takes one fixed step and pauses: the scripts' `fixedUpdate` and the graph's fixed
 pages, once — starting play first when it was not playing. **Stop** puts every entity back as it was when Play was
 pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
 plays.
@@ -190,7 +237,7 @@ An object is an entity as a file: `{ "template": "Lamp", "name": "Lamp", "positi
 "components": { "PointLight": { "range": 5 } }, "children": [...] }`. **Edit, Save as object** writes what
 is picked as one, and a new project starts with a cube, a sphere, the other default meshes, a planet with a
 moon, a camera, a fly camera (a Camera with the engine's FlyCamera: right button, the mouse and W A S D), the
-three lights and a sky. The mesh objects name the standard graph's `lit` component. The engine's own objects are
+three lights and a sky. The mesh objects name the standard graph's `default` component. The engine's own objects are
 offered in any project, one made before an object was among them included; a file of the project's of the same
 name is what it says instead.
 
@@ -203,8 +250,9 @@ onto an entity's Mesh as any mesh is. Their inspector chooses their **tangents**
 four numbers (w the bitangent's side), a `TANGENT` and a `BITANGENT` of three, as a model's meshes have them, or
 neither — saved with the scene's graph, and undone as any change (see [Default meshes](kgraph.md#default-meshes)). **Materials/Defaults** holds materials (`material:Gold`, `material:Red plastic`,
 plastics, metals, wood, rubber, two that glow): dropped on an entity in the scene tree or the inspector, what draws it
-(`lit`, or any component with an `albedo`) is given its albedo, metallic, roughness and emission, and its pictures are
-set white; an entity drawn by nothing is given `lit` first. The table is `Session::DefaultMaterials()`.
+(a component with an `albedo`, or a pipeline's with a `color`, as the standard graph's `default` has) is given its
+albedo, metallic, roughness and emission — as many of them as it has — and its pictures are set white; an entity
+drawn by nothing is given one first. The table is `Session::DefaultMaterials()`.
 
 ### Prefabs
 
@@ -335,8 +383,10 @@ in order, each as wide as its bytes and coloured by what it is (POSITION, NORMAL
 vertex — or, for a buffer that goes per instance, an instance — takes of it.
 
 **Add a node** (Control+Space, right-click the graph, or a wire let go over nothing) is in three columns: the kinds of
-node — Components, Scene, Values, Math, Vectors, Logic, Resources, Pipelines, Passes, Flow — each with its colour
-and how many it has; the nodes of the kind picked, each with what it does in a line, or, as something is typed, what
+node, each with its colour and how many it has, in three sections — **Functions** first, each under what it is for
+(Physics, Sort and scan, Culling; on a page of the fixed step, Physics first), then **Scene and values** (Components,
+Scene, Values, Math, Vectors, Cameras, Logic, Flow), then **Vulkan**: Resources, Pipelines and Passes, what is made on
+the device and what runs; the nodes of the kind picked, each with what it does in a line, or, as something is typed, what
 it finds among every kind, best first, and the graph's own nodes it names; and the node pointed at, drawn as it will
 be on the graph — its controls as they start — with what it does, takes and gives. Enter adds the first found; a
 click adds the one clicked.
@@ -351,7 +401,18 @@ output fits. A `vec3` or `vec4` whose name says it is a colour (`color`, `tint`,
 picker. A number is kept within what its field says (a script's `[Range]`, `[Min]`; an unsigned one at 0 or more),
 dragged or typed, and dragged by so much of what it is where its script says `[Logarithmic]`: a light's intensity and
 range, a camera's near and far. The transform's rotation goes round from −180 to 180 degrees; its scale is dragged by
-so much of its size. The tick beside a component's name switches it off without removing it. **Add** lists the
+so much of its size. The tick beside a component's name switches it off without removing it.
+
+A pipeline's component is a **material**. What two or more of an entity's materials have alike — a field of the same
+name and type, the forward pass's `albedo` and the ray tracer's — is a card of its own, **Shared material**, framed
+apart from the components: the pipelines it is of, each a chip to go to it (● a pass running now uses it, ○ none
+does), then each field once. Read from a material in use, it is set in every one of them whichever renderer is
+chosen; one set apart since — by a script, an undo — gets a **differs** pill at once, and pressed, every one is as the
+one shown. A texture given to the entity (dropped on it from the Assets panel) goes into each material's field of
+that name too. Under the card, each material has what is its own: *pipeline's own · 1 field, the rest shared above*.
+A material no pass the choices leave running reads (`Session::MaterialInUse`: none runs its pipeline, nor reads its
+Draw's buffer of instances — the meshlets read the forward Draw's) is another renderer's: dimmed, shut unless
+opened, and what is its own is not set while so. **Add** lists the
 components the entity doesn't have yet: each pipeline's (what its draws take from each entity), `Mesh`, and the
 scene's tags. **New tag** makes a tag and gives it to the entity.
 
@@ -395,8 +456,7 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
   entity.
 - **Entities aren't reordered among their siblings** by dragging: a drop puts one last under what it is
   dropped on. An entity is renamed in the inspector, not in the scene tree.
-- **A component the shader makes starts at zero**: a new `lit` is black and polished until its fields are
-  set. The objects set them. Objects have no icons.
+- **A component the shader makes starts at zero**: a new `default` is black until its colour is set. The objects set them. Objects have no icons.
 - **The scene view's toolbar is words**, and a menu line that is on is marked with a `*`.
 - `Project, Run` finds `koral-play` beside the editor on Linux only. Elsewhere it has to be on the path.
 
@@ -504,15 +564,35 @@ while the scene plays: in `koral-play`, and in the editor after Run.
 
 `koral-editor` and `koral-play` given no project open the one this user chose with **Project, Open at startup**
 (kept in `~/.config/koral-engine/startup-project`, or under `$XDG_CONFIG_HOME`), and otherwise the engine's own:
-Forward+, made with nodes (`projects/forward-plus`, see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
+Forward+, made with nodes (`forward-plus` in the projects folder, `KORAL_ENGINE_PROJECTS` — `/mnt/w/EngineProjects` unless the build says otherwise; see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
 validation layer, which they otherwise leave out: it costs a fifth of a frame and more in a scene of many draws.
 `koral-play --frames N --timings` says what the frames took and what each pass of them did.
+
+## How abstract a node is
+
+A node's card shows its level (kgraph.md, *Node types*) as five steps at its title bar's end, as many lit as its level
+and one — a number lights one, a Function's call all five — and says it in words under its title (`Draw · command`).
+A card made of other nodes (a Function's call) is a stack of cards. Its colour stays its category's: what it is for.
+
+## The Pass flow panel
+
+A tab beside the Graph: the pages as cards, left to right in the order they run, each wired from the pages whose work
+it uses — the last page before it to write what it reads, not the one that made it (what a page reads of the frame
+before, a history, is wired too, and has no say in where either goes). Each page is in the column, between those it
+takes from and those that take from it, that keeps its wires shortest — a wire from a page that feeds many counting
+the less — and at the height of what it is wired to, above or below, none over another. The branches of a Switch are
+bands, framed and named for the choice (`renderer = 1`): a page is of a branch when its passes idle unless the choice
+is that option (or are on only then), or when only that option is reached from it; what the branches share, in their
+columns, is above them. A Switch that
+chooses between branches is a card of its own, with a list to choose by; a page whose passes did not run, or idle
+(a branch not chosen), is dimmed. Its cards show their cost on the GPU, and — a page being made of nodes — a stack,
+and the steps of its most abstract node. Pressed twice, a page is shown in the Graph. Nothing else is edited there.
 
 ## The Scene panel
 
 The scene fills its panel. Its title bar has, at its end, whose eyes it is seen through (the editor's own view,
-or the scene's camera) and play, pause and stop; the Game panel's has play, pause and stop. Over the picture, in a corner, are the gizmo's tools — select
-only, move, rotate, scale — framing what is picked, and how many frames a second.
+or the scene's camera); play, pause, a step and stop are the window's, in its title bar. Over the picture, in a corner, are the gizmo's tools — select
+only, move, rotate, scale — framing what is picked, how the scene is shown, the grid, and how many frames a second.
 
 **File, New project** makes a project with nothing in it. Only a scene that was in no project yet — made in an
 editor opened on none — goes into the one that is made: that is where it is saved.
@@ -587,6 +667,11 @@ or the environment variable of that name — which is made if it is not there.
 ## The graph, read at a glance
 
 - A node of a loop says how many turns it is there for (`cast   x4`), and a Repeat how many it has.
+- **What it costs is on it.** A pass node says its GPU time and its share of the frame's, followed as it runs: faint
+  for what hardly counts, amber from 5% of the frame, red from 15%. A Function's call says what every pass inside it
+  adds up to, and a node of a loop what its turns do (`keditor::CostOf`). A device that can't time the GPU says the
+  CPU's recording instead. Each page in the list of passes says what its passes take of the GPU together, coloured the
+  same way.
 - A port is called what the shader or the component calls it — `position`, not `field.position`; what kind of
   input it is is in what the pointer over it says.
 - A node that makes an image or a buffer has an **eye** on it: on, what it holds is shown on the node. Any number
@@ -633,15 +718,26 @@ that again after the panels have been moved.
   and otherwise looks at what it holds.
 - **A wire let go over nothing** asks what it should go to: the list of nodes, with only the kinds that have
   somewhere for it. The one chosen is made there and wired — to the port of the wire's own kind, when it has one.
+- **A wire let go on a node** asks which of the node's ports it goes to: from an output, every input of it that
+  takes what the wire carries — shown on the node or not, set there or in the inspector — and from an input, every
+  output it has, what it gives of itself (`size`, `extent`, `bytes`) among them. The first that fits is ready for
+  Enter; typing narrows the list. One wired already says what from, and chosen, the new wire takes its place. Under
+  them, greyed, are the ports that can't take it, each with why. `keditor::PortChoices` is the same, for code.
 - **Copy, paste and duplicate** keep the wires among what is copied, and the wires from the rest of the graph.
   A copy has a name of its own (`draw forward 2`); pasted, it goes on the page that is shown.
 - **Arrange this page** (the graph's menu, or Graph in the menu bar) puts the page's nodes in columns, each after
   what it is wired from and as near what it is wired to as that leaves it, and down each column in the order that
-  crosses the fewest wires it can find: each column ordered by where what it is wired to is on either side — a wire
-  across several columns counted in each it passes — sweep after sweep, then nodes side by side swapped while that
-  crosses fewer, and all of it begun again from other orders, the best kept. It comes out shaped nearly as the panel
-  is: a column taller than that leaves is wrapped into more beside it, at the height, of those that shape it so, whose
-  wires cross least; and nodes wired to nothing go in rows underneath, as wide as the rest. Each loop's frame is a block of its own: its
+  crosses the fewest wires it can find: each column ordered by where what it is wired to is on either side, at the
+  ports it is wired at — a wire across several columns counted in each it passes — sweep after sweep, then nodes side
+  by side swapped while that crosses fewer, and all of it begun again from other orders, the best kept. Then each node
+  is put level with what it is wired to, its port with the other's, as near as the rest of its column leaves room for
+  (the nearest in order there can be, by least squares), so that wires run straight where they can; a wire that runs
+  past a column has a lane kept clear through it, and is held straighter than the rest, so that it goes round what it
+  passes. Columns are as far apart as the wires between them are steep. Each card is taken at the size it came out on
+  the page, and one that shows a picture is that big before its picture comes. Kept level, the page stays so unless
+  that is far from the panel's shape — about twice as wide or as tall as it could be — or crosses more wires than
+  stacking would: then a column taller than the panel leaves is wrapped into more beside it, at the height, of those
+  that shape it so, whose wires cross least. Nodes wired to nothing go in rows underneath, as wide as the rest. Each loop's frame is a block of its own: its
   nodes are put in order by themselves, and the block among the rest as one node, so that a frame holds its loop's nodes
   and nothing else, and no two loops' frames are over each other. A node is of one loop: one that runs once a turn of a
   Repeat and once an element of a ForEach (a shadow's draw) is in the Repeat's. Ctrl+Z puts them back.
@@ -662,6 +758,10 @@ that again after the panels have been moved.
 - **Each component is a node.** The list of nodes has, under Components, two for every component the world has —
   the engine's package's Camera and lights, the project's scripts', a pipeline's: `PointLight`, a ForEach of it, and
   `PointLight Buffer`, a BufferBuilder laid out as its element is. A script made with **New script** is one at once.
+- **A Bundle** is many wires as one, by name, drawn in pink. A Bundle node's inspector edits its names a line each,
+  each an input on the node; an Unbundle has an output for each member of what it takes apart. A Bundle let go on a
+  buffer, or on a Draw or a Dispatch, offers first **By name: n of its m members**, which fills every input of the
+  same name.
 - **A BufferBuilder's layout** is edited a line a field: its name, its type, and how many of it (more than one is a
   fixed array). Its fields are ports from the start, as a ShaderBuffer's are.
 - A new node goes where the pointer asked for it, or in the middle of what the graph shows.

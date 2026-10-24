@@ -260,6 +260,61 @@ validation and sync validation. What differs from the plan:
 
 **Gate:** a batched node gives the same picture as unbatched, and 10,000 entities are measurably faster.
 
+### E8: A graph made both to try ideas in and to make them fast
+
+Planned 2026-10-21. The graph is to be friendlier without losing anything Vulkan can do, and to be where a frame is
+made faster as well as where it is first put together. What is decided is in [ADR 0001](adr/0001-graph-projects-the-framework.md):
+the graph shows what `kor::` has, and friendliness comes from Functions that can always be opened. The words are in
+[GLOSSARY.md](../GLOSSARY.md): **Page**, **Pass**, **Function**, **Bundle**, **Frame view**. Each step is usable by itself,
+and they are taken in this order:
+
+1. **A wire let go on a node offers its ports.** From an output, the node's inputs that can take it; from an input, its
+   outputs that can give it. The list includes optional ports not shown, inputs placed in the inspector, and what a
+   node gives (`size`, `extent`, `bytes`). A port that can't take the wire says why on a greyed line. One already wired
+   says what it is wired from, and choosing it replaces that. Typing filters the list. It always opens, with the first
+   port that fits already chosen, and is never wired without asking. `kui::NodeEditor` gains
+   `onWireDroppedOnNode(from, fromOutput, node, at)` (GFX, beside `onWireDropped`), and keditor builds the menu.
+   **Gate:** an image wire let go on a Draw lists its unshown `param.` image ports and wires the one chosen; a wire
+   from a Blit's `source` let go on an Image lists `out` and `size`; covered by keditor tests. **Built** (2026-10-21).
+2. **Cost on the canvas.** A Pass shows its GPU time on a badge, and is tinted by its share of the frame. A page in
+   the list shows its total, and a Function's call shows the sum of the Passes in it (`Runtime::Timings`).
+   **Gate:** forward-plus shows each Pass's cost without opening an inspector. **Built** (2026-10-21).
+3. **The add-node list by intent.** It is ranked by what the wire carries, by the page's rate and by what is near.
+   Functions come first, grouped by what they are for (Shadows, Post, Culling, Physics, Sort and scan), and every
+   builder and command node is under **Vulkan**. Search covers descriptions and tags. **Gate:** "blur" and "shadow"
+   find the Functions that do them. **Built** (2026-10-21): a function's file says its `purpose`, `description` and `tags`; the
+   engine's nine say theirs. No function blurs or shadows yet: that is step 7.
+4. **Async compute as an input.** A Dispatch (and whatever else `kor` lets run there) gets `async`, as it has
+   `enabled`. On a device without a second queue, the node's note says it runs on graphics. **Gate:** a Dispatch set
+   async is scheduled async (`FrameGraph::Schedule`), and saved and loaded so. **Built** (2026-10-21). The `aliasing`
+   switch is not: every resource of a graph is made by its node and imported into the frame graph, and the framework
+   aliases only what it makes itself (`PassBuilder::Create`). Aliasing in the graph waits for **transient** Image and
+   Buffer nodes, made by the frame graph for the frame, which is a later step.
+5. **Bundles.** ForEach, Filter and Entity give `element`, a Bundle of the component's fields and the transform. A
+   **Bundle** node builds one and an **Unbundle** takes one apart, and a Function's output may be one. A Bundle fills the fields it reaches
+   by exact name, and a wire to a single field takes precedence. What doesn't match stays an open port, and the node's
+   note names the unmatched fields on both sides. A Bundle let go on a node offers **By name: n of m fields** first,
+   and on a BufferBuilder or ShaderBuffer, the whole buffer. This lifts the "No node gives a struct" limit in
+   [kgraph.md](kgraph.md#limits). **Gate:** a ForEach of PointLight's `element` wired to a ShaderBuffer fills
+   its fields; a field wired by itself takes precedence; a misspelled field is named on the node. **Built** (2026-10-21).
+6. **The Frame view.** It shows only the Passes, in the order `FrameGraph::Schedule` runs them, grouped by dependency
+   level, a lane for each queue, and a bar as wide as GPU time. Culled and skipped Passes are greyed, with the reason,
+   and each resource is drawn from its first write to its last read, with `Memory()` used and saved by aliasing. It is
+   read-only: clicking goes to the node on its page. It is not a wall-clock GPU timeline: that waits for `kor` to
+   record when each pass starts. **Gate:** forward-plus's Frame view lists every Pass that ran, and only those, in
+   order. **Built** (2026-10-21).
+7. **The engine's first Functions:** Camera (a Bundle out), SunShadows, Bloom and Tonemap, made from
+   forward-plus's graph, their shaders the engine's (`koral_shadow`, `koral_bloom`, `koral_tonemap`). **Gate:**
+   forward-plus rebuilt on them (backed up first, its graph alone migrated, checked with `koral-play`) has under 60
+   nodes at the top, down from 182, and draws the same picture. **Built** (2026-10-21), but for the count: it draws
+   the same picture to the pixel, and has 144 nodes. The gate's 60 was a guess made before the graph was counted: 54
+   of what is left are References, and the pages these four don't touch (occlusion, reflections, sky, light culling,
+   the lamps' shadows, the forward pass) are forward-plus's own. Under 60 takes those as the project's own functions,
+   or a page that brings in what it uses without a node for each.
+
+Alongside them, **Page** replaces "pass" in the editor and the docs (the **Pages** panel, THIS PAGE). `Graph::passes`
+and `PassRate` become `pages` and `PageRate` in one change later, writing `"pages"` and reading `"passes"` as well.
+
 ## First steps
 
 The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. Next is **E7**:

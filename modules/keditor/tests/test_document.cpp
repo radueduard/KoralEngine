@@ -686,6 +686,35 @@ TEST(Arrange, EachLoopIsABlockOfItsOwn) {
           { { "a1", "b1" }, { "b1", "a2" }, { "a2", "b2" } }, false);
 }
 
+// Put in order, each node is level with what it is wired to, port with port: a wire runs straight where it can.
+TEST(Arrange, AWireRunsStraightFromItsPortToTheOther) {
+    const std::vector<keditor::PlacedNode> nodes { { "camera", 0, 0, 160, 80, {}, 0 }, { "draw", 0, 300, 200, 160, {}, 0 }, { "show", 0, 600, 160, 60, {}, 0 } };
+    // Out of the camera's second row, into the draw's fourth; out of the draw's first, into the show's only.
+    const std::vector<keditor::PlacedWire> wires { { "camera", "draw", 60.f, 120.f }, { "draw", "show", 45.f, 30.f } };
+    const auto where = keditor::ArrangeNodes(nodes, wires);
+    EXPECT_NEAR(where.at("camera").second + 60.0, where.at("draw").second + 120.0, 1.0) << "the camera's port level with the draw's";
+    EXPECT_NEAR(where.at("draw").second + 45.0, where.at("show").second + 30.0, 1.0) << "the draw's port level with the show's";
+    EXPECT_LT(where.at("camera").first + 160.0, where.at("draw").first);
+}
+
+// Put in order, a wire that runs past a column has its way kept clear through it: it does not run through the node
+// that is in that column, level with where it goes.
+TEST(Arrange, ALongWireGoesRoundWhatItPasses) {
+    const std::vector<keditor::PlacedNode> nodes { { "a", 0, 0, 160, 100, {}, 0 }, { "b", 0, 0, 160, 100, {}, 0 }, { "c", 0, 0, 160, 140, {}, 0 } };
+    // a into b into c, and a straight into c — each wire from a's middle, into c at two rows near one another.
+    const std::vector<keditor::PlacedWire> wires { { "a", "b", 50.f, 50.f }, { "b", "c", 50.f, 80.f }, { "a", "c", 50.f, 50.f } };
+    const auto where = keditor::ArrangeNodes(nodes, wires);
+    const auto [ax, ay] = where.at("a");
+    const auto [bx, by] = where.at("b");
+    const auto [cx, cy] = where.at("c");
+    ASSERT_LT(ax, bx);
+    ASSERT_LT(bx, cx);
+    // Where the straight line from a's port to c's is, across b's column.
+    const auto lineAt = [&](const double x) { return ay + 50.0 + (cy + 50.0 - ay - 50.0) * (x - ax - 160.0) / (cx - ax - 160.0); };
+    for (const double x : { bx, bx + 80.0, bx + 160.0 })
+        EXPECT_TRUE(lineAt(x) < by || lineAt(x) > by + 100.0) << "the wire from a to c runs clear of b, at " << x;
+}
+
 // Put in order, a page's wires cross as few times as they can: each column is ordered by what it is wired to on either
 // side, its first one too — not only by what comes before it.
 TEST(Arrange, WiresCrossAsFewTimesAsTheyCan) {
@@ -733,4 +762,158 @@ TEST(Arrange, WiresCrossAsFewTimesAsTheyCan) {
                           { "m", 300, 0, 160, 80, {}, 0 }, { "n", 300, 100, 160, 80, {}, 0 },
                           { "z", 600, 0, 160, 80, {}, 0 }, { "w", 600, 100, 160, 80, {}, 0 } },
                         { { "a", "n" }, { "n", "w" }, { "b", "m" }, { "m", "z" }, { "b", "w" } }), 0);
+}
+
+// A wire let go on a node is offered every port of it that would take it — shown on the node or not — and, greyed, the
+// rest with why; the other way, from an input, the node's outputs, what it gives of itself among them.
+TEST_F(DocumentTest, AWireLetGoOnANodeIsOfferedItsPorts) {
+    scene::MakeProject("port choices");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const std::string picture = doc.AddNode("Image", 0, 0, "picture");
+    const std::string other = doc.AddNode("Image", 0, 200, "other");
+    const std::string blit = doc.AddNode("Blit", 300, 0, "blit");
+    Frame();
+
+    const auto choices = keditor::PortChoices(doc, picture, "out", true, blit);
+    const auto find = [&](const std::string& port) { return std::ranges::find(choices, port, &keditor::PortChoice::port); };
+    ASSERT_NE(find("source"), choices.end());
+    EXPECT_TRUE(find("source")->fits);
+    ASSERT_NE(find("sourceMip"), choices.end()) << "an input not shown on the node is offered too";
+    EXPECT_FALSE(find("sourceMip")->fits);
+    EXPECT_NE(find("sourceMip")->why.find("value"), std::string::npos) << find("sourceMip")->why;
+    EXPECT_TRUE(choices.front().fits) << "what fits comes first";
+    EXPECT_TRUE(find("source")->wiredFrom.empty());
+
+    ASSERT_TRUE(doc.Connect(other, "out", blit, "source"));
+    Frame();
+    const auto again = keditor::PortChoices(doc, picture, "out", true, blit);
+    const auto source = std::ranges::find(again, std::string("source"), &keditor::PortChoice::port);
+    ASSERT_NE(source, again.end());
+    EXPECT_EQ(source->wiredFrom, "out of other") << "one wired says from what; chosen, the new wire takes its place";
+
+    // From the Blit's source, onto an Image: its outputs, `out` fitting and its size not.
+    const auto outputs = keditor::PortChoices(doc, blit, "source", false, picture);
+    const auto out = std::ranges::find(outputs, std::string("out"), &keditor::PortChoice::port);
+    const auto size = std::ranges::find(outputs, std::string("size"), &keditor::PortChoice::port);
+    ASSERT_NE(out, outputs.end());
+    EXPECT_TRUE(out->fits);
+    ASSERT_NE(size, outputs.end()) << "what a node gives of itself is offered";
+    EXPECT_FALSE(size->fits);
+
+    EXPECT_TRUE(keditor::PortChoices(doc, blit, "source", false, blit).empty()) << "none onto its own node";
+}
+
+// What a node costs: a pass's own; a Function's call's and a loop's every pass inside added up; nothing for the rest.
+TEST(Cost, ACallOrALoopIsWhatItsPassesAddUpTo) {
+    std::map<std::string, kgraph::Runtime::Timing, std::less<>> timings;
+    timings["blit"] = { .gpuMs = 0.5, .gpuMeasured = true, .runs = 1 };
+    timings["bloom/down"] = { .gpuMs = 1.0, .gpuMeasured = true, .runs = 1 };
+    timings["bloom/up"] = { .gpuMs = 2.0, .gpuMeasured = true, .runs = 1 };
+    timings["bloomy"] = { .gpuMs = 8.0, .gpuMeasured = true, .runs = 1 };
+    timings["down [0]"] = { .gpuMs = 0.25, .gpuMeasured = true, .runs = 1 };
+    timings["down [1]"] = { .gpuMs = 0.25, .gpuMeasured = true, .runs = 1 };
+    ASSERT_TRUE(keditor::CostOf(timings, "blit"));
+    EXPECT_DOUBLE_EQ(keditor::CostOf(timings, "blit")->gpuMs, 0.5);
+    ASSERT_TRUE(keditor::CostOf(timings, "bloom"));
+    EXPECT_DOUBLE_EQ(keditor::CostOf(timings, "bloom")->gpuMs, 3.0) << "a call's passes, and not another node whose name starts the same";
+    EXPECT_EQ(keditor::CostOf(timings, "bloom")->runs, 2u);
+    EXPECT_DOUBLE_EQ(keditor::CostOf(timings, "down")->gpuMs, 0.5) << "a loop's turns";
+    EXPECT_FALSE(keditor::CostOf(timings, "image"));
+}
+
+// The list of nodes: the functions first, each under what it is for and found by its tags; then the scene's and
+// values' nodes; then Vulkan's own.
+TEST(NodeList, FunctionsComeFirstUnderWhatTheyAreForAndVulkansOwnLast) {
+    kgraph::Preset blur { .name = "GaussianBlur", .type = "Function", .doc = "Blurs a picture.", .group = "Post", .keywords = "blur soften gaussian" };
+    blur.inputs = { { "function", kgraph::Value("GaussianBlur") } };
+    const auto found = keditor::FindNodeTypes("soften", { blur });
+    ASSERT_FALSE(found.empty()) << "found by a tag";
+    EXPECT_EQ(found.front()->name, "GaussianBlur");
+    EXPECT_EQ(found.front()->category, "Post");
+
+    const std::map<std::string, std::size_t> counts { { "Passes", 3 }, { "Math", 2 }, { "Post", 1 }, { "Physics", 2 }, { "Functions", 1 }, { "Resources", 4 } };
+    const std::vector<std::string> sections = keditor::NodeListSections(counts);
+    const std::vector<std::string> expected { "#Functions", "Physics", "Post", "Functions", "#Scene and values", "Math", "#Vulkan", "Resources", "Passes" };
+    EXPECT_EQ(sections, expected);
+    const auto fixed = keditor::NodeListSections({ { "Post", 1 }, { "Physics", 1 } }, kgraph::PassRate::eFixed);
+    ASSERT_GE(fixed.size(), 2u);
+    EXPECT_EQ(fixed[1], "Physics") << "on the fixed step, what simulates first";
+    EXPECT_EQ(keditor::NodeListSections({ { "Math", 1 } }).front(), "#Scene and values") << "a heading only over something";
+}
+
+// What a function is for is in its file, beside its graph: the engine's are offered under it, with what they do.
+TEST_F(DocumentTest, AnEngineFunctionSaysWhatItIsFor) {
+    scene::MakeProject("function purposes");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const keditor::FunctionAbout about = doc.AboutFunction("XpbdStep");
+    EXPECT_EQ(about.purpose, "Physics");
+    EXPECT_FALSE(about.description.empty());
+    EXPECT_TRUE(std::ranges::contains(about.tags, std::string("rigid body")));
+    const auto presets = doc.Presets();
+    const auto call = std::ranges::find(presets, std::string("XpbdStep"), &kgraph::Preset::name);
+    ASSERT_NE(call, presets.end());
+    EXPECT_EQ(call->group, "Physics");
+    const auto found = keditor::FindNodeTypes("prefix sum", presets);
+    ASSERT_FALSE(found.empty());
+    EXPECT_EQ(found.front()->name, "Scan") << "found by what it does, not only its name";
+}
+
+// A Bundle let go on a buffer is offered first as what it fills by name, with how many of its members match.
+TEST_F(DocumentTest, ABundleLetGoOnABufferFillsItByName) {
+    scene::MakeProject("bundle choices");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const std::string lamps = doc.AddNode("ForEach", 0, 0, "lamps");
+    ASSERT_TRUE(doc.SetInput(lamps, "component", kgraph::Value("PointLight")));
+    const std::string data = doc.AddNode("BufferBuilder", 300, 0, "lamp data");
+    ASSERT_TRUE(doc.SetInput(data, "layout", kgraph::Value(kgraph::Value::List {
+        kgraph::Value::Members { { "name", "color" }, { "type", "eVec3" } }, kgraph::Value::Members { { "name", "range" }, { "type", "eFloat" } },
+        kgraph::Value::Members { { "name", "glow" }, { "type", "eFloat" } } })));
+    Frame();
+
+    const auto choices = keditor::PortChoices(doc, lamps, "element", true, data);
+    ASSERT_FALSE(choices.empty());
+    EXPECT_EQ(choices.front().port, "fields");
+    EXPECT_TRUE(choices.front().byName);
+    EXPECT_NE(choices.front().label.find("By name: 2 of"), std::string::npos) << choices.front().label;
+    EXPECT_TRUE(std::ranges::none_of(choices, [](const keditor::PortChoice& c) { return c.fits && c.port == "field.color"; })) << "a Bundle goes only where one is taken";
+}
+
+// A call opened and kept is given what it was given, at every port: not only the first of its function's inputs.
+TEST_F(DocumentTest, AFunctionOpenedAndKeptLeavesItsCallWiredAsItWas) {
+    using kgraph::Value;
+    const keditor::Project project = scene::MakeProject("functions-kept");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    doc.SetAssetDirectory(project.directory / "assets");
+    doc.AddNode("Number", 0, 0, "n");
+    doc.SetInput("n", "value", 2);
+    doc.AddNode("Number", 0, 100, "m");
+    doc.SetInput("m", "value", 5);
+    doc.AddNode("Multiply", 300, 0, "times");
+    ASSERT_TRUE(doc.Connect("n", "out", "times", "a"));
+    ASSERT_TRUE(doc.Connect("m", "out", "times", "b"));
+    doc.AddNode("Add", 600, 0, "plus");
+    ASSERT_TRUE(doc.Connect("times", "out", "plus", "a"));
+    doc.SetInput("plus", "b", 1);
+    doc.AddNode("Add", 900, 0, "show");
+    ASSERT_TRUE(doc.Connect("plus", "out", "show", "a"));
+    std::string error;
+    const std::string call = doc.MakeFunction({ "times", "plus" }, "Affine", &error);
+    ASSERT_FALSE(call.empty()) << error;
+    ASSERT_EQ(doc.Runtime().ValueOf("show"), Value(11));
+    const auto inputs = doc.Graph().Find(call)->inputs;
+    ASSERT_EQ(inputs.size(), 3u) << "function, a, b";
+
+    ASSERT_FALSE(doc.OpenFunction(call, &error).empty()) << error;
+    ASSERT_TRUE(doc.CloseFunction(true, &error)) << error;
+    const auto after = doc.Graph().Find(call)->inputs;
+    EXPECT_EQ(after.size(), inputs.size());
+    for (const auto& [port, input] : inputs) {
+        ASSERT_TRUE(after.contains(port)) << port << " was lost";
+        EXPECT_EQ(after.at(port).link.has_value(), input.link.has_value()) << port;
+    }
+    EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(11));
 }

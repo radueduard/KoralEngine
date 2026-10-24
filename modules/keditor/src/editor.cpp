@@ -278,6 +278,114 @@ namespace keditor
         return static_cast<bool>(out);
     }
 
+    namespace {
+        /** The designs a theme is in, as the theme file and the Settings menu name them. */
+        constexpr std::pair<const char*, kui::ThemeDesign> ThemeDesigns[] { { "koral", kui::ThemeDesign::eKoral }, { "material", kui::ThemeDesign::eMaterial },
+                                                                           { "cupertino", kui::ThemeDesign::eCupertino }, { "windows", kui::ThemeDesign::eFluent } };
+    }
+
+    kui::Theme Session::SavedTheme()
+    {
+        std::ifstream in(ConfigDirectory() / "theme");
+        std::string design, shade;
+        if (!(in >> design >> shade)) return kui::Theme::Dark();
+        for (const auto& [name, which] : ThemeDesigns)
+            if (design == name) return kui::Theme::Of(which, shade != "light");
+        return kui::Theme::Dark();
+    }
+
+    bool Session::SetSavedTheme(const kui::ThemeDesign design, const bool dark)
+    {
+        const std::filesystem::path file = ConfigDirectory() / "theme";
+        std::error_code ignored;
+        std::filesystem::create_directories(file.parent_path(), ignored);
+        std::ofstream out(file, std::ios::trunc);
+        for (const auto& [name, which] : ThemeDesigns)
+            if (which == design) out << name << ' ' << (dark ? "dark" : "light") << '\n';
+        return static_cast<bool>(out);
+    }
+
+    void Session::ChooseTheme(const kui::ThemeDesign design, const bool dark)
+    {
+        themeChosen = kui::Theme::Of(design, dark);
+        // Kept for the next run — but not by an editor that keeps nothing of this user's (a test's).
+        if (!std::getenv("KORAL_ENGINE_NO_LAYOUT") && !SetSavedTheme(design, dark)) Say("The theme could not be kept for the next run.", true);
+    }
+
+    namespace {
+        /** The grid as this user last set it: `<name> <value>` a line, in ~/.config/koral-engine/scene-grid. */
+        Grid ReadGrid()
+        {
+            Grid grid;
+            if (std::getenv("KORAL_ENGINE_NO_LAYOUT")) return grid;     // a test's editor keeps nothing of this user's
+            std::ifstream in(ConfigDirectory() / "scene-grid");
+            std::string name;
+            float value = 0.f;
+            while (in >> name >> value) {
+                if (name == "shown") grid.shown = value != 0.f;
+                else if (name == "cell" && value > 0.f) grid.cell = value;
+                else if (name == "major" && value >= 1.f) grid.major = value;
+                else if (name == "fade" && value > 0.f) grid.fade = value;
+                else if (name == "opacity") grid.opacity = std::clamp(value, 0.f, 1.f);
+                else if (name == "plane" && value >= 0.f && value <= 2.f) grid.plane = static_cast<Grid::Plane>(static_cast<int>(value));
+                else if (name == "depthTested") grid.depthTested = value != 0.f;
+            }
+            return grid;
+        }
+        void SaveGrid(const Grid& grid)
+        {
+            if (std::getenv("KORAL_ENGINE_NO_LAYOUT")) return;
+            std::error_code ignored;
+            std::filesystem::create_directories(ConfigDirectory(), ignored);
+            std::ofstream(ConfigDirectory() / "scene-grid", std::ios::trunc) << "shown " << (grid.shown ? 1 : 0) << "\ncell " << grid.cell << "\nmajor " << grid.major
+                << "\nfade " << grid.fade << "\nopacity " << grid.opacity << "\nplane " << static_cast<int>(grid.plane) << "\ndepthTested " << (grid.depthTested ? 1 : 0) << '\n';
+        }
+
+        /** What a channel of a material is called in the Scene panel's list. */
+        constexpr std::pair<kgraph::ShaderDebugChannel, const char*> MaterialChannels[] {
+            { kgraph::ShaderDebugChannel::eAlbedo, "Unlit (albedo)" }, { kgraph::ShaderDebugChannel::eNormal, "Normals" },
+            { kgraph::ShaderDebugChannel::eRoughness, "Roughness" }, { kgraph::ShaderDebugChannel::eMetallic, "Metallic" },
+            { kgraph::ShaderDebugChannel::eEmissive, "Emissive" }, { kgraph::ShaderDebugChannel::eOcclusion, "Occlusion" },
+        };
+    }
+
+    std::vector<Session::ViewModeChoice> Session::ViewModes() const
+    {
+        std::vector<ViewModeChoice> modes;
+        modes.push_back({ {}, "Lit", "" });
+        for (const auto& [channel, name] : MaterialChannels) modes.push_back({ { .kind = ViewMode::Kind::eMaterial, .channel = channel }, name, "Material" });
+        if (Overlay* const over = _play.Over())
+            for (auto& view : over->Views()) modes.push_back({ { .kind = ViewMode::Kind::eEditor, .file = view.file, .id = view.id }, view.name, "Editor" });
+        for (auto& view : _play.Doc().Runtime().DebugViews()) modes.push_back({ { .kind = ViewMode::Kind::eGraph, .id = view.id }, view.name, "Scene graph" });
+        return modes;
+    }
+
+    void Session::SetViewMode(ViewMode mode)
+    {
+        if (mode == _viewMode) return;
+        _viewMode = std::move(mode);
+        ++_changes;
+    }
+
+    std::vector<std::string> Session::WithoutMaterialViews() const { return _play.Doc().Runtime().WithoutShaderDebugView(); }
+
+    void Session::SetGrid(const Grid& grid)
+    {
+        if (grid == _grid) return;
+        _grid = grid;
+        SaveGrid(_grid);
+        ++_changes;
+    }
+
+    kor::ResourceRef<const kor::Image> Session::ViewModePicture() const
+    {
+        return _modeHeld && _modeHeld->handle ? kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(_modeHeld->handle)) : kor::ResourceRef<const kor::Image>();
+    }
+    kor::ResourceRef<const kor::Image> Session::GridPicture() const
+    {
+        return _gridHeld && _gridHeld->handle ? kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(_gridHeld->handle)) : kor::ResourceRef<const kor::Image>();
+    }
+
     bool Session::Run()
     {
         if (!_hasProject) { Say("There is no project to run yet: File, New project.", true); return false; }
@@ -523,11 +631,32 @@ namespace keditor
         if (const std::size_t reading = Doc().Reading(); reading != _reading) { _reading = reading; ++_changes; }
         // The one it shows meanwhile is kept until it has stopped showing it, a few frames on.
         std::erase_if(_overBefore, [](auto& kept) { return --kept.second <= 0; });
-        if (auto held = over ? over->PictureHeld() : nullptr; held != _overHeld) {
-            if (_overHeld) _overBefore.emplace_back(std::move(_overHeld), 6);
-            _overHeld = std::move(held);
+        const auto hold = [this](std::shared_ptr<kgraph::Resource>& showing, std::shared_ptr<kgraph::Resource> held) {
+            if (held == showing) return;
+            if (showing) _overBefore.emplace_back(std::move(showing), 6);
+            showing = std::move(held);
             ++_changes;
+        };
+        hold(_overHeld, over ? over->PictureHeld() : nullptr);
+
+        // How the Scene panel shows the scene, told to the scene's runtime — the Game panel's is another, and lit — and
+        // to the editor's graphs. A DebugView no longer there (the graph was changed) is the scene lit again.
+        runtime.SetEditorView(true);
+        if (!std::exchange(_gridRead, true)) _grid = ReadGrid();
+        if (_viewMode.kind == ViewMode::Kind::eGraph || _viewMode.kind == ViewMode::Kind::eEditor) {
+            const auto modes = ViewModes();
+            if (std::ranges::find(modes, _viewMode, &ViewModeChoice::mode) == modes.end()) { _viewMode = {}; ++_changes; }
         }
+        const bool graphView = _viewMode.kind == ViewMode::Kind::eGraph, editorView = _viewMode.kind == ViewMode::Kind::eEditor;
+        runtime.ShowDebugView(graphView ? _viewMode.id : std::string());
+        runtime.SetShaderDebugView(_viewMode.kind == ViewMode::Kind::eMaterial ? static_cast<int>(_viewMode.channel) : 0);
+        if (over) {
+            over->ShowView(editorView ? _viewMode.file : std::filesystem::path(), editorView ? _viewMode.id : std::string());
+            over->SetGrid(_grid);
+            over->SetProjectViews(_hasProject ? _project.directory / "editor" : std::filesystem::path());
+        }
+        hold(_modeHeld, graphView ? runtime.ResourceOf(_viewMode.id) : editorView && over ? over->ViewPictureHeld() : nullptr);
+        hold(_gridHeld, over ? over->GridHeld() : nullptr);
 
         // The view, moved by the mouse over the scene's panel: how far it went since the last frame, from where it was.
         const kor::Vec2 mouse = input.MousePosition();
@@ -1256,8 +1385,9 @@ class $NAME : ResourceScript() {
         std::error_code ignored;
         if (std::filesystem::exists(path, ignored)) { Say(std::format("There is a shader called {} already.", name), true); return false; }
         std::filesystem::create_directories(path.parent_path(), ignored);
-        // One that draws each entity's mesh reads the frame the standard shaders declare: they are the project's from here on.
-        if (kind == "Vertex" && !choice.wholePicture) WriteStandardShaders(_project.ShaderDirectory());
+        // One that draws each entity's mesh reads the frame engineCommon declares, the lit graph's: the project's from here on.
+        if (kind == "Vertex" && !choice.wholePicture)
+            WriteShaders(_project.ShaderDirectory(), { *std::ranges::find(LitShaders(), std::string("engineCommon.slang"), &std::pair<std::string, std::string>::first) });
         { std::ofstream out(path, std::ios::binary); out << Named(source, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
         Say(std::format("Made shaders/{}.slang: a pipeline node names it as its module, '{}'.", name, name));
         return true;
@@ -1307,12 +1437,16 @@ class $NAME : ResourceScript() {
         return true;
     }
 
-    bool Session::NewStandardScene()
+    bool Session::NewStandardScene() { return NewScene(false); }
+    bool Session::NewLitScene() { return NewScene(true); }
+
+    bool Session::NewScene(const bool lit)
     {
         if (_prefab) ClosePrefab(true);         // the scene is what changes: the prefab saved, and the scene back, first
-        if (!_hasProject) { Say("The standard scene's shaders go in a project: File, New project.", true); return false; }
+        if (!_hasProject) { Say("A new scene's shaders go in a project: File, New project.", true); return false; }
         if (InPlayMode()) Stop();
-        WriteStandardShaders(_project.ShaderDirectory());
+        if (lit) WriteLitShaders(_project.ShaderDirectory());
+        else WriteStandardShaders(_project.ShaderDirectory());
         WriteStandardObjects(_project.directory / "objects");
         _play.New();
         Doc().SetAssetDirectory(_project.directory / "assets");     // the project's: its files, and its prefabs, are named from it
@@ -1321,8 +1455,8 @@ class $NAME : ResourceScript() {
         selectedEntity = kecs::NullEntity;
         _folded.clear();
         std::string error;
-        if (!AddStandardGraph(Doc(), error)) { Say(error, true); return false; }
-        Select(AddStandardScene(Doc()));
+        if (!(lit ? AddLitGraph(Doc(), error) : AddStandardGraph(Doc(), error))) { Say(error, true); return false; }
+        Select(lit ? AddLitScene(Doc()) : AddStandardScene(Doc()));
         LoadObjects();
         Say("A new scene: saving writes it to the project.");
         return true;
@@ -1444,6 +1578,11 @@ class $NAME : ResourceScript() {
             if (node.type != "Switch") continue;
             const auto index = node.inputs.find("index");
             const kgraph::Node* driver = index != node.inputs.end() && index->second.link ? graph.Find(index->second.link->node) : nullptr;
+            // Brought in from another page: the node it stands for says which.
+            for (int hops = 0; driver && driver->type == "Reference" && hops < 16; ++hops) {
+                const auto target = driver->inputs.find("node");
+                driver = target != driver->inputs.end() && target->second.value.String() ? graph.Find(*target->second.value.String()) : nullptr;
+            }
             if (!driver || (driver->type != "Number" && driver->type != "Int" && driver->type != "UInt" && driver->type != "Bool")) continue;
             if (std::ranges::find(choices, driver->id, &Choice::driver) != choices.end()) continue;
             Choice choice;
@@ -1469,6 +1608,499 @@ class $NAME : ResourceScript() {
         const kgraph::Node* node = Doc().Graph().Find(driver);
         if (!node) return;
         Doc().SetInput(driver, "value", node->type == "Bool" ? Value(option != 0) : Value(option));
+    }
+
+    Session::PassFlow Session::Flow() const
+    {
+        PassFlow flow;
+        const kgraph::Graph& graph = _play.Doc().Graph();
+        // What a node stands for: a Reference is the node it brings in.
+        const auto origin = [&](std::string id) {
+            for (int hops = 0; hops < 16; ++hops) {
+                const kgraph::Node* node = graph.Find(id);
+                if (!node || node->type != "Reference") break;
+                const auto target = node->inputs.find("node");
+                if (target == node->inputs.end() || !target->second.value.String()) break;
+                id = *target->second.value.String();
+            }
+            return id;
+        };
+        // The Switches that choose between branches are steps of their own; every other node is of its page.
+        std::set<std::string> switches;
+        for (const auto& choice : Choices())
+            for (const auto& node : graph.nodes)
+                if (node.type == "Switch")
+                    if (const auto index = node.inputs.find("index"); index != node.inputs.end() && index->second.link && origin(index->second.link->node) == choice.driver)
+                        switches.insert(node.id);
+        const auto stepOf = [&](const std::string& id) -> std::string {
+            if (switches.contains(id)) return id;
+            const kgraph::Node* node = graph.Find(id);
+            return node ? node->pass : std::string();
+        };
+        // Whose work a page reading @p source (its @p output) has: the last page before it to write it — not the one it
+        // was made on, when another drew into it since.
+        const auto producer = [&](const std::string& source, const std::string& output, const std::string& readerPage) {
+            std::string from = stepOf(source);
+            if (switches.contains(source)) return from;
+            const auto at = [&](const std::string& page) { return static_cast<int>(std::ranges::find(graph.passes, page) - graph.passes.begin()); };
+            const int reader = at(readerPage);
+            int latest = -1;
+            for (const auto& use : _play.Doc().Runtime().UsesOf(source, output))
+                if (use.write && at(use.pass) < reader && at(use.pass) > latest) { latest = at(use.pass); from = use.pass; }
+            return from;
+        };
+        for (const auto& page : graph.passes) {
+            // A page of nothing but what it brings in (one that holds the Switches, which are steps of their own) is no step.
+            if (std::ranges::none_of(graph.nodes, [&](const kgraph::Node& node) { return node.pass == page && node.type != "Reference" && node.type != "Note" && !switches.contains(node.id); }))
+                continue;
+            PassFlow::Step step;
+            step.id = page;
+            step.order = static_cast<int>(std::ranges::find(graph.passes, page) - graph.passes.begin());
+            step.rate = std::string(kgraph::PassRateName(graph.RateOf(page)));
+            step.nodes = static_cast<std::size_t>(std::ranges::count(graph.nodes, page, &kgraph::Node::pass));
+            // A page of nothing but values and resources has no pass to leave out: it is as good as run.
+            step.ran = std::ranges::none_of(graph.nodes, [&](const kgraph::Node& node) {
+                const kgraph::NodeType* type = node.pass == page ? kgraph::FindType(node.type) : nullptr;
+                return type && type->category == "Passes";
+            });
+            // Which branch it is of, as its passes say: each idles unless a choice is one option (or is on only then).
+            const auto only = [&](const std::string& wired, const bool idling, auto&& self, int depth) -> std::optional<std::pair<std::string, int>> {
+                const kgraph::Node* by = graph.Find(origin(wired));
+                if (!by || depth > 4) return std::nullopt;
+                if (by->type == "Max" || by->type == "Or")      // idle for this or that: whichever names a choice
+                    for (const char* side : { "a", "b" })
+                        if (const auto it = by->inputs.find(side); it != by->inputs.end() && it->second.link)
+                            if (auto found = self(it->second.link->node, idling, self, depth + 1)) return found;
+                if (by->type != (idling ? "NotEqual" : "Equal")) return std::nullopt;
+                const auto a = by->inputs.find("a"), b = by->inputs.find("b");
+                if (a == by->inputs.end() || !a->second.link || b == by->inputs.end() || !b->second.value.Number()) return std::nullopt;
+                return std::pair { origin(a->second.link->node), static_cast<int>(*b->second.value.Number()) };
+            };
+            for (const auto& node : graph.nodes) {
+                if (node.pass != page) continue;
+                for (const auto& [input, idling] : { std::pair { "idle", true }, std::pair { "enabled", false } })
+                    if (const auto it = node.inputs.find(input); it != node.inputs.end() && it->second.link)
+                        if (const auto found = only(it->second.link->node, idling, only, 0)) { step.branchDriver = found->first; step.branchOption = found->second; }
+                if (step.branchOption >= 0) break;
+            }
+            flow.steps.push_back(std::move(step));
+        }
+        for (const auto& id : switches) {
+            PassFlow::Step step;
+            step.id = id;
+            step.isSwitch = true;
+            const kgraph::Node* node = graph.Find(id);
+            step.order = static_cast<int>(std::ranges::find(graph.passes, node->pass) - graph.passes.begin());
+            step.driver = origin(node->inputs.at("index").link->node);
+            for (int option = 0; option < 16; ++option) {
+                const auto wired = node->inputs.find(std::format("option[{}]", option));
+                if (wired == node->inputs.end() || !wired->second.link) break;
+                step.options.push_back(producer(origin(wired->second.link->node), wired->second.link->output, node->pass));
+            }
+            if (const kgraph::Node* driver = graph.Find(step.driver))
+                if (const auto value = driver->inputs.find("value"); value != driver->inputs.end())
+                    step.chosen = value->second.value.Bool() ? (*value->second.value.Bool() ? 1 : 0) : value->second.value.Number() ? static_cast<int>(*value->second.value.Number()) : 0;
+            flow.steps.push_back(std::move(step));
+        }
+        // A link for each step a step takes something from, saying what.
+        std::map<std::tuple<std::string, std::string, int>, std::set<std::string>> carried;
+        for (const auto& node : graph.nodes) {
+            const std::string to = stepOf(node.id);
+            if (to.empty()) continue;
+            for (const auto& [input, given] : node.inputs) {
+                if (!given.link) continue;
+                if (switches.contains(node.id) && input == "index") continue;     // which: the choice, not something used
+                const std::string source = origin(given.link->node);
+                const std::string from = producer(source, given.link->output, node.pass);
+                if (from.empty() || from == to) continue;
+                int option = -1;
+                if (switches.contains(node.id) && input.starts_with("option[")) option = std::stoi(input.substr(7));
+                carried[{ from, to, option }].insert(source);
+            }
+        }
+        for (auto& [key, sources] : carried)
+            flow.links.push_back({ std::get<0>(key), std::get<1>(key), std::vector<std::string>(sources.begin(), sources.end()), std::get<2>(key) });
+        // What ran in the last frame, and what it cost: a pass of the frame is a node of the graph — a call's by its call,
+        // a loop's turn by its node.
+        for (const auto& pass : _play.Doc().Runtime().Frame().passes) {
+            std::string id = pass.node;
+            if (const auto slash = id.find('/'); slash != std::string::npos) id.resize(slash);
+            if (const auto turn = id.find(" ["); turn != std::string::npos) id.resize(turn);
+            const kgraph::Node* node = graph.Find(id);
+            if (!node) continue;
+            // One that idles (a branch not chosen) is there, and does nothing.
+            const kgraph::Value idle = _play.Doc().Runtime().ValueOf(pass.node, "idle");
+            if (idle.Bool() ? *idle.Bool() : idle.Number() && *idle.Number() != 0.0) continue;
+            if (const auto step = std::ranges::find(flow.steps, node->pass, &PassFlow::Step::id); step != flow.steps.end()) {
+                step->ran = true;
+                step->gpuMs += pass.gpuMs;
+            }
+        }
+        return flow;
+    }
+
+    namespace {
+        /** What a node stands for: a Reference is the node it brings in. */
+        std::string OriginOf(const kgraph::Graph& graph, std::string id)
+        {
+            for (int hops = 0; hops < 16; ++hops) {
+                const kgraph::Node* node = graph.Find(id);
+                if (!node || node->type != "Reference") break;
+                const auto target = node->inputs.find("node");
+                if (target == node->inputs.end() || !target->second.value.String()) break;
+                id = *target->second.value.String();
+            }
+            return id;
+        }
+
+        /**
+         * Whether a pass is left off by a choice as the choices are: its `idle` wired from what says a driver is (or is
+         * not) an option — through Max or Or, idle for either — and that holds; or its `enabled` from what does not.
+         * Nothing when no choice has a say in it.
+         */
+        std::optional<bool> OffByChoice(const kgraph::Graph& graph, const kgraph::Node& pass, const std::map<std::string, int>& chosen)
+        {
+            const auto holds = [&](const std::string& wired, auto&& self, const int depth) -> std::optional<bool> {
+                const kgraph::Node* by = graph.Find(OriginOf(graph, wired));
+                if (!by || depth > 4) return std::nullopt;
+                if (by->type == "Max" || by->type == "Or") {
+                    std::optional<bool> any;
+                    for (const char* side : { "a", "b" })
+                        if (const auto it = by->inputs.find(side); it != by->inputs.end() && it->second.link)
+                            if (const auto found = self(it->second.link->node, self, depth + 1)) any = any.value_or(false) || *found;
+                    return any;
+                }
+                if (by->type != "Equal" && by->type != "NotEqual") return std::nullopt;
+                const auto a = by->inputs.find("a"), b = by->inputs.find("b");
+                if (a == by->inputs.end() || !a->second.link || b == by->inputs.end() || !b->second.value.Number()) return std::nullopt;
+                const auto driver = chosen.find(OriginOf(graph, a->second.link->node));
+                if (driver == chosen.end()) return std::nullopt;
+                const bool same = driver->second == static_cast<int>(*b->second.value.Number());
+                return by->type == "Equal" ? same : !same;
+            };
+            std::optional<bool> off;
+            if (const auto idle = pass.inputs.find("idle"); idle != pass.inputs.end() && idle->second.link)
+                if (const auto found = holds(idle->second.link->node, holds, 0)) off = *found;
+            if (const auto enabled = pass.inputs.find("enabled"); enabled != pass.inputs.end() && enabled->second.link)
+                if (const auto found = holds(enabled->second.link->node, holds, 0)) off = off.value_or(false) || !*found;
+            return off;
+        }
+
+        bool IsPass(const kgraph::Node& node)
+        {
+            const kgraph::NodeType* type = kgraph::FindType(node.type);
+            return type && type->category == "Passes";
+        }
+    }
+
+    std::set<std::string> Session::PagesNotChosen() const
+    {
+        const kgraph::Graph& graph = _play.Doc().Graph();
+        std::map<std::string, int> chosen;
+        for (const auto& choice : Choices()) chosen[choice.driver] = choice.chosen;
+        std::set<std::string> hidden;
+        if (chosen.empty()) return hidden;
+        // A page of passes: left out when every one of them is off by a choice.
+        std::set<std::string> passless;
+        for (const auto& page : graph.passes) {
+            bool any = false, on = false;
+            for (const auto& node : graph.nodes) {
+                if (node.pass != page || !IsPass(node)) continue;
+                any = true;
+                if (!OffByChoice(graph, node, chosen).value_or(false)) { on = true; break; }
+            }
+            if (!any) passless.insert(page);
+            else if (!on) hidden.insert(page);
+        }
+        // A page of no passes: left out when what uses it is all left out — the scene the rays are traced through, when
+        // they are not — till nothing more is.
+        std::map<std::string, std::set<std::string>> usedBy;
+        for (const auto& node : graph.nodes)
+            for (const auto& input : node.inputs | std::views::values)
+                if (input.link)
+                    if (const kgraph::Node* from = graph.Find(OriginOf(graph, input.link->node)); from && from->pass != node.pass && !node.pass.empty())
+                        usedBy[from->pass].insert(node.pass);
+        for (bool more = true; more;) {
+            more = false;
+            for (const auto& page : passless) {
+                if (hidden.contains(page)) continue;
+                const auto users = usedBy.find(page);
+                if (users == usedBy.end() || users->second.empty()) continue;
+                if (std::ranges::all_of(users->second, [&](const std::string& user) { return hidden.contains(user); })) { hidden.insert(page); more = true; }
+            }
+        }
+        return hidden;
+    }
+
+    bool Session::MaterialInUse(const std::string& component)
+    {
+        const auto pipelines = PipelineComponents();
+        const auto of = pipelines.find(component);
+        if (of == pipelines.end()) return true;
+        const kgraph::Graph& graph = _play.Doc().Graph();
+        std::map<std::string, int> chosen;
+        for (const auto& choice : Choices()) chosen[choice.driver] = choice.chosen;
+        if (chosen.empty()) return true;
+        const std::string& pipeline = of->second;
+        const auto pipelineOf = [&](const kgraph::Node& pass) {
+            const auto it = pass.inputs.find("pipeline");
+            return it != pass.inputs.end() && it->second.link ? OriginOf(graph, it->second.link->node) : std::string();
+        };
+        // The Draws of the pipeline, whose buffers of instances hold the component's fields: what reads one reads it.
+        std::set<std::string> draws;
+        for (const auto& node : graph.nodes)
+            if (node.type == "Draw" && pipelineOf(node) == pipeline) draws.insert(node.id);
+        const auto readsInstances = [&](const kgraph::Node& node) {
+            return std::ranges::any_of(node.inputs | std::views::values, [&](const kgraph::Input& input) {
+                return input.link && input.link->output == "instances" && draws.contains(OriginOf(graph, input.link->node));
+            });
+        };
+        std::set<std::string> readers { pipeline };
+        for (const auto& node : graph.nodes)
+            if (node.type.ends_with("Pipeline") && readsInstances(node)) readers.insert(node.id);
+        bool used = false;
+        for (const auto& node : graph.nodes) {
+            if (!IsPass(node) || !(readers.contains(pipelineOf(node)) || readsInstances(node))) continue;
+            used = true;
+            if (!OffByChoice(graph, node, chosen).value_or(false)) return true;
+        }
+        return !used;
+    }
+
+    Session::FlowLayout Session::LayOut(const PassFlow& flow, const std::map<std::string, std::pair<float, float>>& sizes)
+    {
+        FlowLayout layout;
+        const std::size_t count = flow.steps.size();
+        if (count == 0) return layout;
+        std::map<std::string, std::size_t> index;
+        for (std::size_t i = 0; i < count; ++i) index[flow.steps[i].id] = i;
+        std::vector<std::set<std::size_t>> from(count), to(count);
+        for (const auto& link : flow.links) {
+            const auto a = index.find(link.from), b = index.find(link.to);
+            if (a == index.end() || b == index.end() || a->second == b->second) continue;
+            // What a page reads of one that runs after it is what that one left the frame before (a history): drawn, and
+            // no say in where either goes. A Switch counts as running with the page it is on, after what it chooses from.
+            const auto& one = flow.steps[a->second];
+            const auto& other = flow.steps[b->second];
+            const bool forward = one.order < other.order || (one.order == other.order && !one.isSwitch && other.isSwitch);
+            if (!forward) continue;
+            to[a->second].insert(b->second);
+            from[b->second].insert(a->second);
+        }
+        const auto sizeOf = [&](const std::size_t i) {
+            const auto it = sizes.find(flow.steps[i].id);
+            if (it != sizes.end() && it->second.first > 1.f) return it->second;
+            return flow.steps[i].isSwitch ? std::pair { 220.f, 150.f } : std::pair { 200.f, 90.f };
+        };
+
+        // ---- columns: as early as what it takes from lets it, then where its wires are shortest -----------------------
+        std::vector<int> column(count, 0);
+        for (std::size_t round = 0; round < count; ++round) {
+            bool moved = false;
+            for (std::size_t i = 0; i < count; ++i)
+                for (const std::size_t j : from[i])
+                    if (column[i] < column[j] + 1 && column[j] + 1 < static_cast<int>(count)) { column[i] = column[j] + 1; moved = true; }
+            if (!moved) break;
+        }
+        for (int round = 0; round < 6; ++round)
+            for (std::size_t k = 0; k < count; ++k) {
+                const std::size_t i = round % 2 == 0 ? count - 1 - k : k;
+                if (from[i].empty() || to[i].empty()) continue;    // the first and the last stay where they are
+                int low = 0, high = std::numeric_limits<int>::max();
+                // Each wire's pull, and how much it counts: one from a step that feeds many (the frame's values) is
+                // long wherever this goes, so it counts the less for it.
+                std::vector<std::pair<int, float>> near;
+                for (const std::size_t j : from[i]) { low = std::max(low, column[j] + 1); near.push_back({ column[j] + 1, 1.f / static_cast<float>(to[j].size()) }); }
+                for (const std::size_t j : to[i]) { high = std::min(high, column[j] - 1); near.push_back({ column[j] - 1, 1.f }); }
+                if (low > high) continue;
+                std::ranges::sort(near);
+                float total = 0.f, reached = 0.f;
+                for (const auto& [at, weight] : near) total += weight;
+                int median = near.front().first;
+                for (const auto& [at, weight] : near) { reached += weight; median = at; if (reached >= total * 0.5f) break; }
+                column[i] = std::clamp(median, low, high);      // the weighted median: the least wire, weighed and summed
+            }
+
+        // ---- branches: a choice's options, each a band — the pages that run only for it, as their passes say, and what
+        // only it is reached from ---------------------------------------------------------------------------------------
+        const auto ancestors = [&](const std::size_t start) {
+            std::set<std::size_t> seen { start };
+            std::vector<std::size_t> todo { start };
+            while (!todo.empty()) {
+                const std::size_t i = todo.back();
+                todo.pop_back();
+                for (const std::size_t j : from[i]) if (seen.insert(j).second) todo.push_back(j);
+            }
+            return seen;
+        };
+        std::vector<int> band(count, 0);       // 0: shared; then a branch each, from 1
+        std::map<std::pair<std::string, int>, int> bandOf;
+        const auto bandFor = [&](const std::string& driver, const int option, const std::string& last) {
+            const auto key = std::pair { driver, option };
+            if (const auto it = bandOf.find(key); it != bandOf.end()) return it->second;
+            FlowLayout::Branch branch;
+            branch.option = option;
+            branch.title = std::format("{} = {}", driver, option);
+            (void)last;
+            layout.branches.push_back(std::move(branch));
+            return bandOf[key] = static_cast<int>(layout.branches.size());
+        };
+        for (const auto& step : flow.steps)
+            if (step.isSwitch)
+                for (std::size_t k = 0; k < step.options.size(); ++k) {
+                    const int b = bandFor(step.driver.empty() ? step.id : step.driver, static_cast<int>(k), step.options[k]);
+                    layout.branches[static_cast<std::size_t>(b - 1)].switchId = step.id;
+                }
+        // What the graph says of a page: it runs only for this option.
+        for (std::size_t i = 0; i < count; ++i)
+            if (flow.steps[i].branchOption >= 0) band[i] = bandFor(flow.steps[i].branchDriver, flow.steps[i].branchOption, {});
+        // What else only one option is reached from.
+        for (const auto& step : flow.steps) {
+            if (!step.isSwitch) continue;
+            std::vector<std::set<std::size_t>> reached;
+            for (const auto& option : step.options) reached.push_back(index.contains(option) ? ancestors(index.at(option)) : std::set<std::size_t>());
+            for (std::size_t k = 0; k < reached.size(); ++k)
+                for (const std::size_t i : reached[k]) {
+                    if (band[i] != 0) continue;
+                    bool only = true;
+                    for (std::size_t other = 0; other < reached.size() && only; ++other) if (other != k && reached[other].contains(i)) only = false;
+                    if (only) band[i] = bandFor(step.driver.empty() ? step.id : step.driver, static_cast<int>(k), step.options[k]);
+                }
+        }
+        for (std::size_t i = 0; i < count; ++i)
+            if (band[i] != 0) layout.branches[static_cast<std::size_t>(band[i] - 1)].steps.push_back(flow.steps[i].id);
+        std::erase_if(layout.branches, [](const FlowLayout::Branch& branch) { return branch.steps.empty(); });
+        // (The bands numbered again, as the branches are now.)
+        {
+            std::map<int, int> renumber;
+            int next = 0;
+            std::vector<std::string> kept;
+            for (const auto& branch : layout.branches) kept.push_back(branch.steps.front());
+            for (std::size_t i = 0; i < count; ++i)
+                if (band[i] != 0 && !renumber.contains(band[i]))
+                    for (std::size_t b = 0; b < layout.branches.size(); ++b)
+                        if (std::ranges::find(layout.branches[b].steps, flow.steps[i].id) != layout.branches[b].steps.end()) { renumber[band[i]] = static_cast<int>(b) + 1; break; }
+            for (auto& each : band) if (each != 0) each = renumber[each];
+            (void)next;
+        }
+
+        // ---- heights: each at those it is wired to, its column's kept in order and apart --------------------------------
+        int columns = 0;
+        for (const int c : column) columns = std::max(columns, c + 1);
+        std::vector<std::vector<std::size_t>> stacked(static_cast<std::size_t>(columns));
+        for (std::size_t i = 0; i < count; ++i) stacked[static_cast<std::size_t>(column[i])].push_back(i);
+        std::vector<float> y(count, 0.f);
+        constexpr float Gap = 28.f, BandGap = 96.f;
+        // Each column's steps put as near as they can be to where they would be, in order, none over the next: the
+        // nearest such heights, summed over the squares (the pool-adjacent-violators way).
+        const auto settle = [&](std::vector<std::size_t>& steps, const std::vector<float>& wanted) {
+            std::vector<float> offset(steps.size(), 0.f);
+            for (std::size_t k = 1; k < steps.size(); ++k)
+                offset[k] = offset[k - 1] + sizeOf(steps[k - 1]).second + (band[steps[k]] != band[steps[k - 1]] ? BandGap : Gap);
+            struct Pool { float sum; int n; std::size_t first; };
+            std::vector<Pool> pools;
+            for (std::size_t k = 0; k < steps.size(); ++k) {
+                pools.push_back({ wanted[k] - offset[k], 1, k });
+                while (pools.size() > 1 && pools[pools.size() - 2].sum / pools[pools.size() - 2].n > pools.back().sum / pools.back().n) {
+                    pools[pools.size() - 2].sum += pools.back().sum;
+                    pools[pools.size() - 2].n += pools.back().n;
+                    pools.pop_back();
+                }
+            }
+            for (std::size_t p = 0; p < pools.size(); ++p) {
+                const std::size_t end = p + 1 < pools.size() ? pools[p + 1].first : steps.size();
+                for (std::size_t k = pools[p].first; k < end; ++k) y[steps[k]] = pools[p].sum / pools[p].n + offset[k];
+            }
+        };
+        // To begin with: shared first, then each branch in its order, each in the order of the flow.
+        for (auto& steps : stacked) {
+            std::ranges::stable_sort(steps, {}, [&](const std::size_t i) { return band[i]; });
+            std::vector<float> wanted(steps.size(), 0.f);
+            settle(steps, wanted);
+        }
+        const auto middle = [&](const std::size_t i) { return y[i] + sizeOf(i).second * 0.5f; };
+        for (int round = 0; round < 12; ++round)
+            for (int c = 0; c < columns; ++c) {
+                auto& steps = stacked[static_cast<std::size_t>(round % 2 == 0 ? c : columns - 1 - c)];
+                // Where each would be: level with the middle of those it is wired to — its branch's own counting double,
+                // so that a branch keeps together rather than reaching for what it shares.
+                std::vector<std::pair<float, std::size_t>> wanted;
+                for (const std::size_t i : steps) {
+                    float sum = 0.f, weight = 0.f;
+                    for (const auto* near : { &from[i], &to[i] })
+                        for (const std::size_t j : *near) {
+                            const float w = band[j] == band[i] ? 2.f : 1.f;
+                            sum += middle(j) * w;
+                            weight += w;
+                        }
+                    wanted.push_back({ weight > 0.f ? sum / weight - sizeOf(i).second * 0.5f : y[i], i });
+                }
+                // In order of their bands, and within one of where they would be.
+                std::ranges::stable_sort(wanted, [&](const auto& a, const auto& b) {
+                    return band[a.second] != band[b.second] ? band[a.second] < band[b.second] : a.first < b.first;
+                });
+                std::vector<float> heights;
+                for (std::size_t k = 0; k < wanted.size(); ++k) { steps[k] = wanted[k].second; heights.push_back(wanted[k].first); }
+                settle(steps, heights);
+            }
+
+        // ---- the branches kept apart: each a block of heights none of another has, in their order, moved as little as can be.
+        // What is shared, in the columns the branches are in, is a block of its own before them: out of their frames.
+        const int branchBands = static_cast<int>(layout.branches.size());
+        std::vector<bool> amongBranches(static_cast<std::size_t>(columns), false);
+        for (std::size_t i = 0; i < count; ++i) if (band[i] != 0) amongBranches[static_cast<std::size_t>(column[i])] = true;
+        const auto blockOf = [&](const std::size_t i) { return band[i] != 0 ? band[i] : amongBranches[static_cast<std::size_t>(column[i])] ? 0 : -1; };
+        const int bands = branchBands + 1;      // block 0: what is shared among the branches
+        if (branchBands > 1) {
+            std::vector<float> tops(static_cast<std::size_t>(bands), std::numeric_limits<float>::max()), bottoms(static_cast<std::size_t>(bands), std::numeric_limits<float>::lowest());
+            for (std::size_t i = 0; i < count; ++i) {
+                if (blockOf(i) < 0) continue;
+                const auto b = static_cast<std::size_t>(blockOf(i));
+                tops[b] = std::min(tops[b], y[i]);
+                bottoms[b] = std::max(bottoms[b], y[i] + sizeOf(i).second);
+            }
+            // Where each block's top goes: as near where it is as it can be, each below the one before it.
+            struct Pool { float sum; int n; std::size_t first; };
+            // (A block with nothing in it takes no room.)
+            for (std::size_t b = 0; b < tops.size(); ++b) if (tops[b] > bottoms[b]) { tops[b] = 0.f; bottoms[b] = -BandGap; }
+            std::vector<float> offset(static_cast<std::size_t>(bands), 0.f);
+            for (std::size_t b = 1; b < offset.size(); ++b) offset[b] = offset[b - 1] + (bottoms[b - 1] - tops[b - 1]) + BandGap;
+            std::vector<Pool> pools;
+            for (std::size_t b = 0; b < offset.size(); ++b) {
+                pools.push_back({ tops[b] - offset[b], 1, b });
+                while (pools.size() > 1 && pools[pools.size() - 2].sum / pools[pools.size() - 2].n > pools.back().sum / pools.back().n) {
+                    pools[pools.size() - 2].sum += pools.back().sum;
+                    pools[pools.size() - 2].n += pools.back().n;
+                    pools.pop_back();
+                }
+            }
+            std::vector<float> shift(static_cast<std::size_t>(bands), 0.f);
+            for (std::size_t p = 0; p < pools.size(); ++p) {
+                const std::size_t end = p + 1 < pools.size() ? pools[p + 1].first : offset.size();
+                for (std::size_t b = pools[p].first; b < end; ++b) shift[b] = pools[p].sum / pools[p].n + offset[b] - tops[b];
+            }
+            for (std::size_t i = 0; i < count; ++i)
+                if (blockOf(i) >= 0) y[i] += shift[static_cast<std::size_t>(blockOf(i))];
+            // What is shared, moved off the blocks where they now cross it: each column kept in order, apart.
+            for (auto& steps : stacked) {
+                std::ranges::stable_sort(steps, {}, [&](const std::size_t i) { return y[i]; });
+                std::vector<float> wanted;
+                for (const std::size_t i : steps) wanted.push_back(y[i]);
+                settle(steps, wanted);
+            }
+        }
+
+        // ---- across: each column as wide as its widest card, and a space between -----------------------------------------
+        std::vector<float> x(static_cast<std::size_t>(columns) + 1, 0.f);
+        for (int c = 0; c < columns; ++c) {
+            float widest = 0.f;
+            for (const std::size_t i : stacked[static_cast<std::size_t>(c)]) widest = std::max(widest, sizeOf(i).first);
+            x[static_cast<std::size_t>(c) + 1] = x[static_cast<std::size_t>(c)] + widest + 90.f;
+        }
+        float top = std::numeric_limits<float>::max();
+        for (const float each : y) top = std::min(top, each);
+        for (std::size_t i = 0; i < count; ++i) layout.at[flow.steps[i].id] = { x[static_cast<std::size_t>(column[i])], y[i] - top };
+        return layout;
     }
 
     std::filesystem::path Session::ProjectsDirectory()
@@ -1802,8 +2434,18 @@ class $NAME : ResourceScript() {
                     if (score > bestScore) { bestScore = score; best = { component, field.name }; }
                 }
             if (!best) { Say(std::format("{} has no field that holds a picture: a component of a pipeline that samples one has.", name), true); return false; }
-            if (!doc.SetField(entity, best->first, best->second, kgraph::Value(id), &error)) { Say(error, true); return false; }
-            Say(std::format("{} is {}'s {}.", asset->label, name, best->second));
+            // And every other material of it that has a picture of that name: what they share is set in each, as the
+            // inspector's shared material sets it.
+            const auto pipelines = PipelineComponents();
+            std::vector<std::string> into { best->first };
+            if (pipelines.contains(best->first))
+                for (const auto& component : doc.ComponentsOf(entity))
+                    if (component != best->first && pipelines.contains(component))
+                        if (const auto* field = doc.World().Describe(doc.World().Find(component)).FindField(best->second); field && field->type == "Image") into.push_back(component);
+            for (const auto& component : into)
+                if (!doc.SetField(entity, component, best->second, kgraph::Value(id), &error)) { Say(error, true); return false; }
+            Say(into.size() > 1 ? std::format("{} is {}'s {}, in each of its {} materials.", asset->label, name, best->second, into.size())
+                                : std::format("{} is {}'s {}.", asset->label, name, best->second));
             return true;
         }
         case Asset::Kind::ePrefab:
@@ -1812,17 +2454,25 @@ class $NAME : ResourceScript() {
         case Asset::Kind::eMaterial: {
             const Material* material = MaterialOf(id);
             if (!material) return false;
-            // What the entity is drawn with that has a material's fields; none, the first there is that has them (not
-            // the blended one's, where there is another): what an imported model's things are given.
+            // What the entity is drawn with that has a material's fields — an albedo, or, a pipeline's that has no
+            // more than that, a colour (a light's is not one); none, the first there is that has them (not the blended
+            // one's, where there is another): what an imported model's things are given.
+            const auto colourOf = [&](const std::string& component) -> const char* {
+                const kecs::ComponentId c = doc.World().Find(component);
+                if (c == kecs::NoComponent) return nullptr;
+                const auto& type = doc.World().Describe(c);
+                if (type.FindField("albedo")) return "albedo";
+                return type.FindField("color") && doc.Runtime().ComponentOf(component) == c ? "color" : nullptr;
+            };
             std::vector<std::string> components;
             for (const auto& component : doc.ComponentsOf(entity))
-                if (doc.World().Describe(doc.World().Find(component)).FindField("albedo")) components.push_back(component);
+                if (colourOf(component)) components.push_back(component);
             if (components.empty()) {
                 std::vector<std::string> all;
                 for (const auto& component : doc.ComponentNames())
-                    if (const kecs::ComponentId c = doc.World().Find(component); c != kecs::NoComponent && doc.World().Describe(c).FindField("albedo")) all.push_back(component);
+                    if (colourOf(component)) all.push_back(component);
                 const auto unblended = std::ranges::find_if(all, [](const std::string& c) { return c.find("blend") == std::string::npos; });
-                if (all.empty()) { Say("The scene draws nothing with a material: no pipeline's component has an albedo.", true); return false; }
+                if (all.empty()) { Say("The scene draws nothing with a material: no pipeline's component has an albedo or a colour.", true); return false; }
                 const std::string chosen = unblended != all.end() ? *unblended : all.front();
                 if (!doc.AddComponent(entity, chosen)) { Say(std::format("{} could not be given {}.", name, chosen), true); return false; }
                 components.push_back(chosen);
@@ -1831,7 +2481,7 @@ class $NAME : ResourceScript() {
             for (const auto& component : components) {
                 const auto& type = doc.World().Describe(doc.World().Find(component));
                 const auto give = [&](const char* field, const kgraph::Value& value) { if (type.FindField(field)) doc.SetField(entity, component, field, value); };
-                give("albedo", vec(material->albedo));
+                give(colourOf(component), vec(material->albedo));
                 give("metallic", kgraph::Value(material->metallic));
                 give("roughness", kgraph::Value(material->roughness));
                 give("emission", vec(material->emission));
@@ -2613,11 +3263,11 @@ class $NAME : ResourceScript() {
             if (!type) type = std::make_unique<kgraph::NodeType>();
             *type = *base;
             type->name = preset.name;
-            // A call of one of the project's functions is offered among the functions; a component's node, among the components.
+            // A call of a function is offered under what it is for, among the functions; a component's node, among the components.
             const bool call = preset.type == "Function";
-            type->category = call ? "Functions" : "Components";
+            type->category = call ? (preset.group.empty() ? "Functions" : preset.group) : "Components";
             type->doc = preset.doc;
-            type->keywords = call ? std::format("function call {}", base->keywords) : std::format("{} {}", preset.component, base->keywords);
+            type->keywords = call ? std::format("function call {} {} {}", preset.group, preset.keywords, base->keywords) : std::format("{} {}", preset.component, base->keywords);
             offered.push_back(type.get());
         }
         const auto lower = [](std::string text) {
@@ -2669,6 +3319,31 @@ class $NAME : ResourceScript() {
         std::vector<const kgraph::NodeType*> types;
         for (const auto& [score, type] : found) types.push_back(type);
         return types;
+    }
+
+    std::vector<std::string> NodeListSections(const std::map<std::string, std::size_t>& counts, const kgraph::PassRate rate)
+    {
+        static const std::vector<std::string> scene { "Components", "Scene", "Values", "Math", "Vectors", "Cameras", "Logic", "Flow" };
+        static const std::vector<std::string> vulkan { "Resources", "Pipelines", "Passes" };
+        // What is neither is what a function is for: those first, by name, the functions that say nothing last — and on a
+        // page of the fixed step, what simulates before the rest.
+        std::vector<std::string> purposes;
+        for (const auto& category : counts | std::views::keys)
+            if (!std::ranges::contains(scene, category) && !std::ranges::contains(vulkan, category) && category != "Functions") purposes.push_back(category);
+        if (rate == kgraph::PassRate::eFixed)
+            std::ranges::stable_partition(purposes, [](const std::string& purpose) { return purpose == "Physics"; });
+        if (counts.contains("Functions")) purposes.push_back("Functions");
+        std::vector<std::string> sections;
+        const auto section = [&](const std::string& heading, const std::vector<std::string>& categories) {
+            const auto first = sections.size();
+            for (const auto& category : categories)
+                if (counts.contains(category)) sections.push_back(category);
+            if (sections.size() > first) sections.insert(sections.begin() + static_cast<std::ptrdiff_t>(first), "#" + heading);
+        };
+        section("Functions", purposes);
+        section("Scene and values", scene);
+        section("Vulkan", vulkan);
+        return sections;
     }
 
     namespace {
@@ -3198,6 +3873,25 @@ class $NAME : ResourceScript() {
             return Rows(std::move(rows), 4.f);
         }
 
+        /** A Bundle node's members' names, a line each: each an input of the node, to wire or to give. */
+        kui::Widget Names(const Value& value, const std::function<void(Value)>& set, const std::string& key)
+        {
+            const Value::List items = value.Items() ? *value.Items() : Value::List {};
+            std::vector<kui::Widget> rows;
+            for (std::size_t i = 0; i < items.size(); ++i)
+                rows.push_back(kui::Row({
+                    kui::Expanded(TextEdit(items[i], [set, items, i](Value v) { auto list = items; list[i] = std::move(v); set(Value(std::move(list))); },
+                                           std::format("{}[{}]", key, i), "viewProjection")),
+                    kui::Tooltip("Take it out", SmallIcon("close", [set, items, i] { auto list = items; list.erase(list.begin() + static_cast<std::ptrdiff_t>(i)); set(Value(std::move(list))); })),
+                }, kui::FlexOptions {}.SetGap(4.f)));
+            rows.push_back(Small("+ member", [set, items] {
+                auto list = items;
+                list.emplace_back(std::format("member{}", list.size()));
+                set(Value(std::move(list)));
+            }));
+            return Rows(std::move(rows), 4.f);
+        }
+
         /**
          * What a field that holds another entity is shown as: which of the scene's it is — each under what it is under —
          * or none; and an entity dragged here from the outliner is the one it holds from then on.
@@ -3385,8 +4079,37 @@ class $NAME : ResourceScript() {
         bool WireFits(const std::string_view from, const std::string_view to)
         {
             if (from.substr(0, 2) != to.substr(0, 2)) return false;
+            // A Bundle goes where a Bundle is taken — or a function's edge, which takes any value — and nothing else takes one.
+            if ((from == "v:bundle") != (to == "v:bundle")) return from == "v:value" || to == "v:value";
             if (from.starts_with("v:")) return true;
             return from == to || from == "r:Resource" || to == "r:Resource" || (from == "r:ImageView" && to == "r:Image");
+        }
+
+        using Timings = std::map<std::string, kgraph::Runtime::Timing, std::less<>>;
+
+        /** The GPU's time of every pass of a frame. */
+        double FrameGpuMs(const Timings& timings)
+        {
+            double total = 0.0;
+            for (const auto& timing : timings | std::views::values) total += timing.gpuMs;
+            return total;
+        }
+
+        /** How hot a share of the frame is, by how bright it is said: faint for what hardly counts, the text's own for the most. */
+        kui::Color HeatColor(const double share)
+        {
+            const kui::Theme& t = kui::Theme::Current();
+            if (share >= 0.15) return t.text;
+            if (share >= 0.05) return t.text.WithAlpha(0.78f);
+            return t.textMuted;
+        }
+
+        /** A cost said in a few words: its GPU time and its share of the frame's; the CPU's recording, where the GPU can't be timed. */
+        std::string CostText(const kgraph::Runtime::Timing& cost, const double frameMs)
+        {
+            if (!cost.gpuMeasured) return std::format("record {:.2f} ms", cost.recordMs);
+            const double share = frameMs > 0.0 ? cost.gpuMs / frameMs : 0.0;
+            return std::format("GPU {:.2f} ms  ·  {:.0f}%", cost.gpuMs, share * 100.0);
         }
 
         /** A port's colour, and its wires': by what it carries, so that an image's wire is told from a buffer's at a glance. */
@@ -3403,10 +4126,21 @@ class $NAME : ResourceScript() {
                 return kui::Color::Hex(0x9AA4B0);
             }
             if (type == "bool" || type == "Bool") return kui::Color::Hex(0xD86A6A);
+            if (type == "bundle") return kui::Color::Hex(0xD46FA8);
             if (type == "number" || type == "Number" || type == "Float" || type == "Double" || type == "Int" || type == "UInt") return kui::Color::Hex(0x5B9BD5);
             if (type == "string" || type == "String") return kui::Color::Hex(0xC9A0DC);
             if (type == "vector" || type == "Color") return kui::Color::Hex(0x62C3E8);
             return kui::Color::Hex(0x8FA3B8);
+        }
+
+        /** A port's mark, by what it carries: an image's a diamond, a buffer's a square, anything else's a circle. */
+        kui::PortShape PortShapeOf(const std::string_view kind)
+        {
+            if (!kind.starts_with("r:")) return kui::PortShape::eCircle;
+            const std::string_view type = kind.substr(2);
+            if (type == "Image" || type == "ImageView") return kui::PortShape::eDiamond;
+            if (type == "Buffer" || type == "BufferView") return kui::PortShape::eSquare;
+            return kui::PortShape::eCircle;
         }
 
         /** A value in a few characters, to be said on a node. */
@@ -3433,7 +4167,7 @@ class $NAME : ResourceScript() {
                 { "Vectors", 0x4C6FCF }, { "Logic", 0x8A5BA8 }, { "Cameras", 0x5A8F3A }, { "Scene", 0x3B9C7A }, { "Components", 0x4E9E4E }, { "Flow", 0x6B7685 },
                 { "Functions", 0x3E9FA8 } };
             const auto it = colors.find(category);
-            return kui::Color::Hex(it == colors.end() ? 0x3B9C7A : it->second);
+            return kui::Color::Hex(it == colors.end() ? 0x3E9FA8 : it->second);   // none of these: what a function is for
         }
 
         // ---- a node's picture ----------------------------------------------------------------------------------------
@@ -3653,6 +4387,10 @@ class $NAME : ResourceScript() {
                     // From before the passes and what a page can use were panels: where they start.
                     if (text.str().find("\"passes\"") == std::string::npos) _layout->Dock("passes", kui::DockArea::eLeft, 1);
                     if (text.str().find("\"here\"") == std::string::npos) _layout->Dock("here", kui::DockArea::eBottomRight);
+                    // From before the frame was a panel: a tab beside what is wrong.
+                    if (text.str().find("\"frame\"") == std::string::npos) { _layout->Dock("frame", kui::DockSide::eCenter, "problems"); _layout->Activate("assets"); }
+                    // From before the pass flow was a panel: a tab beside the graph.
+                    if (text.str().find("\"flow\"") == std::string::npos) { _layout->Dock("flow", kui::DockSide::eCenter, "graph"); _layout->Activate("graph"); }
                 }
             }
 
@@ -3675,11 +4413,16 @@ class $NAME : ResourceScript() {
                         // wrong is behind them, a press away.
                         .Dock("problems", kui::DockSide::eBottom, "graph", 0.27f)
                         .Dock("assets", kui::DockSide::eCenter, "problems")
+                        // And the frame as it runs, a tab beside them: what each pass costs, in the order they run.
+                        .Dock("frame", kui::DockSide::eCenter, "problems")
+                        // The pages as a flow, a tab beside the graph: which uses what of which, and the branches chosen between.
+                        .Dock("flow", kui::DockSide::eCenter, "graph")
                         // Beside them, what the page shown can use of the passes before it: things to drag onto it, as files are.
                         .Dock("here", kui::DockArea::eBottomRight)
                         // What is looked at closely is a tab beside the scene, there once something is.
                         .Dock("viewer", kui::DockSide::eCenter, "scene");
                 layout->Close("viewer");
+                layout->Activate("graph");
                 layout->Activate("assets");
                 layout->Activate("scene");
                 return layout;
@@ -3739,6 +4482,8 @@ class $NAME : ResourceScript() {
                         Docked("here", "Here to use", "inventory_2", HereToUse()),
                         Docked("inspector", "Inspector", "tune", Inspector()),
                         Docked("problems", "Problems", "warning", Problems()),
+                        Docked("frame", "Frame", "timeline", FramePanel()),
+                        Docked("flow", "Pass flow", "account_tree", FlowPanel()),
                         Docked("assets", "Assets", "folder", AssetsPanel()),
                         ViewerDocked(),
                     }, kui::DockOptions {}.OnChanged([this] { SaveLayout(); }).OnClosed([this](const std::string& panel) {
@@ -3753,7 +4498,7 @@ class $NAME : ResourceScript() {
             }
 
         private:
-            enum class Dialog { eNone, eAddNode, eNewProject, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab };
+            enum class Dialog { eNone, eAddNode, ePortChoice, eNewProject, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab };
             static constexpr float ListSize = 28.f;     // the least the Assets panel shows a thing at: a line of a list
 
             /**
@@ -3775,12 +4520,13 @@ class $NAME : ResourceScript() {
             bool _logoRead = false;
 
             /**
-             * The title bar: the logo and the menus at its start, and at its end the window's buttons — the editor's own,
+             * The title bar: the logo and the menus at its start, the scene's play controls in its middle, and at its end the window's buttons — the editor's own,
              * shaped as the dock's side buttons are, the last of them over the right side's. (On macOS, the system's.)
              */
             kui::TitleBarOptions TitleBarOptions()
             {
-                auto options = kui::TitleBarOptions {}.SetLeading(kui::Row({ Logo(), Menus() }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                auto options = kui::TitleBarOptions {}.SetLeading(kui::Row({ Logo(), Menus() }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)))
+                    .SetCenter(PlayControls());
 #ifndef __APPLE__
                 using Does = WindowButton::Does;
                 options.SetButtons(false).SetTrailing(kui::Padding(kui::EdgeInsets::Only(0.f, 0.f, 6.f, 0.f), kui::Row({
@@ -3873,7 +4619,7 @@ class $NAME : ResourceScript() {
                 }), ScenePanel());
                 kui::DockPanel panel { "scene", "Scene", std::move(scene), false };
                 panel.icon = kui::MaterialIcon("videocam");
-                panel.titleBar = TitleTools(true);
+                panel.titleBar = TitleTools();
                 return panel;
             }
 
@@ -3886,7 +4632,6 @@ class $NAME : ResourceScript() {
                 kui::Widget view = _session->Game() ? kgui::SceneView(*_session->Game()) : kui::Text("");
                 kui::DockPanel panel { "game", "Game", std::move(view), false };
                 panel.icon = kui::MaterialIcon("sports_esports");
-                panel.titleBar = TitleTools(false);
                 return panel;
             }
 
@@ -3901,27 +4646,31 @@ class $NAME : ResourceScript() {
             }
             static kui::Widget ToolSeparator() { return kui::SizedBox(1.f, 16.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x606060))))); }
 
-            /**
-             * What the Scene and Game panels' title bars have, at their end: play, pause and stop — and, the Scene's,
-             * whose eyes it is seen through.
-             */
-            kui::Widget TitleTools(const bool scene)
+            /** What the Scene panel's title bar has, at its end: whose eyes it is seen through. */
+            kui::Widget TitleTools()
             {
-                const bool playMode = _session->InPlayMode();
+                return kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kui::Row({
+                    kui::Expanded(kui::Text("")),
+                    Tool("videocam", "Look through the scene's camera", _session->ThroughSceneCamera(), [this] { _session->SetLookThroughCamera(!_session->lookThroughCamera); }),
+                }, kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+            }
+
+            /**
+             * Play, pause, a step and stop, in the middle of the window's title bar: the scene's, whichever panel shows
+             * it. While it plays they sit on the theme's colour, and while it is paused on a dimmer one of it, so that
+             * what is done to the scene then — and is lost at Stop — is not mistaken for an edit.
+             */
+            kui::Widget PlayControls()
+            {
+                const bool playMode = _session->InPlayMode(), playing = _session->IsPlaying();
                 std::vector<kui::Widget> tools;
-                tools.push_back(kui::Expanded(kui::Text("")));
-                if (scene) {
-                    tools.push_back(Tool("videocam", "Look through the scene's camera", _session->ThroughSceneCamera(),
-                                         [this] { _session->SetLookThroughCamera(!_session->lookThroughCamera); }));
-                    tools.push_back(ToolSeparator());
-                }
-                if (_session->IsPlaying()) tools.push_back(Tool("pause", "Pause", false, [this] { _session->Pause(); }));
+                if (playing) tools.push_back(Tool("pause", "Pause", false, [this] { _session->Pause(); }));
                 else tools.push_back(Tool("play_arrow", playMode ? "Resume" : "Play: scripts and the scene's systems run", playMode, [this] { _session->StartPlaying(); }));
-                tools.push_back(Tool("skip_next", "One fixed step, and paused: the scripts' fixedUpdate and the graph's fixed pages, once", false, [this] { _session->Step(); },
-                                     !_session->IsPlaying()));
+                tools.push_back(Tool("skip_next", "One fixed step, and paused: the scripts' fixedUpdate and the graph's fixed pages, once", false, [this] { _session->Step(); }, !playing));
                 tools.push_back(Tool("stop", "Stop, and put the scene back as it was", false, [this] { _session->Stop(); }, playMode));
-                return kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f),
-                                    kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                const kui::Color backing = playing ? kui::Theme::Current().primary.WithAlpha(0.45f) : playMode ? kui::Theme::Current().primary.WithAlpha(0.2f) : kui::colors::Transparent;
+                return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(4.f, 2.f)).SetDecoration(kui::Decoration {}.SetColor(backing).SetRadius(6.f)),
+                                      kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
             }
 
             /**
@@ -3942,6 +4691,9 @@ class $NAME : ResourceScript() {
                 tools.push_back(Tool("center_focus_strong", "Frame what is picked (the view: right-drag turns, middle-drag moves, the wheel zooms)", false,
                                      [this, selected] { _session->Frame(selected); }, !selected.IsNull()));
                 tools.push_back(ToolSeparator());
+                tools.push_back(ViewModeTool());
+                tools.push_back(GridTool());
+                tools.push_back(ToolSeparator());
                 tools.push_back(kui::Make<FrameRate>(_session));
                 // What the graph can be switched between — its picture, a debug view of it — without going to the node that says which.
                 for (const auto& choice : _session->Choices()) {
@@ -3953,6 +4705,13 @@ class $NAME : ResourceScript() {
 
                 std::vector<kui::Widget> layers;
                 layers.push_back(kgui::SceneView(_session->Play(), _session->viewport));
+                // Over the scene's picture: a DebugView's in its place, when one is chosen; the grid; and the overlay.
+                const auto cover = [&](kor::ResourceRef<const kor::Image> picture) {
+                    if (picture.Get())
+                        layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 0.f, .top = 0.f, .right = 0.f, .bottom = 0.f }, kui::IgnorePointer(kui::Image(picture, kui::ImageFit::eFill))));
+                };
+                cover(_session->ViewModePicture());
+                cover(_session->GridPicture());
                 if (_session->Play().Over())
                     if (const auto picture = _session->OverPicture(); picture.Get())
                         layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 0.f, .top = 0.f, .right = 0.f, .bottom = 0.f }, kui::IgnorePointer(kui::Image(picture, kui::ImageFit::eFill))));
@@ -3961,6 +4720,109 @@ class $NAME : ResourceScript() {
                                        .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.69f)).SetRadius(6.f)),
                                    kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)))));
                 return kui::Stack(std::move(layers));
+            }
+
+            /** A heading over a group of lines in one of the Scene panel's popups. */
+            static kui::Widget PopupHeading(const std::string& text)
+            {
+                return kui::Padding(kui::EdgeInsets::Only(8.f, 8.f, 8.f, 2.f), kui::Text(text, kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted)));
+            }
+            /** A popup's backing: the theme's surface, edged. */
+            static kui::Widget PopupPanel(kui::Widget body, const float width)
+            {
+                const kui::Theme t = kui::Theme::Current();
+                return kui::Container(kui::ContainerOptions {}.SetWidth(width).SetPadding(kui::EdgeInsets::All(4.f))
+                                          .SetDecoration(kui::Decoration {}.SetColor(t.surface).SetRadius(6.f).SetBorderWidth(1.f).SetBorderColor(t.border)),
+                                      std::move(body));
+            }
+
+            /**
+             * How the Scene panel shows the scene — lit, a channel of its materials, one of the editor's ways, a
+             * DebugView of its graph — as a button naming the one it is, and under it the list of them by heading.
+             */
+            kui::Widget ViewModeTool()
+            {
+                const auto modes = _session->ViewModes();
+                const auto now = std::ranges::find(modes, _session->CurrentViewMode(), &Session::ViewModeChoice::mode);
+                const std::string name = now == modes.end() ? "Lit" : now->name;
+                std::vector<kui::Widget> lines;
+                std::string group = "-";
+                for (const auto& choice : modes) {
+                    if (choice.group != group) {
+                        group = choice.group;
+                        if (!group.empty()) lines.push_back(PopupHeading(group));
+                    }
+                    const bool chosen = choice.mode == _session->CurrentViewMode();
+                    std::string label = choice.name;
+                    std::string tip;
+                    if (choice.mode.kind == Session::ViewMode::Kind::eMaterial) tip = "What the shaders that import koral_debug show of their materials; the rest are drawn lit";
+                    else if (choice.mode.kind == Session::ViewMode::Kind::eEditor) tip = std::format("A DebugView of {}", choice.mode.file.filename().string());
+                    else if (choice.mode.kind == Session::ViewMode::Kind::eGraph) tip = std::format("The scene graph's DebugView '{}'", choice.mode.id);
+                    else tip = "The scene as its graph draws it";
+                    kui::Widget line = kui::Button(kui::Row({ kui::SizedBox(16.f, 16.f, chosen ? kui::Icon("check", kui::IconStyle::eFilled, kui::Theme::Current().text) : kui::Text("")),
+                                                              kui::Text(std::move(label), kui::TextStyle {}.SetSize(13.f)) },
+                                                            kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                                                   [this, mode = choice.mode] { _session->SetViewMode(mode); SetState([&] { _viewModesOpen = false; }); },
+                                                   kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain));
+                    lines.push_back(kui::Tooltip(std::move(tip), std::move(line)));
+                }
+                if (_session->CurrentViewMode().kind == Session::ViewMode::Kind::eMaterial)
+                    if (const auto without = _session->WithoutMaterialViews(); !without.empty())
+                        lines.push_back(kui::Padding(kui::EdgeInsets::Only(8.f, 8.f, 6.f, 4.f), kui::Text(std::format("Lit still: {} — its shaders do not import koral_debug.",
+                            [&] { std::string all; for (const auto& id : without) all += (all.empty() ? "" : ", ") + id; return all; }()),
+                            kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted))));
+                const kui::Color ink = kui::Color::Hex(0xE0E0E0);
+                kui::Widget face = kui::Container(kui::ContainerOptions {}.SetHeight(24.f).SetPadding(kui::EdgeInsets::Symmetric(4.f, 0.f)).SetAlignment(kui::Alignment::Center())
+                                                      .SetDecoration(kui::Decoration {}.SetColor(_viewModesOpen ? kui::Theme::Current().primary.WithAlpha(0.35f) : kui::colors::Transparent).SetRadius(3.f)),
+                    kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("layers", kui::IconStyle::eFilled, ink)), kui::Text(name, kui::TextStyle {}.SetSize(12.f).SetColor(ink)),
+                               kui::SizedBox(14.f, 14.f, kui::Icon("expand_more", kui::IconStyle::eFilled, ink)) },
+                             kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
+                return kui::Column({
+                    kui::Tooltip("How the scene is shown here: lit, a channel of its materials, or a debug view", kui::Button(std::move(face), [this] { SetState([&] { _viewModesOpen = !_viewModesOpen; _gridOpen = false; }); },
+                                                                                                                    kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))),
+                    kui::PopupAnchor(_viewModesOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 220.f), [this] { SetState([&] { _viewModesOpen = false; }); }, { 0.f, 4.f }),
+                }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
+            }
+
+            /** The grid: on or off, and beside it its settings — which plane, how far apart its lines, how far it reaches. */
+            kui::Widget GridTool()
+            {
+                const Grid grid = _session->SceneGrid();
+                const auto change = [this](std::function<void(Grid&)> how) { Grid grid = _session->SceneGrid(); how(grid); _session->SetGrid(grid); };
+                const auto row = [](const char* label, kui::Widget control) {
+                    return kui::Padding(kui::EdgeInsets::Symmetric(8.f, 3.f), kui::Row({ kui::SizedBox(96.f, 22.f, kui::Align(kui::Alignment::CenterLeft(), kui::Text(label, kui::TextStyle {}.SetSize(12.f)))),
+                                                                                        kui::Expanded(std::move(control)) }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                };
+                std::vector<kui::Widget> lines;
+                lines.push_back(PopupHeading("Grid"));
+                lines.push_back(row("Shown", kui::Switch(grid.shown, [change](const bool on) { change([&](Grid& g) { g.shown = on; }); })));
+                // Buttons, not a Dropdown: its list would be a popup of its own, in place of this one.
+                std::vector<kui::Widget> planes;
+                for (const auto& [plane, name, what] : { std::tuple { Grid::Plane::eXZ, "XZ", "The floor: Y up" }, std::tuple { Grid::Plane::eXY, "XY", "Facing Z" },
+                                                         std::tuple { Grid::Plane::eYZ, "YZ", "Facing X" } }) {
+                    const bool on = grid.plane == plane;
+                    planes.push_back(kui::Tooltip(what, kui::Button(
+                        kui::Container(kui::ContainerOptions {}.SetSize(36.f, 22.f).SetAlignment(kui::Alignment::Center())
+                                           .SetDecoration(kui::Decoration {}.SetColor(on ? kui::Theme::Current().primary.WithAlpha(0.35f) : kui::Theme::Current().surfaceHover).SetRadius(4.f)),
+                                       kui::Text(name, kui::TextStyle {}.SetSize(12.f))),
+                        [change, plane] { change([&](Grid& g) { g.plane = plane; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))));
+                }
+                lines.push_back(row("Plane", kui::Row(std::move(planes), kui::FlexOptions {}.SetGap(4.f).SetMainAxisSize(kui::MainAxisSize::eMin))));
+                lines.push_back(row("Cell (m)", kui::DragValue(grid.cell, [change](const float v) { change([&](Grid& g) { g.cell = v; }); },
+                                                                kui::DragValueOptions {}.SetRange(0.001f, 1000.f).SetLogarithmic(true))));
+                lines.push_back(row("Major every", kui::DragValue(grid.major, [change](const float v) { change([&](Grid& g) { g.major = std::round(v); }); },
+                                                                   kui::DragValueOptions {}.SetRange(1.f, 100.f))));
+                lines.push_back(row("Fades at (m)", kui::DragValue(grid.fade, [change](const float v) { change([&](Grid& g) { g.fade = v; }); },
+                                                                    kui::DragValueOptions {}.SetRange(1.f, 10000.f).SetLogarithmic(true))));
+                lines.push_back(row("Opacity", kui::Slider(grid.opacity, [change](const float v) { change([&](Grid& g) { g.opacity = v; }); })));
+                lines.push_back(row("Behind things", kui::Checkbox(grid.depthTested, [change](const bool on) { change([&](Grid& g) { g.depthTested = on; }); })));
+                return kui::Row({
+                    Tool("grid_on", grid.shown ? "Hide the grid" : "Show the grid", grid.shown, [change] { change([](Grid& g) { g.shown = !g.shown; }); }),
+                    kui::Column({
+                        Tool("tune", "The grid's settings", _gridOpen, [this] { SetState([&] { _gridOpen = !_gridOpen; _viewModesOpen = false; }); }),
+                        kui::PopupAnchor(_gridOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 250.f), [this] { SetState([&] { _gridOpen = false; }); }, { 0.f, 4.f }),
+                    }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin)),
+                }, kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
             }
 
             // ---- menus and dialogs ------------------------------------------------------------------------------
@@ -3985,6 +4847,7 @@ class $NAME : ResourceScript() {
                         { "Open project...", Asking("Opening another project", [this] { SetState([&] { _dialog = Dialog::eOpenProject; }); }) },
                         { .separator = true },
                         { "New scene", Asking("Making the scene anew", needsProject([this] { _session->NewStandardScene(); })), !playMode },
+                        { "New lit scene", Asking("Making the scene anew, lit under a sky", needsProject([this] { _session->NewLitScene(); })), !playMode },
                         { "Revert to saved", Asking("Putting the saved scene back", [this] { _session->Revert(); }), _session->HasProject() && !playMode },
                         { "Save scene", needsProject([this] { _session->Save(); }), !playMode },
                     } },
@@ -4035,6 +4898,9 @@ class $NAME : ResourceScript() {
                         { "Arrange this page", [this] { Arrange(); } },
                         { "Frame everything   F", [this] { _view->Frame(); SetState(); } },
                     } },
+                    { "Settings", {
+                        { .label = "Theme", .items = ThemeMenu() },
+                    } },
                     { "Entity", {
                         { "New entity", [this] { _session->Select(Doc().CreateEntity()); } },
                         { "New tag...", [this] { SetState([&] { _dialog = Dialog::eNone; _session->Say("Give the tag a name in the inspector of an entity."); }); } },
@@ -4042,10 +4908,27 @@ class $NAME : ResourceScript() {
                 });
             }
 
+            /** Each design the editor can be drawn in, and dark or light: the one it is in ticked. */
+            std::vector<kui::MenuItem> ThemeMenu()
+            {
+                const kui::Theme& now = kui::Theme::Current();
+                const auto ticked = [](const bool on, const char* label) { return std::string(on ? "✓  " : "     ") + label; };
+                const bool dark = now.IsDark();
+                std::vector<kui::MenuItem> items;
+                for (const auto& [label, design] : { std::pair { "Koral", kui::ThemeDesign::eKoral }, std::pair { "Material", kui::ThemeDesign::eMaterial },
+                                                     std::pair { "Cupertino", kui::ThemeDesign::eCupertino }, std::pair { "Windows", kui::ThemeDesign::eFluent } })
+                    items.push_back({ ticked(now.design == design, label), [this, design, dark] { _session->ChooseTheme(design, dark); } });
+                items.push_back({ .separator = true });
+                items.push_back({ ticked(dark, "Dark"), [this, design = now.design] { _session->ChooseTheme(design, true); } });
+                items.push_back({ ticked(!dark, "Light"), [this, design = now.design] { _session->ChooseTheme(design, false); } });
+                return items;
+            }
+
             kui::Widget DialogBody()
             {
                 switch (_dialog) {
                 case Dialog::eAddNode: return AddNodeDialog();
+                case Dialog::ePortChoice: return PortChoiceDialog();
                 case Dialog::eNewProject:
                     return kgui::FileBrowser({ .start = Session::ProjectsDirectory(), .directories = true, .createDirectories = true, .confirm = "Make the project here" },
                         [this](const std::filesystem::path& chosen) { _session->NewProject(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
@@ -4183,6 +5066,62 @@ class $NAME : ResourceScript() {
                 SetState([&] { _dialog = Dialog::eAddNode; _addAt = at; _filter.clear(); _newId.clear(); _wire = std::move(wire); });
             }
 
+            /** Opens the list of @p node's ports that @p wire could go to, let go on it. */
+            void AskForPort(LooseWire wire, const std::string& node)
+            {
+                SetState([&] { _dialog = Dialog::ePortChoice; _filter.clear(); _wire = std::move(wire); _wireOnto = node; });
+            }
+
+            /** Wires the wire let go to @p port of the node it was let go on, and closes the list. */
+            void WireToPort(const std::string& port)
+            {
+                const LooseWire wire = *std::exchange(_wire, std::nullopt);
+                if (wire.fromOutput) Doc().Connect(wire.from.node, wire.from.port, _wireOnto, port);
+                else Doc().Connect(_wireOnto, port, wire.from.node, wire.from.port);
+                SetState([&] { _dialog = Dialog::eNone; });
+            }
+
+            /**
+             * The ports of the node a wire was let go on, for it to go to: those that fit, the first ready for Enter, and
+             * under them, greyed, those that don't, each with why. Typing narrows both.
+             */
+            kui::Widget PortChoiceDialog()
+            {
+                if (!_wire) return kui::SizedBox(0.f, 0.f);
+                const LooseWire& wire = *_wire;
+                std::vector<PortChoice> choices = PortChoices(Doc(), wire.from.node, wire.from.port, wire.fromOutput, _wireOnto);
+                const auto lowered = [](std::string text) {
+                    std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                    return text;
+                };
+                const std::string typed = lowered(_filter);
+                std::erase_if(choices, [&](const PortChoice& choice) { return !typed.empty() && lowered(choice.label).find(typed) == std::string::npos && lowered(choice.port).find(typed) == std::string::npos; });
+                const auto first = std::ranges::find_if(choices, &PortChoice::fits);
+
+                std::vector<kui::Widget> rows;
+                bool greyed = false;
+                for (const auto& choice : choices) {
+                    if (!choice.fits) {
+                        if (!greyed) { greyed = true; rows.push_back(kgui::Muted("Can't take it", 11.f)); }
+                        rows.push_back(kgui::Muted(std::format("{}   ·   {}", choice.label, choice.why), 12.f));
+                        continue;
+                    }
+                    const std::string text = choice.wiredFrom.empty() ? choice.label : std::format("{}   ·   now from {}", choice.label, choice.wiredFrom);
+                    rows.push_back(kui::Selectable(text, &choice == &*first, [this, port = choice.port] { WireToPort(port); }));
+                }
+                if (choices.empty()) rows.push_back(kgui::Muted(_filter.empty() ? "It has no ports." : std::format("No port of it is called '{}'.", _filter)));
+                return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column({
+                    Heading(wire.fromOutput ? std::format("Wire {} of {} to {}", PortLabel(wire.from.port), wire.from.node, _wireOnto)
+                                            : std::format("Wire {} of {} from {}", PortLabel(wire.from.port), wire.from.node, _wireOnto)),
+                    kui::TextField(kui::TextFieldOptions { .text = _filter, .placeholder = "Type part of a port's name; Enter wires the first",
+                                                           .onChanged = [this](const std::string& text) { SetState([&] { _filter = text; }); },
+                                                           .onSubmitted = [this, port = first == choices.end() ? std::string() : first->port](const std::string&) {
+                                                               if (!port.empty()) WireToPort(port);
+                                                           }, .width = 420.f, .focus = 1 }),
+                    kui::SizedBox(420.f, 360.f, kui::ScrollView(kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(2.f)))),
+                }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(12.f)));
+            }
+
             /** Whether a node of kind @p type has somewhere for @p wire to go. */
             static bool Takes(const kgraph::NodeType& type, const LooseWire& wire)
             {
@@ -4304,7 +5243,14 @@ class $NAME : ResourceScript() {
             {
                 // As the page is shaped: as wide, for how tall, as the panel it is in.
                 const float aspect = _view->size.y > 1.f ? std::clamp(_view->size.x / _view->size.y, 0.4f, 4.f) : 1.6f;
-                const auto where = ArrangeNodes(_placed, _wires, aspect);
+                // Each as big as its card came out, where it has been laid out: what the page was built with is a guess.
+                std::vector<PlacedNode> placed = _placed;
+                for (auto& node : placed)
+                    if (const auto size = _view->sizes.find(node.id); size != _view->sizes.end() && size->second.x > 0.f) {
+                        node.width = size->second.x;
+                        node.height = size->second.y;
+                    }
+                const auto where = ArrangeNodes(placed, _wires, aspect);
                 if (where.empty()) return;
                 if (_overview) Doc().PlaceInOverview(where);
                 else Doc().PlaceNodes(where);
@@ -4323,25 +5269,25 @@ class $NAME : ResourceScript() {
                 auto found = FindNodeTypes(_filter, Doc().Presets());
                 // For a wire let go over nothing: only what has somewhere for it to go.
                 if (_wire) std::erase_if(found, [&](const kgraph::NodeType* type) { return !Takes(*type, *_wire); });
-                // The categories, in the order work goes: what the scene holds and what is worked out of it, then what is
-                // made on the device, and what runs.
-                static const std::vector<std::string> order { "Components", "Scene", "Values", "Math", "Vectors", "Cameras", "Logic", "Resources", "Pipelines", "Passes", "Flow", "Functions" };
+                // The categories in three sections: the functions first, each under what it is for; then what the scene
+                // holds and what is worked out of it; then Vulkan's own — what is made on the device, and what runs.
                 std::map<std::string, std::size_t> counts;
                 for (const auto* type : found) ++counts[type->category];
+                const std::vector<std::string> sections = NodeListSections(counts, Doc().RateOf(ShownPass()));
                 std::vector<std::string> categories;
-                for (const auto& category : order) if (counts.contains(category)) categories.push_back(category);
-                for (const auto& [category, count] : counts) if (!std::ranges::contains(categories, category)) categories.push_back(category);
+                for (const auto& section : sections) if (!section.starts_with('#')) categories.push_back(section);
                 const std::string category = std::ranges::contains(categories, _menuCategory) ? _menuCategory : std::string();
 
-                // Left: every category, with how many it has of what is found.
+                // Left: every category, with how many it has of what is found, under its section.
                 std::vector<kui::Widget> left;
                 const auto categoryRow = [&](const std::string& name, const std::string& label, const std::size_t count) {
                     return kui::Selectable(std::format("{}   {}", label, count), category == name, [this, name] { SetState([&] { _menuCategory = name; }); });
                 };
                 left.push_back(categoryRow({}, _filter.empty() ? "Everything" : "All that is found", found.size()));
-                for (const auto& name : categories)
-                    left.push_back(kui::Row({ kui::Container(kui::ContainerOptions { .width = 4.f, .height = 18.f, .decoration = { .color = CategoryColor(name), .radius = 2.f } }),
-                                              kui::Expanded(categoryRow(name, name, counts[name])) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                for (const auto& name : sections)
+                    if (name.starts_with('#')) left.push_back(kui::Padding(kui::EdgeInsets::Only(0.f, 8.f, 0.f, 2.f), kgui::Muted(name.substr(1), 11.f)));
+                    else left.push_back(kui::Row({ kui::Container(kui::ContainerOptions { .width = 4.f, .height = 18.f, .decoration = { .color = CategoryColor(name), .radius = 2.f } }),
+                                                   kui::Expanded(categoryRow(name, name, counts[name])) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
 
                 // Middle: the nodes of the category — or, as something is typed, what it finds, best first.
                 std::vector<const kgraph::NodeType*> listed;
@@ -4449,6 +5395,8 @@ class $NAME : ResourceScript() {
                 card.title = type.name;
                 card.icon = type.icon;
                 card.accent = CategoryColor(type.category);
+                card.level = static_cast<int>(type.level);
+                card.composite = type.composite;
                 for (const auto& port : type.inputs) {
                     if (port.name.find("[]") != std::string::npos) {
                         if (port.optional) continue;
@@ -4459,14 +5407,14 @@ class $NAME : ResourceScript() {
                     kgraph::Port shown = port;
                     if (const auto open = shown.name.find("[]"); open != std::string::npos) shown.name.insert(open + 1, "0");
                     kui::NodePort row { shown.name, PortLabel(shown.name), WireType(shown) };
-                    row.color = PortColor(row.type);
+                    row.color = PortColor(row.type); row.shape = PortShapeOf(row.type);
                     if (placement == kgraph::Placement::eNode) row.control = NodeControl(node, shown, shown.initial);
                     card.inputs.push_back(std::move(row));
                 }
                 for (const auto& port : type.outputs)
                     if (!port.optional) {
                         kui::NodePort row { port.name, port.name == "out" ? TypeLabel(port.type) : PortLabel(port.name), WireType(port) };
-                        row.color = PortColor(row.type);
+                        row.color = PortColor(row.type); row.shape = PortShapeOf(row.type);
                         card.outputs.push_back(std::move(row));
                     }
                 std::vector<kui::Widget> body { kgui::Muted(type.name, 11.f) };
@@ -4490,11 +5438,15 @@ class $NAME : ResourceScript() {
                 if (trailing) line.push_back(std::move(trailing));
                 return kui::Padding(kui::EdgeInsets::Only(4.f, 10.f, 0.f, 2.f), kui::SizedBox(-1.f, 22.f, kui::Row(std::move(line), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
             }
-            /** A few words in a pill at a line's end: how many, how many wrong, that it is here already. */
-            static kui::Widget ListPill(std::string text, const kui::Color& tint)
+            /**
+             * A few words in a pill at a line's end: how many, how many wrong, that it is here already. Every pill is the
+             * panel's own grey — what matters more is said brighter (@p ink), never in a colour of its own.
+             */
+            static kui::Widget ListPill(std::string text, const kui::Color& ink)
             {
-                return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(6.f, 1.f)).SetDecoration(kui::Decoration {}.SetColor(tint.WithAlpha(0.16f)).SetRadius(8.f)),
-                                      kui::Text(std::move(text), kui::TextStyle {}.SetSize(11.f).SetColor(tint), kui::TextAlign::eStart, false));
+                const kui::Theme& t = kui::Theme::Current();
+                return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(6.f, 1.f)).SetDecoration(kui::Decoration {}.SetColor(t.text.WithAlpha(0.07f)).SetRadius(8.f)),
+                                      kui::Text(std::move(text), kui::TextStyle {}.SetSize(11.f).SetColor(ink), kui::TextAlign::eStart, false));
             }
             /** A line of a list: picked, it is lit and marked down its left; under the pointer, lit a little. */
             kui::Widget ListLine(const std::string& key, const bool picked, std::vector<kui::Widget> line, std::function<void()> onTap)
@@ -4561,10 +5513,11 @@ class $NAME : ResourceScript() {
                 std::vector<kui::Widget> rows;
                 // A function open in place: what its page is, and the way out — keeping what was done, or not.
                 if (const auto& opened = Doc().Opened()) {
-                    const kui::Color teal = kui::Color::Hex(0x3E9FA8);
+                    // Said in the panel's own colours, the theme's accent on its icon: not a colour of its own.
+                    const kui::Color accent = t.primary;
                     rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(10.f))
-                                                      .SetDecoration(kui::Decoration {}.SetColor(teal.WithAlpha(0.14f)).SetBorderWidth(1.f).SetBorderColor(teal.WithAlpha(0.45f)).SetRadius(6.f)),
-                        Rows({ kui::Row({ icon("functions", teal), kui::Expanded(kui::Text(std::format("Function {} is open", opened->function), kui::TextStyle {}.SetSize(13.f).SetColor(t.text), kui::TextAlign::eStart, false, 1, true)) },
+                                                      .SetDecoration(kui::Decoration {}.SetColor(t.text.WithAlpha(0.05f)).SetBorderWidth(1.f).SetBorderColor(t.border).SetRadius(6.f)),
+                        Rows({ kui::Row({ icon("functions", accent), kui::Expanded(kui::Text(std::format("Function {} is open", opened->function), kui::TextStyle {}.SetSize(13.f).SetColor(t.text), kui::TextAlign::eStart, false, 1, true)) },
                                         kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
                                kgui::Muted(std::format("What is done on its page is the function's, for every call. Its inputs are what {} was given.", opened->call.id), 11.f),
                                kui::Row({ Chip("Done", [this] { _session->CloseFunction(true); }), Chip("Discard", [this] { _session->CloseFunction(false); }),
@@ -4638,8 +5591,13 @@ class $NAME : ResourceScript() {
                         "Nothing runs on the fixed step yet. A fixed pass runs on the frames that have a fixed step in them while the scene "
                         "plays, and rests on the rest: a simulation that must not go faster or slower with the frame rate. A FixedStep node "
                         "gives its dt. + makes the first.", 11.f)));
+                // The pages of what the choices do not choose — another renderer's — left out, but for the one shown.
+                const auto unchosen = _session->PagesNotChosen();
+                std::size_t leftOut = 0;
                 for (std::size_t i = 0; i < listed.size(); ++i) {
                     const std::string& pass = listed[i];
+                    const bool notChosen = unchosen.contains(pass);
+                    if (notChosen && !_everyChoice && pass != shown) { ++leftOut; continue; }
                     std::size_t nodes = 0, failed = 0;
                     for (const auto& node : Doc().Graph().nodes) {
                         if (node.pass != pass) continue;
@@ -4650,8 +5608,23 @@ class $NAME : ResourceScript() {
                     const int index = offset + static_cast<int>(i);   // among them all: what the document moves it by
                     std::vector<kui::Widget> line;
                     line.push_back(kui::SizedBox(18.f, -1.f, kui::Text(std::to_string(i + 1), kui::TextStyle {}.SetSize(11.f).SetColor(picked ? t.primary : t.textMuted), kui::TextAlign::eEnd, false)));
-                    line.push_back(name(pass, picked));
-                    if (failed) line.push_back(kui::Tooltip(std::format("{} of its nodes could not be made", failed), chip(std::format("{} wrong", failed), kui::Color::Hex(0xE5484D))));
+                    line.push_back(notChosen ? kui::Tooltip("Of what the choices do not choose now: its passes idle", kui::Opacity(0.5f, name(pass, picked))) : name(pass, picked));
+                    if (failed) line.push_back(kui::Tooltip(std::format("{} of its nodes could not be made", failed), chip(std::format("{} wrong", failed), t.text)));
+                    // What the page's passes cost the GPU together, coloured by their share of the frame.
+                    line.push_back(kui::Tooltip("What its passes take of the GPU together, averaged over recent frames", kui::Make<LiveValue>(_session, [this, pass] {
+                        const Timings timings = Doc().Runtime().Timings();
+                        double ms = 0.0;
+                        bool measured = false;
+                        for (const auto& node : Doc().Graph().nodes)
+                            if (node.pass == pass)
+                                if (const auto cost = CostOf(timings, node.id)) { ms += cost->gpuMs; measured = measured || cost->gpuMeasured; }
+                        const double frame = FrameGpuMs(timings);
+                        return measured ? Value(Value::List { Value(ms), Value(frame > 0.0 ? ms / frame : 0.0) }) : Value();
+                    }, [](const Value& said) -> kui::Widget {
+                        const auto* both = said.Items();
+                        if (!both || both->size() != 2) return kui::SizedBox(0.f, 0.f);
+                        return ListPill(std::format("{:.2f} ms", *(*both)[0].Number()), HeatColor(*(*both)[1].Number()));
+                    })));
                     line.push_back(chip(std::to_string(nodes), t.textMuted));
                     const int first = offset, last = offset + static_cast<int>(listed.size()) - 1;
                     kui::Widget row = kui::ContextMenu({
@@ -4699,6 +5672,11 @@ class $NAME : ResourceScript() {
                             kui::IgnorePointer(kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.primary))))) });
                     rows.push_back(std::move(row));
                 }
+                if (leftOut > 0 || (_everyChoice && std::ranges::any_of(listed, [&](const std::string& pass) { return unchosen.contains(pass); })))
+                    rows.push_back(kui::Tooltip("Pages whose passes all idle as the choices are — another renderer's, say — are left out of the list. Choose another in the Pass flow, or the scene view's switch, and its pages are listed.",
+                        kui::Row({ kui::Expanded(kgui::Muted(_everyChoice ? std::string("Listing what the choices do not choose too") : std::format("{} {} of what the choices do not choose", leftOut, leftOut == 1 ? "page" : "pages"), 11.f)),
+                                   Chip(_everyChoice ? "Hide them" : "Show them", [this] { SetState([&] { _everyChoice = !_everyChoice; }); }) },
+                                 kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
                 if (passes.empty()) rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted("None yet: every node is on one page. + makes the first.", 11.f)));
                 if (_addingPass || passes.empty())
                     rows.push_back(kui::TextField(kui::TextFieldOptions { .placeholder = "Its name, then Enter",
@@ -4843,7 +5821,7 @@ class $NAME : ResourceScript() {
                     for (const auto& output : runtime.OutputsOf(of.id))
                         if (!output.optional || wiredFrom.contains({ node.id, output.name }) || _session->Asked(node.id, "out:" + output.name)) {
                             kui::NodePort port { output.name, output.name == "out" ? TypeLabel(output.type) : PortLabel(output.name), WireType(output) };
-                            port.color = PortColor(port.type);
+                            port.color = PortColor(port.type); port.shape = PortShapeOf(port.type);
                             card.outputs.push_back(std::move(port));
                         }
                 };
@@ -4851,15 +5829,12 @@ class $NAME : ResourceScript() {
                 const auto wide = [](const std::string& text, const float each) { return static_cast<float>(text.size()) * each; };
                 const auto measured = [&](const kui::GraphNode& card, const float bodyWidth, const float bodyHeight) {
                     PlacedNode placed { card.id, card.position.x, card.position.y };
-                    const std::size_t rows = std::max(card.inputs.size(), card.outputs.size());
-                    placed.width = std::max({ kui::nodes::MinWidth, wide(card.title, 7.6f) + 24.f + (card.icon.empty() ? 0.f : 21.f), bodyWidth + 16.f });
-                    for (std::size_t i = 0; i < rows; ++i) {
-                        float row = 40.f;
-                        if (i < card.inputs.size())
-                            row += wide(card.inputs[i].label, 6.6f) + (card.inputs[i].control ? 120.f : card.inputs[i].value.empty() ? 0.f : 8.f + wide(card.inputs[i].value, 6.6f));
-                        if (i < card.outputs.size()) row += wide(card.outputs[i].label, 6.6f);
-                        placed.width = std::max(placed.width, row);
-                    }
+                    // A row a port: its outputs, then its inputs.
+                    const std::size_t rows = card.inputs.size() + card.outputs.size();
+                    placed.width = std::max({ kui::nodes::MinWidth, wide(card.title, 7.6f) + 24.f + (card.icon.empty() ? 0.f : 21.f) + (card.level >= 0 ? 28.f : 0.f), bodyWidth + 16.f });
+                    for (const auto& input : card.inputs)
+                        placed.width = std::max(placed.width, 20.f + wide(input.label, 6.6f) + (input.control ? 132.f : input.value.empty() ? 0.f : 28.f + wide(input.value, 6.6f)));
+                    for (const auto& output : card.outputs) placed.width = std::max(placed.width, 20.f + wide(output.label, 6.6f));
                     placed.height = kui::nodes::TitleHeight + kui::nodes::RowHeight * static_cast<float>(rows) + bodyHeight + 16.f + (card.error.empty() ? 0.f : 44.f);
                     return placed;
                 };
@@ -4878,6 +5853,7 @@ class $NAME : ResourceScript() {
                                 if (std::string found = loopOf(*from, depth + 1); !found.empty()) return found;
                     return {};
                 };
+                const Timings costs = runtime.Timings();   // which nodes have run something, to say what it costs
                 for (const auto& node : graph.nodes) {
                     if (!here(node)) continue;
                     visible.insert(node.id);
@@ -4905,10 +5881,12 @@ class $NAME : ResourceScript() {
                         card.position = { static_cast<float>(at->second.first), static_cast<float>(at->second.second) };
                     card.accent = CategoryColor(type ? type->category : std::string());
                     if (type) card.icon = type->icon;
+                    // How abstract it is, as steps in its title bar; made of other nodes, a stack of cards (kgraph::Level).
+                    if (type) { card.level = static_cast<int>(type->level); card.composite = type->composite; }
                     for (const auto& input : InputsOf(runtime, node, [&](const std::string& name) { return _session->Asked(node.id, name); }))
                         if (ShowsAsPort(input, node)) {
                             kui::NodePort port { input.port.name, PortLabel(input.port.name), WireType(input.port) };
-                            port.color = PortColor(port.type);
+                            port.color = PortColor(port.type); port.shape = PortShapeOf(port.type);
                             const auto given = node.inputs.find(input.port.name);
                             const bool wired = given != node.inputs.end() && given->second.link;
                             // Set on the node: its control, while nothing is wired to it — what it is, or what it starts as.
@@ -4925,6 +5903,8 @@ class $NAME : ResourceScript() {
                         const kgraph::Node* target = StandsFor(node);
                         card.title = target ? target->id : card.title;
                         card.accent = kui::Color::Hex(0x5A6472);
+                        // As abstract as what it brings in.
+                        if (const kgraph::NodeType* of = target ? kgraph::FindType(target->type) : nullptr) { card.level = static_cast<int>(of->level); card.composite = of->composite; }
                         if (target) {
                             outputsOf(node, *target, card);
                             // Its main output is the thing itself, whatever else of it is wired from.
@@ -4935,19 +5915,22 @@ class $NAME : ResourceScript() {
                             if (Doc().IsSetup(target->pass)) card.accent = kui::Color::Hex(0x3E9FA8);
                             if (const std::string holds = Holds(target->id); !holds.empty() && holds != target->type) kind += "  ·  " + holds;
                         }
-                        if (card.outputs.empty()) card.outputs.push_back({ "out", "Resource", "r:Resource", PortColor("r:Resource") });
+                        if (card.outputs.empty()) card.outputs.push_back({ "out", "Resource", "r:Resource", PortColor("r:Resource"), PortShapeOf("r:Resource") });
                     } else {
                         // What it gives: what it makes, and whatever else of it something is wired to or was asked for.
                         outputsOf(node, node, card);
                     }
                     if (const auto* status = runtime.Status(node.id); status && !status->ok) card.error = status->error;
                     if (turns > 0) kind += ", once a turn";
+                    // And how abstract it is, in words, beside the steps in its title bar.
+                    if (card.level >= 0) kind += std::format("  ·  {}{}", kgraph::LevelName(static_cast<kgraph::Level>(card.level)), card.composite ? ", of nodes" : "");
                     float bodyWidth = wide(kind, 6.f) + 16.f, bodyHeight = 18.f;
                     if (node.type == "Note") {
                         // Words: what it says is all it is.
                         const auto text = node.inputs.find("text");
                         const std::string words = text != node.inputs.end() && text->second.value.String() ? *text->second.value.String() : std::string();
                         card.accent = kui::Color::Hex(0x8A7A3A);
+                        card.level = -1;        // words, of no level
                         card.body = kui::SizedBox(220.f, -1.f, kui::Text(words, kui::TextStyle {}.SetSize(12.f)));
                         bodyWidth = 236.f;
                         bodyHeight = 12.f + 16.f * std::ceil((wide(words, 6.6f) + 1.f) / 220.f);
@@ -5008,19 +5991,37 @@ class $NAME : ResourceScript() {
                                 bodyHeight += 17.f;
                             }
                         }
+                        // What it costs, as it runs, coloured by its share of the frame: a pass's own, and a Function's call's or a
+                        // loop's every pass inside it added up.
+                        if ((type && type->category == "Passes") || node.type == "Function" || CostOf(costs, node.id)) {
+                            said.push_back(kui::Make<LiveValue>(_session, [this, id = node.id] {
+                                const Timings timings = Doc().Runtime().Timings();
+                                const auto cost = CostOf(timings, id);
+                                if (!cost) return Value("not run");
+                                const double frame = FrameGpuMs(timings);
+                                // The words, and the share of the frame they are coloured by.
+                                return Value(Value::List { Value(CostText(*cost, frame)), Value(cost->gpuMeasured && frame > 0.0 ? cost->gpuMs / frame : 0.0) });
+                            }, [](const Value& said) {
+                                const auto* both = said.Items();
+                                const bool ran = both && both->size() == 2;
+                                const std::string text = ran ? *(*both)[0].String() : said.String() ? *said.String() : std::string();
+                                return kgui::Line(text, kui::TextStyle {}.SetSize(11.f).SetColor(ran ? HeatColor(*(*both)[1].Number()) : kui::Theme::Current().textMuted));
+                            }));
+                            bodyWidth = std::max(bodyWidth, 150.f);
+                            bodyHeight += 17.f;
+                        }
                         // What it says while it is fine: what it waits for — a script that fills what it makes, which nothing runs yet.
                         if (const auto* status = runtime.Status(node.id); status && status->ok && !status->note.empty()) {
-                            said.push_back(kui::SizedBox(240.f, -1.f, kui::Text(status->note, kui::TextStyle {}.SetSize(11.f).SetColor(kui::Color::Hex(0xD9A441)))));
+                            said.push_back(kui::SizedBox(240.f, -1.f, kui::Text(status->note, kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted))));
                             bodyWidth = std::max(bodyWidth, 256.f);
                             bodyHeight += 16.f * std::ceil((wide(status->note, 6.f) + 1.f) / 240.f);
                         }
                         // What it stands for, where it is: what it holds, what this page does with it, what was done to it before.
                         if (const kgraph::Node* target = node.type == "Reference" ? StandsFor(node) : nullptr; target && target != &node && runtime.ResourceOf(node.id)) {
                             const UseHere use = UsesAt(target->id, node.pass);
-                            const kui::Color tint = use.write ? kui::Color::Hex(0xE09A3E) : use.read ? kui::Color::Hex(0x4C9A6A) : kui::Color::Hex(0x7A8494);
+                            const kui::Theme& t = kui::Theme::Current();
                             // A line more, of a card that was one line less: a graph laid out before has room for it.
-                            said.push_back(kui::Row({ kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(6.f, 1.f)).SetDecoration(kui::Decoration {}.SetColor(tint.WithAlpha(0.18f)).SetRadius(8.f)),
-                                                                     kui::Text(UsedHere(use), kui::TextStyle {}.SetSize(11.f).SetColor(tint), kui::TextAlign::eStart, false)),
+                            said.push_back(kui::Row({ ListPill(UsedHere(use), use.write ? t.text : t.textMuted),
                                                       kui::Expanded(kui::Text(WrittenBefore(use), kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted), kui::TextAlign::eStart, false, 1, true)) },
                                                     kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
                             bodyWidth = std::max(bodyWidth, wide(UsedHere(use), 6.f) + wide(WrittenBefore(use), 6.f) + 40.f);
@@ -5032,16 +6033,15 @@ class $NAME : ResourceScript() {
                         if (looking || image) {
                             const auto picture = looking ? _session->LookPictureOf(node.id) : _session->ThumbnailOf(node.id);
                             const std::string& says = looking ? _session->LookSaysOf(node.id) : _session->ThumbnailSaysOf(node.id);
-                            if (picture.Get()) {
-                                said.push_back(kui::Make<NodePicture>(_session, node.id, looking));
-                                bodyWidth = std::max(bodyWidth, 256.f);
-                                bodyHeight += 156.f;
-                                card.width = 264.f;     // as wide as its picture: a card is otherwise as narrow as its words
-                                if (wide(kind, 6.f) + 16.f > card.width) bodyHeight += 15.f;    // and its kind, wider than that, in two lines
-                            } else {
-                                said.push_back(kgui::Muted(says.empty() ? std::string("Its picture is on its way.") : says, 11.f));
-                                bodyHeight += 17.f;
-                            }
+                            // As big from the first, its picture there or not: a card that grew once it came would lie over
+                            // what the page was put in order round it.
+                            if (picture.Get()) said.push_back(kui::Make<NodePicture>(_session, node.id, looking));
+                            else said.push_back(kui::SizedBox(240.f, 146.f, kui::Align(kui::Alignment::Center(),
+                                                    kgui::Muted(says.empty() ? std::string("Its picture is on its way.") : says, 11.f))));
+                            bodyWidth = std::max(bodyWidth, 256.f);
+                            bodyHeight += 156.f;
+                            card.width = 264.f;     // as wide as its picture: a card is otherwise as narrow as its words
+                            if (wide(kind, 6.f) + 16.f > card.width) bodyHeight += 15.f;    // and its kind, wider than that, in two lines
                         }
                         card.body = kui::Column(std::move(said), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
                     }
@@ -5066,7 +6066,9 @@ class $NAME : ResourceScript() {
                         kui::GraphNode card;
                         card.id = id;
                         card.title = node.title.empty() ? id : node.title;
-                        card.position = at;
+                        // Beside what it is wired to — and wherever it was dragged to from there, on this page.
+                        const kor::Vec2 dragged = _outsideMoved[page][id];
+                        card.position = at + dragged;
                         card.accent = kui::Color::Hex(0x5A6472);
                         card.icon = "link";
                         outputsOf(node, target ? *target : node, card);
@@ -5075,14 +6077,22 @@ class $NAME : ResourceScript() {
                         shown.nodes.push_back(std::move(card));
                     }
                 }
-                std::set<std::string> drawn;
-                for (const auto& card : shown.nodes) drawn.insert(card.id);
+                std::map<std::string, const kui::GraphNode*> drawn;
+                for (const auto& card : shown.nodes) drawn[card.id] = &card;
+                // How far down its card a port is: where its row is, as kui::nodes lays a card out. None shown: the middle.
+                const auto portY = [&](const std::string& id, const std::string& port, const bool output) {
+                    const kui::GraphNode& card = *drawn.at(id);
+                    const auto& ports = output ? card.outputs : card.inputs;
+                    const auto it = std::ranges::find(ports, port, &kui::NodePort::id);
+                    if (it == ports.end()) return -1.f;
+                    return kui::nodes::PortOffset(output, static_cast<std::size_t>(it - ports.begin()), 0.f, card.outputs.size()).y;
+                };
                 for (const auto& node : graph.nodes)
                     if (drawn.contains(node.id) && visible.contains(node.id))
                         for (const auto& [name, input] : node.inputs)
                             if (input.link && drawn.contains(input.link->node)) {
                                 shown.wires.push_back({ { input.link->node, input.link->output }, { node.id, name } });
-                                _wires.emplace_back(input.link->node, node.id);
+                                _wires.push_back({ input.link->node, node.id, portY(input.link->node, input.link->output, true), portY(node.id, name, false) });
                             }
                 // A node is of one loop: one there once a turn of a Repeat is in that loop's, though it also runs for each
                 // element of a ForEach — a shadow's draw, once a face and once an entity. Two loops are never one.
@@ -5207,9 +6217,11 @@ class $NAME : ResourceScript() {
                     .OnConnect([this](const kui::GraphWire& wire) { Doc().Connect(wire.from.node, wire.from.port, wire.to.node, wire.to.port); })
                     .OnDisconnect([this](const kui::GraphWire& wire) { Doc().ClearInput(wire.to.node, wire.to.port); })
                     // Built again at once: a frame with the nodes back where they were is a frame of them jumping.
-                    .OnMove([this, own, overview](const std::vector<std::string>& nodes, const kor::Vec2 by) {
+                    .OnMove([this, own, overview, page, visible](const std::vector<std::string>& nodes, const kor::Vec2 by) {
                         if (overview) Doc().MoveInOverview(own(nodes), by.x, by.y);
                         else Doc().MoveNodes(own(nodes), by.x, by.y);
+                        // A node of another page shown here, wired straight: moved on this page only, as the editor shows it.
+                        for (const auto& id : nodes) if (!visible.contains(id)) _outsideMoved[page][id] = _outsideMoved[page][id] + by;
                         SetState();
                     })
                     .OnDelete([this, own](const std::vector<std::string>& picked, const std::vector<kui::GraphWire>& wires, const std::vector<std::string>&) {
@@ -5227,6 +6239,11 @@ class $NAME : ResourceScript() {
                         const auto kind = kinds->find({ from.node, from.port, fromOutput });
                         if (kind == kinds->end()) return;
                         AskForNode({ std::round(fromOutput ? at.x : at.x - 180.f), std::round(at.y - 40.f) }, LooseWire { from, fromOutput, kind->second });
+                    })
+                    // A wire let go on a node asks which of its ports it goes to: every one, shown on the node or not.
+                    .OnWireDroppedOnNode([this, kinds](const kui::PortRef& from, const bool fromOutput, const std::string& node, kor::Vec2) {
+                        const auto kind = kinds->find({ from.node, from.port, fromOutput });
+                        AskForPort(LooseWire { from, fromOutput, kind == kinds->end() ? std::string() : kind->second }, node);
                     })
                     // Pressed twice: gone to where it is made, when it is of another page; its shader opened, when it has one; looked at, when it holds something.
                     .OnActivate([this, visible](const std::string& id) { Activate(id, visible.contains(id)); })
@@ -5541,12 +6558,12 @@ class $NAME : ResourceScript() {
             kui::Widget PrefabBar(const std::string& prefab)
             {
                 const kui::Theme& t = kui::Theme::Current();
-                const kui::Color teal = kui::Color::Hex(0x4FB3BF);
+                const kui::Color accent = t.primary;     // the theme's accent on its icon; the bar itself, the panel's grey
                 const bool changed = _session->PrefabChanged();
                 return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(8.f))
-                                          .SetDecoration(kui::Decoration {}.SetColor(teal.WithAlpha(0.14f))),
+                                          .SetDecoration(kui::Decoration {}.SetColor(t.text.WithAlpha(0.05f))),
                     Rows({
-                        kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("widgets", kui::IconStyle::eFilled, teal)),
+                        kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("widgets", kui::IconStyle::eFilled, accent)),
                                    kui::Expanded(kui::Text(std::format("{}{}", std::filesystem::path(prefab).stem().string(), changed ? "  ·  changed" : ""),
                                                            kui::TextStyle {}.SetSize(13.f).SetColor(t.text), kui::TextAlign::eStart, false, 1, true)) },
                                  kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
@@ -6209,8 +7226,8 @@ class $NAME : ResourceScript() {
                         rows.push_back(kgui::Labeled("Roughness", kgui::Line(std::format("{:.2f}", material->roughness)), LabelWidth));
                         rows.push_back(kgui::Labeled("Emission", kgui::Line(three(material->emission)), LabelWidth));
                     }
-                    rows.push_back(kgui::Muted("Drag it from the Assets panel onto an entity, in the scene tree or the inspector: what draws it (lit, or any "
-                                               "component with an albedo) is given these, its pictures white. One that has none is given lit."));
+                    rows.push_back(kgui::Muted("Drag it from the Assets panel onto an entity, in the scene tree or the inspector: what draws it (a pipeline's "
+                                               "component with an albedo, or a colour) is given these, its pictures white. One drawn by nothing is given one."));
                     break;
                 case Session::Asset::Kind::eScene:
                     rows.push_back(kgui::Muted("A scene of the project's: its graph and its entities, as they were saved."));
@@ -6375,6 +7392,7 @@ class $NAME : ResourceScript() {
                 }
                 if (port.editor == "attributes") return Attributes(value, set, key);
                 if (port.editor == "fields") return Fields(value, set, key);
+                if (port.editor == "names") return Names(value, set, key);
                 if (port.editor == "numbers") {
                     // A few numbers that are one thing: a box (x, y, width, height), a depth bias's three.
                     std::vector<float> numbers(port.name == "depthBias" ? 3 : 4, 0.f);
@@ -6961,16 +7979,208 @@ class $NAME : ResourceScript() {
                     if (type.fields.empty()) return { "label", "a tag", kui::Color::Hex(0x9AA4B0) };
                     return { "data_object", "data", kui::Color::Hex(0x5B9BD5) };
                 };
+                // A field's control, read from @p component's and set by @p set: of one component, or of each that shares it.
+                const auto fieldEditor = [&](const std::string& component, const auto& field, const std::function<void(const Value&)>& set) -> kui::Widget {
+                    const std::string fieldName = field.name;
+                    const Value value = doc.Field(entity, component, fieldName);
+                    // As its script says — its [Range], [Min], [Logarithmic] — and an unsigned one none or more.
+                    const kgraph::NumberLimits limits { field.type.starts_with("u") ? std::max(field.min, 0.f) : field.min, field.max, field.logarithmic };
+                    kui::Widget editor;
+                    if (HoldsResource(field.type)) {
+                        // What it can hold, and nothing it cannot: a mesh's field the meshes, a picture's the pictures —
+                        // and of the graph only what is made before the pass that would use it.
+                        std::vector<std::string> choices { std::string() };
+                        int selected = 0;
+                        for (const auto& choice : _session->FieldChoices(component, field.type)) {
+                            if (value.String() && *value.String() == choice) selected = static_cast<int>(choices.size());
+                            choices.push_back(choice);
+                        }
+                        // What it holds that is none of those is listed all the same: it is what is so.
+                        const std::string holds = value.String() ? *value.String() : std::string();
+                        if (selected == 0 && !holds.empty()) { selected = static_cast<int>(choices.size()); choices.push_back(holds); }
+                        std::vector<std::string> labels;
+                        for (const auto& choice : choices) labels.push_back(choice.empty() ? std::string("(nothing)") : ChoiceLabel(choice));
+                        editor = kui::Dropdown(std::move(labels), selected, [set, choices](const int index) {
+                            set(index <= 0 ? Value {} : Value(choices[static_cast<std::size_t>(index)]));
+                        });
+                        // What it holds is shown beside its name, small: a picture by itself, a mesh by the picture of it.
+                        kui::Widget shownBeside;
+                        if (field.type == "Mesh") {
+                            if (const auto picture = _session->MeshPicture(holds); picture.Get()) shownBeside = kui::Image(picture, kui::ImageFit::eContain);
+                        } else if (!holds.empty()) {
+                            if (const auto held = doc.Runtime().ResourceOf(holds); held && held->handle && (held->kind == "Image" || held->kind == "ImageView") && doc.Runtime().ImageOf(holds).Get())
+                                shownBeside = kui::Image(doc.Runtime().ImageOf(holds), kui::ImageFit::eContain);
+                            else if (holds.starts_with('@'))
+                                if (const auto file = doc.Runtime().ResourceOf(holds); file && file->handle) shownBeside = kui::Image(kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(file->handle)), kui::ImageFit::eContain);
+                        }
+                        if (holds.starts_with('@')) editor = kui::Tooltip(holds, std::move(editor));
+                        if (shownBeside)
+                            editor = kui::Row({ kui::SizedBox(24.f, 24.f, std::move(shownBeside)), kui::Expanded(std::move(editor)) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                        // And what is dropped on it from the Assets panel is what it holds from then on — when it is
+                        // the kind of thing the field holds.
+                        editor = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([this, set, type = field.type, fieldName](const kui::DragData& dragged, kor::Vec2) {
+                            const auto* id = dragged.As<std::string>();
+                            const auto asset = id ? AssetOf(*id) : std::nullopt;
+                            if (!asset) return;
+                            const bool mesh = asset->kind == Session::Asset::Kind::eMesh, picture = asset->kind == Session::Asset::Kind::eTexture;
+                            if (type == "Mesh" ? mesh : type == "Image" && picture) set(Value(*id));
+                            else _session->Say(std::format("'{}' holds a {}, and {} is not one.", fieldName, type == "Mesh" ? "mesh" : type == "Image" ? "picture" : type, asset->label), true);
+                        }), std::move(editor));
+                    } else if (field.type == "entity") {
+                        editor = EntityPicker(doc.World(), value, set);
+                    } else if (!Editable(field.type)) {
+                        editor = kgui::Muted(field.type);
+                    } else if (value.String()) {
+                        const std::string text = *value.String();
+                        editor = kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } })
+                            .Key(component + "." + fieldName + "=" + text);
+                    } else if ((field.type == "vec4" || field.type == "vec3") && NamesAColor(fieldName)) {
+                        editor = ColorOf(value, set, field.type == "vec4");
+                    } else {
+                        // A box to tick, numbers to drag: followed as it plays (LiveValue), the control alone built again.
+                        const bool wholes = field.type.starts_with("i") || field.type.starts_with("u") || field.type.starts_with("b");
+                        const bool whole = field.type.starts_with("i") || field.type.starts_with("u");
+                        auto build = [set, limits, whole, wholes, choices = field.choices](const Value& now) -> kui::Widget {
+                            if (now.Bool()) return kui::Checkbox(*now.Bool(), [set](const bool on) { set(Value(on)); });
+                            if (!choices.empty() && now.Number()) {
+                                // One of so many things: by its name. A number that is none of them is shown as it is.
+                                std::vector<std::string> names = choices;
+                                const auto at = static_cast<long long>(std::llround(*now.Number()));
+                                int selected = at >= 0 && at < static_cast<long long>(names.size()) ? static_cast<int>(at) : -1;
+                                if (selected < 0) { selected = static_cast<int>(names.size()); names.push_back(std::format("{} (none of these)", at)); }
+                                const auto count = choices.size();
+                                return kui::Dropdown(std::move(names), selected, [set, count](const int index) {
+                                    if (index >= 0 && static_cast<std::size_t>(index) < count) set(Value(index));
+                                });
+                            }
+                            if (const auto* items = now.Items()) {
+                                std::vector<float> numbers;
+                                for (const auto& item : *items) numbers.push_back(NumberOf(item));
+                                return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, limits, wholes);
+                            }
+                            return kui::DragValue(NumberOf(now), [set, whole](const float v) { set(Value(whole ? std::round(v) : v)); }, Dragging(limits, whole));
+                        };
+                        editor = kui::Make<LiveValue>(_session, [this, entity, component, fieldName] { return Doc().Field(entity, component, fieldName); }, std::move(build));
+                    }
+                    return editor;
+                };
+                // The materials it has — the components of pipelines — and what two or more of them have alike, a field of
+                // the same name and type: set once, for each, above what each has of its own. One that no pass the
+                // choices leave running uses (another renderer's) is shut, and what is its own is not set while so.
+                std::vector<std::string> materials;
+                for (const auto& component : has)
+                    if (pipelines.contains(component) && !doc.World().Describe(doc.World().Find(component)).fields.empty()) materials.push_back(component);
+                std::map<std::string, bool> inUse;
+                for (const auto& material : materials) inUse[material] = _session->MaterialInUse(material);
+                std::vector<std::pair<std::string, std::string>> sharedFields;     // a field, and its type
+                std::map<std::string, std::vector<std::string>> sharedBy;          // a field, the materials that have it
+                if (materials.size() > 1) {
+                    std::map<std::pair<std::string, std::string>, std::vector<std::string>> having;
+                    for (const auto& material : materials)
+                        for (const auto& field : doc.World().Describe(doc.World().Find(material)).fields) {
+                            auto& list = having[{ field.name, field.type }];
+                            if (list.empty() && material == materials.front()) sharedFields.emplace_back(field.name, field.type);
+                            list.push_back(material);
+                        }
+                    std::erase_if(sharedFields, [&](const auto& field) { return having[field].size() < 2; });
+                    for (const auto& field : sharedFields) sharedBy[field.first] = having[field];
+                }
+                bool sharedShown = sharedFields.empty();
                 for (const auto& component : has) {
+                    const bool material = std::ranges::contains(materials, component);
+                    if (material && !sharedShown) {
+                        // What its materials have alike: a card of its own, none of theirs — read from one in use, and set in
+                        // each of them whichever renderer is chosen. What each has besides is under it, in its own.
+                        sharedShown = true;
+                        rows.push_back(kui::Separator());
+                        const bool shut = _componentsShut.contains(" shared");
+                        std::vector<kui::Widget> card;
+                        std::vector<kui::Widget> head;
+                        head.push_back(kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon(shut ? "chevron_right" : "expand_more", kui::IconStyle::eFilled, t.textMuted)),
+                                                   [this, shut] { SetState([&] { if (shut) _componentsShut.erase(" shared"); else _componentsShut.insert(" shared"); }); },
+                                                   kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+                        head.push_back(kui::SizedBox(16.f, 16.f, kui::Icon("link", kui::IconStyle::eFilled, t.primary)));
+                        head.push_back(Heading("Shared material"));
+                        head.push_back(kui::Expanded(kgui::Muted(std::format("{} pipelines, one value each", materials.size()), 11.f)));
+                        card.push_back(kui::Row(std::move(head), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                        // The pipelines it is of, each to go to: whether a pass the choices leave running uses it now.
+                        std::vector<kui::Widget> of;
+                        for (const auto& each : materials) {
+                            const auto pipeline = pipelines.find(each);
+                            const std::string node = pipeline != pipelines.end() ? pipeline->second : std::string();
+                            of.push_back(kui::Tooltip(inUse[each] ? std::format("The {} pipeline's material: a pass running now uses it. Pressed, the pipeline on the graph.", each)
+                                                                  : std::format("The {} pipeline's material: no pass the choices leave running uses it now — set here all the same. Pressed, the pipeline on the graph.", each),
+                                                      kui::Opacity(inUse[each] ? 1.f : 0.6f, Chip(std::format("{} {}", inUse[each] ? "●" : "○", each), [this, node] { _session->GoTo(node); }))));
+                        }
+                        card.push_back(kui::Wrap(std::move(of), 4.f, 4.f));
+                        if (!shut) {
+                            card.push_back(kgui::Muted("What the pipelines' materials have alike, a field of the same name: set here, it is set in every one of them, whichever renderer is chosen.", 11.f));
+                            const auto readFrom = std::ranges::find_if(materials, [&](const std::string& each) { return inUse[each]; });
+                            for (const auto& [fieldName, fieldType] : sharedFields) {
+                                const std::vector<std::string>& by = sharedBy[fieldName];
+                                const std::string from = readFrom != materials.end() && std::ranges::contains(by, *readFrom) ? *readFrom : by.front();
+                                const auto& fields = doc.World().Describe(doc.World().Find(from)).fields;
+                                const auto field = std::ranges::find(fields, fieldName, &std::remove_cvref_t<decltype(fields.front())>::name);
+                                const auto set = [this, entity, by, fieldName](const Value& changed) {
+                                    std::string error;
+                                    for (const auto& each : by)
+                                        if (!Doc().SetField(entity, each, fieldName, changed, &error)) { _session->Say(error, true); return; }
+                                };
+                                kui::Widget editor = fieldEditor(from, *field, set);
+                                // Each of them, followed: one set apart since — by a script, an undo — is said, and made
+                                // alike again by a press.
+                                auto readAll = [this, entity, by, fieldName] {
+                                    Value::List all;
+                                    for (const auto& each : by) all.push_back(Doc().Field(entity, each, fieldName));
+                                    return Value(std::move(all));
+                                };
+                                const std::size_t shown = static_cast<std::size_t>(std::ranges::find(by, from) - by.begin());
+                                auto apart = [this, by, shown, set, from](const Value& all) -> kui::Widget {
+                                    const auto* values = all.Items();
+                                    if (!values || values->size() != by.size()) return kui::SizedBox(0.f, 0.f);
+                                    std::string others;
+                                    for (std::size_t i = 0; i < by.size(); ++i)
+                                        if (i != shown && (*values)[i] != (*values)[shown]) others += (others.empty() ? "" : ", ") + by[i];
+                                    if (others.empty()) return kui::SizedBox(0.f, 0.f);
+                                    return kui::Tooltip(std::format("{} has another value: this is {}'s. Pressed, every one is {}'s.", others, from, from),
+                                                        Chip("differs", [set, value = (*values)[shown]] { set(value); }));
+                                };
+                                editor = kui::Row({ kui::Expanded(std::move(editor)), kui::Make<LiveValue>(_session, std::move(readAll), std::move(apart)) },
+                                                  kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                                std::string names;
+                                for (const auto& each : by) names += (names.empty() ? "" : ", ") + each;
+                                card.push_back(kui::Tooltip(std::format("{}: set in {}", fieldType, names), kgui::Labeled(fieldName, std::move(editor), LabelWidth)));
+                            }
+                        }
+                        // Framed apart from the components, its edge the theme's accent: it is theirs together, none's alone.
+                        rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(8.f))
+                                                          .SetDecoration(kui::Decoration {}.SetColor(t.primary.WithAlpha(0.05f)).SetBorderWidth(1.f).SetBorderColor(t.primary.WithAlpha(0.45f)).SetRadius(6.f)),
+                            kui::Column(std::move(card), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(6.f))));
+                    }
                     rows.push_back(kui::Separator());
                     const auto& type = doc.World().Describe(doc.World().Find(component));
-                    const auto [componentIcon, what, componentTint] = kindOf(component);
-                    const bool shut = _componentsShut.contains(component);
+                    auto [componentIcon, what, componentTint] = kindOf(component);
+                    // Another renderer's: shut unless opened, and what is its own not set while no pass uses it.
+                    const bool unused = material && !inUse[component];
+                    const bool shut = unused ? !_unusedOpen.contains(component) : _componentsShut.contains(component);
+                    if (material) {
+                        std::size_t own = 0;
+                        for (const auto& field : type.fields)
+                            if (const auto shared = sharedBy.find(field.name); shared == sharedBy.end() || !std::ranges::contains(shared->second, component)) ++own;
+                        what = unused ? std::string("pipeline's own · no pass uses it now") : std::string("pipeline's own");
+                        if (!sharedFields.empty() && std::ranges::any_of(sharedBy, [&](const auto& shared) { return std::ranges::contains(shared.second, component); }))
+                            what += own ? std::format(" · {} {}, the rest shared above", own, own == 1 ? "field" : "fields") : std::string(" · nothing besides what is shared above");
+                    }
                     const auto pipeline = pipelines.find(component);
                     std::vector<kui::Widget> head;
                     if (!type.fields.empty())
                         head.push_back(kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon(shut ? "chevron_right" : "expand_more", kui::IconStyle::eFilled, t.textMuted)),
-                                                   [this, component, shut] { SetState([&] { if (shut) _componentsShut.erase(component); else _componentsShut.insert(component); }); },
+                                                   [this, component, shut, unused] {
+                                                       SetState([&] {
+                                                           std::set<std::string>& folded = unused ? _unusedOpen : _componentsShut;
+                                                           if (shut == !unused) folded.erase(component); else folded.insert(component);
+                                                       });
+                                                   },
                                                    kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
                     head.push_back(kui::Tooltip("Switched off, it has the component still and nothing runs for it",
                                                 kui::Checkbox(doc.IsEnabled(entity, component), [this, entity, component](const bool on) { Doc().SetEnabled(entity, component, on); })));
@@ -6994,94 +8204,18 @@ class $NAME : ResourceScript() {
                         { "Take it off the entity", [this, entity, component] { Doc().RemoveComponent(entity, component); } },
                         { doc.IsEnabled(entity, component) ? "Switch it off" : "Switch it on", [this, entity, component, on = doc.IsEnabled(entity, component)] { Doc().SetEnabled(entity, component, !on); } },
                         { "Go to its pipeline", [this, node = pipeline != pipelines.end() ? pipeline->second : std::string()] { _session->GoTo(node); }, pipeline != pipelines.end() },
-                    }, kui::Row(std::move(head), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
+                    }, kui::Opacity(unused ? 0.55f : 1.f, kui::Row(std::move(head), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)))));
                     if (shut) continue;
                     for (const auto& field : type.fields) {
                         const std::string fieldName = field.name;
-                        const Value value = doc.Field(entity, component, fieldName);
-                        // As its script says — its [Range], [Min], [Logarithmic] — and an unsigned one none or more.
-                        const kgraph::NumberLimits limits { field.type.starts_with("u") ? std::max(field.min, 0.f) : field.min, field.max, field.logarithmic };
+                        // What it has alike with another material is set above, for both.
+                        if (const auto shared = sharedBy.find(fieldName); shared != sharedBy.end() && std::ranges::contains(shared->second, component)) continue;
                         const auto set = [this, entity, component, fieldName](const Value& changed) {
                             std::string error;
                             if (!Doc().SetField(entity, component, fieldName, changed, &error)) _session->Say(error, true);
                         };
-                        kui::Widget editor;
-                        if (HoldsResource(field.type)) {
-                            // What it can hold, and nothing it cannot: a mesh's field the meshes, a picture's the pictures —
-                            // and of the graph only what is made before the pass that would use it.
-                            std::vector<std::string> choices { std::string() };
-                            int selected = 0;
-                            for (const auto& choice : _session->FieldChoices(component, field.type)) {
-                                if (value.String() && *value.String() == choice) selected = static_cast<int>(choices.size());
-                                choices.push_back(choice);
-                            }
-                            // What it holds that is none of those is listed all the same: it is what is so.
-                            const std::string holds = value.String() ? *value.String() : std::string();
-                            if (selected == 0 && !holds.empty()) { selected = static_cast<int>(choices.size()); choices.push_back(holds); }
-                            std::vector<std::string> labels;
-                            for (const auto& choice : choices) labels.push_back(choice.empty() ? std::string("(nothing)") : ChoiceLabel(choice));
-                            editor = kui::Dropdown(std::move(labels), selected, [set, choices](const int index) {
-                                set(index <= 0 ? Value {} : Value(choices[static_cast<std::size_t>(index)]));
-                            });
-                            // What it holds is shown beside its name, small: a picture by itself, a mesh by the picture of it.
-                            kui::Widget shownBeside;
-                            if (field.type == "Mesh") {
-                                if (const auto picture = _session->MeshPicture(holds); picture.Get()) shownBeside = kui::Image(picture, kui::ImageFit::eContain);
-                            } else if (!holds.empty()) {
-                                if (const auto held = doc.Runtime().ResourceOf(holds); held && held->handle && (held->kind == "Image" || held->kind == "ImageView") && doc.Runtime().ImageOf(holds).Get())
-                                    shownBeside = kui::Image(doc.Runtime().ImageOf(holds), kui::ImageFit::eContain);
-                                else if (holds.starts_with('@'))
-                                    if (const auto file = doc.Runtime().ResourceOf(holds); file && file->handle) shownBeside = kui::Image(kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(file->handle)), kui::ImageFit::eContain);
-                            }
-                            if (holds.starts_with('@')) editor = kui::Tooltip(holds, std::move(editor));
-                            if (shownBeside)
-                                editor = kui::Row({ kui::SizedBox(24.f, 24.f, std::move(shownBeside)), kui::Expanded(std::move(editor)) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
-                            // And what is dropped on it from the Assets panel is what it holds from then on — when it is
-                            // the kind of thing the field holds.
-                            editor = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([this, set, type = field.type, fieldName](const kui::DragData& dragged, kor::Vec2) {
-                                const auto* id = dragged.As<std::string>();
-                                const auto asset = id ? AssetOf(*id) : std::nullopt;
-                                if (!asset) return;
-                                const bool mesh = asset->kind == Session::Asset::Kind::eMesh, picture = asset->kind == Session::Asset::Kind::eTexture;
-                                if (type == "Mesh" ? mesh : type == "Image" && picture) set(Value(*id));
-                                else _session->Say(std::format("'{}' holds a {}, and {} is not one.", fieldName, type == "Mesh" ? "mesh" : type == "Image" ? "picture" : type, asset->label), true);
-                            }), std::move(editor));
-                        } else if (field.type == "entity") {
-                            editor = EntityPicker(doc.World(), value, set);
-                        } else if (!Editable(field.type)) {
-                            editor = kgui::Muted(field.type);
-                        } else if (value.String()) {
-                            const std::string text = *value.String();
-                            editor = kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } })
-                                .Key(component + "." + fieldName + "=" + text);
-                        } else if ((field.type == "vec4" || field.type == "vec3") && NamesAColor(fieldName)) {
-                            editor = ColorOf(value, set, field.type == "vec4");
-                        } else {
-                            // A box to tick, numbers to drag: followed as it plays (LiveValue), the control alone built again.
-                            const bool wholes = field.type.starts_with("i") || field.type.starts_with("u") || field.type.starts_with("b");
-                            const bool whole = field.type.starts_with("i") || field.type.starts_with("u");
-                            auto build = [set, limits, whole, wholes, choices = field.choices](const Value& now) -> kui::Widget {
-                                if (now.Bool()) return kui::Checkbox(*now.Bool(), [set](const bool on) { set(Value(on)); });
-                                if (!choices.empty() && now.Number()) {
-                                    // One of so many things: by its name. A number that is none of them is shown as it is.
-                                    std::vector<std::string> names = choices;
-                                    const auto at = static_cast<long long>(std::llround(*now.Number()));
-                                    int selected = at >= 0 && at < static_cast<long long>(names.size()) ? static_cast<int>(at) : -1;
-                                    if (selected < 0) { selected = static_cast<int>(names.size()); names.push_back(std::format("{} (none of these)", at)); }
-                                    const auto count = choices.size();
-                                    return kui::Dropdown(std::move(names), selected, [set, count](const int index) {
-                                        if (index >= 0 && static_cast<std::size_t>(index) < count) set(Value(index));
-                                    });
-                                }
-                                if (const auto* items = now.Items()) {
-                                    std::vector<float> numbers;
-                                    for (const auto& item : *items) numbers.push_back(NumberOf(item));
-                                    return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, limits, wholes);
-                                }
-                                return kui::DragValue(NumberOf(now), [set, whole](const float v) { set(Value(whole ? std::round(v) : v)); }, Dragging(limits, whole));
-                            };
-                            editor = kui::Make<LiveValue>(_session, [this, entity, component, fieldName] { return Doc().Field(entity, component, fieldName); }, std::move(build));
-                        }
+                        kui::Widget editor = fieldEditor(component, field, set);
+                        if (unused) editor = kui::Disabled(std::move(editor));
                         rows.push_back(kui::Tooltip(field.type, kgui::Labeled(fieldName, std::move(editor), LabelWidth)));
                     }
                 }
@@ -7127,6 +8261,166 @@ class $NAME : ResourceScript() {
 
             // ---- what is wrong ----------------------------------------------------------------------------------
 
+            /**
+             * The frame as it runs: the graph's passes in the order the frame graph schedules them, each with its level,
+             * its queue, a bar as long as its GPU time — coloured by its share of the frame — and what it uses; then what
+             * was left out, and why. Read only: a pass pressed is gone to on its page. Followed as it runs.
+             */
+            /**
+             * The pages as a flow, left to right: each a card wired from the pages it uses what they made of, and each
+             * Switch between branches a card that says which it takes. Nothing is wired or moved for good here: the
+             * flow is the graph's, and only which branch is chosen is set — and a page pressed twice is shown in the
+             * Graph panel. A page that did not run in the last frame (a branch not chosen) is dimmed.
+             */
+            kui::Widget FlowPanel()
+            {
+                return kui::Make<LiveValue>(_session, [this] {
+                    if (!_layout->IsShown("flow")) return Value();
+                    const auto flow = _session->Flow();
+                    std::string seen;
+                    for (const auto& step : flow.steps) seen += std::format("{}|{}|{}|{:.1f}|{};", step.id, step.ran, step.chosen, step.gpuMs, step.nodes);
+                    for (const auto& link : flow.links) seen += std::format("{}>{}#{};", link.from, link.to, link.option);
+                    // And built again when a card was dragged.
+                    for (const auto& [id, by] : _flowMoved) seen += std::format("{}@{},{};", id, by.x, by.y);
+                    return Value(seen);
+                }, [this](const Value& seen) { return seen.IsNull() ? kui::SizedBox(0.f, 0.f) : FlowGraph(); });
+            }
+
+            kui::Widget FlowGraph()
+            {
+                const auto flow = _session->Flow();
+                const kui::Theme& t = kui::Theme::Current();
+                // Laid out by how big each card was drawn last.
+                std::map<std::string, std::pair<float, float>> sizes;
+                for (const auto& [id, size] : _flowView->sizes) sizes[id] = { size.x, size.y };
+                const auto layout = Session::LayOut(flow, sizes);
+                // Framed whole again when the pages are others, or their cards were first measured: laid out anew then.
+                std::string pages = sizes.empty() ? std::string("?") : std::string();
+                for (const auto& step : flow.steps) pages += step.id + "|";
+                if (pages != _flowFramed) { _flowFramed = pages; _flowView->Frame(); }
+                kui::NodeGraph graph;
+                // Each branch a band of its own, framed and named: a colour each, the same one it is in every time.
+                static const std::uint32_t hues[] { 0x4C8DD6, 0xC58A2E, 0x9B6ADA, 0x3FA37C, 0xCF5C7A, 0x6C8A9E };
+                for (std::size_t b = 0; b < layout.branches.size(); ++b) {
+                    const auto& branch = layout.branches[b];
+                    graph.comments.push_back({ .id = std::format("branch {}", b), .text = branch.title,
+                                               .color = kui::Color::Hex(hues[static_cast<std::size_t>(branch.option) % std::size(hues)]), .around = branch.steps });
+                }
+                for (const auto& step : flow.steps) {
+                    kui::GraphNode node;
+                    node.id = step.id;
+                    node.title = step.id;
+                    const auto at = layout.at.at(step.id);
+                    node.position = { at.first + _flowMoved[step.id].x, at.second + _flowMoved[step.id].y };
+                    node.outputs.push_back({ .id = "out", .label = "made", .type = "flow" });
+                    if (step.isSwitch) {
+                        node.icon = "call_split";
+                        node.accent = t.primary;
+                        node.width = 220.f;
+                        for (std::size_t i = 0; i < step.options.size(); ++i)
+                            node.inputs.push_back({ .id = std::format("option[{}]", i), .label = std::format("{}  {}", i, step.options[i]), .type = "flow" });
+                        node.body = kui::Padding(kui::EdgeInsets::All(6.f), kui::Dropdown(step.options, std::clamp(step.chosen, 0, std::max(0, static_cast<int>(step.options.size()) - 1)),
+                            [this, driver = step.driver](const int option) { _session->Choose(driver, option); }, kui::DropdownOptions {}.SetWidth(200.f)));
+                    } else {
+                        node.icon = step.rate == "setup" ? "build" : step.rate == "fixed" ? "timer" : "layers";
+                        // A page is made of nodes: as abstract as the most abstract of them.
+                        node.composite = true;
+                        for (const auto& each : Doc().Graph().nodes)
+                            if (each.pass == step.id)
+                                if (const kgraph::NodeType* type = kgraph::FindType(each.type); type && each.type != "Reference")
+                                    node.level = std::max(node.level, static_cast<int>(type->level));
+                        node.inputs.push_back({ .id = "in", .label = "uses", .type = "flow", .multiple = true });
+                        if (!step.ran) node.accent = t.textMuted;
+                        const std::string said = !step.ran ? std::format("{} nodes  ·  not run", step.nodes)
+                                                           : std::format("{} nodes  ·  {:.2f} ms", step.nodes, step.gpuMs);
+                        node.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 4.f), kgui::Muted(said, 11.f));
+                    }
+                    graph.nodes.push_back(std::move(node));
+                }
+                for (const auto& link : flow.links) {
+                    const auto to = std::ranges::find(flow.steps, link.to, &Session::PassFlow::Step::id);
+                    graph.wires.push_back({ { link.from, "out" }, { link.to, to != flow.steps.end() && to->isSwitch ? std::format("option[{}]", link.option) : std::string("in") } });
+                }
+                return kui::NodeEditor(std::move(graph), kui::NodeEditorOptions {}
+                    .CanConnect([](const kui::NodePort&, const kui::NodePort&) { return false; })
+                    .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { SetState([&] { for (const auto& id : nodes) _flowMoved[id] = _flowMoved[id] + by; }); })
+                    .OnActivate([this](const std::string& id) {
+                        if (std::ranges::find(Doc().Passes(), id) == Doc().Passes().end()) return;
+                        _session->ShowPass(id);
+                        _layout->Activate("graph");
+                    })
+                    .SetView(_flowView));
+            }
+            std::map<std::string, kor::Vec2> _flowMoved;                    // where the flow's cards were dragged to, from where they are laid out
+            std::string _flowFramed;                                        // the pages the flow was last framed with
+            // Where a node of another page, shown on a page it is wired to straight, was dragged to there: by page, by node.
+            std::map<std::string, std::map<std::string, kor::Vec2>> _outsideMoved;
+            std::shared_ptr<kui::NodeEditorView> _flowView = std::make_shared<kui::NodeEditorView>();
+
+            kui::Widget FramePanel()
+            {
+                // Built again when what it shows changes: the passes, their order and queues, and their times to a hundredth.
+                return kui::Make<LiveValue>(_session, [this] {
+                    // Nothing is read, or shown, while it is behind another tab.
+                    if (!_layout->IsShown("frame")) return Value();
+                    const auto frame = Doc().Runtime().Frame();
+                    std::string seen;
+                    for (const auto& pass : frame.passes) seen += std::format("{}|{}|{}|{:.2f};", pass.name, pass.level, pass.async, pass.gpuMs);
+                    for (const auto& [node, why] : frame.leftOut) seen += node + why;
+                    return Value(seen);
+                }, [this](const Value& seen) { return seen.IsNull() ? kui::SizedBox(0.f, 0.f) : FrameRows(); });
+            }
+
+            kui::Widget FrameRows()
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const auto frame = Doc().Runtime().Frame();
+                std::vector<kui::Widget> rows;
+                double total = 0.0, longest = 0.0;
+                std::size_t async = 0;
+                for (const auto& pass : frame.passes) { total += pass.gpuMs; longest = std::max(longest, pass.gpuMs); async += pass.async ? 1 : 0; }
+                rows.push_back(kgui::Muted(std::format("{} passes, {} on the async queue  ·  GPU {:.2f} ms", frame.passes.size(), async, total), 12.f));
+                if (frame.unsharedBytes > frame.bytes)
+                    rows.push_back(kgui::Muted(std::format("{:.1f} MiB made by the frame graph, {:.1f} MiB saved by sharing memory", frame.bytes / 1048576.0, (frame.unsharedBytes - frame.bytes) / 1048576.0), 11.f));
+                if (frame.passes.empty()) rows.push_back(kgui::Muted("Nothing has run yet."));
+                // Where a pass of the frame is on the graph: a call's node is gone to by its call, a loop's turn by its node.
+                const auto onGraph = [](std::string id) {
+                    if (const auto slash = id.find('/'); slash != std::string::npos) id.resize(slash);
+                    if (const auto turn = id.find(" ["); turn != std::string::npos) id.resize(turn);
+                    return id;
+                };
+                for (const auto& pass : frame.passes) {
+                    const double share = total > 0.0 ? pass.gpuMs / total : 0.0;
+                    const kui::Color heat = HeatColor(share);
+                    const std::string name = pass.name.contains('\n') ? std::format("{}  (step {})", pass.node, pass.name.substr(pass.name.rfind(' ') + 1)) : pass.node;
+                    std::string uses;
+                    for (const auto& [resource, how] : pass.uses)
+                        uses += std::format("{}{} {}", uses.empty() ? "" : "  ·  ", how == 'b' ? "reads and writes" : how == 'w' ? "writes" : "reads", resource);
+                    const float bar = longest > 0.0 ? static_cast<float>(pass.gpuMs / longest) : 0.f;
+                    rows.push_back(kui::GestureDetector(kui::GestureOptions {}.OnTap([this, id = onGraph(pass.node)] { _session->GoTo(id); }), kui::Column({
+                        kui::Row({
+                            kui::SizedBox(26.f, -1.f, kui::Text(std::to_string(pass.level), kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eEnd, false)),
+                            pass.async ? ListPill("async", kui::Theme::Current().textMuted) : kui::SizedBox(0.f, 0.f),
+                            kui::Expanded(kui::Text(name, kui::TextStyle {}.SetSize(12.5f), kui::TextAlign::eStart, false, 1, true)),
+                            kui::Text(pass.gpuMeasured ? std::format("{:.3f} ms", pass.gpuMs) : std::format("record {:.3f} ms", pass.recordMs),
+                                      kui::TextStyle {}.SetSize(11.f).SetColor(heat), kui::TextAlign::eEnd, false),
+                        }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                        // As long as its GPU time, against the longest's.
+                        kui::Padding(kui::EdgeInsets::Only(34.f, 0.f, 0.f, 0.f), kui::Row({
+                            kui::Expanded(kui::Container(kui::ContainerOptions {}.SetHeight(4.f).SetDecoration(kui::Decoration {}.SetColor(heat.WithAlpha(0.8f)).SetRadius(2.f))),
+                                          std::max(bar, 0.005f)),
+                            kui::Expanded(kui::SizedBox(0.f, 4.f), std::max(1.f - bar, 0.f) + 0.0001f) })),
+                        kui::Padding(kui::EdgeInsets::Only(34.f, 0.f, 0.f, 0.f), kui::Text(uses.empty() ? std::string("uses nothing it declares") : uses,
+                                                                                         kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eStart, false, 2, true)),
+                    }, kui::FlexOptions {}.SetGap(3.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch))));
+                }
+                if (!frame.leftOut.empty()) rows.push_back(kgui::Muted("Left out", 11.f));
+                for (const auto& [node, why] : frame.leftOut)
+                    rows.push_back(kui::GestureDetector(kui::GestureOptions {}.OnTap([this, id = onGraph(node)] { _session->GoTo(id); }),
+                                                        kgui::Muted(std::format("{}  ·  {}", node, why), 11.f)));
+                return Panel(std::move(rows));
+            }
+
             kui::Widget Problems()
             {
                 const kgraph::Runtime& runtime = Doc().Runtime();
@@ -7160,6 +8454,7 @@ class $NAME : ResourceScript() {
             std::shared_ptr<kui::DockLayout> _layout;
             std::uint64_t _shown = 0;
             Dialog _dialog = Dialog::eNone;
+            bool _viewModesOpen = false, _gridOpen = false;     // the Scene panel's popups: how it shows the scene, the grid's settings
             kor::Vec2 _addAt {};
             std::string _filter, _newId;
             std::string _menuCategory;      // the node menu's: the category shown, empty for all of them
@@ -7169,6 +8464,7 @@ class $NAME : ResourceScript() {
             // and the page as it was last shown, for putting it in order.
             std::shared_ptr<kui::NodeEditorView> _view = _session->graphView;
             std::optional<LooseWire> _wire;
+            std::string _wireOnto;   // the node a wire was let go on, for the port it should go to
             // The Assets panel: the folder that is picked in it, the folders shut down its side, what was last pressed
             // and when (twice in a row opens), and what is asked about before it goes to the trash.
             // The outliner: what is looked for in it, the entity whose name is being typed over, and where what is held
@@ -7177,6 +8473,7 @@ class $NAME : ResourceScript() {
             kecs::Entity _renaming = kecs::NullEntity, _dropOn = kecs::NullEntity;
             Session::Beside _dropWhere = Session::Beside::eUnder;
             std::set<std::string> _componentsShut;
+            std::set<std::string> _unusedOpen;     // the materials no pass uses now, opened all the same: shut, else
             std::string _folderPicked, _tapped;
             std::set<std::string> _foldersShut;
             std::chrono::steady_clock::time_point _tappedAt {};
@@ -7186,6 +8483,7 @@ class $NAME : ResourceScript() {
             bool _overview = false; // the page shown is every node at once, of passes: its own layout
             std::string _passHover; // the line of the pass list under the pointer
             bool _addingPass = false;  // the pass list asks for a new pass's name
+            bool _everyChoice = false;  // the pass list lists the pages of what the choices do not choose too
             Session::ShaderChoice _shaderChoice;    // what the New shader dialog has ticked
             kgraph::PassRate _rateTab = kgraph::PassRate::eFrame;     // which passes the pass list shows: those of every frame, the fixed step's or setup's
             std::string _tabPass;       // the page shown when the tab was last set: another shown, the tab follows it
@@ -7199,18 +8497,93 @@ class $NAME : ResourceScript() {
             bool _importChosen = false;
             int _made = 0;
             std::vector<PlacedNode> _placed;
-            std::vector<std::pair<std::string, std::string>> _wires;
+            std::vector<PlacedWire> _wires;     ///< The page's wires, at their ports: what putting it in order goes by.
         };
+    }
+
+    std::optional<kgraph::Runtime::Timing> CostOf(const std::map<std::string, kgraph::Runtime::Timing, std::less<>>& timings, const std::string& id)
+    {
+        std::optional<kgraph::Runtime::Timing> sum;
+        // What it stands for starts with its id, so it is all after where the id would be.
+        for (auto it = timings.lower_bound(id); it != timings.end() && it->first.starts_with(id); ++it) {
+            const std::string& name = it->first;
+            if (name.size() != id.size() && name[id.size()] != '/' && name.compare(id.size(), 2, " [") != 0) continue;
+            if (!sum) sum.emplace();
+            sum->gpuMs += it->second.gpuMs;
+            sum->recordMs += it->second.recordMs;
+            sum->prepareMs += it->second.prepareMs;
+            sum->gpuMeasured = sum->gpuMeasured || it->second.gpuMeasured;
+            sum->runs += it->second.runs;
+        }
+        return sum;
+    }
+
+    std::vector<PortChoice> PortChoices(const Document& doc, const std::string& fromNode, const std::string& fromPort, const bool fromOutput, const std::string& node)
+    {
+        const kgraph::Runtime& runtime = doc.Runtime();
+        const kgraph::Node* onto = doc.Graph().Find(node);
+        const kgraph::Node* source = doc.Graph().Find(fromNode);
+        if (!onto || !source || fromNode == node) return {};
+        // Every input a node has, as it is set: shown or not, and those that do nothing as it is set.
+        const auto inputsOf = [&](const kgraph::Node& of) {
+            std::vector<kgraph::Port> ports, more;
+            for (auto& shown : InputsOf(runtime, of, [](const std::string&) { return true; }, &more)) ports.push_back(std::move(shown.port));
+            for (auto& port : more) if (port.name.find("[]") == std::string::npos) ports.push_back(std::move(port));
+            return ports;
+        };
+        // What the wire carries: its own end's kind.
+        std::string carried;
+        for (const auto& port : fromOutput ? runtime.OutputsOf(fromNode) : inputsOf(*source))
+            if (port.name == fromPort) { carried = WireType(port); break; }
+        if (carried.empty()) return {};
+        const auto said = [](const std::string& kind) { return TypeLabel(kind.substr(2)); };
+
+        std::vector<PortChoice> choices;
+        for (const auto& port : fromOutput ? inputsOf(*onto) : runtime.OutputsOf(node)) {
+            PortChoice choice { .port = port.name, .label = fromOutput || port.name != "out" ? PortLabel(port.name) : TypeLabel(port.type) };
+            const std::string kind = WireType(port);
+            choice.fits = fromOutput ? WireFits(carried, kind) : WireFits(kind, carried);
+            if (!choice.fits)
+                choice.why = kind.starts_with("v:") != carried.starts_with("v:")
+                           ? (kind.starts_with("v:") ? "takes a value; the wire is of a resource" : std::format("is of a {}; the wire is of a value", said(kind)))
+                           : std::format("is of a {}; the wire is of a {}", said(kind), said(carried));
+            if (fromOutput)
+                if (const auto input = onto->inputs.find(port.name); input != onto->inputs.end() && input->second.link)
+                    choice.wiredFrom = std::format("{} of {}", PortLabel(input->second.link->output), input->second.link->node);
+            // A Bundle into what fills its inputs by name says how many of them it fills.
+            if (choice.fits && carried == "v:bundle" && (port.name == "fields" || port.name == "push")) {
+                const std::string prefix = port.name == "fields" ? "field." : "push.";
+                const auto members = runtime.BundleOf(fromNode, fromPort);
+                const auto ports = inputsOf(*onto);
+                const auto matched = std::ranges::count_if(members, [&](const std::string& member) {
+                    return std::ranges::contains(ports, prefix + member, &kgraph::Port::name);
+                });
+                choice.label = std::format("By name: {} of its {} members", matched, members.size());
+                choice.byName = true;
+            }
+            choices.push_back(std::move(choice));
+        }
+        // What fits first, each in the node's order — what a Bundle fills by name before all — and what doesn't after.
+        std::ranges::stable_partition(choices, &PortChoice::fits);
+        std::ranges::stable_partition(choices, &PortChoice::byName);
+        return choices;
     }
 
     namespace {
         /** Nodes laid out by how they are wired, a column after another, with no loop of them kept apart from the rest. */
-        std::map<std::string, std::pair<double, double>> ArrangeFlat(const std::vector<PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires,
-                                                                     float aspect);
+        std::map<std::string, std::pair<double, double>> ArrangeFlat(const std::vector<PlacedNode>& nodes, const std::vector<PlacedWire>& wires, float aspect);
     }
 
     std::map<std::string, std::pair<double, double>> ArrangeNodes(const std::vector<PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires,
                                                                   const float aspect)
+    {
+        std::vector<PlacedWire> placed;
+        placed.reserve(wires.size());
+        for (const auto& [from, to] : wires) placed.push_back({ from, to });
+        return ArrangeNodes(nodes, placed, aspect);
+    }
+
+    std::map<std::string, std::pair<double, double>> ArrangeNodes(const std::vector<PlacedNode>& nodes, const std::vector<PlacedWire>& wires, const float aspect)
     {
         // Each loop is laid out by itself, as a block of its own; then the page, with each loop's block as one node wired as
         // its nodes are; then each loop's nodes where its block went. So the frame round a loop holds its nodes and nothing
@@ -7235,9 +8608,9 @@ class $NAME : ResourceScript() {
             const auto [Side, Top, Bottom] = room(std::ranges::max(members, {}, &PlacedNode::depth).depth);
             std::vector<PlacedNode> plain = members;
             for (auto& member : plain) { member.group.clear(); blockOf[member.id] = block; }
-            std::vector<std::pair<std::string, std::string>> among;
+            std::vector<PlacedWire> among;
             for (const auto& wire : wires)
-                if (std::ranges::contains(plain, wire.first, &PlacedNode::id) && std::ranges::contains(plain, wire.second, &PlacedNode::id)) among.push_back(wire);
+                if (std::ranges::contains(plain, wire.from, &PlacedNode::id) && std::ranges::contains(plain, wire.to, &PlacedNode::id)) among.push_back(wire);
             auto laid = ArrangeFlat(plain, among, 0.f);
             // From its own corner, and how big it came to be.
             double left = std::numeric_limits<double>::max(), top = left, right = -left, bottom = -left;
@@ -7256,11 +8629,20 @@ class $NAME : ResourceScript() {
         }
         for (const auto& node : nodes)
             if (!blockOf.contains(node.id)) { page.push_back(node); page.back().group.clear(); }
-        // Wired as its nodes are: a wire into or out of a loop is into or out of its block.
-        std::vector<std::pair<std::string, std::string>> between;
-        const auto named = [&](const std::string& id) { const auto it = blockOf.find(id); return it == blockOf.end() ? id : it->second; };
-        for (const auto& [from, to] : wires)
-            if (const std::string a = named(from), b = named(to); a != b && !std::ranges::contains(between, std::pair { a, b })) between.emplace_back(a, b);
+        // Wired as its nodes are: a wire into or out of a loop is into or out of its block, where in the block its node's port came to be.
+        std::map<std::string, const PlacedNode*> byId;
+        for (const auto& node : nodes) byId[node.id] = &node;
+        const auto portY = [&](const std::string& id, const float y) { return y >= 0.f ? y : byId.at(id)->height * 0.5f; };
+        std::vector<PlacedWire> between;
+        for (const auto& wire : wires) {
+            if (!byId.contains(wire.from) || !byId.contains(wire.to)) continue;
+            const auto a = blockOf.find(wire.from), b = blockOf.find(wire.to);
+            PlacedWire outer { a == blockOf.end() ? wire.from : a->second, b == blockOf.end() ? wire.to : b->second, wire.fromY, wire.toY };
+            if (outer.from == outer.to) continue;
+            if (a != blockOf.end()) outer.fromY = static_cast<float>(inside.at(a->second).at(wire.from).second) + portY(wire.from, wire.fromY);
+            if (b != blockOf.end()) outer.toY = static_cast<float>(inside.at(b->second).at(wire.to).second) + portY(wire.to, wire.toY);
+            if (!std::ranges::contains(between, outer)) between.push_back(std::move(outer));
+        }
         const auto placed = ArrangeFlat(page, between, aspect);
         std::map<std::string, std::pair<double, double>> where;
         for (const auto& [id, at] : placed) {
@@ -7272,12 +8654,15 @@ class $NAME : ResourceScript() {
     }
 
     namespace {
-    /** How many of the wires between two columns cross: each from a place in one to a place in the next, crossing those it is over and under. */
-    std::size_t Crossings(std::vector<std::pair<int, int>> wires)
+    /**
+     * How many of the wires between two columns cross: each from a place in one to a place in the next — a node's place
+     * and how far down it its port is — crossing those it is over and under.
+     */
+    std::size_t Crossings(std::vector<std::pair<double, double>> wires)
     {
         // By where each starts, then where it ends: what is out of order of where they end crosses. Counted as a merge sort counts.
         std::ranges::sort(wires);
-        std::vector<int> ends(wires.size()), spare(wires.size());
+        std::vector<double> ends(wires.size()), spare(wires.size());
         for (std::size_t i = 0; i < wires.size(); ++i) ends[i] = wires[i].second;
         const std::function<std::size_t(std::size_t, std::size_t)> count = [&](const std::size_t from, const std::size_t to) -> std::size_t {
             if (to - from < 2) return 0;
@@ -7296,57 +8681,93 @@ class $NAME : ResourceScript() {
         return count(0, ends.size());
     }
 
+    /** A wire of a page, between two of its nodes by index: how far down each it is. */
+    struct Edge {
+        std::size_t a, b;
+        float ya, yb;
+    };
+
+    /**
+     * A page in columns: each column's nodes, top to bottom, and among them a stand-in (numbered from the nodes' count
+     * on) for each wire that runs past the column — the way kept for it. And each wire's ways from one column to the
+     * next, a link each: from a node or a stand-in to the next, how far down each it is.
+     */
+    struct Layers {
+        struct Link { std::size_t a, b; float ya, yb; };
+        std::vector<std::vector<std::size_t>> rows;
+        std::vector<Link> links;
+        std::size_t count = 0;
+    };
+
     /**
      * Each column's nodes in the order that crosses as few wires as can be found, as layered graphs are drawn: a wire across
      * several columns has a stand-in in each it passes through; each column is ordered by the middle of where what it is
-     * wired to is, a column at a time from the left and then from the right, again and again, the best kept; then two side
-     * by side are swapped while that crosses fewer. A column starts in the order its nodes were in, top to bottom.
+     * wired to is — the ports it is wired at, so that two wires out of one node cross if their ports are the other way
+     * up from what they go to — a column at a time from the left and then from the right, again and again, the best
+     * kept; then two side by side are swapped while that crosses fewer. A column starts in the order its nodes were in,
+     * top to bottom. Gives the columns with their stand-ins, and the links between them.
      */
-    void OrderColumns(const std::vector<PlacedNode>& nodes, const std::vector<std::vector<std::size_t>>& after, std::vector<std::vector<std::size_t>>& columns)
+    Layers OrderColumns(const std::vector<PlacedNode>& nodes, const std::vector<Edge>& edges, std::vector<std::vector<std::size_t>>& columns)
     {
         const std::size_t layers = columns.size();
-        if (layers < 2) return;
+        Layers out;
+        out.rows = columns;
+        for (auto& row : out.rows) std::ranges::stable_sort(row, {}, [&](const std::size_t i) { return nodes[i].y; });
+        out.count = nodes.size();
         std::vector<int> layerOf(nodes.size(), -1);
         for (std::size_t c = 0; c < layers; ++c)
             for (const std::size_t i : columns[c]) layerOf[i] = static_cast<int>(c);
-        // What is ordered: the nodes, and the stand-ins after them.
-        std::vector<std::vector<std::size_t>> ups(nodes.size()), downs(nodes.size());
-        std::vector<std::vector<std::size_t>> rows = columns;
-        for (auto& row : rows) std::ranges::stable_sort(row, {}, [&](const std::size_t i) { return nodes[i].y; });
-        for (std::size_t i = 0; i < nodes.size(); ++i)
-            for (const std::size_t to : after[i]) {
-                const int from = layerOf[i], into = layerOf[to];
-                if (from < 0 || into <= from) continue;     // a wire back, or in a ring: no order says where it goes
-                std::size_t previous = i;
-                for (int layer = from + 1; layer < into; ++layer) {
-                    const std::size_t standIn = ups.size();
-                    ups.push_back({ previous });
-                    downs.push_back({});
-                    downs[previous].push_back(standIn);
-                    rows[static_cast<std::size_t>(layer)].push_back(standIn);
-                    previous = standIn;
-                }
-                downs[previous].push_back(to);
-                ups[to].push_back(previous);
+        // The links, a wire's from one column to the next, through a stand-in in each column it passes.
+        for (const Edge& edge : edges) {
+            const int from = layerOf[edge.a], into = layerOf[edge.b];
+            if (from < 0 || into <= from) continue;     // a wire back, or in a ring: no order says where it goes
+            std::size_t previous = edge.a;
+            float previousY = edge.ya;
+            for (int layer = from + 1; layer < into; ++layer) {
+                const std::size_t standIn = out.count++;
+                out.rows[static_cast<std::size_t>(layer)].push_back(standIn);
+                out.links.push_back({ previous, standIn, previousY, 0.f });
+                previous = standIn;
+                previousY = 0.f;
             }
-        std::vector<int> at(ups.size(), 0);
+            out.links.push_back({ previous, edge.b, previousY, edge.yb });
+        }
+        if (layers < 2) { columns = out.rows; return out; }
+        // How far down a node a link is, as a part of a place: a node's place and its port's share of its height, so that
+        // ports one over another are in that order. A stand-in's is its middle.
+        const auto share = [&](const std::size_t u, const float y) {
+            if (u >= nodes.size() || nodes[u].height <= 0.f) return 0.49;
+            return 0.98 * std::clamp(static_cast<double>(y) / nodes[u].height, 0.0, 1.0);
+        };
+        std::vector<std::vector<std::size_t>> ups(out.count), downs(out.count);     // the links into each, and out of each
+        std::vector<std::pair<double, double>> shares(out.links.size());
+        for (std::size_t l = 0; l < out.links.size(); ++l) {
+            const auto& link = out.links[l];
+            downs[link.a].push_back(l);
+            ups[link.b].push_back(l);
+            shares[l] = { share(link.a, link.ya), share(link.b, link.yb) };
+        }
+        auto& rows = out.rows;
+        std::vector<int> at(out.count, 0);
         const auto number = [&](const std::size_t c) { for (std::size_t k = 0; k < rows[c].size(); ++k) at[rows[c][k]] = static_cast<int>(k); };
         for (std::size_t c = 0; c < layers; ++c) number(c);
         const auto between = [&](const std::size_t c) {
-            std::vector<std::pair<int, int>> wires;
+            std::vector<std::pair<double, double>> wires;
             for (const std::size_t u : rows[c])
-                for (const std::size_t v : downs[u]) wires.emplace_back(at[u], at[v]);
+                for (const std::size_t l : downs[u]) wires.emplace_back(at[u] + shares[l].first, at[out.links[l].b] + shares[l].second);
             return Crossings(std::move(wires));
         };
         const auto all = [&] { std::size_t sum = 0; for (std::size_t c = 0; c + 1 < layers; ++c) sum += between(c); return sum; };
-        // By the middle of where its neighbours are, on one side: one with none there stays where it is.
-        const auto byMiddle = [&](const std::size_t c, const std::vector<std::vector<std::size_t>>& side) {
-            std::vector<double> key(ups.size(), 0.0);
+        // By the middle of where its links go, on one side: one with none there stays where it is.
+        const auto byMiddle = [&](const std::size_t c, const bool fromLeft) {
+            std::vector<double> key(out.count, 0.0);
             for (const std::size_t u : rows[c]) {
-                if (side[u].empty()) { key[u] = at[u]; continue; }
+                const auto& side = fromLeft ? ups[u] : downs[u];
+                if (side.empty()) { key[u] = at[u] + 0.5; continue; }
                 double sum = 0.0;
-                for (const std::size_t n : side[u]) sum += at[n];
-                key[u] = sum / static_cast<double>(side[u].size());
+                for (const std::size_t l : side)
+                    sum += fromLeft ? at[out.links[l].a] + shares[l].first : at[out.links[l].b] + shares[l].second;
+                key[u] = sum / static_cast<double>(side.size());
             }
             std::ranges::stable_sort(rows[c], {}, [&](const std::size_t u) { return key[u]; });
             number(c);
@@ -7358,8 +8779,8 @@ class $NAME : ResourceScript() {
             auto kept = rows;
             std::size_t fewest = all();
             for (int sweep = 0; sweep < 24 && fewest > 0; ++sweep) {
-                if (sweep % 2 == 0) for (std::size_t c = 1; c < layers; ++c) byMiddle(c, ups);
-                else for (std::size_t c = layers - 1; c-- > 0;) byMiddle(c, downs);
+                if (sweep % 2 == 0) for (std::size_t c = 1; c < layers; ++c) byMiddle(c, true);
+                else for (std::size_t c = layers - 1; c-- > 0;) byMiddle(c, false);
                 if (const std::size_t now = all(); now < fewest) { fewest = now; kept = rows; }
             }
             rows = std::move(kept);
@@ -7393,24 +8814,60 @@ class $NAME : ResourceScript() {
             if (const std::size_t now = settle(); now < fewest) { fewest = now; best = rows; }
         }
         rows = std::move(best);
-        // The nodes in that order; the stand-ins were for ordering only.
+        // The nodes in that order, without the stand-ins.
         for (std::size_t c = 0; c < layers; ++c) {
             columns[c].clear();
             for (const std::size_t u : rows[c]) if (u < nodes.size()) columns[c].push_back(u);
         }
+        return out;
     }
 
-    std::map<std::string, std::pair<double, double>> ArrangeFlat(const std::vector<PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires,
-                                                                 const float aspect)
+    /**
+     * The places in a column nearest to where each is wanted — @p wanted, weighed by @p weight — that keep them in their
+     * order with @p spacing between each and the next: the least, of the squares of how far each is from where it is
+     * wanted, there can be. (Each is moved up by what comes before it, and then the places are the closest that never go
+     * back up: pooled, a run of them, where they would.)
+     */
+    std::vector<double> InOrder(const std::vector<double>& wanted, const std::vector<double>& weight, const std::vector<double>& spacing)
+    {
+        const std::size_t n = wanted.size();
+        std::vector<double> before(n, 0.0);
+        for (std::size_t k = 1; k < n; ++k) before[k] = before[k - 1] + spacing[k - 1];
+        struct Pool { double sum, weight; std::size_t count; };
+        std::vector<Pool> pools;
+        for (std::size_t k = 0; k < n; ++k) {
+            pools.push_back({ (wanted[k] - before[k]) * weight[k], weight[k], 1 });
+            while (pools.size() > 1) {
+                const Pool& last = pools.back();
+                const Pool& previous = pools[pools.size() - 2];
+                if (previous.sum / previous.weight <= last.sum / last.weight) break;
+                const Pool merged { previous.sum + last.sum, previous.weight + last.weight, previous.count + last.count };
+                pools.pop_back();
+                pools.back() = merged;
+            }
+        }
+        std::vector<double> places(n);
+        std::size_t k = 0;
+        for (const Pool& pool : pools)
+            for (std::size_t i = 0; i < pool.count; ++i, ++k) places[k] = pool.sum / pool.weight + before[k];
+        return places;
+    }
+
+    std::map<std::string, std::pair<double, double>> ArrangeFlat(const std::vector<PlacedNode>& nodes, const std::vector<PlacedWire>& wires, const float aspect)
     {
         std::map<std::string, std::pair<double, double>> where;
         if (nodes.empty()) return where;
         std::map<std::string, std::size_t> index;
         for (std::size_t i = 0; i < nodes.size(); ++i) index[nodes[i].id] = i;
         std::vector<std::vector<std::size_t>> before(nodes.size()), after(nodes.size());
-        for (const auto& [from, to] : wires) {
-            const auto a = index.find(from), b = index.find(to);
+        std::vector<Edge> edges;
+        for (const auto& wire : wires) {
+            const auto a = index.find(wire.from), b = index.find(wire.to);
             if (a == index.end() || b == index.end() || a->second == b->second) continue;
+            const PlacedNode& from = nodes[a->second];
+            const PlacedNode& to = nodes[b->second];
+            edges.push_back({ a->second, b->second, wire.fromY >= 0.f ? std::min(wire.fromY, from.height) : from.height * 0.5f,
+                              wire.toY >= 0.f ? std::min(wire.toY, to.height) : to.height * 0.5f });
             before[b->second].push_back(a->second);
             after[a->second].push_back(b->second);
         }
@@ -7445,37 +8902,91 @@ class $NAME : ResourceScript() {
             else columns[static_cast<std::size_t>(column[i])].push_back(i);
         }
         std::erase_if(columns, [](const auto& c) { return c.empty(); });
-        OrderColumns(nodes, after, columns);
+        const Layers layers = OrderColumns(nodes, edges, columns);
         float left = nodes.front().x, top = nodes.front().y;
         for (const auto& node : nodes) { left = std::min(left, node.x); top = std::min(top, node.y); }
-        constexpr float Across = 90.f, Down = 28.f;
-        std::vector<float> middle(nodes.size(), 0.f), tall(columns.size(), 0.f);
-        for (std::size_t c = 0; c < columns.size(); ++c) {
-            for (const std::size_t i : columns[c]) tall[c] += nodes[i].height + Down;
-            tall[c] -= Down;
-        }
-        const float tallest = columns.empty() ? 0.f : *std::ranges::max_element(tall);
-        float x = left;
-        for (std::size_t c = 0; c < columns.size(); ++c) {
-            const auto& here = columns[c];      // in the order that crosses the fewest wires (OrderColumns)
-            float y = top + (tallest - tall[c]) * 0.5f, width = 0.f;
-            for (const std::size_t i : here) {
-                where[nodes[i].id] = { std::round(x), std::round(y) };
-                middle[i] = y + nodes[i].height * 0.5f;
-                y += nodes[i].height + Down;
-                width = std::max(width, nodes[i].width);
+
+        // Down each column: each node level with what it is wired to, port with port, as near as the others in its column
+        // leave room for. A stand-in is a wire's way past the column: a lane kept clear for it, level with where it goes.
+        constexpr float Across = 80.f, Down = 28.f, Lane = 12.f;
+        const std::size_t count = layers.count;
+        const auto tallOf = [&](const std::size_t u) { return u < nodes.size() ? static_cast<double>(nodes[u].height) : 0.0; };
+        const auto gap = [&](const std::size_t u, const std::size_t v) { return u >= nodes.size() || v >= nodes.size() ? Lane : Down; };
+        std::vector<double> y(count, 0.0);
+        {
+            // To begin with, each column stacked, its middle level with the tallest's.
+            std::vector<double> tall(layers.rows.size(), 0.0);
+            for (std::size_t c = 0; c < layers.rows.size(); ++c) {
+                const auto& row = layers.rows[c];
+                for (std::size_t k = 0; k < row.size(); ++k) {
+                    y[row[k]] = tall[c];
+                    tall[c] += tallOf(row[k]) + (k + 1 < row.size() ? gap(row[k], row[k + 1]) : 0.0);
+                }
             }
-            x += width + Across;
+            const double tallest = tall.empty() ? 0.0 : *std::ranges::max_element(tall);
+            for (std::size_t c = 0; c < layers.rows.size(); ++c)
+                for (const std::size_t u : layers.rows[c]) y[u] += (tallest - tall[c]) * 0.5;
         }
-        float wide = x - left - (columns.empty() ? 0.f : Across), high = tallest;
-        // As the view is shaped: a column that runs past a height is wrapped into another beside it, in the same order —
-        // the height lowered until the whole is as wide, for how tall it is, as the view.
+        // What pulls each, from either side: where it would be, level with what a link joins it to — a wire's way past
+        // columns pulled harder, so that a long wire runs straight and what it passes moves aside for it.
+        struct Pull { std::size_t other; double offset, weight; };
+        std::vector<std::vector<Pull>> fromLeft(count), fromRight(count);
+        for (const auto& link : layers.links) {
+            const double weight = link.a >= nodes.size() && link.b >= nodes.size() ? 16.0 : link.a >= nodes.size() || link.b >= nodes.size() ? 8.0 : 1.0;
+            fromLeft[link.b].push_back({ link.a, static_cast<double>(link.ya) - link.yb, weight });
+            fromRight[link.a].push_back({ link.b, static_cast<double>(link.yb) - link.ya, weight });
+        }
+        const auto place = [&](const std::vector<std::size_t>& row, const bool leftSide, const bool rightSide) {
+            if (row.empty()) return;
+            std::vector<double> wanted(row.size()), weight(row.size()), spacing(row.size(), 0.0);
+            for (std::size_t k = 0; k < row.size(); ++k) {
+                const std::size_t u = row[k];
+                double sum = 0.0, weights = 0.0;
+                const auto pull = [&](const std::vector<Pull>& pulls) { for (const Pull& p : pulls) { sum += p.weight * (y[p.other] + p.offset); weights += p.weight; } };
+                if (leftSide) pull(fromLeft[u]);
+                if (rightSide) pull(fromRight[u]);
+                // Nothing pulling it: it stays where it is, if the others let it.
+                wanted[k] = weights > 0.0 ? sum / weights : y[u];
+                weight[k] = weights > 0.0 ? weights : 0.01;
+                if (k + 1 < row.size()) spacing[k] = tallOf(u) + gap(u, row[k + 1]);
+            }
+            const auto places = InOrder(wanted, weight, spacing);
+            for (std::size_t k = 0; k < row.size(); ++k) y[row[k]] = places[k];
+        };
+        // Sweeps from the left, by what each is wired from, and from the right, by what it is wired to; then by both, so
+        // that each is between what it takes and what it gives.
+        const std::size_t columnCount = layers.rows.size();
+        for (int sweep = 0; sweep < 16; ++sweep) {
+            const bool both = sweep >= 10;
+            if (sweep % 2 == 0) for (std::size_t c = 0; c < columnCount; ++c) place(layers.rows[c], true, both);
+            else for (std::size_t c = columnCount; c-- > 0;) place(layers.rows[c], both, true);
+        }
+        // Across: each column as wide as its widest, and further from the next the steeper the wires between them run.
+        std::vector<float> widest(columns.size(), 0.f), x(columns.size(), left);
+        for (std::size_t c = 0; c < columns.size(); ++c)
+            for (const std::size_t i : columns[c]) widest[c] = std::max(widest[c], nodes[i].width);
+        std::vector<int> layerOf(count, -1);
+        for (std::size_t c = 0; c < columnCount; ++c)
+            for (const std::size_t u : layers.rows[c]) layerOf[u] = static_cast<int>(c);
+        std::vector<double> steepest(columns.size(), 0.0);
+        for (const auto& link : layers.links)
+            if (const int c = layerOf[link.a]; c >= 0)
+                steepest[static_cast<std::size_t>(c)] = std::max(steepest[static_cast<std::size_t>(c)], std::abs(y[link.b] + link.yb - y[link.a] - link.ya));
+        for (std::size_t c = 1; c < columns.size(); ++c) x[c] = x[c - 1] + widest[c - 1] + Across + static_cast<float>(std::min(160.0, steepest[c - 1] * 0.15));
+        double highest = std::numeric_limits<double>::max(), lowest = -highest;
+        for (const auto& row : columns)
+            for (const std::size_t i : row) { highest = std::min(highest, y[i]); lowest = std::max(lowest, y[i] + nodes[i].height); }
+        for (std::size_t c = 0; c < columns.size(); ++c)
+            for (const std::size_t i : columns[c]) where[nodes[i].id] = { std::round(x[c]), std::round(top + y[i] - highest) };
+        float wide = columns.empty() ? 0.f : x.back() + widest.back() - left, high = columns.empty() ? 0.f : static_cast<float>(lowest - highest);
+
+        // As the view is shaped: when the page so laid out is far from that, a column that runs past a height is wrapped into
+        // another beside it, in the same order — the height lowered until the whole is as wide, for how tall it is, as the view.
         if (aspect > 0.f && !columns.empty()) {
-            std::vector<float> widest(columns.size(), 0.f);
-            float lowest = 0.f;
-            for (std::size_t c = 0; c < columns.size(); ++c)
-                for (const std::size_t i : columns[c]) { widest[c] = std::max(widest[c], nodes[i].width); lowest = std::max(lowest, nodes[i].height); }
-            std::vector<std::pair<float, float>> at(nodes.size(), { 0.f, 0.f });     // where each is, wrapped at the height tried
+            float shortest = 0.f;
+            for (const auto& row : columns)
+                for (const std::size_t i : row) shortest = std::max(shortest, nodes[i].height);
+            std::vector<std::pair<float, float>> at(nodes.size(), { 0.f, 0.f });     // where each is, as laid out at the height tried
             const auto lay = [&](const float limit, const bool place) {
                 float cx = left, most = 0.f;
                 for (std::size_t c = 0; c < columns.size(); ++c) {
@@ -7501,32 +9012,42 @@ class $NAME : ResourceScript() {
                 }
                 return loose.empty() ? 0.f : rows + row + 60.f;
             };
-            // How many wires cross, as laid out: each straight from the middle of one's right side to the middle of the other's left.
+            // How many wires cross, as laid out: each straight from its port on the one to its port on the other.
             const auto crossed = [&] {
                 struct Line { float x1, y1, x2, y2; std::size_t a, b; };
                 std::vector<Line> lines;
-                for (std::size_t i = 0; i < nodes.size(); ++i)
-                    for (const std::size_t to : after[i])
-                        lines.push_back({ at[i].first + nodes[i].width, at[i].second + nodes[i].height * 0.5f, at[to].first, at[to].second + nodes[to].height * 0.5f, i, to });
-                const auto side = [](const Line& l, const float x, const float y) { return (l.x2 - l.x1) * (y - l.y1) - (l.y2 - l.y1) * (x - l.x1); };
-                std::size_t count = 0;
+                for (const Edge& e : edges) lines.push_back({ at[e.a].first + nodes[e.a].width, at[e.a].second + e.ya, at[e.b].first, at[e.b].second + e.yb, e.a, e.b });
+                const auto side = [](const Line& l, const float px, const float py) { return (l.x2 - l.x1) * (py - l.y1) - (l.y2 - l.y1) * (px - l.x1); };
+                std::size_t crossings = 0;
                 for (std::size_t i = 0; i < lines.size(); ++i)
                     for (std::size_t j = i + 1; j < lines.size(); ++j) {
                         const Line& p = lines[i];
                         const Line& q = lines[j];
                         if (p.a == q.a || p.b == q.b || p.a == q.b || p.b == q.a) continue;
-                        if (side(p, q.x1, q.y1) * side(p, q.x2, q.y2) < 0.f && side(q, p.x1, p.y1) * side(q, p.x2, p.y2) < 0.f) ++count;
+                        if (side(p, q.x1, q.y1) * side(p, q.x2, q.y2) < 0.f && side(q, p.x1, p.y1) * side(q, p.x2, p.y2) < 0.f) ++crossings;
                     }
-                return count;
+                return crossings;
             };
-            // Of the heights there are to wrap at — not wrapping among them — those whose whole is shaped nearly as the view,
-            // and of those the one whose wires cross least: a column wrapped can cross what it did not.
+            const auto offShape = [&](const float w, const float h) { return std::abs(std::log(w / std::max(h + underneath(std::max(w, 600.f)), 1.f) / aspect)); };
+            // The page as laid out, each level with what it is wired to.
+            for (const auto& row : columns)
+                for (const std::size_t i : row) at[i] = { static_cast<float>(where[nodes[i].id].first), static_cast<float>(where[nodes[i].id].second) };
+            const float levelOff = offShape(wide, high);
+            const std::size_t levelCrossings = crossed();
+            // Of the heights there are to wrap at, those whose whole is shaped nearly as the view, and of those the one whose
+            // wires cross least: a column wrapped can cross what it did not.
             struct Tried { float limit, off; std::size_t crossings; };
             std::vector<Tried> tried;
-            float nearest = std::numeric_limits<float>::max();
-            for (float limit = tallest; limit >= std::max(lowest, 1.f); limit *= 0.94f) {
+            float nearest = levelOff;
+            float tallest = 0.f;
+            for (const auto& row : columns) {
+                float tall = 0.f;
+                for (const std::size_t i : row) tall += nodes[i].height + Down;
+                tallest = std::max(tallest, tall - Down);
+            }
+            for (float limit = tallest; limit >= std::max(shortest, 1.f); limit *= 0.94f) {
                 const auto [w, h] = lay(limit, false);
-                const float off = std::abs(std::log(w / std::max(h + underneath(std::max(w, 600.f)), 1.f) / aspect));
+                const float off = offShape(w, h);
                 tried.push_back({ limit, off, crossed() });
                 nearest = std::min(nearest, off);
             }
@@ -7540,7 +9061,9 @@ class $NAME : ResourceScript() {
                     best = one.off;
                     limit = one.limit;
                 }
-            std::tie(wide, high) = lay(limit, true);
+            // Level is kept unless it is far from the view's shape — about twice as wide, or as tall, as the best — or crosses more.
+            constexpr float Far = 0.7f;
+            if (levelOff > nearest + Far || levelCrossings > fewest) std::tie(wide, high) = lay(limit, true);
         }
         // What is wired to nothing: in rows under it all, as wide as the rest (or one row, shaped by nothing).
         float lx = left, ly = top + high + (columns.empty() ? 0.f : 60.f), row = 0.f;
@@ -7584,7 +9107,8 @@ class $NAME : ResourceScript() {
         _session->HostScripts(_scriptsHost);
         if (!_projectPath.empty()) _session->OpenProject(_projectPath);
         _session->window = &SceneWindow();      // what the title bar's own buttons act on
-        _ui = std::make_unique<kui::Ui>(EditorRoot(_session));
+        // In the theme this user left it in — unless it keeps nothing of theirs (a test's).
+        _ui = std::make_unique<kui::Ui>(EditorRoot(_session), kui::UiSettings {}.SetTheme(std::getenv("KORAL_ENGINE_NO_LAYOUT") ? kui::Theme::Dark() : Session::SavedTheme()));
         Graph().Add<kui::UiPass>(*_ui);
     }
 
@@ -7595,6 +9119,11 @@ class $NAME : ResourceScript() {
         _session->UpdateThumbnails(static_cast<float>(Time::FrameTime()));
         _session->UpdateView(static_cast<float>(Time::FrameTime()));
         _ui->Update();
+        // A theme chosen from a menu: put on now the menu is done with, every panel built again in it.
+        if (_session->themeChosen) {
+            _ui->SetTheme(*_session->themeChosen);
+            _session->themeChosen.reset();
+        }
         // Control+S saves, Control+R runs — unless a field is being typed into.
         const kor::Input& input = SceneInput();
         const bool control = input.IsKeyHeld(kor::Key::eLeftControl) || input.IsKeyHeld(kor::Key::eRightControl);

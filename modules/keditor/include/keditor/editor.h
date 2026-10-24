@@ -191,6 +191,41 @@ namespace keditor
         void Frame(kecs::Entity entity);
         /** @brief Frames a second, averaged over the last quarter of one. */
         [[nodiscard]] int Fps() const { return _fps; }
+
+        /**
+         * @brief How the Scene panel shows the scene: as its graph draws it (lit); a channel of its materials, which
+         *        the shaders that import koral_debug show; one of the editor's own ways — its edges, clay, normals —
+         *        from the editor's graphs (Overlay::Views); or a DebugView of the scene's graph. Only the Scene panel's:
+         *        the Game panel, and the project run, show the scene lit.
+         */
+        struct ViewMode {
+            enum class Kind : std::uint8_t { eLit, eMaterial, eEditor, eGraph };
+            Kind kind = Kind::eLit;
+            kgraph::ShaderDebugChannel channel = kgraph::ShaderDebugChannel::eLit;     ///< eMaterial's.
+            std::filesystem::path file;     ///< eEditor's: the editor graph its DebugView is in.
+            std::string id;                 ///< eEditor's and eGraph's: the DebugView.
+            bool operator==(const ViewMode&) const = default;
+        };
+        /** @brief One of the ways there are to show the scene: what it is called, and under which heading. */
+        struct ViewModeChoice {
+            ViewMode mode;
+            std::string name;
+            std::string group;      ///< "", "Material", "Editor" or "Scene graph".
+        };
+        /** @brief Every way there is now: lit, the material's channels, the editor graphs' DebugViews, then the scene graph's. */
+        [[nodiscard]] std::vector<ViewModeChoice> ViewModes() const;
+        [[nodiscard]] const ViewMode& CurrentViewMode() const { return _viewMode; }
+        /** @brief Shows the scene so. A DebugView that is gone — the graph changed — is lit again. */
+        void SetViewMode(ViewMode mode);
+        /** @brief The graphics pipelines of the scene whose shaders show no channel of their material: drawn lit whatever is chosen. */
+        [[nodiscard]] std::vector<std::string> WithoutMaterialViews() const;
+        /** @brief The picture shown in place of the scene's, for a DebugView; empty for the scene lit or a channel of its materials. */
+        [[nodiscard]] kor::ResourceRef<const kor::Image> ViewModePicture() const;
+        /** @brief The grid in the scene, as this user set it last: kept from one run to the next. */
+        [[nodiscard]] const Grid& SceneGrid() const { return _grid; }
+        void SetGrid(const Grid& grid);
+        /** @brief The grid, on nothing, to go over the scene's picture; empty while it is not shown. */
+        [[nodiscard]] kor::ResourceRef<const kor::Image> GridPicture() const;
         /**
          * @brief Each frame, as the scene being edited updates: the view moved by the mouse over the scene's panel
          *        (right-drag turns, middle-drag moves, the wheel zooms), what is picked outlined and given its
@@ -299,7 +334,10 @@ namespace keditor
          * @return Its asset's id; empty, with why said, when there is no project or it is no picture or model.
          */
         std::string ImportAsset(const std::filesystem::path& file);
+        /** @brief The scene made anew from the standard graph (keditor::AddStandardGraph), its shader written into the project. */
         bool NewStandardScene();
+        /** @brief The scene made anew from the lit graph (keditor::AddLitGraph): every light, under a sky. */
+        bool NewLitScene();
         /** @brief Reads the scene again from its file. */
         bool Revert();
 
@@ -429,6 +467,73 @@ namespace keditor
         [[nodiscard]] std::vector<Choice> Choices() const;
         void Choose(const std::string& driver, int option);
 
+        /**
+         * @brief The graph as its pages run: each page a step, wired from every page it uses something of — a resource
+         *        or a value one of its nodes made, brought in by a Reference or wired straight — and each Switch that
+         *        chooses between branches (a Choice) a step of its own, between the pages its options come from and
+         *        those that use what it chose. What the Pass flow panel shows; none of it is edited there but the choice.
+         */
+        struct PassFlow {
+            struct Step {
+                std::string id;                     ///< The page's name, or the Switch's id.
+                bool isSwitch = false;
+                std::string rate;                   ///< A page's: "setup", "fixed" or "frame".
+                std::size_t nodes = 0;              ///< How many nodes the page has.
+                bool ran = false;                   ///< Whether a pass of it ran in the last frame.
+                double gpuMs = 0.0;                 ///< What its passes cost, on the GPU.
+                std::string driver;                 ///< A Switch's: the node that says which (Choice::driver).
+                std::vector<std::string> options;   ///< A Switch's: the page each option comes from.
+                int chosen = 0;
+                int order = 0;                      ///< Where it runs among the pages: a Switch, where the page it is on does.
+                /// A page that runs only while a choice is one of its options — its passes idle unless `driver` is
+                /// `option` (or are enabled only then) — is of that branch: the driver, and the option. Otherwise -1.
+                std::string branchDriver;
+                int branchOption = -1;
+            };
+            struct Link {
+                std::string from, to;               ///< Steps, by id.
+                std::vector<std::string> carries;   ///< What of `from` `to` uses: nodes, by id.
+                int option = -1;                    ///< Into a Switch: which of its options; -1 otherwise.
+            };
+            std::vector<Step> steps;                ///< The pages in the order they run, then the Switches.
+            std::vector<Link> links;
+        };
+        [[nodiscard]] PassFlow Flow() const;
+
+        /**
+         * @brief The pages of what the choices do not choose now: each of whose passes idles (or is switched off) by a
+         *        choice's value — a branch of a Switch not chosen, shadow maps rays need not — and each page of no pass of
+         *        its own that only such pages use. A pass idle for a reason of its own (a shadow drawn only when it
+         *        changed) does not count. What the Graph panel's page list leaves out.
+         */
+        [[nodiscard]] std::set<std::string> PagesNotChosen() const;
+        /**
+         * @brief Whether a pipeline's component — a material — is read by a pass the choices leave running: one that runs
+         *        its pipeline, or one whose pipeline reads its Draw's buffer of instances (the meshlets read the forward
+         *        Draw's). True for a component of no pipeline, and for one no pass uses.
+         */
+        [[nodiscard]] bool MaterialInUse(const std::string& component);
+
+        /**
+         * @brief Where each step of a flow goes, and the branches it is drawn in. Columns from left to right in the order
+         *        the steps need each other — each step in the column, between those it takes from and those that take
+         *        from it, that keeps its wires shortest — and in each column the steps at the heights of those they are
+         *        wired to, above or below, kept apart. The steps only one option of a Switch leads to are a branch: a
+         *        band of their own, its steps kept together, apart from the others'.
+         */
+        struct FlowLayout {
+            std::map<std::string, std::pair<float, float>> at;      ///< Each step's top-left.
+            struct Branch {
+                std::string switchId;
+                int option = 0;
+                std::string title;
+                std::vector<std::string> steps;
+            };
+            std::vector<Branch> branches;
+        };
+        /** @param sizes Each step's card, as big as it was drawn; one not drawn yet is guessed. */
+        [[nodiscard]] static FlowLayout LayOut(const PassFlow& flow, const std::map<std::string, std::pair<float, float>>& sizes);
+
         // ---- what a project is made of, besides its scenes ----------------------------------------------------
 
         /** @brief Something of the project's that is in a file: what the Assets panel lists. */
@@ -533,6 +638,16 @@ namespace keditor
         [[nodiscard]] static std::filesystem::path StartupProject();
         /** @brief Makes @p project the one the editor opens when given none; empty, the engine's own again. */
         static bool SetStartupProject(const std::filesystem::path& project);
+        /**
+         * @brief The editor's theme: this user's choice of design and of dark or light, kept in their config folder
+         *        (SetSavedTheme). Koral's dark when none was chosen.
+         */
+        [[nodiscard]] static kui::Theme SavedTheme();
+        /** @brief Keeps @p design, dark or light, as the theme the editor opens in. */
+        static bool SetSavedTheme(kui::ThemeDesign design, bool dark);
+        /** @brief A theme chosen (Settings, Theme): the editor puts it on between frames, and keeps it. */
+        void ChooseTheme(kui::ThemeDesign design, bool dark);
+        std::optional<kui::Theme> themeChosen;  ///< What ChooseTheme chose, until the editor puts it on.
         /** @brief Where a new project is offered to be made: KORAL_ENGINE_PROJECTS, or the folder the build names. */
         [[nodiscard]] static std::filesystem::path ProjectsDirectory();
         /** @brief Whether what is under @p entity is folded away in the outliner. Open, to begin with. */
@@ -692,6 +807,10 @@ namespace keditor
         const std::pair<bool, bool>& Drawn(kecs::Entity entity);
         std::vector<kgraph::Node> _copied;
         std::shared_ptr<kgraph::Resource> _overHeld;    // the overlay's picture the interface shows
+        std::shared_ptr<kgraph::Resource> _modeHeld, _gridHeld;     // the DebugView's picture, and the grid's
+        ViewMode _viewMode;
+        Grid _grid;
+        bool _gridRead = false;
         std::vector<std::pair<std::shared_ptr<kgraph::Resource>, int>> _overBefore;    // those it showed, and for how many frames more each is kept
         std::vector<std::pair<std::string, std::shared_ptr<kgraph::Resource>>> _assetsHeld, _assetsHeldBefore;   // what the Assets panel shows, and showed
         std::size_t _reading = 0;
@@ -715,6 +834,7 @@ namespace keditor
         std::uint64_t _undoRevision = 0;
         float _undoQuiet = 0.f;
         bool _undoPending = false;              // something was done since _now was taken
+        bool NewScene(bool lit);
         void TrackUndo(float seconds, bool busy);
         void Commit();
         void PutBack(const Was& state);
@@ -764,6 +884,13 @@ namespace keditor
      *        "Components", each a node type with its own name and the ports of the one it is made of.
      */
     [[nodiscard]] std::vector<const kgraph::NodeType*> FindNodeTypes(std::string_view typed, const std::vector<kgraph::Preset>& presets = {});
+    /**
+     * @brief The sections of the list of nodes, in order, of the categories in @p counts (how many each has): `#Functions`,
+     *        each function's purpose under it — on a page of @p rate eFixed, Physics first — and those that say none as
+     *        Functions; `#Scene and values`; `#Vulkan`, what is made on the device and what runs. A heading is `#` and its
+     *        name, and is there only when something is under it.
+     */
+    [[nodiscard]] std::vector<std::string> NodeListSections(const std::map<std::string, std::size_t>& counts, kgraph::PassRate rate = kgraph::PassRate::eFrame);
 
     /** @brief A node as the graph's view has it, for putting a page in order: where it is, and about how big its card is. */
     struct PlacedNode {
@@ -772,18 +899,54 @@ namespace keditor
         std::string group;      ///< The frame it is in — the outermost, of those one inside another — laid out as a block of its own. Empty: none.
         int depth = 0;          ///< How many frames are inside that one, one in another: how far out it is drawn from its nodes.
     };
+    /** @brief A wire, for putting a page in order: from which node to which, and where on each — its ports' — it is. */
+    struct PlacedWire {
+        std::string from, to;
+        float fromY = -1.f, toY = -1.f;     ///< How far down each node its port is, from the node's top. Negative: its middle.
+        bool operator==(const PlacedWire&) const = default;
+    };
     /**
      * @brief Where a page's nodes go to be read from left to right: each in the column after the last thing it is
      *        wired from — and no further from what it is wired to than it need be — and down its column in the order
-     *        of what feeds it. What nothing is wired to or from is put in a row under the rest.
-     * @param wires From which node to which, by id; a wire to or from a node not in @p nodes is not counted.
-     * @param aspect How wide, for how tall, the page is to come out — the view's own shape: a column taller than that
-     *               leaves is wrapped into more, side by side, and what is wired to nothing is in rows as wide as the
-     *               rest. 0: each column as tall as it is, the unwired in one row.
+     *        that crosses the fewest wires, port by port. Then each is put level with what it is wired to — its ports
+     *        with theirs, as near as the others in its column leave room for — so that wires run as straight as they
+     *        can, and one that runs past a column has a way kept clear through it. What nothing is wired to or from is
+     *        put in rows under the rest.
+     * @param wires From which node to which; a wire to or from a node not in @p nodes is not counted.
+     * @param aspect How wide, for how tall, the page is to come out — the view's own shape: when the page laid out so
+     *               is far from that, a column taller than it leaves is wrapped into more, side by side, and what is
+     *               wired to nothing is in rows as wide as the rest. 0: each column as tall as it is, the unwired in one row.
      * @return Each node's place, by id: Document::PlaceNodes puts them there.
      */
+    [[nodiscard]] std::map<std::string, std::pair<double, double>> ArrangeNodes(const std::vector<PlacedNode>& nodes, const std::vector<PlacedWire>& wires,
+                                                                               float aspect = 0.f);
+    /** @brief As ArrangeNodes, each wire at the middle of the nodes it is between. */
     [[nodiscard]] std::map<std::string, std::pair<double, double>> ArrangeNodes(const std::vector<PlacedNode>& nodes, const std::vector<std::pair<std::string, std::string>>& wires,
                                                                                float aspect = 0.f);
+
+    /**
+     * @brief What node @p id costs a frame, of the runtime's @p timings: a pass node's own, or — a Function's call, a node
+     *        of a loop — every pass it stands for (`call/node`, `node [n]`) added up. None, for a node that runs nothing.
+     */
+    [[nodiscard]] std::optional<kgraph::Runtime::Timing> CostOf(const std::map<std::string, kgraph::Runtime::Timing, std::less<>>& timings, const std::string& id);
+
+    /** @brief A port of a node that a wire let go on it could go to, or come from: what the menu that opens lists. */
+    struct PortChoice {
+        std::string port;        ///< Its name: an input's, for a wire from an output; an output's, for a wire from an input.
+        std::string label;       ///< As the node calls it.
+        bool fits = false;       ///< Whether it takes what the wire carries.
+        std::string why;         ///< Not fitting: what it is of, against what the wire is of.
+        std::string wiredFrom;   ///< An input wired already: from what, in words. Chosen, the new wire takes its place.
+        bool byName = false;     ///< A Bundle into what it fills by name (`fields`, `push`): offered first, saying how many it fills.
+    };
+    /**
+     * @brief The ports of @p node a wire from @p fromPort of @p fromNode (an output's, or with @p fromOutput false an
+     *        input's) could be wired to, let go on it: every input of it — shown or not, set on the node or in the
+     *        inspector — or every output, what it gives of itself among them. Those that fit come first, each in the
+     *        node's order; those that don't say why. None, for a wire onto its own node.
+     */
+    [[nodiscard]] std::vector<PortChoice> PortChoices(const Document& doc, const std::string& fromNode, const std::string& fromPort, bool fromOutput,
+                                                      const std::string& node);
 
     /** @brief The whole interface, over @p session. */
     [[nodiscard]] kui::Widget EditorRoot(std::shared_ptr<Session> session);

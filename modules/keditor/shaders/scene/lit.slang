@@ -1,6 +1,7 @@
 module lit;
 
 import engineCommon;
+import koral_debug;     // what the editor's scene view shows of the material: its albedo, its normal...
 
 struct Vertex {
     float3 position : POSITION;
@@ -86,6 +87,7 @@ float4 fragment(RasterInfo raster) : SV_Target
     float3 normal = normalize(raster.normal);
     float3 toEye = normalize(frame.cameraPosition.xyz - raster.worldPosition);
     float facingEye = max(dot(normal, toEye), 1e-4);
+    if (koralDebugShowing()) return float4(koralDebugColor(KoralSurface(albedo, normal, roughness, metallic, toLinear(draw.emission))), 1.0);
 
     // What it reflects straight on: a little of everything for what is not metal, its own colour for what is.
     // And what is left to scatter: a metal scatters none.

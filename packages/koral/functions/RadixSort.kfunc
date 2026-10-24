@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Sort and scan",
+  "description": "Keys and their values sorted by key on the GPU, stably, four bits a turn.",
+  "tags": ["sort", "radix", "order", "keys"],
   "graph": {
     "kgraph": 1,
     "nodes": [

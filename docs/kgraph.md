@@ -170,7 +170,8 @@ before its loops are, so that a function can hold a loop and a call can be in on
 what the call is given there; what is wired from the call is what the output is wired from inside. So nothing new
 is evaluated: a call wired from a ForEach follows it as its nodes would. A call fares as its nodes do: the first of
 them that fails says so on it, by name (`times: 'b' is a number`). A function that calls itself is written out
-eight deep, and no further. `Runtime::PortsOf` and `OutputsOf` give a call's ports as its edges are, an output as
+eight deep, and no further. A loop in a function names its own nodes — a Previous's `of` and `first`, an Element's
+`of` — and they are named as the call has them written out. `Runtime::PortsOf` and `OutputsOf` give a call's ports as its edges are, an output as
 the node inside gives it, and `ValueOf` and `ResourceOf` what is there.
 
 A FunctionInput or FunctionOutput in a graph itself — a function opened in place, in the editor — stands for what
@@ -179,6 +180,10 @@ its `value` is wired from.
 A call's nodes are written out where the call is among the nodes, and a loop's a turn at a time — every node of the
 turn, then the next turn's — where the loop's first node is: passes that nothing they use orders run in the order of
 the nodes, so a function's passes run where it is called, and a loop's in turns.
+
+A function's file says what it is for beside its graph, for the editor's list of nodes to offer it under and find it by
+(`Document::AboutFunction`): `"purpose"` (`"Physics"`), `"description"`, and `"tags"` (`["prefix sum", "scan"]`). One
+of the engine's saved as the project's own keeps them.
 
 **The engine's functions** are there in every project (`packages/koral/functions`, beside its shaders in
 `packages/koral/shaders`); a project's function of the same name is called in its place, and one of the engine's
@@ -196,6 +201,10 @@ works on 32-bit uints, in buffers with `eStorage`:
 | **XpbdPrepare** | `bodies`, `count` | each body's inverse mass, inverse inertia and reach worked out from its shape, its size and its mass (given in `w` of its inverse inertia), and `shared` with no joints — on setup |
 | **XpbdFromComponents** | `described` (eight float4 an entity: position and kind; orientation; velocity and shape; spin and radius; half extents and height; scale and density; mass, friction, restitution, angular damping; linear damping, the entity's id and a mesh's thickness), `count`, `joints` (five float4 a Joint: its entity's id, the other's, kind, limited; anchor and lower limit; other anchor and upper limit; axis and motor speed; most torque and whether the two still collide), `jointCount`, the meshes: `meshesOf` (a float4 an entity with a Mesh: its id and its group, which of the pack's meshes it shows), `listed`, a MeshPack's `ranges` (its rangeBuffer) and `meshes` (its count), and its MeshBuffers' `vertices`, `indices`, `stride`, `position` and `indexCount` | `bodies`, `materials` and `shared` for XpbdStep, as kphysics' bridge reads a RigidBody, a Collider and a Joint: sizes by the entity's scale, the mass given or of the density and the volume, a cone's body at its centre of mass; each joint's bodies found by their entities, its anchors and axes in each one's frame, and each body's list of them; each mesh collider's line — its triangles, its scale, its thickness, its bounds — and every triangle of the pack |
 | **XpbdRigidBodies** | — | every entity with a RigidBody and a Collider (its ForEach is `<call>/bodies of`, which a WriteBack names), every Joint on one, and the meshes they show (a Filter of them grouped by Mesh, packed as positions only), as XpbdStep's `bodies`, `materials`, `count` and `shared`: put it on a setup page |
+| **Camera** | — | the scene's camera — the first entity with a Camera, a View from where it is the way it faces and a Perspective of its fields at the window's aspect, both `main` — as `view`, `projection`, `viewProjection`, and `camera`: a Bundle of `view`, `projection`, `inverseView`, `inverseProjection`, `viewProjection`, `position`, `zNear` and `zFar`, the names a camera block has |
+| **SunShadows** | `entities`, `cascades` (a buffer whose first four matrices are the cascades'), `matrices` (the same four, a ShadowCascades' `matrices`), `layout` (a mesh's vertex layout), `size` (4096), `without` (components whose entities cast none: `["PointLight"]`) | `atlas`: four cascades' depth, `size` each way, two by two, each entity with a Mesh drawn as each cascade sees it (`koral_shadow`), again only when what it would draw has changed |
+| **Bloom** | `picture` (an image of light, `eStorage`), `sampler` (linear), `threshold` (1), `knee` (0.5), `strength` (1/12) | the picture with what is brighter than `threshold` bled round it, in place (`koral_bloom`): six levels down, five up; and `picture`, for what comes after |
+| **Tonemap** | `picture`, `exposure` (1) | `picture`: an image of eight bits a channel the window's size, exposed, tone mapped (ACES) and encoded for the display (`koral_tonemap`) |
 
 A scene runs its RigidBodies on the GPU with no PhysicsSimulation: XpbdRigidBodies on a setup page; FixedStep and XpbdStep
 (wired from it) on a page of the fixed step; and a WriteBack of XpbdStep's `bodies` (stride 112, `position` 96,
@@ -213,6 +222,21 @@ that use it run in the order of the nodes.
 
 ## Node types
 
+Every node type is of a **level** (`NodeType::level`, `kgraph::Level`): what one works at with it, each level made of
+the ones below.
+
+| Level | What it is | Examples |
+|---|---|---|
+| 0 value | worked out on the CPU, and what routes it | Number, Math, Vectors, Logic, View, Perspective, Switch, Bundle, Reference |
+| 1 resource | a GPU object | Image, Buffer, Sampler, ImageView, the pipelines, Primitive, ImageFile |
+| 2 command | one thing done on the GPU | Draw, Dispatch, TraceRays, Blit, Copy, Clear |
+| 3 scene | what is read of the entities, and assembled of them | Entities, Filter, ForEach, MeshPack, IndirectDraws, Meshlets, RayScene, ShaderBuffer, BufferBuilder |
+| 4 technique | a way of drawing or working, whole | a Function's call: Bloom, Tonemap, SunShadows, RadixSort |
+
+`NodeType::composite` says it is made of other nodes: a Function's call, written out as its function's nodes before
+the graph runs. An editor shows both on a node's card (see editor.md).
+
+
 `kgraph::Catalog()` lists them, with every input and output, its type and its description. This is what
 the editor will build its node list and its nodes from.
 
@@ -221,7 +245,9 @@ the editor will build its node list and its nodes from.
   with one argument is an input of that name. With several it is one input per argument:
   `extent.x`, `entryPoint.module`. A setting that can be given more than once is `color[].view`, written
   in a graph as `color[0].view`, `color[1].view`. Nothing is written by hand: a builder that gains a
-  setting gains the input.
+  setting gains the input. An Image is wired as it is where a view of all of it is wanted — an attachment, a
+  pipeline's image parameter — and that takes the image's default view, of the shape the shader declares: an
+  ImageView node is for part of an image (a mip level, a layer) or another way of seeing it.
 - **Values:** numbers of a kind — Float (32 bits, as a shader's `float`), Double, Int and UInt (what they are given
   rounded toward zero and kept within 32 bits; a UInt none or more) — and vectors of a size and a kind: Vec2, Vec3 and
   Vec4 of floats, IVec2 to IVec4 of ints, UVec2 to UVec4 of uints, each component given (0 when not). Bool, String,
@@ -291,6 +317,12 @@ the editor will build its node list and its nodes from.
 
 Every pass node also takes `enabled`: false leaves the pass out, with the node still there and still ok.
 
+A pass node that records compute dispatches and copies only — Dispatch, Copy, CopyBuffer, ClearBuffer, CopyBufferToImage,
+CopyImageToBuffer (`kgraph::RunsAsync`) — also takes `async`: true runs it on the async compute queue, beside the graphics
+passes it does not depend on, ordered against them by what it reads and writes (`kor::PassBuilder::AsyncCompute`). One
+that uses the screen stays on the graphics queue, and on a device with no second queue it runs there in order, which is
+always correct; its node's note says which. `FrameGraph::Schedule` says where each pass ran.
+
 ## Loops and branches
 
 A **Repeat** is a count. Every node wired from one, straight or through other nodes, is in its loop: it is there
@@ -317,6 +349,19 @@ is six views, six pipelines and six passes, each reading the level the turn befo
 - **Switch** is one of the things wired to its `option[n]` inputs, by `index`: a resource or a value. With a
   pass's `enabled` it is a branch: a picture to show or another, and the pass that makes the other left out
   while it is not shown.
+- **DebugView** is a picture an editor's scene view can be switched to: its `picture`, listed by its `name`
+  (`Runtime::DebugViews()`). `Runtime::ShowDebugView(id)` shows one: its `shown` is true — wired to the `enabled` of
+  the passes that make its picture, they run only then — and its `out` is the picture. Which is shown is the
+  runtime's, not the graph's: nothing is saved of it, and another runtime of the same graph (the editor's Game
+  panel, the project run) shows none.
+
+Every pass also has `views`: `all` (what it is when not given), `game` — run only where `Runtime::SetEditorView` is
+false, as in the game and the editor's Game panel: a vignette, words on the screen — or `editor`, run only in an
+editor's scene view. And a pipeline whose shaders declare the specialization constant `koralDebugView`
+(`packages/koral/shaders/koral_debug.slang`) is built with what `Runtime::SetShaderDebugView` says — a channel of
+its material to show in place of its lit colour (`kgraph::ShaderDebugChannel`) — unless its node gives it.
+`Runtime::WithoutShaderDebugView()` lists the graphics pipelines whose shaders do not. Each of the three is taken
+up at the start of the next frame, building again only what it changes.
 
 The graph that is saved and edited has the loop as a loop. What runs has it written out, a node a turn, named
 `down [0]`, `down [1]`: `Runtime::TurnsOf("down")` lists them, and each is asked about like any node. Asked
@@ -666,6 +711,33 @@ lists the fields it does have.
 Values are as the component holds them: a colour is as it was picked, not converted to linear (a Linear node does
 that), and an angle is in degrees. Pow, Radians and Cos nodes between the two do that for each entity.
 
+### Bundles
+
+A **Bundle** is many values carried on one wire, each by its name. A ForEach, an Entity, an Entities node and a Filter
+give each element as one, `element`: its component's fields and `with`'s, by their own names (its component's first),
+and where it is — `matrix`, `normalMatrix`, `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`,
+`orientation`, `scale`, `entityId`. A **Bundle** node is one of what it is given: an input for each of its `names`,
+`field.<name>`, a value or a wire, made on `base` (another Bundle, whose members of the same names its own replace).
+An **Unbundle** takes one apart: an output for each member, by its name. A function's input or output may carry one.
+
+A ShaderBuffer's or a BufferBuilder's `fields`, and a Draw's, a Dispatch's or a TraceRays' `push`, take a Bundle and fill
+each `field.<name>` (or `push.<name>`) of the same name — names match exactly, nothing more:
+
+```json
+{ "id": "lamps", "type": "ForEach", "inputs": { "component": "PointLight" } },
+{ "id": "light data", "type": "ShaderBuffer", "inputs": { "module": "lit", "entry": "fragment", "parameter": "lights",
+    "fields": { "$link": ["lamps", "element"] }, "field.color": { "$link": ["tinted", "out"] }, "field.kind": 1 } }
+```
+
+is a buffer of the lights whose `position` and `range` are each lamp's, and whose `color` is wired by itself: an input
+given by itself, a wire or a value, takes its own. What matches nothing, on either side, is said on the node
+(`Status(id)->note`): the bundle's `intensity`, which the struct has not; the layout's `glow`, which the bundle has not.
+Wired from what is no Bundle, `fields` is an error on the node.
+
+Nothing new is worked out. Before the graph runs, after its calls are written out and before its loops are, each
+Bundle is written out into the wires it stands for (`Runtime::BundleOf(id, output)` says what one holds), so a buffer
+filled from an `element` is filled once an element, as one wired a field at a time is.
+
 ### A buffer laid out on its node
 
 A **BufferBuilder** is a buffer of elements whose fields are said on the node, not read from a shader: its `layout` is
@@ -846,7 +918,12 @@ A Dispatch can also read its group counts from a buffer a pass before it wrote: 
 (the buffer needs `eIndirect`), with `indirectOffset` for where in it.
 
 **TraceRays** runs a ray tracing pipeline the same way: `size` (or `size.x/y/z`) rays, or as many as
-`cover` an image parameter.
+`cover` an image parameter. Wired to a Filter's entities (`entities`), its pipeline has a material as a Draw's has: a
+buffer its shader marks `[entity("PER_INSTANCE")]` and nothing is wired to is an element for each of them, in the
+Filter's order — the `InstanceID()` a RayScene of the same Filter gives each — filled from the pipeline's component
+(see [Each instance's, said by the shader](#each-instances-said-by-the-shader)), which each entity holds as it holds a Draw's.
+It gives that buffer as `instances`, as a Draw does, for a pass to read the materials too: Forward+ lists what gives off
+light from it (an `emission` above nothing), and its rays are lit by that.
 
 **Draw** draws with a graphics pipeline into a framebuffer: the pipeline's own, or the one wired to
 `framebuffer`. What it draws is its `mesh`:
@@ -944,7 +1021,9 @@ A `param.` wired on the Draw is used as it is, and then nothing of the buffer is
 Draws that would write the same into their buffers share one, written once a frame: of the same Filter, an element
 laid out alike — field by field, where each is and what it is — and, when any field is the entity's own, the same
 pipeline's component. A shadow pass's turns share theirs; a pass whose element also has its entity's colour has its
-own. A Draw gives its buffer as `instances`, outgrown the buffer is made again for every Draw that shares it.
+own. A Draw gives its buffer as `instances`, outgrown the buffer is made again for every Draw that shares it. It is
+written each frame whether the Draw draws or idles: another pass may read it while the Draw rests (Forward+'s meshlets
+read the forward Draw's when the vertices are not drawn).
 
 The rest of a draw is the node's as well:
 
@@ -998,6 +1077,11 @@ frames late; `gpuMeasured` false on a device that cannot time), and the CPU's in
 page's passes for every step a frame can run added together (`runs`). The editor shows it in a pass node's inspector.
 Each pass is a command buffer of its own in the frame graph, which costs some tens of microseconds of CPU and GPU time
 whatever it does: a loop of hundreds of small dispatches costs that many times over.
+
+`Runtime::Frame()` is the frame as the frame graph runs it: the graph's passes in the order they are scheduled, each with
+the node it is, its dependency level (passes of one level depend on none of each other), whether it is on the async
+compute queue, its times, and what it reads and writes — by the node that made each resource, or the entities' set it
+is; then the passes left out, skipped or culled, and why; and the memory the frame graph made for itself.
 
 ## Looking at what a node made
 
@@ -1093,8 +1177,9 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   its array (`buffer B { uint count; Light lights[]; }`) only the array is filled.
 - What is worked out between a ForEach and a buffer is worked out again for each element, each frame: fine for
   lights, slow for tens of thousands of entities.
-- No node gives a struct, or takes one: what a component holds, and what a View and a lens work out, is wired a
-  value at a time. A graph saved with a View's `of`, `kind` or `face`, a ForEach's `struct`, a buffer's `instance` or a
+- No node works on a struct: a Bundle (see [Bundles](#bundles)) is many wires as one, written out into them before
+  anything runs, so what a component holds, and what a View and a lens work out, is still worked out a value at a
+  time. A graph saved with a View's `of`, `kind` or `face`, a ForEach's `struct`, a buffer's `instance` or a
   ShadowCascades' `camera` says so on the node: each is the View, the lens and the wires of [The scene](#the-scene).
 - A Paraboloid gives what a shader needs to bend a picture, not a matrix that does: a lens's matrix is straight lines
   in, straight lines out, and a paraboloid's is not.

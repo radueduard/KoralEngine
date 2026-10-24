@@ -501,3 +501,27 @@ TEST(PassRates, ArePutInTheOrderTheyRunAndSetOneAtATime) {
     EXPECT_EQ(old.passes, (std::vector<std::string> { "a", "b" }));
     EXPECT_TRUE(old.fixed.empty());
 }
+
+// Every node type is of a level — what one works at, from a value to a whole technique — and a Function's call is the
+// one made of other nodes.
+TEST(Catalog, EveryNodeIsOfALevelAndAFunctionsCallIsOfNodes) {
+    using kgraph::Level;
+    const auto level = [](const char* type) { const kgraph::NodeType* found = kgraph::FindType(type); return found ? found->level : Level::eValue; };
+    EXPECT_EQ(level("Number"), Level::eValue);
+    EXPECT_EQ(level("MatrixMultiply"), Level::eValue);
+    EXPECT_EQ(level("Perspective"), Level::eValue);
+    EXPECT_EQ(level("Switch"), Level::eValue);
+    EXPECT_EQ(level("Image"), Level::eResource);
+    EXPECT_EQ(level("GraphicsPipeline"), Level::eResource);
+    EXPECT_EQ(level("Sampler"), Level::eResource);
+    EXPECT_EQ(level("Draw"), Level::eCommand);
+    EXPECT_EQ(level("Dispatch"), Level::eCommand);
+    EXPECT_EQ(level("TraceRays"), Level::eCommand);
+    EXPECT_EQ(level("Filter"), Level::eScene);
+    EXPECT_EQ(level("MeshPack"), Level::eScene);
+    EXPECT_EQ(level("RayScene"), Level::eScene);
+    EXPECT_EQ(level("Meshlets"), Level::eScene);
+    EXPECT_EQ(level("Function"), Level::eTechnique);
+    for (const auto& type : kgraph::Catalog()) EXPECT_EQ(type.composite, type.name == "Function") << type.name;
+    EXPECT_EQ(kgraph::LevelName(Level::eScene), "scene");
+}

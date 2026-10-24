@@ -1,5 +1,5 @@
 // The Koral Engine editor: `koral-editor [project folder] [--frames N] [--no-vsync] [--validate]`. With no project it opens the one
-// this user said to start with (Project, Open at startup), or else the engine's own: Forward+, made with nodes (projects/forward-plus).
+// this user said to start with (Project, Open at startup), or else the engine's own: Forward+, made with nodes (forward-plus, in the projects folder).
 // A project with scripts is opened by their runner instead, which runs them: before this opens any window, in a
 // process forked for it — and when one is opened from the File menu, this closes its window and does the same.
 

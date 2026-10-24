@@ -1,7 +1,0 @@
-{
-  "files.associations": { "*.slang": "slang" },
-  "slang.additionalSearchPaths": ["${workspaceFolder}/shaders"],
-  "files.exclude": { "**/bin": true, "**/obj": true, "**/build": true, "**/.gradle": true, "**/.kotlin": true },
-  "dotnet.defaultSolution": "disable",
-  "java.import.gradle.enabled": true
-}

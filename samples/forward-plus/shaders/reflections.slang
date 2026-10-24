@@ -6,6 +6,7 @@
 // `maxDistance`, `thickness`, `maxRoughness` and `intensity` are given on the trace pipeline's node.
 
 import forwardCommon;
+import koral_debug;
 
 Sampler2D<float4> hdr;              // what is mirrored
 Sampler2D<float4> positionTex;      // where each pixel's surface is; w is 0 where there is none
@@ -105,6 +106,7 @@ void compose(uint3 id : SV_DispatchThreadID)
     uint width, height;
     hdrImage.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
+    if (koralDebugShowing()) return;    // a channel of a material shown in the editor: nothing mirrored onto it
     float4 color = hdrImage[id.xy];
     hdrImage[id.xy] = float4(color.rgb + traced.Load(int3(id.xy, 0)).rgb, color.a);
 }

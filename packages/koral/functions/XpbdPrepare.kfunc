@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Physics",
+  "description": "Each body's inverse mass, inertia and reach worked out from its shape, size and mass, on setup.",
+  "tags": ["physics", "rigid body", "xpbd", "mass", "inertia"],
   "graph": {
     "kgraph": 1,
     "nodes": [

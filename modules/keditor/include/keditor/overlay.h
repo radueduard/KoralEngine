@@ -5,9 +5,14 @@
 // every entity with a Mesh as the editor's view sees it. So a scene whose graph was written without a thought for an
 // editor is picked from and outlined all the same, and what a project runs has nothing of the editor in it.
 //
+// So are the editor's other ways of looking at a scene — its edges, its shape in clay, its normals, a grid under it —
+// but those are graphs in files (packages/koral/editor/scene-view.kgraph, and a project's `editor/*.kgraph`), each
+// DebugView of them one more way the Scene panel can show the scene.
+//
 
 #pragma once
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -25,6 +30,19 @@ namespace kor { class FrameGraph; class DebugDraw; }
 
 namespace keditor
 {
+    /** @brief The grid the editor draws in the scene, as its settings have it: a plane through the origin. */
+    struct Grid {
+        bool shown = true;
+        float cell = 1.f;           ///< Metres between its lines.
+        float major = 10.f;         ///< A stronger line every so many cells.
+        float fade = 80.f;          ///< Metres off at which it is gone.
+        float opacity = 1.f;
+        enum class Plane : int { eXZ = 0, eXY = 1, eYZ = 2 } plane = Plane::eXZ;
+        bool depthTested = true;    ///< Hidden behind what is drawn in front of it.
+
+        bool operator==(const Grid&) const = default;
+    };
+
     class Overlay {
     public:
         /** @brief Runs in @p frameGraph, beside the scene's passes, over the entities of @p world. Both must outlive it. */
@@ -55,8 +73,50 @@ namespace keditor
         /** @brief Why its passes could not be made; empty when they were. */
         [[nodiscard]] std::string Problem() const;
 
+        // ---- the editor's ways of looking at the scene: graphs in files ----------------------------------------
+
+        /** @brief The engine's own: packages/koral/editor/scene-view.kgraph, which is read first, and has the grid. */
+        [[nodiscard]] static std::filesystem::path EngineViews();
+        /**
+         * @brief Runs, besides the engine's, every `*.kgraph` in @p directory (a project's `editor` folder): each
+         *        DebugView of them is listed after the engine's. Another directory, or none, takes those it ran away.
+         */
+        void SetProjectViews(const std::filesystem::path& directory);
+        /** @brief One of the DebugViews of those graphs: which graph — its file — its node and its name. */
+        struct View {
+            std::filesystem::path file;
+            std::string id;
+            std::string name;
+        };
+        /** @brief Every DebugView of the graphs it runs: the engine's, then the project's, each in its graph's order. */
+        [[nodiscard]] std::vector<View> Views() const;
+        /** @brief Shows the DebugView @p id of the graph read from @p file; empty, none. */
+        void ShowView(const std::filesystem::path& file, const std::string& id);
+        /** @brief The picture of the DebugView shown, to hold while it is shown; null with none. */
+        [[nodiscard]] std::shared_ptr<kgraph::Resource> ViewPictureHeld() const;
+        /** @brief How the grid is drawn: the engine's graph's `grid shown` and its grid Draw's push constants. */
+        void SetGrid(const Grid& grid);
+        /** @brief The grid, on nothing, as big as the scene's picture: to go over it. Null while it is not shown. */
+        [[nodiscard]] std::shared_ptr<kgraph::Resource> GridHeld() const;
+        /** @brief What is wrong with those graphs, each said with its file: one not read, a node that failed. */
+        [[nodiscard]] std::vector<std::string> ViewProblems() const;
+
     private:
+        struct ViewGraph;
+        void ReadViews(ViewGraph& graph);
+        void ApplyGrid();
+
+        kor::FrameGraph& _frameGraph;
+        kecs::World& _world;
         std::unique_ptr<kgraph::Runtime> _runtime;
+        std::vector<std::unique_ptr<ViewGraph>> _views;     // the engine's first
+        std::vector<std::pair<std::unique_ptr<ViewGraph>, int>> _retired;   // until the frames that drew with them are done
+        std::optional<std::filesystem::path> _projectViews;                  // asked for, taken up at the next Update
+        std::filesystem::path _projectViewsNow;
+        std::optional<kgraph::View> _view;
+        Grid _grid;
+        bool _gridAsked = false;
+        std::uint32_t _frames = 0;
     };
 
     /**

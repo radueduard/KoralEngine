@@ -325,6 +325,19 @@ TEST_F(EditorTest, TheMenusAndButtonsDoWhatTheySay) {
     EXPECT_EQ(Doc().Entities().size(), before + 1);
 }
 
+// Settings, Theme: the editor is in Koral's dark until another is chosen, and then in that one — Windows' light, here.
+// A test's editor keeps nothing of this user's, so their theme is as it was.
+TEST_F(EditorTest, AThemeChosenIsTheOneTheEditorIsIn) {
+    Open();
+    EXPECT_EQ(editor->Interface().GetTheme().design, kui::ThemeDesign::eKoral);
+    EXPECT_TRUE(editor->Interface().GetTheme().IsDark());
+    Session().ChooseTheme(kui::ThemeDesign::eFluent, false);
+    Frame();
+    EXPECT_EQ(editor->Interface().GetTheme().design, kui::ThemeDesign::eFluent);
+    EXPECT_FALSE(editor->Interface().GetTheme().IsDark());
+    EXPECT_FALSE(Session().themeChosen) << "put on, and done with";
+}
+
 // For looking at: the inspector of one node of each kind, and a node being dragged.
 TEST_F(EditorTest, DISABLED_Sheets) {
     const auto project = scene::MakeProject("sheets");
@@ -751,14 +764,42 @@ TEST_F(EditorTest, EntitiesAreATreeEachWithATransform) {
     EXPECT_FALSE(Shows("Barrel"));
 }
 
-// The scene a project starts from: meshes lit under a sky, by nodes alone and the three standard shaders.
-TEST_F(EditorTest, TheStandardSceneDrawsLitMeshesUnderASky) {
+// The scene a project starts from: meshes in a colour each, lit by the sun, by nodes alone and the one standard shader.
+TEST_F(EditorTest, TheStandardSceneDrawsMeshesInAColourEach) {
     const auto project = scene::MakeProject("standard");
-    EXPECT_EQ(keditor::WriteStandardShaders(project.ShaderDirectory()).size(), 3u);
+    EXPECT_EQ(keditor::WriteStandardShaders(project.ShaderDirectory()), std::vector<std::string> { "default.slang" });
     EXPECT_TRUE(keditor::WriteStandardShaders(project.ShaderDirectory()).empty()) << "one that is there is left as it is";
     Open();
     std::string error;
     ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(Doc().Runtime().Ok());
+    EXPECT_EQ(Doc().Passes(), (std::vector<std::string> { "Draw", "Blit" }));
+
+    // The pipeline's component is what makes an entity drawn: what its shader's `color` asks of each entity.
+    const kecs::ComponentId renderer = Doc().Runtime().ComponentOf("default");
+    ASSERT_NE(renderer, kecs::NoComponent);
+    std::vector<std::string> fields;
+    for (const auto& field : Doc().World().Describe(renderer).fields) fields.push_back(field.name);
+    EXPECT_EQ(fields, std::vector<std::string> { "color" });
+
+    const kecs::Entity sphere = keditor::AddStandardScene(Doc());
+    for (const char* name : { "Camera", "Sun", "Sphere", "Cylinder" }) EXPECT_TRUE(Shows(name)) << name;
+    EXPECT_TRUE(Shows("Nothing is wrong."));
+    ASSERT_NE(Doc().Runtime().ReportOf("draw"), nullptr);
+    EXPECT_EQ(Doc().Runtime().ReportOf("draw")->ran, 2u) << "the sphere and the cylinder: " << Doc().Runtime().ReportOf("draw")->why;
+    Session().Select(sphere);
+    Sheet("standard");
+}
+
+// The scene to start from instead: meshes lit under a sky, by nodes alone and the lit graph's three shaders.
+TEST_F(EditorTest, TheLitSceneDrawsLitMeshesUnderASky) {
+    const auto project = scene::MakeProject("lit");
+    EXPECT_EQ(keditor::WriteLitShaders(project.ShaderDirectory()).size(), 3u);
+    EXPECT_TRUE(keditor::WriteLitShaders(project.ShaderDirectory()).empty()) << "one that is there is left as it is";
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     ASSERT_TRUE(Doc().Runtime().Ok());
 
@@ -774,13 +815,158 @@ TEST_F(EditorTest, TheStandardSceneDrawsLitMeshesUnderASky) {
     EXPECT_EQ(Doc().World().Find("Spin"), kecs::NoComponent) << "what a thing does is a script's";
     EXPECT_EQ(Doc().Runtime().ComponentOf("sky"), kecs::NoComponent);
 
-    const kecs::Entity sphere = keditor::AddStandardScene(Doc());
+    const kecs::Entity sphere = keditor::AddLitScene(Doc());
     for (const char* name : { "Sky", "Camera", "Sun", "Sphere" }) EXPECT_TRUE(Shows(name)) << name;
     EXPECT_TRUE(Shows("Nothing is wrong."));
     ASSERT_NE(Doc().Runtime().ReportOf("draw scene"), nullptr);
     EXPECT_EQ(Doc().Runtime().ReportOf("draw scene")->ran, 1u) << Doc().Runtime().ReportOf("draw scene")->why;
     Session().Select(sphere);
-    Sheet("standard");
+    Sheet("lit");
+}
+
+// The Scene panel shows the scene other ways than lit: a channel of its materials — what the shaders that import
+// koral_debug show — the editor's own ways from its graph in a file (edges, clay, normals...), a DebugView of the scene's
+// graph; and a grid under it. None of it reaches the Game panel.
+TEST_F(EditorTest, TheSceneViewShowsTheSceneOtherWaysAndAGrid) {
+    const auto project = scene::MakeProject("views");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    const kecs::Entity sphere = keditor::AddLitScene(Doc());
+    Session().Frame(sphere);
+    for (int i = 0; i < 8; ++i) Frame();
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    keditor::Overlay* over = Session().Play().Over();
+    ASSERT_NE(over, nullptr);
+    for (const auto& problem : over->ViewProblems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(Doc().Runtime().EditorView()) << "the scene's runtime is the scene view's";
+
+    const auto named = [&](const std::string& name) -> std::optional<keditor::Session::ViewMode> {
+        for (const auto& choice : Session().ViewModes())
+            if (choice.name == name) return choice.mode;
+        return std::nullopt;
+    };
+    for (const char* name : { "Lit", "Unlit (albedo)", "Normals", "Roughness", "Wireframe", "Clay", "Normals (geometry)", "UV checker", "Overdraw", "Entities" })
+        EXPECT_TRUE(named(name)) << name;
+    EXPECT_EQ(Session().CurrentViewMode().kind, keditor::Session::ViewMode::Kind::eLit);
+    EXPECT_FALSE(Session().ViewModePicture().Get()) << "lit, the scene's own picture is all there is";
+    Sheet("view-lit");
+
+    // A channel of the materials: the lit shader shows its albedo; the sky's does not import koral_debug.
+    Session().SetViewMode(*named("Unlit (albedo)"));
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_EQ(Doc().Runtime().ShaderDebugView(), static_cast<int>(kgraph::ShaderDebugChannel::eAlbedo));
+    const auto without = Session().WithoutMaterialViews();
+    EXPECT_EQ(std::ranges::find(without, "lit"), without.end());
+    EXPECT_NE(std::ranges::find(without, "sky"), without.end());
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    EXPECT_FALSE(Session().ViewModePicture().Get()) << "drawn by the scene's own passes";
+    Sheet("view-albedo");
+
+    // The editor's ways: a picture of their own in the scene's place.
+    for (const char* name : { "Clay", "Wireframe", "Normals (geometry)", "UV checker", "Overdraw", "Entities" }) {
+        Session().SetViewMode(*named(name));
+        for (int i = 0; i < 6; ++i) Frame();
+        EXPECT_EQ(Doc().Runtime().ShaderDebugView(), 0) << name;
+        EXPECT_TRUE(Session().ViewModePicture().Get()) << name;
+        for (const auto& problem : over->ViewProblems()) ADD_FAILURE() << name << ": " << problem;
+        Sheet(std::string("view-") + name);
+    }
+
+    // A DebugView of the scene's graph is listed, and shown in its place.
+    ASSERT_EQ(Doc().AddNode("DebugView", 1200, 600, "picture view", "scene"), "picture view");
+    ASSERT_TRUE(Doc().SetInput("picture view", "name", "The picture"));
+    ASSERT_TRUE(Doc().Connect("color", "out", "picture view", "picture"));
+    for (int i = 0; i < 3; ++i) Frame();
+    const auto graphView = named("The picture");
+    ASSERT_TRUE(graphView);
+    EXPECT_EQ(graphView->kind, keditor::Session::ViewMode::Kind::eGraph);
+    Session().SetViewMode(*graphView);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(Doc().Runtime().ShownDebugView(), "picture view");
+    EXPECT_EQ(Session().ViewModePicture().Get(), Doc().Runtime().ImageOf("color").Get());
+    // Taken away, the scene is lit again.
+    Doc().RemoveNodes({ "picture view" });
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(Session().CurrentViewMode().kind, keditor::Session::ViewMode::Kind::eLit);
+
+    // The grid: over the scene while it is shown, set as the user likes.
+    keditor::Grid grid = Session().SceneGrid();
+    grid.shown = true;
+    grid.cell = 0.5f;
+    Session().SetGrid(grid);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(Session().GridPicture().Get());
+    Sheet("view-grid");
+    grid.shown = false;
+    Session().SetGrid(grid);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Session().GridPicture().Get());
+
+    // Played, the Game panel shows the scene lit, whatever the Scene panel shows.
+    Session().SetViewMode(*named("Normals"));
+    Session().StartPlaying();
+    for (int i = 0; i < 6; ++i) Frame();
+    ASSERT_NE(Session().Game(), nullptr);
+    ASSERT_NE(Session().Game()->Runtime(), nullptr);
+    EXPECT_EQ(Session().Game()->Runtime()->ShaderDebugView(), 0);
+    EXPECT_FALSE(Session().Game()->Runtime()->EditorView());
+    EXPECT_EQ(Doc().Runtime().ShaderDebugView(), static_cast<int>(kgraph::ShaderDebugChannel::eNormal));
+    Session().Stop();
+    Frame();
+}
+
+// The pages as a flow: each wired from the pages whose work it uses — the last before it to write what it reads — and a
+// Switch that chooses between two pages' pictures a step between them and what uses its choice.
+TEST_F(EditorTest, ThePagesAreAFlowAndASwitchChoosesABranch) {
+    const auto project = scene::MakeProject("flow");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    keditor::AddLitScene(Doc());
+    for (int i = 0; i < 6; ++i) Frame();
+    const auto linked = [](const keditor::Session::PassFlow& flow, const std::string& from, const std::string& to) {
+        return std::ranges::any_of(flow.links, [&](const auto& link) { return link.from == from && link.to == to; });
+    };
+    auto flow = Session().Flow();
+    std::vector<std::string> pages;
+    for (const auto& step : flow.steps) if (!step.isSwitch) pages.push_back(step.id);
+    EXPECT_EQ(pages, Doc().Passes());
+    EXPECT_TRUE(linked(flow, "frame", "scene"));
+    EXPECT_TRUE(linked(flow, "scene", "sky"));
+    EXPECT_TRUE(linked(flow, "sky", "show")) << "the sky drew into the picture last, before it is shown";
+    EXPECT_FALSE(linked(flow, "scene", "show")) << "what show uses of the picture is what sky left";
+    for (const auto& step : flow.steps) EXPECT_TRUE(step.ran) << step.id;
+
+    // A second picture, made on a page of its own, and a Switch on the show page between it and the first.
+    ASSERT_TRUE(Doc().AddPass("other"));
+    ASSERT_EQ(Doc().AddNode("Image", 40, 40, "other picture", "other"), "other picture");
+    Doc().SetInput("other picture", "format", "eRGBA8_UNORM");
+    Doc().SetInput("other picture", "usage", kgraph::Value(kgraph::Value::List { "eTransferDst", "eTransferSrc", "eSampled" }));
+    ASSERT_EQ(Doc().AddNode("Clear", 300, 40, "paint other", "other"), "paint other");
+    ASSERT_TRUE(Doc().Connect("other picture", "out", "paint other", "image"));
+    ASSERT_EQ(Doc().AddNode("Number", 40, 400, "branch", "show"), "branch");
+    ASSERT_EQ(Doc().AddNode("Switch", 200, 400, "which picture", "show"), "which picture");
+    ASSERT_TRUE(Doc().Connect("branch", "out", "which picture", "index"));
+    ASSERT_TRUE(Doc().Connect("color", "out", "which picture", "option[0]"));
+    ASSERT_TRUE(Doc().Connect("other picture", "out", "which picture", "option[1]"));
+    ASSERT_TRUE(Doc().Connect("which picture", "out", "show", "source"));
+    for (int i = 0; i < 4; ++i) Frame();
+    flow = Session().Flow();
+    const auto choosing = std::ranges::find(flow.steps, std::string("which picture"), &keditor::Session::PassFlow::Step::id);
+    ASSERT_NE(choosing, flow.steps.end());
+    EXPECT_TRUE(choosing->isSwitch);
+    EXPECT_EQ(choosing->options, (std::vector<std::string> { "sky", "other" }));
+    EXPECT_EQ(choosing->chosen, 0);
+    EXPECT_TRUE(linked(flow, "which picture", "show"));
+    EXPECT_TRUE(linked(flow, "other", "which picture"));
+    Session().Choose("branch", 1);
+    for (int i = 0; i < 4; ++i) Frame();
+    flow = Session().Flow();
+    EXPECT_EQ(std::ranges::find(flow.steps, std::string("which picture"), &keditor::Session::PassFlow::Step::id)->chosen, 1);
+    Sheet("flow");
 }
 
 // What an editor does with the standard scene: looks at it from a view of its own, outlines and picks, plays and
@@ -792,7 +978,8 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     ASSERT_TRUE(Session().NewProject(directory));
     ASSERT_TRUE(Session().NewStandardScene());
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
-    EXPECT_TRUE(std::filesystem::exists(directory / "shaders" / "lit.slang")) << "the standard shaders are the project's own, to edit";
+    EXPECT_TRUE(std::filesystem::exists(directory / "shaders" / "default.slang")) << "the standard shader is the project's own, to edit";
+    EXPECT_FALSE(std::filesystem::exists(directory / "shaders" / "lit.slang")) << "and the lit graph's are not, until they are asked for";
     EXPECT_TRUE(std::filesystem::exists(directory / "objects" / "Cube.json"));
     kecs::World& world = Doc().World();
     const kecs::Entity sphere = world.FindEntity("Sphere");
@@ -897,7 +1084,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
         EXPECT_EQ(Session().Version(), version) << "and nothing else was built again for it";
     }
     world.SetRotation(world.FindEntity("Sphere"), { 0, 40, 0 });   // what a script would do as it plays
-    Doc().SetField(world.FindEntity("Sphere"), "lit", "metallic", kgraph::Value(1));
+    Doc().SetField(world.FindEntity("Sphere"), "default", "color", kgraph::Value(kgraph::Value::List { 1.f, 1.f, 1.f }));
     Session().Pause();
     EXPECT_FALSE(Session().IsPlaying());
     EXPECT_TRUE(Session().InPlayMode()) << "paused, it is still a moment of the play";
@@ -905,7 +1092,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     EXPECT_FALSE(Session().InPlayMode());
     const kecs::Entity again = world.FindEntity("Sphere");
     EXPECT_EQ(world.RotationOf(again), (kecs::Vec3 {}));
-    EXPECT_EQ(Doc().Field(again, "lit", "metallic"), kgraph::Value(0));
+    EXPECT_EQ(*Doc().Field(again, "default", "color").Items(), (kgraph::Value::List { 0.81f, 0.19f, 0.19f }));
     EXPECT_EQ(Session().selectedEntity, again) << "found again where it was";
 
     // The project's objects are what there is to make.
@@ -919,7 +1106,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     ASSERT_EQ(world.ChildrenOf(planet).size(), 1u);
     EXPECT_EQ(world.NameOf(world.ChildrenOf(planet)[0]), "Moon");
     EXPECT_EQ(Doc().Field(planet, "Mesh", "mesh"), kgraph::Value("$sphere"));
-    EXPECT_EQ(*Doc().Field(planet, "lit", "albedo").Items(), (kgraph::Value::List { 0.3f, 0.55f, 1 })) << "what the object says of the shader's component";
+    EXPECT_EQ(*Doc().Field(planet, "default", "color").Items(), (kgraph::Value::List { 0.3f, 0.55f, 1 })) << "what the object says of the shader's component";
     EXPECT_EQ(Doc().ComponentsOf(planet).size(), 2u);
     const kecs::Entity second = Session().Create(object("Planet"));
     EXPECT_EQ(world.NameOf(second), "Planet 2") << "a name of its own";
@@ -944,7 +1131,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     EXPECT_FALSE(world.Alive(lamp));
 
     Session().Select(made);
-    for (const char* field : { "albedo", "metallic", "roughness", "emission" }) EXPECT_TRUE(Shows(field)) << field;
+    EXPECT_TRUE(Shows("color"));
     Sheet("features");
 
     // Saved, opened again: all of it is there.
@@ -953,7 +1140,7 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     const kecs::Entity reopened = Doc().World().FindEntity("Lit Planet 2");
     ASSERT_FALSE(reopened.IsNull());
-    EXPECT_EQ(Doc().Field(reopened, "lit", "roughness"), kgraph::Value(0.5));
+    EXPECT_EQ(*Doc().Field(reopened, "default", "color").Items(), (kgraph::Value::List { 0.3f, 0.55f, 1 }));
     EXPECT_EQ(Doc().Field(reopened, "Mesh", "mesh"), kgraph::Value("$sphere"));
 }
 
@@ -961,10 +1148,10 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
 // passes before it is brought in.
 TEST_F(EditorTest, TheGraphIsAPageAPass) {
     const auto project = scene::MakeProject("passes");
-    keditor::WriteStandardShaders(project.ShaderDirectory());
+    keditor::WriteLitShaders(project.ShaderDirectory());
     Open();
     std::string error;
-    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     EXPECT_EQ(Doc().Passes(), (std::vector<std::string> { "frame", "scene", "sky", "show" }));
 
@@ -979,7 +1166,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     EXPECT_TRUE(Shows("sky target"));
     // The scene pass's framebuffer is among what this page can use, in its panel — and not on the page itself.
     EXPECT_EQ(std::ranges::count(kui::debug::Texts(editor->Interface()), std::string("scene target")), 1);
-    EXPECT_TRUE(Shows("ImageView, from scene")) << "what it took from an earlier pass says where from";
+    EXPECT_TRUE(Shows("Image, from scene")) << "what it took from an earlier pass says where from";
     EXPECT_TRUE(Shows("DataBuffer, from frame"));
     Sheet("pass");
     Session().ShowEveryPass();
@@ -1053,10 +1240,10 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
 // to it before, and goes again when the last wire from it does.
 TEST_F(EditorTest, SetupIsATabOfItsOwnAndWhatAPageCanUseIsBesideIt) {
     const auto project = scene::MakeProject("setup");
-    keditor::WriteStandardShaders(project.ShaderDirectory());
+    keditor::WriteLitShaders(project.ShaderDirectory());
     Open();
     std::string error;
-    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
 
     // A setup pass is first, wherever it is asked to be, and the passes of every frame after it.
     ASSERT_TRUE(Doc().AddPass("noise", -1, kgraph::PassRate::eSetup));
@@ -1255,7 +1442,7 @@ TEST_F(EditorTest, EveryKindOfShaderIsMadeAndBuilt) {
     std::filesystem::remove_all(directory);
     Open();
     ASSERT_TRUE(Session().NewProject(directory));
-    ASSERT_TRUE(Session().NewStandardScene());
+    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the frame data, is the lit graph's
     Session().ShowPass("sky");
     int made = 0;
     const auto build = [&](const std::string& name, const std::string& kind, const keditor::Session::ShaderChoice& choice, const char* type,
@@ -1323,7 +1510,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_FALSE(Session().NewShader("glow", "Compute")) << "there is no project for it to go in";
     EXPECT_TRUE(Session().Failed());
     ASSERT_TRUE(Session().NewProject(directory));
-    ASSERT_TRUE(Session().NewStandardScene());
+    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the frame data, is the lit graph's
 
     for (const auto& [kind, what] : keditor::Session::ShaderKinds()) EXPECT_FALSE(what.empty()) << kind;
     ASSERT_TRUE(Session().NewShader("glow", "Compute")) << Session().Status();
@@ -1416,7 +1603,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     ASSERT_TRUE(Session().NewStandardScene()) << Session().Status();
     EXPECT_TRUE(Doc().AddComponent(Doc().World().Roots().front(), "Drifter")) << "a new scene forgot the project's scripts";
     EXPECT_FALSE(Session().NewScript("Roller", "Kotlin")) << "a script of that name is there";
-    EXPECT_FALSE(Session().NewScript("lit", "Kotlin")) << "a component is called that already";
+    EXPECT_FALSE(Session().NewScript("default", "Kotlin")) << "a component is called that already";
     EXPECT_FALSE(Session().NewScript("My Script", "Kotlin"));
     EXPECT_FALSE(Session().NewScript("Thing", "Lua"));
 
@@ -1519,7 +1706,7 @@ TEST_F(EditorTest, ScriptsAreGivenEntitiesAndPrefabsArePlaced) {
     ASSERT_FALSE(world.ChildrenOf(camera).empty());
     EXPECT_EQ(Doc().PrefabOf(world.ChildrenOf(camera).back()), "prefabs/Sphere.prefab");
     // What is set on an instance is its own, and said so.
-    ASSERT_TRUE(Doc().SetField(placed, "lit", "metallic", 1.0));
+    ASSERT_TRUE(Doc().SetField(placed, "default", "color", kgraph::Value(kgraph::Value::List { 1.f, 1.f, 1.f })));
     Session().Select(placed);
     EXPECT_TRUE(Shows("1 thing is its own"));
 }
@@ -2111,10 +2298,10 @@ TEST_F(EditorTest, DISABLED_FlyingThroughAProjectTakesNoLongerThanStandingStill)
 // does not hold on to one that is gone. Seconds of it in sight, and then one of them brought in and picked.
 TEST_F(EditorTest, WhatAPageCanUseStaysInSightAsItsPicturesAreMadeAgain) {
     const auto project = scene::MakeProject("in sight");
-    keditor::WriteStandardShaders(project.ShaderDirectory());
+    keditor::WriteLitShaders(project.ShaderDirectory());
     Open();
     std::string error;
-    ASSERT_TRUE(keditor::AddStandardGraph(Doc(), error)) << error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
     Session().ShowPass("show");
     EXPECT_TRUE(Shows("WHAT SHOW CAN USE"));
     EXPECT_TRUE(Session().DrawerShown()) << "its panel is in sight, and says so";
@@ -2241,20 +2428,23 @@ TEST_F(EditorTest, TheDefaultMeshesAndMaterialsAreAssetsOfEveryProject) {
     ASSERT_NE(gold, assets.end());
     EXPECT_EQ(gold->folder, "Materials/Defaults");
 
-    // Dropped on an entity that is drawn, its lit is given the material; on one that is not, it is given lit.
+    // Dropped on an entity that is drawn, what draws it is given the material — the standard graph's, its colour; on
+    // one that is not, it is given that first. A light's colour is no material's.
     kecs::World& world = Doc().World();
     kecs::Entity drawn = kecs::NullEntity;
-    world.EachEntity([&](const kecs::Entity e) { if (drawn.IsNull() && world.Has(e, world.Find("lit"))) drawn = e; });
+    world.EachEntity([&](const kecs::Entity e) { if (drawn.IsNull() && world.Has(e, world.Find("default"))) drawn = e; });
     ASSERT_FALSE(drawn.IsNull());
     ASSERT_TRUE(Session().GiveAsset("material:Gold", drawn));
-    EXPECT_EQ(*Doc().Field(drawn, "lit", "albedo").Items(), (kgraph::Value::List { 1.f, 0.78f, 0.34f }));
-    EXPECT_EQ(Doc().Field(drawn, "lit", "metallic"), kgraph::Value(1));
-    EXPECT_EQ(Doc().Field(drawn, "lit", "roughness"), kgraph::Value(0.25f));
+    EXPECT_EQ(*Doc().Field(drawn, "default", "color").Items(), (kgraph::Value::List { 1.f, 0.78f, 0.34f }));
+    const kecs::Entity sun = world.FindEntity("Sun");
+    ASSERT_TRUE(Session().GiveAsset("material:Gold", sun));
+    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(sun), std::string("default"))) << "given what draws, not its light coloured";
+    EXPECT_EQ(*Doc().Field(sun, "DirectionalLight", "color").Items(), (kgraph::Value::List { 1.f, 0.96f, 0.9f }));
     const kecs::Entity bare = Doc().CreateEntity("Bare");
     ASSERT_TRUE(Session().GiveAsset("$torus", bare));
     ASSERT_TRUE(Session().GiveAsset("material:Red plastic", bare));
-    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(bare), std::string("lit")));
-    EXPECT_EQ(*Doc().Field(bare, "lit", "albedo").Items(), (kgraph::Value::List { 0.8f, 0.1f, 0.08f }));
+    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(bare), std::string("default")));
+    EXPECT_EQ(*Doc().Field(bare, "default", "color").Items(), (kgraph::Value::List { 0.8f, 0.1f, 0.08f }));
     EXPECT_FALSE(Session().GiveAsset("material:Nothing", bare));
     for (int i = 0; i < 5; ++i) Frame();
 
@@ -2388,4 +2578,99 @@ TEST_F(EditorTest, StepIsOneFixedStepAndPaused) {
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_EQ(count(), 2.0);
     Session().Stop();
+}
+
+// The grid's settings, changed in their popup over the Scene panel: it stays open while the editor is built again,
+// a plane is picked, a number dragged — and an editor closed with it open goes quietly.
+TEST_F(EditorTest, TheGridsSettingsAreChangedInTheirPopup) {
+    const auto project = scene::MakeProject("grid settings");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    keditor::AddLitScene(Doc());
+    for (int i = 0; i < 6; ++i) Frame();
+    keditor::Grid grid = Session().SceneGrid();
+    grid.shown = true;
+    Session().SetGrid(grid);
+
+    Click({ 1009.f, 90.f });       // the grid's settings, beside the grid
+    ASSERT_TRUE(Shows("Behind things"));
+    for (int i = 0; i < 10; ++i) Frame();
+    EXPECT_TRUE(Shows("Behind things")) << "open still, the editor built again under it";
+    Sheet("grid settings");
+
+    Click({ 1164.f, 180.f });      // XY
+    EXPECT_EQ(Session().SceneGrid().plane, keditor::Grid::Plane::eXY);
+    EXPECT_TRUE(Shows("Behind things")) << "a setting changed leaves it open";
+    const float cell = Session().SceneGrid().cell;
+    auto& input = editor->SceneInput();
+    input.FeedMousePosition({ 1170.f, 215.f });
+    Frame();
+    input.FeedMouseButton(kor::MouseButton::eLeft, true);
+    for (int x = 1170; x <= 1250; x += 10) { input.FeedMousePosition({ static_cast<float>(x), 215.f }); Frame(); }
+    input.FeedMouseButton(kor::MouseButton::eLeft, false);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_GT(Session().SceneGrid().cell, cell) << "dragged to the right, a bigger cell";
+    EXPECT_TRUE(Shows("Behind things"));
+    for (const auto& problem : Session().Play().Over()->ViewProblems()) ADD_FAILURE() << problem;
+}
+
+// A node says how abstract it is — a value, a resource, a command, the scene's data, a technique — and whether it is
+// made of other nodes: a Function's call is a technique, of nodes.
+TEST_F(EditorTest, ANodeSaysHowAbstractItIsAndWhetherItIsMadeOfNodes) {
+    const auto project = scene::MakeProject("levels");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    const std::string call = Doc().AddNode("Function", 900, 300, "tone it", "scene");
+    Doc().SetInput(call, "function", "Tonemap");
+    Session().ShowPass("scene");
+    EXPECT_TRUE(Shows("Function  ·  technique, of nodes"));
+    EXPECT_TRUE(Shows("Draw  ·  command"));
+    EXPECT_TRUE(Shows("Image  ·  resource"));
+}
+
+// The pages laid out as a flow: each in the column, between what it takes from and what takes from it, where its wires
+// are shortest; each branch of a Switch a band of its own, apart from the others; no card over another.
+TEST(PassFlowLayout, BranchesAreBandsAndWiresAreShort) {
+    using Flow = keditor::Session::PassFlow;
+    Flow flow;
+    int order = 0;
+    const auto page = [&](const char* id) { flow.steps.push_back({ .id = id, .rate = "frame", .ran = true, .order = order++ }); };
+    for (const char* id : { "frame", "lights", "a1", "a2", "a3", "a4", "b1", "b2", "c1", "post", "show" }) page(id);
+    Flow::Step choose { .id = "choose", .isSwitch = true, .driver = "renderer", .options = { "a4", "b2", "c1" }, .order = 8 };
+    flow.steps.push_back(choose);
+    const auto link = [&](const char* a, const char* b, const int option = -1) { flow.links.push_back({ a, b, {}, option }); };
+    link("frame", "lights");
+    for (const char* first : { "a1", "b1", "c1" }) { link("frame", first); link("lights", first); }
+    link("a1", "a2"); link("a2", "a3"); link("a3", "a4"); link("b1", "b2");
+    link("a4", "choose", 0); link("b2", "choose", 1); link("c1", "choose", 2);
+    link("choose", "post"); link("post", "show"); link("frame", "post");
+    const auto layout = keditor::Session::LayOut(flow, {});
+
+    ASSERT_EQ(layout.branches.size(), 3u);
+    EXPECT_EQ(layout.branches[0].steps.size(), 4u);
+    EXPECT_EQ(layout.branches[1].steps.size(), 2u);
+    EXPECT_EQ(layout.branches[2].steps, (std::vector<std::string> { "c1" }));
+    EXPECT_NE(layout.branches[0].title.find("renderer = 0"), std::string::npos) << layout.branches[0].title;
+    // Each branch a band: the heights of one are none of another's.
+    std::vector<std::pair<float, float>> spans;
+    for (const auto& branch : layout.branches) {
+        float low = 1e9f, high = -1e9f;
+        for (const auto& id : branch.steps) { low = std::min(low, layout.at.at(id).second); high = std::max(high, layout.at.at(id).second + 90.f); }
+        spans.push_back({ low, high });
+    }
+    for (std::size_t a = 0; a < spans.size(); ++a)
+        for (std::size_t b = a + 1; b < spans.size(); ++b)
+            EXPECT_TRUE(spans[a].second <= spans[b].first || spans[b].second <= spans[a].first) << "branches " << a << " and " << b << " share heights";
+    // The short branch is next to the Switch it ends in, not as far from it as the long one starts.
+    EXPECT_GT(layout.at.at("c1").first, layout.at.at("a1").first) << "one page long, it is beside what takes from it";
+    EXPECT_LT(layout.at.at("frame").first, layout.at.at("a1").first);
+    EXPECT_LT(layout.at.at("choose").first, layout.at.at("post").first);
+    // No card over another.
+    for (const auto& [a, at] : layout.at)
+        for (const auto& [b, other] : layout.at)
+            if (a < b && at.first == other.first) EXPECT_GE(std::abs(at.second - other.second), 90.f) << a << " and " << b << " overlap";
 }

@@ -25,6 +25,8 @@
 #include <kmath/transform.h>
 
 #include <kgraph/entities.h>
+#include <kscript/declarations.h>
+#include <log.h>
 
 namespace keditor
 {
@@ -147,7 +149,6 @@ float4 fragment(Raster raster) : SV_Target
             kgraph::Graph graph;
             const auto image = [&](const char* id, const char* format, Value::List usage) {
                 graph.Add(id, "Image").Set("format", format).Set("usage", Value(std::move(usage))).Wire("extent", "screen", "extent");
-                graph.Add(std::string(id) + " view", "ImageView").Wire("image", id);
             };
             const auto clear = [](const char* scalar, const char* member) {
                 return Value(Value::Members { { "scalarType", scalar }, { "components", 4 }, { "value", Value::Members { { member, Value::List { 0, 0, 0, 0 } } } } });
@@ -163,8 +164,8 @@ float4 fragment(Raster raster) : SV_Target
             // Which entity is where: its number, nearest first.
             image("ids", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" });
             image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
-            graph.Add("ids target", "Framebuffer").Wire("color[0].view", "ids view").Set("color[0].name", "ids").Set("color[0].clear", clear("UInt", "u"))
-                .Wire("depthStencil.view", "depth view").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
+            graph.Add("ids target", "Framebuffer").Wire("color[0].view", "ids").Set("color[0].name", "ids").Set("color[0].clear", clear("UInt", "u"))
+                .Wire("depthStencil.view", "depth").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
             graph.Add("entities", "GraphicsPipeline").Set("vertex.module", "koralEditorIds").Set("vertex.entry", "vertex")
                 .Set("fragment.module", "koralEditorIds").Set("fragment.entry", "fragment").Wire("vertex.layout", "shape", "layout")
                 .Wire("framebuffer", "ids target").Wire("param.view", "view");
@@ -187,7 +188,7 @@ float4 fragment(Raster raster) : SV_Target
 
             // Over the scene's picture: the line round what is picked, then the editor's shapes.
             image("over", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
-            graph.Add("over target", "Framebuffer").Wire("color[0].view", "over view").Set("color[0].name", "color").Set("color[0].clear", clear("Float", "f"));
+            graph.Add("over target", "Framebuffer").Wire("color[0].view", "over").Set("color[0].name", "color").Set("color[0].clear", clear("Float", "f"));
             graph.Add("outline", "GraphicsPipeline").Set("vertex.module", "koralEditorOutline").Set("vertex.entry", "vertex")
                 .Set("fragment.module", "koralEditorOutline").Set("fragment.entry", "fragment").Wire("framebuffer", "over target").Wire("param.ids", "ids")
                 .Set("depthStencilState", Value::Members { { "depthTestEnable", false }, { "depthWriteEnable", false } });
@@ -198,21 +199,160 @@ float4 fragment(Raster raster) : SV_Target
         }
     }
 
-    Overlay::Overlay(kor::FrameGraph& frameGraph, kecs::World& world)
+    /** A graph of the editor's ways of looking at the scene, read from its file, and read again when the file changes. */
+    struct Overlay::ViewGraph {
+        std::filesystem::path file;
+        std::filesystem::file_time_type written {};
+        std::unique_ptr<kgraph::Runtime> runtime;
+        std::string problem;        // why the file could not be read
+    };
+
+    Overlay::Overlay(kor::FrameGraph& frameGraph, kecs::World& world) : _frameGraph(frameGraph), _world(world)
     {
         WriteShaders();
         _runtime = std::make_unique<kgraph::Runtime>(frameGraph, &world);
         _runtime->Set(Passes());
+        auto engine = std::make_unique<ViewGraph>();
+        engine->file = EngineViews();
+        ReadViews(*engine);
+        _views.push_back(std::move(engine));
+        ApplyGrid();
     }
     Overlay::~Overlay() = default;
 
+    std::filesystem::path Overlay::EngineViews() { return kscript::PackageDirectory() / "editor" / "scene-view.kgraph"; }
+
+    void Overlay::ReadViews(ViewGraph& graph)
+    {
+        std::error_code ec;
+        graph.written = std::filesystem::last_write_time(graph.file, ec);
+        std::ifstream in(graph.file, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        kgraph::Graph read;
+        std::string error;
+        if (text.empty() || !kgraph::Graph::FromJson(text, read, error)) {
+            graph.problem = std::format("{}: {}", graph.file.filename().string(), text.empty() ? "could not be read" : error);
+            return;
+        }
+        graph.problem.clear();
+        if (!graph.runtime) {
+            graph.runtime = std::make_unique<kgraph::Runtime>(_frameGraph, &_world);
+            graph.runtime->SetEditorView(true);
+        }
+        graph.runtime->Set(std::move(read));
+        _gridAsked = true;      // what it was set to is the file's: the grid as the editor has it, again
+    }
+
     void Overlay::Update(const kor::UVec2 extent, kor::DebugDraw* debug)
     {
+        std::erase_if(_retired, [](auto& kept) { return --kept.second <= 0; });
+        // A project's graphs, taken up between frames: those of the one before go once nothing draws with them.
+        if (_projectViews) {
+            const std::filesystem::path directory = *std::exchange(_projectViews, std::nullopt);
+            if (directory != _projectViewsNow) {
+                _projectViewsNow = directory;
+                while (_views.size() > 1) { _retired.emplace_back(std::move(_views.back()), 4); _views.pop_back(); }
+                std::error_code ec;
+                std::vector<std::filesystem::path> files;
+                if (!directory.empty())
+                    for (const auto& entry : std::filesystem::directory_iterator(directory, ec))
+                        if (entry.is_regular_file() && entry.path().extension() == ".kgraph") files.push_back(entry.path());
+                std::ranges::sort(files);
+                for (auto& file : files) {
+                    auto graph = std::make_unique<ViewGraph>();
+                    graph->file = std::move(file);
+                    ReadViews(*graph);
+                    _views.push_back(std::move(graph));
+                }
+            }
+        }
+        // A file written since it was read is read again: a view is worked on while it is looked at.
+        if (++_frames % 30 == 0)
+            for (auto& graph : _views) {
+                std::error_code ec;
+                if (const auto written = std::filesystem::last_write_time(graph->file, ec); !ec && written != graph->written) ReadViews(*graph);
+            }
+        if (std::exchange(_gridAsked, false)) ApplyGrid();
         _runtime->SetScreenExtent(extent);
         _runtime->SetDebugDraw(debug);
         _runtime->Update();
+        for (auto& graph : _views) {
+            if (!graph->runtime) continue;
+            graph->runtime->SetScreenExtent(extent);
+            graph->runtime->SetView(_view);
+            graph->runtime->Update();
+        }
     }
-    void Overlay::SetView(std::optional<kgraph::View> view) { _runtime->SetView(std::move(view)); }
+    void Overlay::SetView(std::optional<kgraph::View> view)
+    {
+        _view = view;
+        _runtime->SetView(std::move(view));
+    }
+
+    void Overlay::SetProjectViews(const std::filesystem::path& directory) { _projectViews = directory; }
+
+    std::vector<Overlay::View> Overlay::Views() const
+    {
+        std::vector<View> views;
+        for (const auto& graph : _views)
+            if (graph->runtime)
+                for (auto& view : graph->runtime->DebugViews()) views.push_back({ graph->file, std::move(view.id), std::move(view.name) });
+        return views;
+    }
+
+    void Overlay::ShowView(const std::filesystem::path& file, const std::string& id)
+    {
+        for (const auto& graph : _views)
+            if (graph->runtime) graph->runtime->ShowDebugView(graph->file == file ? id : std::string());
+    }
+
+    std::shared_ptr<kgraph::Resource> Overlay::ViewPictureHeld() const
+    {
+        for (const auto& graph : _views)
+            if (graph->runtime && !graph->runtime->ShownDebugView().empty()) return graph->runtime->ResourceOf(graph->runtime->ShownDebugView());
+        return nullptr;
+    }
+
+    void Overlay::SetGrid(const Grid& grid)
+    {
+        if (grid == _grid) return;
+        _grid = grid;
+        _gridAsked = true;      // set between frames, as a graph is
+    }
+
+    void Overlay::ApplyGrid()
+    {
+        if (_views.empty() || !_views.front()->runtime) return;
+        const Grid& grid = _grid;
+        kgraph::Runtime& runtime = *_views.front()->runtime;
+        // What it is set to is the graph's own nodes': `grid shown`, and the grid Draw's push constants.
+        kgraph::Graph graph = runtime.Current();
+        kgraph::Node* shown = graph.Find("grid shown");
+        kgraph::Node* draw = graph.Find("draw grid");
+        if (!shown || !draw) return;
+        const kgraph::Graph was = graph;
+        shown->Set("value", grid.shown);
+        draw->Set("push.cell", grid.cell).Set("push.major", grid.major).Set("push.fade", grid.fade).Set("push.opacity", grid.opacity)
+            .Set("push.plane", static_cast<int>(grid.plane)).Set("push.depthTested", grid.depthTested ? 1 : 0);
+        if (graph != was) runtime.Set(std::move(graph));
+    }
+
+    std::shared_ptr<kgraph::Resource> Overlay::GridHeld() const
+    {
+        if (!_grid.shown || _views.empty() || !_views.front()->runtime) return nullptr;
+        return _views.front()->runtime->ResourceOf("grid");
+    }
+
+    std::vector<std::string> Overlay::ViewProblems() const
+    {
+        std::vector<std::string> problems;
+        for (const auto& graph : _views) {
+            if (!graph->problem.empty()) problems.push_back(graph->problem);
+            if (graph->runtime)
+                for (const auto& problem : graph->runtime->Problems()) problems.push_back(std::format("{}: {}", graph->file.filename().string(), problem));
+        }
+        return problems;
+    }
     void Overlay::SetSelected(const kecs::Entity entity) { _runtime->SetSelected(entity); }
     bool Overlay::Pick(const float u, const float v, std::function<void(kecs::Entity)> then) { return _runtime->Pick(u, v, std::move(then)); }
     kor::ResourceRef<const kor::Image> Overlay::Picture() const { return _runtime->ImageOf("over"); }
@@ -236,7 +376,6 @@ float4 fragment(Raster raster) : SV_Target
             kgraph::Graph graph;
             const auto image = [&](const char* id, const char* format, Value::List usage) {
                 graph.Add(id, "Image").Set("format", format).Set("usage", Value(std::move(usage))).Set("extent.x", ThumbSize).Set("extent.y", ThumbSize);
-                graph.Add(std::string(id) + " view", "ImageView").Wire("image", id);
             };
             graph.Add("shape", "Primitive");
             graph.Add("camera", "View").Set("main", true);
@@ -246,9 +385,9 @@ float4 fragment(Raster raster) : SV_Target
                 .Wire("field.viewProjection", "seen");
             image("thumb", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
             image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
-            graph.Add("target", "Framebuffer").Wire("color[0].view", "thumb view").Set("color[0].name", "color")
+            graph.Add("target", "Framebuffer").Wire("color[0].view", "thumb").Set("color[0].name", "color")
                 .Set("color[0].clear", Value(Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 0 } } } } }))
-                .Wire("depthStencil.view", "depth view").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
+                .Wire("depthStencil.view", "depth").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
             graph.Add("meshes", "GraphicsPipeline").Set("vertex.module", "koralEditorThumb").Set("vertex.entry", "vertex")
                 .Set("fragment.module", "koralEditorThumb").Set("fragment.entry", "fragment").Wire("vertex.layout", "shape", "layout")
                 .Wire("framebuffer", "target").Wire("param.view", "view");
@@ -598,7 +737,6 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
         kgraph::Graph graph;
         const auto image = [&](const char* id, const char* format, Value::List usage) {
             graph.Add(id, "Image").Set("format", format).Set("usage", Value(std::move(usage))).Set("extent.x", _extent.x).Set("extent.y", _extent.y);
-            graph.Add(std::string(id) + " view", "ImageView").Wire("image", id);
         };
         graph.Add("camera", "View").Set("main", true);
         graph.Add("lens", "Perspective").Set("main", true).Set("aspect", static_cast<double>(_extent.x) / std::max(_extent.y, 1u));
@@ -608,9 +746,9 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
             .Set("field.count", static_cast<int>(count)).Set("field.edges", _wireframe ? 1 : 0).Set("field.edgeWidth", _edgeWidth);
         image("shot", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
         image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
-        graph.Add("target", "Framebuffer").Wire("color[0].view", "shot view").Set("color[0].name", "color")
+        graph.Add("target", "Framebuffer").Wire("color[0].view", "shot").Set("color[0].name", "color")
             .Set("color[0].clear", Value(Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0.075, 0.078, 0.09, 1 } } } } }))
-            .Wire("depthStencil.view", "depth view").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
+            .Wire("depthStencil.view", "depth").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
         auto& pipeline = graph.Add("solid", "GraphicsPipeline").Set("vertex.module", module).Set("vertex.entry", "vertex")
             .Set("fragment.module", module).Set("fragment.entry", "fragment").Wire("framebuffer", "target").Wire("param.view", "view");
         if (layout) pipeline.Set("vertex.layout", LayoutValueOf(*layout));

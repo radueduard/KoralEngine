@@ -1,5 +1,8 @@
 {
   "koral-function": 1,
+  "purpose": "Physics",
+  "description": "Every entity with a RigidBody and a Collider, its joints and meshes, ready for XpbdStep: put it on a setup page.",
+  "tags": ["physics", "rigid body", "xpbd", "setup", "entities"],
   "graph": {
     "kgraph": 1,
     "nodes": [

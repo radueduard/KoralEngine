@@ -1,10 +1,13 @@
 // The picture as light, made the picture as the display shows it: exposed, tone mapped (Narkowicz's fit of ACES) so
-// that brighter than white rolls off rather than clipping, and encoded for the display's curve.
+// that brighter than white rolls off rather than clipping, and encoded for the display's curve. The engine's Tonemap
+// function runs it.
+
+import koral_debug;
 
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> hdrImage;
 [[vk::image_format("rgba8")]] RWTexture2D<float4> ldrImage;
 
-// `exposure` is given on the pipeline's node: push.exposure.
+// `exposure` is given on the Dispatch: push.exposure.
 
 float3 aces(float3 x)
 {
@@ -18,6 +21,8 @@ void computeMain(uint3 id : SV_DispatchThreadID, uniform float exposure)
     uint width, height;
     ldrImage.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
+    // A channel of a material shown is already as the display shows it.
+    if (koralDebugShowing()) { ldrImage[id.xy] = float4(hdrImage[id.xy].rgb, 1.0); return; }
     float3 color = aces(hdrImage[id.xy].rgb * exposure);
     ldrImage[id.xy] = float4(pow(color, 1.0 / 2.2), 1.0);
 }

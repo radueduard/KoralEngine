@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 
+#include <capiInterop.h>
 #include <input.h>
 
 #include <keditor/editor.h>
@@ -22,10 +23,62 @@
 #include <kgraph/meshes.h>
 #include <keditor/project.h>
 
+#include <kgraph/entities.h>
 #include "forward_plus.h"
 #include "support.h"
 
 namespace {
+    /** How many instances a grouped Filter keeps: its groups' counts, added up. */
+    std::size_t InstancesOf(const kgraph::Runtime& runtime, const std::string_view filter)
+    {
+        std::size_t instances = 0;
+        const kgraph::Value given = runtime.ValueOf(filter, "groups");
+        if (const auto* groups = given.Items())
+            for (const auto& group : *groups)
+                if (const kgraph::Value* count = group.Find("count"); count && count->Number()) instances += static_cast<std::size_t>(*count->Number());
+        return instances;
+    }
+    /** How many instances an IndirectDraws' commands draw, as the GPU left them: looked at, each command's instanceCount added up. */
+    std::optional<std::size_t> DrawnBy(kgraph::Runtime& runtime, const std::string& commands)
+    {
+        runtime.Watch(commands);
+        std::optional<kgraph::Peek> peek;
+        for (int i = 0; i < 8 && !(peek = runtime.Watched(commands)); ++i) support::Frame();
+        runtime.Unwatch(commands);
+        if (!peek) return std::nullopt;
+        std::size_t drawn = 0;
+        for (std::size_t at = 4; at + 4 <= peek->bytes.size(); at += 20) {
+            std::uint32_t count = 0;
+            std::memcpy(&count, peek->bytes.data() + at, 4);
+            drawn += count;
+        }
+        return drawn;
+    }
+
+    /**
+     * How many 8x8 blocks of two pictures differ, on average over the block, by more than a few levels. The picture is
+     * antialiased over the frames, each moved by a fraction of a pixel: two runs differ pixel by pixel along edges
+     * however alike they are, and alike block by block.
+     */
+    std::size_t DifferingBlocks(const std::vector<kor::U8Vec4>& a, const std::vector<kor::U8Vec4>& b, const kor::UVec2 size)
+    {
+        std::size_t differing = 0;
+        for (kor::u32 by = 0; by + 8 <= size.y; by += 8)
+            for (kor::u32 bx = 0; bx + 8 <= size.x; bx += 8) {
+                int sum[3] { 0, 0, 0 };
+                for (kor::u32 y = by; y < by + 8; ++y)
+                    for (kor::u32 x = bx; x < bx + 8; ++x) {
+                        const auto& p = a[y * size.x + x];
+                        const auto& q = b[y * size.x + x];
+                        sum[0] += int(p.x) - int(q.x);
+                        sum[1] += int(p.y) - int(q.y);
+                        sum[2] += int(p.z) - int(q.z);
+                    }
+                if (std::abs(sum[0]) > 3 * 64 || std::abs(sum[1]) > 3 * 64 || std::abs(sum[2]) > 3 * 64) ++differing;
+            }
+        return differing;
+    }
+
     // (The panels are where the editor puts them, not where whoever runs the tests left them.)
     [[maybe_unused]] const int noLayout = setenv("KORAL_ENGINE_NO_LAYOUT", "1", 1);
     using support::Frame;
@@ -81,23 +134,23 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         forwardplus::BuildScene(doc);
-        for (int i = 0; i < 4; ++i) Frame();
+        // (Until it has settled: what is packed of the meshes it draws is built once they are listed.)
+        for (int i = 0; i < 16; ++i) Frame();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         ASSERT_TRUE(doc.Runtime().Ok());
         editing.Sheet();
-        // Every lamp is an element of the lights' buffer, and every drawn thing is drawn: in the pre-pass, in the
-        // forward pass, and four times over for the sun's cascades.
+        // Every lamp is an element of the lights' buffer, and every drawn thing an instance of one indirect draw, a
+        // command a mesh: the pre-pass draws what of them is in sight, and the forward pass what some pixel of the
+        // pre-pass showed — fewer, and none it did not see. The sun's cascades draw each entity four times over.
         EXPECT_EQ(doc.Runtime().ValueOf("light data", "count"), kgraph::Value(96));
-        const auto* forward = doc.Runtime().ReportOf("draw forward");
-        ASSERT_NE(forward, nullptr);
-        EXPECT_EQ(forward->ran + forward->culled, 1u + 6u + 35u + 96u) << forward->why;
-        EXPECT_GT(forward->ran, 80u) << "most of it is in sight";
-        EXPECT_EQ(forward->skipped, 0u) << forward->why;
-        // The depth passes ask nothing of an entity but where it is, so they have no component for one to have:
-        // the pre-pass draws what the forward pass will, and each cascade everything with a mesh but the lamps.
+        EXPECT_EQ(InstancesOf(doc.Runtime(), "drawn"), 1u + 6u + 35u + 96u) << "every mesh but glass, grouped by mesh";
+        EXPECT_EQ(doc.Runtime().ValueOf("in sight", "drawCount"), doc.Runtime().ValueOf("drawn meshes", "count")) << "a command a mesh";
+        for (const char* draw : { "draw depth", "draw forward", "run frustum", "run mark seen", "run gather seen" })
+            EXPECT_TRUE(doc.Runtime().Status(draw) && doc.Runtime().Status(draw)->ok) << draw;
+        // The pre-pass draws with the forward Draw's buffer of instances, so has no component for an entity to have;
+        // the forward pipeline's is each entity's material, its pictures among it.
         EXPECT_EQ(doc.Runtime().ComponentOf("prepass"), kecs::NoComponent);
-        ASSERT_NE(doc.Runtime().ReportOf("draw depth"), nullptr);
-        EXPECT_EQ(doc.Runtime().ReportOf("draw depth")->ran, forward->ran);
+        EXPECT_NE(doc.Runtime().ComponentOf("forward"), kecs::NoComponent);
         std::size_t casts = 0;
         EXPECT_EQ(doc.Runtime().TurnsOf("cast").size(), 4u) << "the shadow pass is a loop of four turns";
         for (const char* cast : { "cast [0]", "cast [1]", "cast [2]", "cast [3]" }) {
@@ -125,13 +178,24 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
             EXPECT_GT(drawing, 0u) << "those whose turn it has been drew what was in their sight";
         }
 
+        // What the culls kept, read back from the GPU: watched — which puts the graph in the frame graph again — so last.
+        {
+            const auto inSight = DrawnBy(doc.Runtime(), "in sight"), seen = DrawnBy(doc.Runtime(), "seen instances");
+            ASSERT_TRUE(inSight && seen);
+            EXPECT_GT(*inSight, 80u) << "most of it is in sight";
+            EXPECT_LE(*inSight, 1u + 6u + 35u + 96u);
+            EXPECT_GT(*seen, 0u);
+            EXPECT_LE(*seen, *inSight) << "the forward pass draws no more than the pre-pass saw";
+        }
+
         // The passes run in the order the picture is made in. The trace only reads the picture, between the sky
         // that writes it and the reflections and the bloom that write it after: it is where the graph has it.
         std::vector<std::string> order;
         for (const auto& pass : editing.scene->Graph().Schedule()) order.push_back(pass.name);
         const auto at = [&](const char* name) { return std::ranges::find(order, name) - order.begin(); };
-        const char* const sequence[] { "reset counter", "run cull lights", "cast [0]", "cast [3]", "draw depth", "draw forward", "run occlusion pass", "run blur occlusion",
-                                       "run apply occlusion", "run sky", "run trace reflections", "run add reflections", "run down [0]", "run down [5]", "run up [0]",
+        const char* const sequence[] { "run advance frame", "reset counter", "run cull lights", "cast [0]", "cast [3]", "run frustum", "draw depth", "run mark seen",
+                                       "run gather seen", "draw forward", "run occlusion pass", "run blur occlusion", "run apply occlusion", "run sky", "run trace reflections",
+                                       "run add reflections", "run resolve", "run keep", "run down [0]", "run down [5]", "run up [0]",
                                        "run up [4]", "run add bloom", "run tone map", "show" };
         for (std::size_t i = 0; i + 1 < std::size(sequence); ++i) {
             ASSERT_LT(at(sequence[i]), static_cast<std::ptrdiff_t>(order.size())) << sequence[i] << " does not run";
@@ -147,21 +211,43 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
 
         // The other thing to look at: how many lights each pixel's cluster holds. Its pass runs only while it is shown.
         EXPECT_EQ(at("run heat"), static_cast<std::ptrdiff_t>(order.size())) << "nothing makes the debug view while the picture is shown";
-        ASSERT_TRUE(doc.SetInput("debug view", "value", 1));
-        for (int i = 0; i < 4; ++i) Frame();
+        doc.Runtime().ShowDebugView("debug view");
+        doc.Runtime().Watch("cluster heat");
+        for (int i = 0; i < 6; ++i) Frame();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         order.clear();
         for (const auto& pass : editing.scene->Graph().Schedule()) order.push_back(pass.name);
         EXPECT_LT(at("run tone map"), at("run heat"));
         EXPECT_LT(at("run heat"), at("show"));
-        editing.Sheet("-heat");
+        EXPECT_EQ(doc.Runtime().ResourceOf("debug view"), doc.Runtime().ResourceOf("cluster heat")) << "what the view shows in the scene's place";
         // Where nothing was drawn there is no cluster to count, and it is grey; among the lamps it is a colour.
-        const auto none = editing.Pixel(Extent.x / 2, 8), some = editing.Pixel(Extent.x / 2, Extent.y - 40);
+        const auto heat = doc.Runtime().Watched("cluster heat");
+        ASSERT_TRUE(heat);
+        ASSERT_EQ(heat->bytes.size(), std::size_t { Extent.x } * Extent.y * 4);
+        const auto texel = [&](const kor::u32 x, const kor::u32 y) {
+            const std::byte* at = heat->bytes.data() + (std::size_t { y } * Extent.x + x) * 4;
+            return kor::U8Vec4(std::to_integer<kor::u8>(at[0]), std::to_integer<kor::u8>(at[1]), std::to_integer<kor::u8>(at[2]), std::to_integer<kor::u8>(at[3]));
+        };
+        const auto none = texel(Extent.x / 2, 8), some = texel(Extent.x / 2, Extent.y - 40);
         EXPECT_LT(std::abs(int(none.x) - int(none.z)), 12) << "grey: " << int(none.x) << " " << int(none.y) << " " << int(none.z);
         EXPECT_GT(std::max({ std::abs(int(some.x) - int(some.y)), std::abs(int(some.y) - int(some.z)), std::abs(int(some.x) - int(some.z)) }), 30)
             << "a colour: " << int(some.x) << " " << int(some.y) << " " << int(some.z);
-        ASSERT_TRUE(doc.SetInput("debug view", "value", 0));
+        doc.Runtime().Unwatch("cluster heat");
+        doc.Runtime().ShowDebugView({});
         Frame();
+
+        // A channel of the materials, as the editor's scene view asks: the forward shader shows its normals, and what
+        // comes after it — occlusion, reflections, bloom, tone mapping — leaves them as they are. The floor faces up.
+        // (Under TAA a picture is the frames before it too: it is looked at once they have all been the normals.)
+        doc.Runtime().SetShaderDebugView(static_cast<int>(kgraph::ShaderDebugChannel::eNormal));
+        for (int i = 0; i < 70; ++i) Frame();
+        for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
+        const auto up = editing.Pixel(Extent.x / 2, Extent.y - 60);
+        EXPECT_NEAR(up.x, 128, 12) << int(up.x) << " " << int(up.y) << " " << int(up.z);
+        EXPECT_GT(up.y, 240);
+        EXPECT_NEAR(up.z, 128, 12);
+        doc.Runtime().SetShaderDebugView(0);
+        for (int i = 0; i < 70; ++i) Frame();
         ASSERT_TRUE(doc.Save(project.ScenePath("main"), error)) << error;
 
         // The camera is flown: with the right button held the mouse turns it and W moves it the way it looks.
@@ -185,14 +271,12 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
     // As a project is run: the file, and nothing of the session that made it.
     Running playing(project.ScenePath("main"));
     ASSERT_TRUE(playing.scene->Error().empty()) << playing.scene->Error();
-    for (int i = 0; i < 4; ++i) Frame();
+    for (int i = 0; i < 60; ++i) Frame();     // and its antialiasing gathered over as many frames as the session's
     for (const auto& problem : playing.scene->Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     const auto again = playing.Picture();
+    playing.Sheet("-saved");
     ASSERT_EQ(again.size(), made.size());
-    std::size_t different = 0;
-    for (std::size_t i = 0; i < made.size(); ++i)
-        if (std::abs(int(made[i].x) - int(again[i].x)) > 2 || std::abs(int(made[i].y) - int(again[i].y)) > 2 || std::abs(int(made[i].z) - int(again[i].z)) > 2) ++different;
-    EXPECT_LT(different, made.size() / 500) << "the saved project draws what the session that made it drew";
+    EXPECT_LT(DifferingBlocks(made, again, Extent), (Extent.x / 8) * (Extent.y / 8) / 25) << "the saved project draws what the session that made it drew (the lamps' shadows and the antialiasing still settling: a few blocks)";
 }
 
 // The project opens in the editor like any other: its pages are shown, and its scene runs in the Scene panel.
@@ -205,13 +289,14 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     for (int i = 0; i < 6; ++i) Frame();
     keditor::Document& doc = editor->CurrentSession().Doc();
     for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
-    EXPECT_EQ(doc.Passes().size(), 11u);
+    EXPECT_EQ(doc.Passes().size(), 21u) << "13, and the meshlet and ray branches' 8";
     EXPECT_EQ(doc.Runtime().ValueOf("light data", "count"), kgraph::Value(96));
     // Every page of it is laid out, with whatever its nodes have of their shaders and their components as ports.
     for (const auto& pass : doc.Passes()) {
         editor->CurrentSession().ShowPass(pass);
         for (int i = 0; i < 3; ++i) Frame();
     }
+
     // Its graph has nothing of an editor in it — no image of which entity is where, no outline — and it is picked
     // from all the same: that is the editor's own doing.
     EXPECT_FALSE(doc.Runtime().Pick(0.5f, 0.7f, [](kecs::Entity) {}));
@@ -239,6 +324,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         for (const auto start = std::chrono::steady_clock::now(); !has() && std::chrono::steady_clock::now() - start < std::chrono::seconds(3);) Frame();
         return has();
     };
+    if (const char* page = std::getenv("FP_PAGE")) { editor->CurrentSession().ShowPass(page); wait(30, 3.5); support::App()->Close(*editor); Frame(); Frame(); return; }
     editor->CurrentSession().Select(std::string("depth"));
     EXPECT_TRUE(shows("Look at what it holds"));
     editor->CurrentSession().Look("depth");
@@ -355,15 +441,20 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         settle();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
 
-        // What the graph can be switched between is there to choose in the Scene panel: here, the clusters' heat.
-        const auto choices = session.Choices();
-        ASSERT_EQ(choices.size(), 1u);
-        EXPECT_EQ(choices.front().driver, "debug view");
-        EXPECT_EQ(choices.front().options, (std::vector<std::string> { "ldr", "cluster heat" }));
-        EXPECT_EQ(choices.front().chosen, 0);
-        session.Choose("debug view", 1);
-        EXPECT_EQ(session.Choices().front().chosen, 1);
-        session.Choose("debug view", 0);
+        // What the graph registers to look at is there to choose in the Scene panel: here, the clusters' heat.
+        // (The one Switch choice is which of the three ways it is drawn: the heat is a DebugView.)
+        ASSERT_EQ(session.Choices().size(), 1u);
+        EXPECT_EQ(session.Choices().front().driver, "renderer");
+        const auto modes = session.ViewModes();
+        const auto heat = std::ranges::find(modes, std::string("Cluster heat"), &keditor::Session::ViewModeChoice::name);
+        ASSERT_NE(heat, modes.end());
+        EXPECT_EQ(heat->group, "Scene graph");
+        session.SetViewMode(heat->mode);
+        settle();
+        EXPECT_EQ(doc.Runtime().ShownDebugView(), "debug view");
+        EXPECT_TRUE(session.ViewModePicture().Get());
+        EXPECT_FALSE(session.CanUndo()) << "what the view shows is no edit of the scene";
+        session.SetViewMode({});
         settle();
     }
 
@@ -412,9 +503,9 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     EXPECT_TRUE(shows("forward.slang")) << "in the Assets panel";
     // Looked for, a thing is found wherever it is.
     session.assetFolder.clear();
-    session.assetFilter = "tonemap";
-    session.SelectAsset("shader:toneMapping");      // (the inspector names what is picked: not the one looked for as gone)
-    EXPECT_TRUE(shows("toneMapping.slang"));
+    session.assetFilter = "heat";
+    session.SelectAsset("shader:clusterHeat");      // (the inspector names what is picked: not the one looked for as gone)
+    EXPECT_TRUE(shows("clusterHeat.slang"));
     EXPECT_FALSE(shows("forward.slang"));
     session.assetFilter.clear();
     // A folder is made in the one shown, and is among the folders.
@@ -443,7 +534,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     session.assetFolder.clear();
     session.SelectAsset("shader:forward");
     EXPECT_TRUE(shows("Entry points")) << "the inspector says what a picked asset is";
-    EXPECT_TRUE(shows("vertex, fragment"));
+    EXPECT_TRUE(shows("vertex, meshletTask, meshletMesh, fragment")) << "its vertex, task, mesh and fragment shaders";
     std::string ran;
     keditor::Session::launch = [&](const std::string& command) { ran = command; return true; };
     EXPECT_TRUE(session.OpenInCode(forward->file));
@@ -506,7 +597,10 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         const kecs::Entity ball = doc.World().FindEntity("Ball 0 0");
         ASSERT_FALSE(ball.IsNull());
         std::string error;
-        EXPECT_TRUE(doc.SetField(ball, "forward", "albedoMap", kgraph::Value(texture->id), &error)) << error;
+        // Given the picture as one is dropped on it: its albedo's, in each material it has — the ray tracer's too.
+        EXPECT_TRUE(session.GiveAsset(texture->id, ball)) << session.Status();
+        EXPECT_EQ(doc.Field(ball, "forward", "albedoMap"), kgraph::Value(texture->id));
+        EXPECT_EQ(doc.Field(ball, "ray tracer", "albedoMap"), kgraph::Value(texture->id)) << "what the materials share is set in each";
         EXPECT_TRUE(doc.SetField(ball, "Mesh", "mesh", kgraph::Value(mesh->id), &error)) << error;
         session.Select(ball);
         EXPECT_TRUE(shows(session.AssetLabel(texture->id))) << "the field says what it holds by its name, a file's as much as a node's";
@@ -532,15 +626,13 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_GT(imported, 20u);
         EXPECT_EQ(both, 0u);
 
-        // An entity a pass cannot run for says so where it is mended: in the outliner, and in its inspector.
+        // A picture of an instance's left empty is none, which the shader reads as white: drawn all the same, and
+        // nothing is wrong with it.
         EXPECT_TRUE(doc.Runtime().PassedBy().empty());
         ASSERT_TRUE(doc.SetField(ball, "forward", "normalMap", kgraph::Value(), &error)) << error;
         for (int i = 0; i < 6; ++i) Frame();
-        const auto passed = doc.Runtime().PassedBy();
-        ASSERT_FALSE(passed.empty());
-        EXPECT_EQ(passed.front().first, ball);
-        EXPECT_TRUE(shows("Not drawn by draw forward: 'normalMap' has nothing in it")) << passed.front().second;
-        EXPECT_TRUE(shows("Give the field something")) << "and what to do about it, under what is wrong";
+        EXPECT_TRUE(doc.Runtime().PassedBy().empty());
+        for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         ASSERT_TRUE(doc.SetField(ball, "forward", "normalMap", kgraph::Value("$white"), &error)) << error;
 
         // A note is words on the graph: it makes nothing, and nothing is wrong with it.
@@ -567,9 +659,124 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
             Frame();
         }
     }
+    // As a flow of pages: the three branches end in the Switch that chooses between their pictures, which the pages
+    // after them use; the branches not chosen do nothing.
+    {
+        keditor::Session& session = editor->CurrentSession();
+        const auto step = [](const keditor::Session::PassFlow& flow, const std::string& id) {
+            const auto it = std::ranges::find(flow.steps, id, &keditor::Session::PassFlow::Step::id);
+            return it == flow.steps.end() ? std::optional<keditor::Session::PassFlow::Step>() : std::optional(*it);
+        };
+        const auto linked = [](const keditor::Session::PassFlow& flow, const std::string& from, const std::string& to) {
+            return std::ranges::any_of(flow.links, [&](const auto& link) { return link.from == from && link.to == to; });
+        };
+        auto flow = session.Flow();
+        const auto picture = step(flow, "final picture");
+        ASSERT_TRUE(picture);
+        EXPECT_TRUE(picture->isSwitch);
+        EXPECT_EQ(picture->options, (std::vector<std::string> { "reflections", "meshlet reflections", "ray trace" }));
+        EXPECT_EQ(picture->chosen, 0);
+        EXPECT_TRUE(linked(flow, "final picture", "antialias"));
+        EXPECT_TRUE(linked(flow, "meshlet tasks", "meshlet forward"));
+        EXPECT_TRUE(linked(flow, "ray scene", "ray trace"));
+        EXPECT_TRUE(step(flow, "forward")->ran);
+        EXPECT_FALSE(step(flow, "meshlet forward")->ran) << "a branch not chosen does nothing";
+        EXPECT_FALSE(step(flow, "ray trace")->ran);
+        session.Choose("renderer", 1);
+        for (int i = 0; i < 8; ++i) Frame();
+        flow = session.Flow();
+        EXPECT_EQ(step(flow, "final picture")->chosen, 1);
+        EXPECT_TRUE(step(flow, "meshlet forward")->ran);
+        EXPECT_FALSE(step(flow, "forward")->ran);
+        session.Choose("renderer", 0);
+        for (int i = 0; i < 4; ++i) Frame();
+
+        // The pages the page list lists are the chosen renderer's, and what every renderer shares: those whose passes
+        // all idle by the choice are left out, and a page of none that only those use.
+        const std::set<std::string> vertexPages { "prepass", "culling", "forward", "occlusion", "sky", "reflections" };
+        const std::set<std::string> meshletPages { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" };
+        const std::set<std::string> rayPages { "ray scene", "ray trace" }, shadowPages { "shadows", "lamp shadows" };
+        const auto expectLeftOut = [&](const std::vector<const std::set<std::string>*>& out, const char* chosen) {
+            const auto hidden = session.PagesNotChosen();
+            std::set<std::string> expected;
+            for (const auto* each : out) expected.insert(each->begin(), each->end());
+            EXPECT_EQ(hidden, expected) << "with " << chosen << " chosen";
+        };
+        expectLeftOut({ &meshletPages, &rayPages }, "vertices");
+        // A material is in use when a pass left running reads it: the forward pass's by the meshlets too, through the
+        // forward Draw's buffer; the blended pipeline's by every renderer, for the glass.
+        EXPECT_TRUE(session.MaterialInUse("forward"));
+        EXPECT_FALSE(session.MaterialInUse("ray tracer"));
+        EXPECT_TRUE(session.MaterialInUse("forward blended"));
+        // The inspector: what the two materials have alike once, set in both; the ray tracer's own shut.
+        const kecs::Entity ball = doc.World().FindEntity("Ball 0 0");
+        ASSERT_TRUE(std::ranges::contains(doc.ComponentsOf(ball), std::string("ray tracer"))) << "it has the ray tracer's material too";
+        session.Select(ball);
+        wait(4, 0.05);
+        EXPECT_TRUE(shows("Shared material"));
+        EXPECT_TRUE(shows("2 pipelines, one value each"));
+        EXPECT_TRUE(shows("● forward") && shows("○ ray tracer")) << "which of them a pass uses now";
+        EXPECT_TRUE(shows("no pass uses it now")) << "the ray tracer's own, while vertices are drawn";
+        EXPECT_FALSE(shows("reflectionBlur")) << "shut";
+        EXPECT_TRUE(shows("transparency")) << "the forward pass's own, under it";
+
+        session.Choose("renderer", 1);
+        for (int i = 0; i < 8; ++i) Frame();
+        expectLeftOut({ &vertexPages, &rayPages }, "meshlets");
+        EXPECT_TRUE(session.MaterialInUse("forward")) << "the meshlets read it through the forward Draw's buffer";
+        EXPECT_FALSE(session.MaterialInUse("ray tracer"));
+
+        session.Choose("renderer", 2);
+        for (int i = 0; i < 8; ++i) Frame();
+        expectLeftOut({ &vertexPages, &meshletPages, &shadowPages }, "rays");
+        EXPECT_FALSE(session.MaterialInUse("forward"));
+        EXPECT_TRUE(session.MaterialInUse("ray tracer"));
+        EXPECT_TRUE(session.MaterialInUse("forward blended")) << "the rays see the glass by it";
+        wait(4, 0.05);
+        EXPECT_TRUE(shows("reflectionBlur")) << "the ray tracer's own, open";
+        EXPECT_FALSE(shows("transparency")) << "the forward pass's, shut";
+        EXPECT_TRUE(shows("○ forward") && shows("● ray tracer"));
+        // Set once, a shared field is each material's.
+        const auto roughness = [&](const char* material) { return *doc.Field(ball, material, "roughness").Number(); };
+        const double was = roughness("forward");
+        EXPECT_NEAR(roughness("ray tracer"), was, 1e-6) << "given the forward pass's when it was made";
+        // One set apart from outside the inspector — a script, say — is said at once, and made alike again by a press.
+        EXPECT_FALSE(shows("differs"));
+        ASSERT_TRUE(doc.SetField(ball, "forward", "roughness", kgraph::Value(0.5)));
+        wait(8, 0.3);
+        EXPECT_TRUE(shows("differs")) << "the forward pass's is not the ray tracer's now";
+        {
+            // Down the inspector to it: in a window this high, it is below the inspector's edge.
+            auto& input = editor->SceneInput();
+            input.FeedMousePosition({ 1200.f, 400.f });
+            Frame();
+            for (int i = 0; i < 20; ++i) { input.FeedScroll({ 0.f, -3.f }); Frame(); }
+            wait(4, 0.1);
+            std::optional<kor::Vec2> pill;
+            std::function<void(kui::RenderObject&)> visit = [&](kui::RenderObject& o) {
+                if (!pill && o.DebugText() == "differs") pill = o.ToGlobal(o.Size() * 0.5f);
+                o.VisitChildren(visit);
+            };
+            if (auto* root = editor->Interface().RootRenderObject()) visit(*root);
+            ASSERT_TRUE(pill);
+            ASSERT_LT(pill->y, 880.f) << "in sight";
+            input.FeedMousePosition(*pill);
+            Frame();
+            input.FeedMouseButton(kor::MouseButton::eLeft, true);
+            Frame();
+            input.FeedMouseButton(kor::MouseButton::eLeft, false);
+            wait(8, 0.3);
+        }
+        EXPECT_NEAR(roughness("forward"), was, 1e-6) << "pressed, each is the ray tracer's: the one in use";
+        EXPECT_FALSE(shows("differs"));
+        session.Choose("renderer", 0);
+        for (int i = 0; i < 4; ++i) Frame();
+        session.Select(kecs::NullEntity);
+    }
     support::App()->Close(*editor);
     Frame();
     Frame();
+
 }
 
 // The graph is what is worked on: its nodes are copied and pasted, a page is put in order, and each page is drawn
@@ -748,7 +955,7 @@ TEST(ForwardPlus, TheGraphIsWorkedOn) {
         // A shader dropped on the graph is a pipeline of it; a script that is no component yet says so; a shader is nothing an entity is given.
         session.ShowPass("show");
         const std::size_t nodesBefore = doc.Graph().nodes.size();
-        const std::string made = session.AssetToNode("shader:toneMapping", 300, 200);
+        const std::string made = session.AssetToNode("shader:clusterHeat", 300, 200);
         ASSERT_FALSE(made.empty()) << session.Status();
         EXPECT_EQ(doc.Graph().Find(made)->pass, "show");
         EXPECT_TRUE(doc.Graph().Find(made)->type == "ComputePipeline" || doc.Graph().Find(made)->type == "GraphicsPipeline");
@@ -761,7 +968,7 @@ TEST(ForwardPlus, TheGraphIsWorkedOn) {
         session.Select(floor);
         EXPECT_TRUE(shows("PASSES, AS THEY ARE DRAWN") && shows("fps")) << "both at once";
         EXPECT_TRUE(shows("Transform") && shows("Run by") && shows("draw forward") && shows("Under"));
-        EXPECT_TRUE(shows("run by a pipeline"));
+        EXPECT_TRUE(shows("pipeline's own")) << "a pipeline's component: a material";
         shot("entity");
         session.Select(std::string("hdr"));
         for (int i = 0; i < 6; ++i) Frame();
@@ -831,16 +1038,15 @@ TEST(ForwardPlus, AModelIsImportedWithItsPicturesUnderASkyFromAFile) {
         for (int i = 0; i < 200000 && doc.Reading() > 0; ++i) Frame();
         ASSERT_EQ(doc.Reading(), 0u);
         for (const auto& why : doc.Runtime().Unread()) ADD_FAILURE() << why;
-        for (int i = 0; i < 6; ++i) Frame();
+        // The antialiasing gathered over as many frames as the saved project's will be, below: each frame keeps nine
+        // tenths of the ones before, so a picture a few frames after the last file came is still half of before it.
+        for (int i = 0; i < 60; ++i) Frame();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         ASSERT_TRUE(doc.Runtime().Ok());
         editing.Sheet("-sponza");
 
-        const auto* forward = doc.Runtime().ReportOf("draw forward");
-        ASSERT_NE(forward, nullptr);
-        EXPECT_GT(forward->ran + forward->culled, 64u + 20u) << "the lamps, and the model's own parts";
-        EXPECT_EQ(forward->skipped, 0u) << forward->why;
-        drawn = forward->ran + forward->culled;
+        drawn = InstancesOf(doc.Runtime(), "drawn") + InstancesOf(doc.Runtime(), "glass");
+        EXPECT_GT(drawn, 64u + 20u) << "the lamps, and the model's own parts";
         // A part has its mesh and its pictures by the files they are in.
         std::size_t textured = 0;
         for (const kecs::Entity entity : doc.Entities()) {
@@ -864,17 +1070,227 @@ TEST(ForwardPlus, AModelIsImportedWithItsPicturesUnderASkyFromAFile) {
     Running playing(project.ScenePath("main"));
     ASSERT_TRUE(playing.scene->Error().empty()) << playing.scene->Error();
     for (int i = 0; i < 200000 && (i < 2 || playing.scene->Doc().Reading() > 0); ++i) Frame();
-    for (int i = 0; i < 6; ++i) Frame();
+    for (int i = 0; i < 60; ++i) Frame();     // and its antialiasing gathered over as many frames as the session's
     for (const auto& problem : playing.scene->Doc().Runtime().Problems()) ADD_FAILURE() << problem;
-    const auto* forward = playing.scene->Doc().Runtime().ReportOf("draw forward");
-    ASSERT_NE(forward, nullptr);
-    EXPECT_EQ(forward->ran + forward->culled, drawn);
-    EXPECT_EQ(forward->skipped, 0u) << forward->why;
+    EXPECT_EQ(InstancesOf(playing.scene->Doc().Runtime(), "drawn") + InstancesOf(playing.scene->Doc().Runtime(), "glass"), drawn);
     const auto again = playing.Picture();
-    std::size_t different = 0;
-    for (std::size_t i = 0; i < made.size(); ++i)
-        if (std::abs(int(made[i].x) - int(again[i].x)) > 2 || std::abs(int(made[i].y) - int(again[i].y)) > 2 || std::abs(int(made[i].z) - int(again[i].z)) > 2) ++different;
-    EXPECT_LT(different, made.size() / 200) << "the saved project draws what the session that made it drew";
+    EXPECT_LT(DifferingBlocks(made, again, Extent), (Extent.x / 8) * (Extent.y / 8) / 200) << "the saved project draws what the session that made it drew";
+}
+
+// A decal as a glTF has one: blended, a third opaque, and saying nothing of how metal it is — which glTF takes as all
+// metal. Imported, it lets two thirds of what is behind it through and is not metal; a material that says it is metal,
+// and how rough, stays metal.
+TEST(ForwardPlus, ADecalIsImportedSeeThroughAndNotMetal) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    const keditor::Project project = MakeProject("-decal");
+    const std::filesystem::path file = project.directory / "assets" / "decals.gltf";
+    std::filesystem::create_directories(file.parent_path());
+    std::ofstream(file) << R"gltf({"asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0, 1]}], "nodes": [{"name": "decal", "mesh": 0}, {"name": "brass", "mesh": 1}], "meshes": [{"name": "decal", "primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 0}]}, {"name": "brass", "primitives": [{"attributes": {"POSITION": 0, "NORMAL": 1, "TEXCOORD_0": 2}, "indices": 3, "material": 1}]}], "materials": [{"name": "dirt", "alphaMode": "BLEND", "pbrMetallicRoughness": {"baseColorFactor": [1, 1, 1, 0.35]}}, {"name": "brass", "pbrMetallicRoughness": {"baseColorFactor": [0.9, 0.7, 0.3, 1], "metallicFactor": 1, "roughnessFactor": 0.3}}], "buffers": [{"byteLength": 108, "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAAAAAAAAIA/AAAAAAEAAAACAAAA"}], "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36}, {"buffer": 0, "byteOffset": 36, "byteLength": 36}, {"buffer": 0, "byteOffset": 72, "byteLength": 24}, {"buffer": 0, "byteOffset": 96, "byteLength": 12}], "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0]}, {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"}, {"bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC2"}, {"bufferView": 3, "componentType": 5125, "count": 3, "type": "SCALAR"}]})gltf";
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    doc.SetAssetDirectory(project.directory / "assets");
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    ASSERT_TRUE(forwardplus::ImportScene(doc, { file }, error, 0)) << error;
+    for (int i = 0; i < 2000 && (i < 2 || doc.Reading() > 0); ++i) Frame();
+    ASSERT_EQ(doc.Reading(), 0u);
+    const kecs::Entity decal = doc.World().FindEntity("decal"), brass = doc.World().FindEntity("brass");
+    ASSERT_FALSE(decal.IsNull());
+    ASSERT_FALSE(brass.IsNull());
+    EXPECT_TRUE(doc.World().Has(decal, doc.World().Find("Blended")));
+    EXPECT_NEAR(*doc.Field(decal, "forward blended", "transparency").Number(), 0.65, 1e-4) << "its colour's alpha, 0.35, is how opaque it is";
+    EXPECT_EQ(*doc.Field(decal, "forward blended", "metallic").Number(), 0.0) << "it says nothing of being metal";
+    EXPECT_EQ(*doc.Field(brass, "forward", "metallic").Number(), 1.0) << "it says it is";
+    EXPECT_NEAR(*doc.Field(brass, "forward", "roughness").Number(), 0.3, 1e-4);
+}
+
+// The scene drawn three ways, a branch of pages each, chosen by `renderer`: by vertex shaders, by task and mesh shaders
+// over meshlets, and by rays. Each ends in a lit picture the rest of the frame takes on; the branches not chosen idle.
+// Drawn by meshlets the picture is the vertex shaders' — the same shading over the same triangles; traced, it is the
+// same scene, lit with rays (its shadows, occlusion and reflections its own).
+TEST(ForwardPlus, TheSceneIsDrawnThreeWays) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    const keditor::Project project = MakeProject("-three");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    forwardplus::BuildScene(doc);
+    // A pane of red glass before the camera, over the left half of the picture: half of what is behind shows through.
+    const kecs::Entity pane = doc.CreateEntity("Pane");
+    doc.SetPosition(pane, { -2.f, 3.5f, 8.f });
+    doc.SetRotation(pane, { -22.f, 0.f, 0.f });
+    doc.SetScale(pane, { 4.f, 3.f, 0.05f });
+    doc.AddComponent(pane, "Mesh");
+    doc.SetField(pane, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("cube")));
+    doc.AddComponent(pane, "Blended");
+    ASSERT_TRUE(doc.AddComponent(pane, "forward blended"));
+    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(pane, "forward blended", map, kgraph::Value("$white"));
+    doc.SetField(pane, "forward blended", "albedo", kgraph::Value(kgraph::Value::List { 1.0, 0.05, 0.05 }));
+    doc.SetField(pane, "forward blended", "roughness", kgraph::Value(0.9));
+    doc.SetField(pane, "forward blended", "transparency", kgraph::Value(0.5));
+    const auto settle = [&](const int frames) {
+        for (int i = 0; i < frames; ++i) Frame();
+        for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
+    };
+    settle(80);
+    ASSERT_TRUE(doc.Runtime().Ok());
+    // Where the pane is: how much redder than it is green, on average, the pixels it covers are.
+    const auto paneRed = [&](const std::vector<kor::U8Vec4>& picture) {
+        double sum = 0;
+        int count = 0;
+        for (kor::u32 y = Extent.y / 3; y < Extent.y * 2 / 3; ++y)
+            for (kor::u32 x = Extent.x / 4; x < Extent.x * 2 / 5; ++x, ++count) sum += picture[y * Extent.x + x].x - picture[y * Extent.x + x].y;
+        return sum / count;
+    };
+    const auto mean = [](const std::vector<kor::U8Vec4>& picture) {
+        double sum = 0;
+        for (const auto& p : picture) sum += p.x + p.y + p.z;
+        return sum / (picture.size() * 3.0);
+    };
+    const auto ran = [&](const char* pass) {
+        const auto frame = doc.Runtime().Frame();
+        return std::ranges::any_of(frame.passes, [&](const auto& run) { return run.node == pass; });
+    };
+    const auto vertex = editing.Picture();
+    editing.Sheet("-vertex");
+    EXPECT_GT(mean(vertex), 20.0) << "something lit is drawn";
+    EXPECT_GT(paneRed(vertex), 25.0) << "the glass is drawn over it";
+
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 1));
+    settle(80);
+    const auto meshlets = editing.Picture();
+    editing.Sheet("-meshlets");
+    EXPECT_GT(*doc.Runtime().ValueOf("meshlets", "count").Number(), 0.0);
+    EXPECT_LT(DifferingBlocks(vertex, meshlets, Extent), (Extent.x / 8) * (Extent.y / 8) / 20) << "the same picture, by meshlets";
+    EXPECT_GT(*doc.Runtime().ValueOf("glass meshlets", "count").Number(), 0.0);
+    EXPECT_NEAR(paneRed(meshlets), paneRed(vertex), 8.0) << "and the same glass over it";
+
+    if (kor::Context::SupportsRayTracing()) {
+        ASSERT_TRUE(doc.SetInput("renderer", "value", 2));
+        settle(80);
+        const auto rays = editing.Picture();
+        editing.Sheet("-rays");
+        EXPECT_GT(mean(rays), mean(vertex) * 0.5) << "traced, the scene is lit as much, near enough";
+        EXPECT_LT(mean(rays), mean(vertex) * 2.0);
+        EXPECT_EQ(*doc.Runtime().ValueOf("ray scene", "count").Number(), static_cast<double>(InstancesOf(doc.Runtime(), "drawn")));
+        EXPECT_EQ(*doc.Runtime().ValueOf("glass ray scene", "count").Number(), static_cast<double>(InstancesOf(doc.Runtime(), "glass")));
+        EXPECT_NEAR(paneRed(rays), paneRed(vertex), 15.0) << "the glass seen through, traced";
+    }
+    (void)ran;
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 0));
+    settle(4);
+}
+
+// A thin thing lit from behind lets some of the light through: a panel with the sun on its back is the brighter on its
+// front the more translucent its material says it is — one field both renderers' materials share — drawn by vertices,
+// by meshlets, or traced.
+TEST(ForwardPlus, AThinThingLitFromBehindLetsTheLightThrough) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    const keditor::Project project = MakeProject("-through");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    forwardplus::BuildScene(doc, 0);
+    // The sun turned round: low, shining towards the camera.
+    doc.SetRotation(doc.World().FindEntity("Sun"), { -25.f, 180.f, 0.f });
+    const kecs::Entity panel = doc.CreateEntity("Panel");
+    // A sheet, as a curtain is: a plane stood up to face the camera.
+    doc.SetPosition(panel, { 0.f, 3.5f, 8.f });
+    doc.SetRotation(panel, { 90.f, 0.f, 0.f });
+    doc.SetScale(panel, { 4.f, 1.f, 3.f });
+    doc.AddComponent(panel, "Mesh");
+    doc.SetField(panel, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("plane")));
+    ASSERT_TRUE(doc.AddComponent(panel, "forward"));
+    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(panel, "forward", map, kgraph::Value("$white"));
+    doc.SetField(panel, "forward", "albedo", kgraph::Value(kgraph::Value::List { 0.9, 0.2, 0.15 }));
+    doc.SetField(panel, "forward", "roughness", kgraph::Value(0.9));
+    forwardplus::GiveRayMaterials(doc);
+    ASSERT_TRUE(doc.World().Describe(doc.World().Find("forward")).FindField("translucency"));
+    ASSERT_TRUE(doc.World().Describe(doc.World().Find("ray tracer")).FindField("translucency")) << "a field the two materials share";
+    // Its middle, where the camera sees its front.
+    const auto red = [&] {
+        double sum = 0;
+        int count = 0;
+        for (kor::u32 y = Extent.y * 2 / 5; y < Extent.y / 2; ++y)
+            for (kor::u32 x = Extent.x * 9 / 20; x < Extent.x * 11 / 20; ++x, ++count) sum += editing.Picture()[y * Extent.x + x].x;
+        return sum / count;
+    };
+    const auto settle = [&] { for (int i = 0; i < 60; ++i) Frame(); for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem; };
+    std::vector<int> renderers { 0, 1 };
+    if (kor::Context::SupportsRayTracing()) renderers.push_back(2);
+    for (const int renderer : renderers) {
+        ASSERT_TRUE(doc.SetInput("renderer", "value", renderer));
+        for (const char* material : { "forward", "ray tracer" }) doc.SetField(panel, material, "translucency", kgraph::Value(0.0));
+        settle();
+        const double opaque = red();
+        editing.Sheet(std::format("-through{}-0", renderer));
+        for (const char* material : { "forward", "ray tracer" }) doc.SetField(panel, material, "translucency", kgraph::Value(0.8));
+        settle();
+        const double through = red();
+        editing.Sheet(std::format("-through{}-1", renderer));
+        EXPECT_GT(through, opaque + 20.0) << "renderer " << renderer << ": the sun behind it shows through, " << opaque << " then " << through;
+    }
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 0));
+    Frame();
+}
+
+// The rays are lit by what gives off light — an emissive material — and not by point lights; the raster passes the other
+// way round. A glowing ball with no light of its own on the left, a point light with nothing to see of it on the right,
+// no sun and no sky: traced, the floor glows under the ball and not under the light; drawn by vertices, under the light
+// and not under the ball.
+TEST(ForwardPlus, TheRaysAreLitByWhatGivesOffLightAndNotByPointLights) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    if (!kor::Context::SupportsRayTracing()) GTEST_SKIP() << "no ray tracing here";
+    const keditor::Project project = MakeProject("-emitters");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    forwardplus::BuildScene(doc, 0);
+    doc.DestroyEntity(doc.World().FindEntity("Sun"));
+    doc.SetField(doc.World().FindEntity("Sky"), "Sky", "ambient", kgraph::Value(0.0));
+    const kgraph::Value white(kgraph::Value::List { 1.0, 1.0, 1.0 });
+    const kecs::Entity ball = doc.CreateEntity("Glow");
+    doc.SetPosition(ball, { -6.f, 1.f, 9.f });
+    doc.SetScale(ball, { 0.3f, 0.3f, 0.3f });
+    doc.AddComponent(ball, "Mesh");
+    doc.SetField(ball, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("sphere")));
+    ASSERT_TRUE(doc.AddComponent(ball, "forward"));
+    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(ball, "forward", map, kgraph::Value("$white"));
+    doc.SetField(ball, "forward", "emission", forwardplus::LampEmission(white, 3.0, 4.0, 0.15));
+    forwardplus::GiveRayMaterials(doc);
+    const kecs::Entity bare = doc.CreateEntity("Bare light");
+    doc.SetPosition(bare, { 6.f, 1.f, 9.f });
+    doc.AddComponent(bare, "PointLight");
+    doc.SetField(bare, "PointLight", "color", white);
+    doc.SetField(bare, "PointLight", "intensity", kgraph::Value(3.0));
+    doc.SetField(bare, "PointLight", "range", kgraph::Value(4.0));
+    // The floor under each: the picture's lower left and lower right, past the ball's own glow.
+    const auto floor = [&](const bool left) {
+        double sum = 0;
+        int count = 0;
+        for (kor::u32 y = Extent.y * 3 / 4; y < Extent.y * 19 / 20; ++y)
+            for (kor::u32 x = left ? Extent.x / 20 : Extent.x * 13 / 20; x < (left ? Extent.x * 7 / 20 : Extent.x * 19 / 20); ++x, ++count) {
+                const auto p = editing.Picture()[y * Extent.x + x];
+                sum += p.x + p.y + p.z;
+            }
+        return sum / (count * 3.0);
+    };
+    const auto settle = [&](const int frames) { for (int i = 0; i < frames; ++i) Frame(); for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem; };
+    settle(80);
+    const double vertexBall = floor(true), vertexLight = floor(false);
+    editing.Sheet("-emitters-vertex");
+    EXPECT_GT(vertexLight, vertexBall + 10.0) << "drawn by vertices, the point light lights the floor and the ball does not: " << vertexBall << " " << vertexLight;
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 2));
+    settle(120);
+    const double raysBall = floor(true), raysLight = floor(false);
+    editing.Sheet("-emitters-rays");
+    EXPECT_GT(raysBall, raysLight + 10.0) << "traced, the ball lights the floor and the point light does not: " << raysBall << " " << raysLight;
+    EXPECT_LT(raysLight, raysBall / 4.0) << "where only the point light is, only what the ball sends that far: its light has no range to end at";
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 0));
+    Frame();
 }
 
 // The shadows are drawn again only when what is in them has changed (a Draw's `whenChanged`): while everything holds
@@ -895,6 +1311,11 @@ TEST(ForwardPlus, ShadowsDrawnOnlyWhenChangedLookAsIfDrawnEveryFrame) {
     const kecs::Vec3 stood = doc.World().PositionOf(camera), lay = doc.World().PositionOf(ball), hung = doc.World().PositionOf(lamp);
 
     const auto moved = [](const kecs::Vec3 from, const float x, const float y, const float z) { return kecs::Vec3 { from.x + x, from.y + y, from.z + z }; };
+    // How many frames the antialiasing has advanced: taa.slang's FrameState.frame, after its two matrices and the jitter.
+    const auto FrameNumber = [&] {
+        const auto state = kor::capi::BufferOf(doc.Runtime().ResourceOf("frame state")->handle)->Read<std::uint32_t>(35);
+        return state.size() == 35 ? state[34] : 0u;
+    };
     const auto pictures = [&](const bool whenChanged) {
         EXPECT_TRUE(doc.SetInput("cast", "whenChanged", whenChanged));
         EXPECT_TRUE(doc.SetInput("cast lamp", "whenChanged", whenChanged));
@@ -902,7 +1323,10 @@ TEST(ForwardPlus, ShadowsDrawnOnlyWhenChangedLookAsIfDrawnEveryFrame) {
         doc.SetPosition(ball, lay);
         doc.SetPosition(lamp, hung);
         std::vector<std::vector<kor::U8Vec4>> made;
-        for (int i = 0; i < 6; ++i) Frame();
+        // A picture is of the frames before it as well, by the antialiasing: both runs are held still until it has
+        // gathered the same picture, then on to the same of its eight sub-pixel offsets — compared frame for frame.
+        for (int i = 0; i < 60; ++i) Frame();
+        for (int i = 0; i < 8 && FrameNumber() % 8 != 0; ++i) Frame();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
         made.push_back(editing.Picture());
         if (whenChanged) {

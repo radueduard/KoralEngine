@@ -1437,3 +1437,74 @@ TEST_F(RuntimeTest, AScriptMakesResourcesAndFillsThem) {
 }
 
 
+
+// A Dispatch set `async` runs on the async compute queue, ordered against the graphics passes by what it reads and
+// writes, and what it makes is the same; a device with no second queue runs it in order, and its node says so.
+TEST_F(RuntimeTest, ADispatchSetAsyncRunsOnTheAsyncComputeQueue) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "target").Set("constant.level", 0.5);
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("run", "Dispatch").Wire("pipeline", "pipeline").Set("groups", Value::List { Size / 8, Size / 8, 1 }).Set("async", true);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "target").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    Frame();
+    Frame();
+    Frame();
+
+    const auto& schedule = scene->Graph().Schedule();
+    const auto run = std::ranges::find(schedule, std::string("run"), &kor::FrameGraph::Scheduled::name);
+    ASSERT_NE(run, schedule.end());
+    EXPECT_EQ(run->async, kor::Context::SupportsAsyncCompute());
+    if (!kor::Context::SupportsAsyncCompute()) EXPECT_NE(runtime.Status("run")->note.find("no second queue"), std::string::npos);
+    const auto show = std::ranges::find(schedule, std::string("show"), &kor::FrameGraph::Scheduled::name);
+    ASSERT_NE(show, schedule.end());
+    EXPECT_FALSE(show->async) << "a pass that uses the screen stays on the graphics queue";
+    const kor::U8Vec4 pixel = scene->Pixel(5, 5);
+    EXPECT_NEAR(pixel.x, 128, 1) << "the clear's red, halved by the shader on the other queue";
+
+    // Set back, it runs on the graphics queue again.
+    graph.Find("run")->Set("async", false);
+    runtime.Set(graph);
+    Frame();
+    const auto again = std::ranges::find(scene->Graph().Schedule(), std::string("run"), &kor::FrameGraph::Scheduled::name);
+    ASSERT_NE(again, scene->Graph().Schedule().end());
+    EXPECT_FALSE(again->async);
+}
+
+// The frame as it runs: the graph's passes in the order they are scheduled, each with what it uses by the node that made
+// it, and a pass left out said so.
+TEST_F(RuntimeTest, TheFrameIsItsPassesInTheOrderTheyRun) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("target", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { Size, Size })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "target").Set("constant.level", 0.5);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "target").Wire("destination", "screen");     // listed first: the order is the frame's
+    graph.Add("run", "Dispatch").Wire("pipeline", "pipeline").Set("groups", Value::List { Size / 8, Size / 8, 1 });
+    graph.Add("clear", "Clear").Wire("image", "target").Set("color", Value::List { 1, 0, 0, 1 });
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+
+    const auto frame = runtime.Frame();
+    std::vector<std::string> order;
+    for (const auto& pass : frame.passes) order.push_back(pass.node);
+    EXPECT_EQ(order, (std::vector<std::string> { "clear", "run", "show" }));
+    const auto run = std::ranges::find(frame.passes, std::string("run"), &kgraph::Runtime::FrameReport::Pass::node);
+    ASSERT_NE(run, frame.passes.end());
+    EXPECT_TRUE(std::ranges::contains(run->uses, std::pair<std::string, char> { "target", 'b' })) << "the image it reads and writes, by the node that made it";
+    EXPECT_GT(run->level, frame.passes.front().level) << "after the clear it depends on";
+    const auto show = std::ranges::find(frame.passes, std::string("show"), &kgraph::Runtime::FrameReport::Pass::node);
+    ASSERT_NE(show, frame.passes.end());
+    EXPECT_TRUE(std::ranges::contains(show->uses, std::pair<std::string, char> { "the screen", 'w' }));
+}

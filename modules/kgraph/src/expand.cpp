@@ -8,6 +8,7 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <optional>
 #include <ranges>
 #include <set>
 
@@ -137,9 +138,13 @@ namespace kgraph
                         made.pass = call.pass;
                         for (auto& input : made.inputs | std::views::values)
                             if (input.link) input.link->node = prefix + input.link->node;
-                        if (made.type == "Reference")
-                            if (auto target = made.inputs.find("node"); target != made.inputs.end() && target->second.value.String())
+                        // What names another node of the function by its id names it as it is written out.
+                        const auto named = [&](const char* input) {
+                            if (auto target = made.inputs.find(input); target != made.inputs.end() && target->second.value.String() && !target->second.value.String()->empty())
                                 target->second.value = Value(prefix + *target->second.value.String());
+                        };
+                        if (made.type == "Reference") named("node");
+                        if (made.type == "Previous" || made.type == "Element") { named("of"); named("first"); }
                         record.nodes.push_back(made.id);
                         graph.nodes.push_back(std::move(made));
                     }
@@ -210,11 +215,153 @@ namespace kgraph
         }
     }
 
-    Expansion Expand(const Graph& given)
+    std::string BundleTaken(const std::string_view type, const std::string_view input)
+    {
+        if (input == "fields" && (type == "BufferBuilder" || type == "ShaderBuffer")) return "field.";
+        if (input == "push" && (type == "Draw" || type == "Dispatch" || type == "TraceRays")) return "push.";
+        return {};
+    }
+
+    namespace {
+        bool IsEach(const std::string_view type) { return type == "ForEach" || type == "Entities" || type == "Filter" || type == "Entity"; }
+
+        /** A BufferBuilder's fields, by name, as its layout lists them. */
+        std::vector<std::string> LayoutNames(const Node& node)
+        {
+            std::vector<std::string> names;
+            const auto layout = node.inputs.find("layout");
+            if (layout == node.inputs.end() || !layout->second.value.Items()) return names;
+            for (const auto& field : *layout->second.value.Items())
+                if (const auto* members = field.Named())
+                    for (const auto& [key, value] : *members)
+                        if (key == "name" && value.String()) names.push_back(*value.String());
+            return names;
+        }
+
+        /**
+         * The graph with its Bundles written out: each input that takes one — a buffer's `fields`, a draw's `push` — is
+         * given, for each member, the input of that name (`field.<name>`), unless it is given that already; and what is
+         * wired from an Unbundle is wired from the member it names. So nothing new is worked out: a Bundle is a way of
+         * wiring many at once. A Bundle or an Unbundle node is left in the graph, and builds nothing.
+         */
+        void WriteBundles(Graph& graph, Expansion& out, const ElementOf& elementOf)
+        {
+            std::map<std::string, const Node*, std::less<>> byId;
+            for (const auto& node : graph.nodes) byId.emplace(node.id, &node);
+            using Members = std::vector<std::pair<std::string, Input>>;
+            // What a wire to a Bundle holds: a Bundle node's out, of what it is given; a ForEach's element. None, for anything else.
+            std::function<std::optional<Members>(const Link&, int)> resolve = [&](const Link& link, const int depth) -> std::optional<Members> {
+                const std::string key = link.node + "." + link.output;
+                if (const auto known = out.bundles.find(key); known != out.bundles.end()) return known->second;
+                const auto found = byId.find(link.node);
+                if (found == byId.end() || depth > 32) return std::nullopt;
+                const Node& node = *found->second;
+                Members members;
+                if (node.type == "Bundle" && link.output == "out") {
+                    // What it is made on first, then its own: one of the same name takes the other's place.
+                    if (const auto base = node.inputs.find("base"); base != node.inputs.end() && base->second.link)
+                        if (auto under = resolve(*base->second.link, depth + 1)) members = std::move(*under);
+                    // In the order of its names; then any given that its names have not.
+                    std::vector<std::string> order;
+                    if (const auto names = node.inputs.find("names"); names != node.inputs.end() && names->second.value.Items())
+                        for (const auto& name : *names->second.value.Items())
+                            if (name.String()) order.push_back(*name.String());
+                    for (const auto& name : node.inputs | std::views::keys)
+                        if (name.starts_with("field.") && !std::ranges::contains(order, name.substr(6))) order.push_back(name.substr(6));
+                    for (const auto& member : order) {
+                        const auto input = node.inputs.find("field." + member);
+                        if (input == node.inputs.end() || (!input->second.link && input->second.value.IsNull())) continue;
+                        if (const auto had = std::ranges::find(members, member, &Members::value_type::first); had != members.end()) had->second = input->second;
+                        else members.emplace_back(member, input->second);
+                    }
+                } else if (IsEach(node.type) && link.output == "element" && elementOf) {
+                    for (const auto& [member, output] : elementOf(node)) members.emplace_back(member, Input { {}, Link { node.id, output } });
+                } else {
+                    return std::nullopt;
+                }
+                out.bundles[key] = members;
+                return members;
+            };
+
+            // Every Bundle there is, taken or not: what an editor offers a wire of one says how many of a node's it matches.
+            for (const auto& node : graph.nodes) {
+                if (node.type == "Bundle") (void)resolve(Link { node.id, "out" }, 0);
+                else if (IsEach(node.type)) (void)resolve(Link { node.id, "element" }, 0);
+            }
+            for (auto& node : graph.nodes) {
+                // What an Unbundle gives, by name, is what its Bundle has of that name.
+                if (node.type == "Unbundle")
+                    if (const auto of = node.inputs.find("of"); of != node.inputs.end() && of->second.link) {
+                        if (auto members = resolve(*of->second.link, 0)) out.bundles[node.id + ".of"] = std::move(*members);
+                        else out.errors[node.id] = std::format("'of' is wired from '{}' of '{}', which is no Bundle: a Bundle node's, or a ForEach's element", of->second.link->output, of->second.link->node);
+                    }
+                std::vector<std::string> taken;
+                for (const auto& name : node.inputs | std::views::keys)
+                    if (!BundleTaken(node.type, name).empty()) taken.push_back(name);
+                for (const auto& name : taken) {
+                    const Input given = node.inputs.at(name);
+                    node.inputs.erase(name);
+                    if (!given.link) continue;
+                    const auto members = resolve(*given.link, 0);
+                    if (!members) {
+                        out.errors[node.id] = std::format("'{}' takes a Bundle — a Bundle node's, or a ForEach's element — and is wired from '{}' of '{}'", name, given.link->output, given.link->node);
+                        continue;
+                    }
+                    const std::string prefix = BundleTaken(node.type, name);
+                    // A BufferBuilder's fields are on the node: what matches none of them is said, and so is what of them it has none for.
+                    const std::vector<std::string> layout = node.type == "BufferBuilder" ? LayoutNames(node) : std::vector<std::string> {};
+                    std::vector<std::string> unmatched;
+                    for (const auto& [member, input] : *members) {
+                        if (node.type == "BufferBuilder" && !std::ranges::contains(layout, member)) { unmatched.push_back(member); continue; }
+                        if (node.inputs.contains(prefix + member)) continue;     // given by itself: that wins
+                        node.inputs[prefix + member] = input;
+                        out.fromBundle[node.id].insert(prefix + member);
+                    }
+                    std::vector<std::string> missing;
+                    for (const auto& field : layout)
+                        if (!node.inputs.contains(prefix + field)) missing.push_back(field);
+                    const auto list = [](const std::vector<std::string>& names) {
+                        std::string text;
+                        for (const auto& each : names) text += (text.empty() ? "'" : ", '") + each + "'";
+                        return text;
+                    };
+                    std::string note;
+                    if (!unmatched.empty()) note = std::format("the bundle has {}, which the layout has not", list(unmatched));
+                    if (!missing.empty()) note += std::format("{}the layout has {}, which the bundle has not", note.empty() ? "" : "; ", list(missing));
+                    if (!note.empty()) out.notes[node.id] = std::move(note);
+                }
+            }
+            // What a Bundle is made on, and what an Unbundle takes apart, is written out: no wire of it is left to follow.
+            for (auto& node : graph.nodes) {
+                if (node.type == "Bundle") node.inputs.erase("base");
+                if (node.type == "Unbundle") node.inputs.erase("of");
+            }
+            // What is wired from an Unbundle is wired from its member of that name.
+            for (auto& node : graph.nodes)
+                for (auto& [name, input] : node.inputs) {
+                    if (!input.link) continue;
+                    const auto from = byId.find(input.link->node);
+                    if (from == byId.end() || from->second->type != "Unbundle") continue;
+                    const auto bundle = out.bundles.find(input.link->node + ".of");
+                    if (bundle == out.bundles.end()) continue;     // it said why
+                    const auto member = std::ranges::find(bundle->second, input.link->output, &Members::value_type::first);
+                    if (member == bundle->second.end()) {
+                        out.errors[node.id] = std::format("'{}' is wired from '{}' of '{}', and its Bundle has no '{}'", name, input.link->output, input.link->node, input.link->output);
+                        input = {};
+                        continue;
+                    }
+                    input = member->second;
+                }
+        }
+    }
+
+    Expansion Expand(const Graph& given, const ElementOf& elementOf)
     {
         Expansion out;
-        // The calls first: what a function holds may be a loop, and a call may be in one.
-        const Graph written = WriteCalls(given, out);
+        // The calls first: what a function holds may be a loop, and a call may be in one. Then the Bundles, which a
+        // function may give or take.
+        Graph written = WriteCalls(given, out);
+        WriteBundles(written, out, elementOf);
         out.graph.passes = written.passes;
         out.graph.setup = written.setup;
         out.graph.fixed = written.fixed;
