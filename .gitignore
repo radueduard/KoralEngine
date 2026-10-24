@@ -15,3 +15,6 @@ obj/
 .gradle/
 bindings/kotlin/**/build/
 .kotlin/
+
+# Downloaded models a project uses (forward-plus: Intel's New Sponza packages), too large for the repository
+/projects/*/assets/

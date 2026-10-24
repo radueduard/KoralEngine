@@ -1615,7 +1615,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
         std::filesystem::remove_all(directory.parent_path() / "assets-none");
         ASSERT_TRUE(keditor::Project::Create(directory.parent_path() / "assets-none", "none", none, error)) << error;
         EXPECT_FALSE(keditor::RunThroughScripts(none).has_value());
-        setenv("KORAL_ENGINE_HANDED_OVER", directory.c_str(), 1);
+        setenv("KORAL_ENGINE_HANDED_OVER", directory.string().c_str(), 1);
         EXPECT_FALSE(keditor::RunThroughScripts(Session().CurrentProject()).has_value()) << "started by the runner it would go to";
         unsetenv("KORAL_ENGINE_HANDED_OVER");
         EXPECT_NE(keditor::ScriptRunner(Session().CurrentProject(), true).find(" edit"), std::string::npos);
@@ -1771,7 +1771,7 @@ TEST_F(EditorTest, TheProjectToStartWithIsTheUsersChoice) {
     const std::string before = was ? was : "";
     const auto config = std::filesystem::temp_directory_path() / "keditor-startup-config";
     std::filesystem::remove_all(config);
-    setenv("XDG_CONFIG_HOME", config.c_str(), 1);
+    setenv("XDG_CONFIG_HOME", config.string().c_str(), 1);
     const auto project = std::filesystem::temp_directory_path() / "keditor-startup-project";
     std::filesystem::create_directories(project);
     std::ofstream(project / "project.json") << R"({ "koral-engine-project": 1, "name": "startup", "scenes": ["main"], "start": "main" })";

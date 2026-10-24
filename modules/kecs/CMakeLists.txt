@@ -3,6 +3,8 @@ add_library(kecs STATIC src/world.cpp src/transform.cpp src/serialize.cpp src/js
 add_library(KoralEngine::kecs ALIAS kecs)
 target_include_directories(kecs PUBLIC include)
 target_compile_options(kecs PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>)
+# KECS_FIELDS walks __VA_ARGS__, which MSVC's traditional preprocessor passes on as one argument.
+target_compile_options(kecs PUBLIC $<$<CXX_COMPILER_ID:MSVC>:/Zc:preprocessor>)
 
 if(KORAL_ENGINE_BUILD_TESTS)
     add_executable(kecs_tests

@@ -79,6 +79,7 @@ internal static class ShadowGate
         Write("LightCamera.cs", Camera);
 
         using var app = new App(new AppSettings { Platform = WindowPlatform.eNone });
+        EngineLibrary.Load();     // as Koral's modules are loaded: see Load
         app.LoadLibrary(EngineLibrary.Path);
         var scene = app.OpenOffscreen("Play", new OffscreenSettings { Title = "shadow", Extent = new UVec2(32, 32) }, new SceneArgs().Set("project", project));
         var world = World.Of(scene) ?? throw new Exception("the Play scene has no world");

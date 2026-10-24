@@ -22,11 +22,13 @@ add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
 target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras PRIVATE Koral::koral-image-import kphysics)
 target_compile_options(keditor PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-missing-field-initializers>)
+target_compile_options(keditor PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)  # editor.cpp, as kgraph's runtime.cpp
 
 if(KORAL_ENGINE_BUILD_TESTS)
     add_executable(keditor_tests tests/test_document.cpp tests/test_editor.cpp tests/test_forward_plus.cpp tests/test_physics.cpp ${CMAKE_SOURCE_DIR}/modules/kgraph/tests/support.cpp)
     target_include_directories(keditor_tests PRIVATE ${CMAKE_SOURCE_DIR}/modules/kgraph/tests ${CMAKE_SOURCE_DIR}/samples/forward-plus)
     target_link_libraries(keditor_tests PRIVATE keditor GTest::gtest GTest::gtest_main)
+    koral_engine_runtime(keditor_tests)
     target_compile_definitions(keditor_tests PRIVATE
         KGRAPH_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/kgraph/tests/shaders"
         KGRAPH_PACKAGE_SHADERS="${CMAKE_SOURCE_DIR}/packages/koral/shaders"

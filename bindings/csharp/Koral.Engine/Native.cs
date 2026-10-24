@@ -39,11 +39,28 @@ public static class EngineLibrary
     }
     private static string? s_path;
 
+    /// <summary>
+    /// The library, loaded once, as Koral's own modules are: its import of Koral.dll is then the engine C# has loaded,
+    /// not the managed assembly of that name. On Windows its other imports — Koral's modules, spdlog — are looked for
+    /// beside the program and on PATH, not beside Koral: Koral's folder and its modules/ go on PATH first.
+    /// </summary>
+    public static IntPtr Load()
+    {
+        if (s_handle != IntPtr.Zero) return s_handle;
+        if (OperatingSystem.IsWindows() && Koral.Native.NativeLibraryResolver.LoadedFrom is { } koral && System.IO.Path.IsPathRooted(koral))
+        {
+            var folder = System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(koral))!;
+            Environment.SetEnvironmentVariable("PATH", string.Join(';', folder, System.IO.Path.Combine(folder, "modules"), Environment.GetEnvironmentVariable("PATH")));
+        }
+        return s_handle = Koral.Native.NativeLibraryResolver.LoadBesideKoral(Path);
+    }
+    private static IntPtr s_handle;
+
 #pragma warning disable CA2255
     [ModuleInitializer]
 #pragma warning restore CA2255
     internal static void Register() =>
-        NativeLibrary.SetDllImportResolver(typeof(EngineLibrary).Assembly, static (name, _, _) => name == Name ? NativeLibrary.Load(Path) : IntPtr.Zero);
+        NativeLibrary.SetDllImportResolver(typeof(EngineLibrary).Assembly, static (name, _, _) => name == Name ? Load() : IntPtr.Zero);
 }
 
 [StructLayout(LayoutKind.Sequential)]

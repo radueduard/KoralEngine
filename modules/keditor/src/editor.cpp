@@ -124,6 +124,16 @@ namespace keditor
         /** A command's word, quoted for a shell. */
         std::string Quoted(const std::string& text) { return "\"" + text + "\""; }
 
+        /** A command's start that gives what it runs @p name, @p value: as sh says it, or as cmd does on Windows. */
+        std::string WithVariable(const std::string_view name, const std::string& value)
+        {
+#ifdef _WIN32
+            return std::format("set \"{}={}\" && ", name, value);
+#else
+            return std::format("{}={} ", name, Quoted(value));
+#endif
+        }
+
         /** Whether two folders are the same one, however they are written. */
         bool Same(const std::filesystem::path& a, const std::filesystem::path& b)
         {
@@ -153,12 +163,17 @@ namespace keditor
         case 'k': {
             // The project's own build, which wants a JDK to start with: this build's, when none is said.
             const char* java = std::getenv("JAVA_HOME");
-            const std::string home = (java && *java) || std::string_view(KEDITOR_JAVA_HOME).empty() ? std::string() : std::format("JAVA_HOME={} ", Quoted(KEDITOR_JAVA_HOME));
-            return std::format("{}{} -p {} -q {}", home, Quoted((project.directory / "gradlew").string()), Quoted(folder), edit ? "edit" : "play");
+            const std::string home = (java && *java) || std::string_view(KEDITOR_JAVA_HOME).empty() ? std::string() : WithVariable("JAVA_HOME", KEDITOR_JAVA_HOME);
+#ifdef _WIN32
+            const std::filesystem::path gradlew = project.directory / "gradlew.bat";
+#else
+            const std::filesystem::path gradlew = project.directory / "gradlew";
+#endif
+            return std::format("{}{} -p {} -q {}", home, Quoted(gradlew.string()), Quoted(folder), edit ? "edit" : "play");
         }
         case 'c': {
             const char* sdk = std::getenv("KORAL_SDK");
-            const std::string where = sdk && *sdk ? std::string() : std::format("KORAL_SDK={} ", Quoted(KEDITOR_SDK));
+            const std::string where = sdk && *sdk ? std::string() : WithVariable("KORAL_SDK", KEDITOR_SDK);
             return std::format("{}{} {}{}", where, Quoted(KEDITOR_DOTNET_RUNNER), Quoted(folder), edit ? " --edit" : "");
         }
         default: return {};
@@ -236,7 +251,8 @@ namespace keditor
         if (ScriptLanguage(_project) == 'k') WriteKotlinBuild(_project.directory, _project.name);    // this build of the engine
 #ifdef _WIN32
         _putenv_s(HandedOver, _project.directory.string().c_str());
-        const std::string detached = "start \"\" " + command;
+        // A cmd of its own, as the command may be more than one (WithVariable's `set ... &&`): /s keeps its quotes.
+        const std::string detached = "start \"\" cmd /s /c \"" + command + "\"";
 #else
         setenv(HandedOver, _project.directory.c_str(), 1);
         const std::string detached = "(" + command + ") >/dev/null 2>&1 &";
@@ -2509,25 +2525,26 @@ class $NAME : ResourceScript() {
     const std::vector<Session::Material>& Session::DefaultMaterials()
     {
         // Colours as they are picked; metals by what they reflect (their colour), and smooth to rough.
+        // (Each named: MSVC 19.51 crashes on a list of bare braces for an aggregate with arrays given defaults.)
         static const std::vector<Material> materials {
-            { "White", { 0.92f, 0.92f, 0.92f }, 0.f, 0.5f },
-            { "Grey", { 0.5f, 0.5f, 0.52f }, 0.f, 0.6f },
-            { "Black", { 0.05f, 0.05f, 0.05f }, 0.f, 0.5f },
-            { "Rubber", { 0.08f, 0.08f, 0.09f }, 0.f, 0.95f },
-            { "Clay", { 0.72f, 0.45f, 0.33f }, 0.f, 0.9f },
-            { "Wood", { 0.55f, 0.36f, 0.2f }, 0.f, 0.7f },
-            { "Red plastic", { 0.8f, 0.1f, 0.08f }, 0.f, 0.35f },
-            { "Orange plastic", { 0.95f, 0.45f, 0.08f }, 0.f, 0.35f },
-            { "Yellow plastic", { 0.95f, 0.82f, 0.15f }, 0.f, 0.35f },
-            { "Green plastic", { 0.15f, 0.65f, 0.2f }, 0.f, 0.35f },
-            { "Blue plastic", { 0.12f, 0.3f, 0.85f }, 0.f, 0.35f },
-            { "Purple plastic", { 0.5f, 0.2f, 0.75f }, 0.f, 0.35f },
-            { "Gold", { 1.f, 0.78f, 0.34f }, 1.f, 0.25f },
-            { "Copper", { 0.95f, 0.64f, 0.54f }, 1.f, 0.3f },
-            { "Chrome", { 0.95f, 0.95f, 0.95f }, 1.f, 0.05f },
-            { "Steel", { 0.6f, 0.6f, 0.62f }, 1.f, 0.45f },
-            { "Glowing white", { 0.9f, 0.9f, 0.9f }, 0.f, 0.5f, { 4.f, 4.f, 4.f } },
-            { "Glowing orange", { 1.f, 0.5f, 0.15f }, 0.f, 0.5f, { 4.f, 1.6f, 0.4f } },
+            Material { "White", { 0.92f, 0.92f, 0.92f }, 0.f, 0.5f },
+            Material { "Grey", { 0.5f, 0.5f, 0.52f }, 0.f, 0.6f },
+            Material { "Black", { 0.05f, 0.05f, 0.05f }, 0.f, 0.5f },
+            Material { "Rubber", { 0.08f, 0.08f, 0.09f }, 0.f, 0.95f },
+            Material { "Clay", { 0.72f, 0.45f, 0.33f }, 0.f, 0.9f },
+            Material { "Wood", { 0.55f, 0.36f, 0.2f }, 0.f, 0.7f },
+            Material { "Red plastic", { 0.8f, 0.1f, 0.08f }, 0.f, 0.35f },
+            Material { "Orange plastic", { 0.95f, 0.45f, 0.08f }, 0.f, 0.35f },
+            Material { "Yellow plastic", { 0.95f, 0.82f, 0.15f }, 0.f, 0.35f },
+            Material { "Green plastic", { 0.15f, 0.65f, 0.2f }, 0.f, 0.35f },
+            Material { "Blue plastic", { 0.12f, 0.3f, 0.85f }, 0.f, 0.35f },
+            Material { "Purple plastic", { 0.5f, 0.2f, 0.75f }, 0.f, 0.35f },
+            Material { "Gold", { 1.f, 0.78f, 0.34f }, 1.f, 0.25f },
+            Material { "Copper", { 0.95f, 0.64f, 0.54f }, 1.f, 0.3f },
+            Material { "Chrome", { 0.95f, 0.95f, 0.95f }, 1.f, 0.05f },
+            Material { "Steel", { 0.6f, 0.6f, 0.62f }, 1.f, 0.45f },
+            Material { "Glowing white", { 0.9f, 0.9f, 0.9f }, 0.f, 0.5f, { 4.f, 4.f, 4.f } },
+            Material { "Glowing orange", { 1.f, 0.5f, 0.15f }, 0.f, 0.5f, { 4.f, 1.6f, 0.4f } },
         };
         return materials;
     }

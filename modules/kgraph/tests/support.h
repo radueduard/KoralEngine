@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
@@ -20,6 +21,15 @@
 #include <kecs/kecs.h>
 #include <kgraph/runtime.h>
 #include <kscript/declarations.h>
+
+#ifdef _WIN32
+// The tests set their environment as POSIX does; Windows has its own calls for it.
+inline int setenv(const char* name, const char* value, int overwrite) {
+    if (!overwrite && std::getenv(name)) return 0;
+    return _putenv_s(name, value);
+}
+inline int unsetenv(const char* name) { return _putenv_s(name, ""); }
+#endif
 
 namespace support
 {

@@ -59,7 +59,11 @@ int main(const int argc, char** argv)
         title = project.name;
     }
 
+#ifdef _WIN32
+    if (!validate && !std::getenv("VK_LOADER_LAYERS_DISABLE")) _putenv_s("VK_LOADER_LAYERS_DISABLE", "*validation*");
+#else
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
+#endif
     kor::App app(kor::AppSettings { .platform = platform });
     if (!project.directory.empty()) project.Use();
     auto play = std::make_unique<keditor::PlayScene>(scene);

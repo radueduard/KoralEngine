@@ -74,7 +74,11 @@ int main(const int argc, char** argv)
     if (!project.empty() && frames <= 0)
         if (const auto exited = ThroughScripts(project)) return *exited;
 
+#ifdef _WIN32
+    if (!validate && !std::getenv("VK_LOADER_LAYERS_DISABLE")) _putenv_s("VK_LOADER_LAYERS_DISABLE", "*validation*");
+#else
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
+#endif
 #ifndef _WIN32
     // Another project with scripts opened from the File menu: the window closes, and this goes to its runner as above.
     keditor::Session::handOverOnExit = frames <= 0;

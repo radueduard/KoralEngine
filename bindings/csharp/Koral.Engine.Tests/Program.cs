@@ -22,6 +22,7 @@ Directory.CreateDirectory(scripts);
 void Write(string file, string source) => File.WriteAllText(Path.Combine(scripts, file), source);
 
 using var app = new App(new AppSettings { Platform = WindowPlatform.eNone });
+EngineLibrary.Load();     // as Koral's modules are loaded: see Load
 app.LoadLibrary(EngineLibrary.Path);
 var scene = app.OpenOffscreen("Play", new OffscreenSettings { Title = "play", Extent = new UVec2(32, 32) });
 var world = World.Of(scene) ?? throw new Exception("the Play scene has no world");

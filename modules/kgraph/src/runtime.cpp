@@ -3675,7 +3675,12 @@ namespace kgraph
         [[nodiscard]] const std::filesystem::path& Assets() const { return source ? source->Assets() : assetDirectory; }
         [[nodiscard]] std::filesystem::path AssetFile(const std::string_view name) const
         {
-            const std::filesystem::path path(name);
+            std::filesystem::path path(name);
+#ifdef _WIN32
+            // A file named as WSL names a Windows drive, /mnt/w/..., is W:/... here: the same project opens on both.
+            if (name.size() >= 6 && name.starts_with("/mnt/") && std::isalpha(static_cast<unsigned char>(name[5])) && (name.size() == 6 || name[6] == '/'))
+                path = std::format("{}:/{}", static_cast<char>(std::toupper(static_cast<unsigned char>(name[5]))), name.substr(std::min<std::size_t>(name.size(), 7)));
+#endif
             return path.is_absolute() || Assets().empty() ? path : Assets() / path;
         }
         [[nodiscard]] std::string AssetId(const std::filesystem::path& file, const int mesh) const

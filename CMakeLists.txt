@@ -41,7 +41,8 @@ if(NOT KORAL_FRAMEWORK_DIR)
         endif()
     endforeach()
 endif()
-if(KORAL_FRAMEWORK_DIR AND NOT Koral_DIR AND NOT CMAKE_PREFIX_PATH)
+# The cache's CMAKE_PREFIX_PATH is the one given: a toolchain such as vcpkg's fills the variable by itself.
+if(KORAL_FRAMEWORK_DIR AND NOT Koral_DIR AND NOT "$CACHE{CMAKE_PREFIX_PATH}")
     # A build that is not Debug is one of the optimised ones: they all go with the framework's release SDK.
     if(CMAKE_BUILD_TYPE STREQUAL "Debug")
         set(KORAL_ENGINE_SDK_KIND debug)
@@ -58,6 +59,26 @@ endif()
 find_package(Koral CONFIG QUIET)
 if(Koral_FOUND)
     message(STATUS "Koral ${Koral_VERSION} found: building what needs it")
+    get_filename_component(KORAL_ENGINE_SDK "${Koral_DIR}/../../.." ABSOLUTE)
+
+    # Windows finds a program's DLLs beside it, not by an RPATH: a program that runs Koral gets the SDK's bin/ beside
+    # it — modules/ kept apart, where Koral looks for them by name — and the DLLs it links, the modules among them.
+    # Koral finds its shaders and assets from where Koral.dll is, so they come too: beside it is a layout it knows.
+    # Called where the program is made, as a target's build steps must be.
+    function(koral_engine_runtime program)
+        if(NOT WIN32)
+            return()
+        endif()
+        koral_copy_runtime_dlls(${program})
+        file(GLOB runtime "${KORAL_ENGINE_SDK}/bin/*.bin" "${KORAL_ENGINE_SDK}/bin/*.manifest")
+        add_custom_command(TARGET ${program} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${runtime} $<TARGET_RUNTIME_DLLS:${program}> "$<TARGET_FILE_DIR:${program}>"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${KORAL_ENGINE_SDK}/bin/modules" "$<TARGET_FILE_DIR:${program}>/modules"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${KORAL_ENGINE_SDK}/share/Koral/shaders" "$<TARGET_FILE_DIR:${program}>/shaders"
+            COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${KORAL_ENGINE_SDK}/share/Koral/assets" "$<TARGET_FILE_DIR:${program}>/assets"
+            COMMAND_EXPAND_LISTS
+            VERBATIM)
+    endfunction()
     add_subdirectory(modules/kgraph)
     add_subdirectory(modules/keditor)
     add_subdirectory(modules/kengine)
@@ -65,7 +86,6 @@ if(Koral_FOUND)
     # Scripts in C#: the engine's C# layer and the program that runs a project with it. Built where there is a .NET
     # SDK and the Koral SDK has its C# assemblies.
     find_program(KORAL_ENGINE_DOTNET dotnet)
-    get_filename_component(KORAL_ENGINE_SDK "${Koral_DIR}/../../.." ABSOLUTE)
     if(KORAL_ENGINE_DOTNET AND EXISTS "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.dll")
         set(KORAL_ENGINE_DOTNET_OUT "${CMAKE_BINARY_DIR}/dotnet")
         file(GLOB_RECURSE KORAL_ENGINE_CS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bindings/csharp/*.cs" "${CMAKE_SOURCE_DIR}/bindings/csharp/*.csproj")
@@ -143,6 +163,9 @@ if(Koral_FOUND)
     # The project either opens when it is given none: Forward+, made with nodes, in the projects folder (forward-plus).
     foreach(app koral-editor koral-play)
         target_compile_definitions(${app} PRIVATE KORAL_ENGINE_DEFAULT_PROJECT="${KORAL_ENGINE_PROJECTS}/forward-plus")
+    endforeach()
+    foreach(app koral-editor koral-play)
+        koral_engine_runtime(${app})
     endforeach()
 else()
     message(STATUS "Koral not found (set CMAKE_PREFIX_PATH to an SDK): building kecs alone")

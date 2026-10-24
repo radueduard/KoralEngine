@@ -31,6 +31,7 @@ if (!File.Exists(Path.Combine(project, "project.json")))
 try
 {
     using var app = new App();
+    EngineLibrary.Load();     // as Koral's modules are loaded: see Load
     app.LoadLibrary(EngineLibrary.Path);
     var title = Path.GetFileName(project);
     var scene = edit
