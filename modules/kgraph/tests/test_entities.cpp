@@ -76,6 +76,43 @@ namespace {
     }})json", stampModule);
     }
 
+    // SceneGraph, batched: one dispatch stamps every entity's image, along z, and one draw shows all of them. Their
+    // pipelines' components are named as SceneGraph's are and have the same fields, so the same entities serve both.
+    // The images are of two sizes: as many groups as the largest needs, and each shader looks at its own image's size.
+    std::string BatchedSceneGraph()
+    {
+        return R"json({
+      "kgraph": 1,
+      "nodes": [
+        { "id": "blit", "type": "Blit", "inputs": { "source": { "$link": ["canvas", "out"] }, "destination": { "$link": ["screen", "out"] } } },
+        { "id": "draw", "type": "Draw", "inputs": { "pipeline": { "$link": ["show", "out"] }, "mesh": { "$link": ["shown", "Mesh.mesh"] }, "batched": true } },
+        { "id": "shown", "type": "Filter", "inputs": { "entities": { "$link": ["all", "out"] }, "with": ["show", "Mesh"], "without": ["Hidden"] } },
+        { "id": "run", "type": "Dispatch", "inputs": { "pipeline": { "$link": ["stamp", "out"] }, "entities": { "$link": ["lit", "out"] }, "groups.x": 2, "groups.y": 2 } },
+        { "id": "lit", "type": "Filter", "inputs": { "entities": { "$link": ["all", "out"] }, "with": ["stamp", "Lit"] } },
+        { "id": "all", "type": "Entities", "inputs": {} },
+        { "id": "tint backdrop", "type": "Clear", "inputs": { "image": { "$link": ["backdrop", "out"] }, "color": [0, 0, 0.25, 0] } },
+        { "id": "screen", "type": "Screen", "inputs": {} },
+
+        { "id": "backdrop", "type": "Image", "inputs": {
+            "format": "eRGBA8_UNORM", "extent.x": 4, "extent.y": 4, "extent.z": 1, "usage": ["eSampled", "eTransferDst"] } },
+        { "id": "stamp shader", "type": "Shader", "inputs": { "entryPoint.module": "stampBatched", "entryPoint.entry": "computeMain" } },
+        { "id": "stamp", "type": "ComputePipeline", "inputs": {
+            "computeShader": { "$link": ["stamp shader", "out"] }, "param.backdrop": { "$link": ["backdrop", "out"] } } },
+
+        { "id": "canvas", "type": "Image", "inputs": {
+            "format": "eRGBA8_UNORM", "extent.x": 32, "extent.y": 32, "extent.z": 1, "usage": ["eColorAttachment", "eTransferSrc"] } },
+        { "id": "canvas view", "type": "ImageView", "inputs": { "image": { "$link": ["canvas", "out"] } } },
+        { "id": "target", "type": "Framebuffer", "inputs": { "color[0].name": "color", "color[0].view": { "$link": ["canvas view", "out"] } } },
+        { "id": "layout", "type": "VertexLayout", "inputs": { "attributes": [ { "semantic": "POSITION", "type": "eFloat", "count": 3 } ] } },
+        { "id": "vertex", "type": "Shader", "inputs": { "entryPoint.module": "showBatched", "entryPoint.entry": "vertexMain" } },
+        { "id": "fragment", "type": "Shader", "inputs": { "entryPoint.module": "showBatched", "entryPoint.entry": "fragmentMain" } },
+        { "id": "show", "type": "GraphicsPipeline", "inputs": {
+            "vertexShader.shader": { "$link": ["vertex", "out"] }, "vertexShader.layout": { "$link": ["layout", "out"] },
+            "fragmentShader": { "$link": ["fragment", "out"] }, "framebuffer": { "$link": ["target", "out"] } } }
+      ]
+    })json";
+    }
+
     /** Another view of a runtime's graph, over its world, in a scene of its own: Set again whenever the first is. */
     class FollowScene final : public kor::Scene {
     public:
@@ -184,6 +221,45 @@ namespace {
 // A tag is asked for by name in a node: these are theirs.
 template <> struct kecs::Name<Lit> { static constexpr std::string_view value = "Lit"; };
 template <> struct kecs::Name<Hidden> { static constexpr std::string_view value = "Hidden"; };
+
+// E7's gate, for compute: one Dispatch of a Filter's entities, along z, stamps every entity's own image as a Dispatch
+// each does — each image written by its bindless storage index — and one batched Draw shows them: the same picture.
+TEST_F(EntityTest, OneDispatchOfEveryEntityStampsWhatADispatchEachDoes) {
+    Load(SceneGraph());
+    MakeFour();
+    for (int i = 0; i < 3; ++i) Frame();
+    const auto picture = [&] {
+        std::vector<kor::U8Vec4> pixels;
+        for (kor::u32 y = 0; y < support::Size; ++y)
+            for (kor::u32 x = 0; x < support::Size; ++x) pixels.push_back(scene->Pixel(x, y));
+        return pixels;
+    };
+    const auto each = picture();
+    ExpectColor(Quarter(1), 0, 255, 64, "a dispatch each: green");
+
+    Load(BatchedSceneGraph());
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(scene->runtime->Ok());
+    // Run once for all of them, and ran: no report, as for any pass that runs once.
+    for (const char* id : { "run", "draw" })
+        if (const auto* report = scene->runtime->ReportOf(id)) ADD_FAILURE() << id << ": ran " << report->ran << ", skipped " << report->skipped << ": " << report->why;
+    EXPECT_EQ(scene->runtime->ValueOf("draw/commands", "drawCount"), kgraph::Value(1)) << "one mesh";
+    // What the images are is known to the frame graph by what the instances name: written, then read.
+    const auto schedule = scene->Schedule();
+    EXPECT_LT(std::ranges::find(schedule, "run") - schedule.begin(), std::ranges::find(schedule, "draw") - schedule.begin());
+    const auto batched = picture();
+    int differing = 0;
+    for (std::size_t i = 0; i < each.size(); ++i)
+        if (std::abs(each[i].x - batched[i].x) > 1 || std::abs(each[i].y - batched[i].y) > 1 || std::abs(each[i].z - batched[i].z) > 1) ++differing;
+    EXPECT_EQ(differing, 0) << "the same picture";
+
+    // An entity's colour changed: stamped again, and shown.
+    Parameters(scene->world, entities[0], stamp).Set("tint", kor::Vec4 { 0, 0, 1, 1 });
+    for (int i = 0; i < 3; ++i) Frame();
+    ExpectColor(Quarter(0), 0, 0, 255, "blue now, over the backdrop's blue");
+    ExpectColor(Quarter(3), 0, 255, 255, "the others as they were");
+}
 
 TEST_F(EntityTest, APipelinesUnwiredParametersAreAComponent) {
     Load(SceneGraph());

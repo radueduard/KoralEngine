@@ -284,9 +284,16 @@ past entities:
   `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess` — ten thousand entities of two meshes, the same picture pixel for
   pixel, 7.8 ms of CPU a frame a draw each and 0.19 ms batched.
 
-Still to do: a Dispatch batched by a dispatch dimension; the editor offering `batched` where a Draw could be (it says
-why only once asked); and the culling the forward-plus sample does on the GPU made one of the engine's functions, for any
-indirect draw of entities.
+- **One Dispatch of a Filter's entities** (`entities`): its groups once for each, along z, each element its
+  `[entity("PER_INSTANCE")]` buffer's, the images each holds read (`TEXTURE`) or written (`STORAGE`) by their bindless
+  indices and told to the frame graph as such (see [kgraph.md](kgraph.md#dispatch-and-draw)). **The gate, for compute:**
+  `EntityTest.OneDispatchOfEveryEntityStampsWhatADispatchEachDoes` — the same images, so the same picture — and
+  `ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`: ten thousand entities, an image each, 14 ms of CPU a frame a
+  Dispatch each and 0.3 ms as one.
+
+Still to do: the editor offering `batched` and `entities` where a Draw or a Dispatch could take them (it says why only
+once asked); more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework; and
+the culling the forward-plus sample does on the GPU made one of the engine's functions, for any indirect draw of entities.
 
 ### E8: A graph made both to try ideas in and to make them fast
 
@@ -345,5 +352,5 @@ and `PassRate` become `pages` and `PageRate` in one change later, writing `"page
 
 ## First steps
 
-The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, is begun, and its gate for graphics passed:
-next is a Dispatch batched by a dispatch dimension.
+The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, has passed its gate for graphics and for compute:
+what is left of it is in its section.

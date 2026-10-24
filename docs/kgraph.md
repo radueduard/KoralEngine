@@ -918,6 +918,18 @@ element's own (`param.<name>` wired from a ForEach), each gets its own count.
 A Dispatch can also read its group counts from a buffer a pass before it wrote: wire it to `indirect`
 (the buffer needs `eIndirect`), with `indirectOffset` for where in it.
 
+**One Dispatch of every entity.** Wired to a Filter's entities (`entities`), a Dispatch runs its `groups` once for each
+of them in one dispatch, one after another along z: an element is `SV_GroupID.z / groups.z`, in the Filter's order.
+What each is to the shader is its `[entity("PER_INSTANCE")]` buffer's, as a batched Draw's — where it is, its own fields,
+and the images it holds by their bindless indices: read, `[entity("TEXTURE")]`, or written, `[entity("STORAGE")]`
+(`kor_RWTexture2D[index]`). Every element runs as many groups as `groups` says, so where their images differ in size it
+is as many as the largest takes, and the shader looks at its own image's size. Nothing else of it can be each element's:
+one wired so is an error that says which. More elements than a dispatch counts along z (65,535, by its groups along z)
+are not run, and its report says so. Ten thousand entities, an image each: a Dispatch each costs the CPU about 14 ms a
+frame (readying 4.4, recording 9.6), one Dispatch of all of them 0.3 ms (Release,
+`ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`), and stamps the same images
+(`EntityTest.OneDispatchOfEveryEntityStampsWhatADispatchEachDoes`).
+
 **TraceRays** runs a ray tracing pipeline the same way: `size` (or `size.x/y/z`) rays, or as many as
 `cover` an image parameter. Wired to a Filter's entities (`entities`), its pipeline has a material as a Draw's has: a
 buffer its shader marks `[entity("PER_INSTANCE")]` and nothing is wired to is an element for each of them, in the
@@ -1013,7 +1025,8 @@ struct Instance {
 ```
 
 A field marked `MATRIX`, `NORMAL_MATRIX` (both `float4x4`), `POSITION` (`float3`) or `ID` (`uint`, one more than the
-entity's index) is where the entity is, or which. Any other — a number, a vector or a `float4x4` — is the entity's own:
+entity's index) is where the entity is, or which. One marked `TEXTURE` or `STORAGE` (`uint`) is an image the entity
+holds — a field of the component, an Image — by its bindless index for reading, or for writing; ~0 for none. Any other — a number, a vector or a `float4x4` — is the entity's own:
 a field of the pipeline's component, as its unwired `param.`s and `push.`s are, shown in the inspector and set from a
 script (`world.set(cube, "<pipeline>", "color", Vec3(1f, 0f, 0f))`). An entity without the component has zeros there.
 The component is not one of the Filter's `with`: the pipeline's vertex layout comes from the pack, which comes from the

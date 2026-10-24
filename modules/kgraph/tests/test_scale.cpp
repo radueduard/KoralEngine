@@ -469,3 +469,55 @@ TEST_F(ScaleTest, ABatchedDrawDrawsTheSamePictureForLess) {
                 n, eachMs, eachRecordMs, batchMs, batchRecordMs);
     EXPECT_LT(batchMs + batchRecordMs, (eachMs + eachRecordMs) / 4) << "measurably faster";
 }
+
+// The same for compute: ten thousand entities, an image each, stamped by a Dispatch each and then by one Dispatch of
+// all of them along z, each image written by its bindless storage index. What each costs the CPU a frame.
+TEST_F(ScaleTest, OneDispatchOfTenThousandEntitiesCostsLess) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto make = [&](const bool batched) {
+        kgraph::Graph graph;
+        graph.Add("backdrop", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 4, 4 }).Set("usage", Value::List { "eSampled", "eTransferDst" });
+        graph.Add("stamp shader", "Shader").Set("entryPoint.module", batched ? "stampBatched" : "stamp").Set("entryPoint.entry", "computeMain");
+        graph.Add("stamp", "ComputePipeline").Wire("computeShader", "stamp shader").Wire("param.backdrop", "backdrop");
+        if (batched) {
+            graph.Add("all", "Entities");
+            graph.Add("stamped", "Filter").Wire("entities", "all").Set("with", Value::List { "stamp" });
+            graph.Add("run", "Dispatch").Wire("pipeline", "stamp").Wire("entities", "stamped").Set("groups.x", 1).Set("groups.y", 1);
+        } else {
+            graph.Add("stamped", "ForEach").Set("component", "stamp");
+            graph.Add("run", "Dispatch").Wire("pipeline", "stamp").Set("cover", "target").Wire("param.target", "stamped", "field.target")
+                .Wire("push.tint", "stamped", "field.tint").Wire("push.gain", "stamped", "field.gain");
+        }
+        return graph;
+    };
+    runtime.Set(make(false));
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const kecs::ComponentId stamp = world.Find("stamp");
+    ASSERT_NE(stamp, kecs::NoComponent);
+    const int n = std::getenv("KGRAPH_SCALE_ENTITIES") ? Count() : 10'000;
+    for (int i = 0; i < n; ++i) {
+        const kecs::Entity entity = world.Create();
+        world.Add(entity, stamp);
+        kgraph::Parameters(world, entity, stamp).Set("target", kgraph::MakeResource(kor::Image::Builder {}.SetType(kor::Image::Type::e2D)
+                .SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2 { 8, 8 }).SetUsage(kor::Image::Usage::eStorage | kor::Image::Usage::eSampled).Build()))
+            .Set("tint", kor::Vec4 { 1, 0, 0, 1 }).Set("gain", 1.f);
+    }
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const double eachMs = Median(30, [](int) {});
+    const double eachRecordMs = runtime.Timings().at("run").recordMs;
+
+    runtime.Set(make(true));
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ReportOf("run"), nullptr) << "run once, for all of them";
+    const double batchMs = Median(30, [](int) {});
+    const double batchRecordMs = runtime.Timings().at("run").recordMs;
+    std::printf("%d entities: a Dispatch each, runtime Update %.2f ms and recording %.2f ms a frame; one Dispatch of all, %.3f ms and %.3f ms\n",
+                n, eachMs, eachRecordMs, batchMs, batchRecordMs);
+    EXPECT_LT(batchMs + batchRecordMs, (eachMs + eachRecordMs) / 4) << "measurably faster";
+}

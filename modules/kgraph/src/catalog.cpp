@@ -214,6 +214,7 @@ namespace kgraph
             if (type.name == "Dispatch") {
                 for (const char* name : { "groups", "cover", "groupSize" }) set(name, "How many");
                 for (const char* name : { "indirect", "indirectOffset" }) set(name, "Indirect");
+                set("entities", "How many");
                 return;
             }
             if (type.name == "Sampler") {
@@ -1209,6 +1210,9 @@ namespace kgraph
                                 optional(Number("groupSize.x", "How much of the covered image one group works on: the pipeline's numThreads, when not given.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
                                 optional(ResourcePort("indirect", "Buffer", "A buffer that says how many groups, three numbers of 32 bits, written by a pass before this one: instead of groups. It needs eIndirect among its usage.")),
                                 optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")),
+                                optional({ "entities", PortKind::eValue, "entities", false, "A Filter's entities: its groups run once for each of them, one after another along z, in one dispatch — "
+                                           "element SV_GroupID.z / groups.z. What each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's, in the Filter's order: where it is, "
+                                           "its own fields, and the images it holds — read (TEXTURE) and written (STORAGE) — by their bindless indices.", nullptr }),
                                 optional({ "push", PortKind::eValue, "bundle", false, "A Bundle that gives each `push.<name>` of the same name the pipeline leaves it: a ForEach's element gives a draw its `matrix`, its `entityId`. One given by itself takes its own.", nullptr }) }, {},
                               "Runs a compute pipeline. What its pipeline leaves unwired is given here, `param.<name>` and `push.<name>`: wired from a ForEach, it "
                               "runs once for each of its elements, and otherwise once.", nullptr });

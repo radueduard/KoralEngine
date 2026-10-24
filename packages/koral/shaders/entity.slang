@@ -16,6 +16,12 @@
 //     NORMAL_MATRIX   float4x4   what turns its normals: the inverse of that, transposed
 //     POSITION        float3     where it is in the world
 //     ID              uint       which entity it is: one more than its index (0 is none)
+//     TEXTURE         uint       a picture the entity holds, by its bindless index (kor_Texture2D[...]): ~0 for none
+//     STORAGE         uint       an image the entity holds that the shader writes, by its bindless storage index
+//                                (kor_RWTexture2D[...]): ~0 for none
+//
+// A TEXTURE or STORAGE field is a field of the entity's own component too, an image, which the frame graph is told the
+// pass reads — or, for STORAGE, writes — though no descriptor of the pass binds it.
 //
 // Any field not annotated is the entity's own: a field of the component named after the pipeline's node, shown in
 // the inspector and set from a script (`world.set(entity, "<pipeline>", "color", ...)`). It is zero on an entity
