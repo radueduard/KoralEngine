@@ -970,8 +970,8 @@ light from it (an `emission` above nothing), and its rays are lit by that.
 | `eDrawIndirect`, `eDrawIndexedIndirect`, `eDrawMeshTasksIndirect` | the draws a buffer holds | `indirect`, `indirectOffset`, `drawCount`, `stride` |
 | `eDrawIndirectCount`, `eDrawIndexedIndirectCount` | as many of them as another buffer says | those, and `count`, `countOffset` (`drawCount` is the most it runs) |
 
-An indirect or count buffer needs `eIndirect` among its usage, and is a use of the pass: the pass that
-writes it runs first.
+An indirect or count buffer needs `eIndirect` among its usage (a Buffer node's is made with it, wired so), and is a
+use of the pass: the pass that writes it runs first.
 
 ### Many meshes in one indirect draw
 
@@ -1213,7 +1213,8 @@ is; then the passes left out, skipped or culled, and why; and the memory the fra
 `runtime.Watch(id)` copies what a node makes — its image or its buffer — out each frame from then on, and
 `runtime.Watched(id)` is what it held a frame or two ago: a `Peek` with an image's format, size and texels, or a
 buffer's bytes, and for a ShaderBuffer its fields by name and offset. `TexelLayoutOf(format)` says how a format's
-texels are laid out. An image needs `eTransferSrc` among its usage, and so does a Buffer node's buffer; when one
+texels are laid out. An image needs `eTransferSrc` among its usage, and so does a buffer (an Image or a Buffer node's
+always has it); when one
 cannot be looked at, `WatchProblem(id)` says why. It costs a copy a frame, so `Unwatch` when done. The copying is
 two nodes added to the graph that runs and to nothing that is saved.
 
@@ -1320,6 +1321,14 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   stays so. Nothing else reaches a Buffer node's memory from the CPU: what is looked at, and what a WriteBack reads, is
   copied out on the GPU. A `type` given is the one it is made with. (Forward-plus's buffers were `eDynamic` before:
   its lights' clusters, an atomic a group over the bus, took 2.9 ms a frame; on the device, 0.02 ms.)
+- An Image or a Buffer node is made for what uses it: its usage is what each node it is wired to uses it as — an
+  attachment of a Framebuffer, a parameter a shader samples or writes, a Clear's, a copy's or a blit's source or
+  destination, an indirect draw's commands, an entity's picture — and `eTransferSrc`, so that it can always be looked
+  at. Its `usage` adds to that, and need not be given: a new node has none, and the inspector shows the rest under it
+  (`Runtime::UsageOf`). What a node is found to use it as when it is built, it is made again with at once, in the
+  same build, and what is wired to it after it; what an entity is found to use it as, the frame after. So a graph that
+  gives no usage builds its images and buffers twice the first time, and again — losing what they held — when what
+  uses one changes what it uses it as. A Buffer shared from another runtime's is that one's, as it was made there.
 - A cycle between passes is left to the frame graph. A resource as it was before this frame's writers is a Keep's
   copy of it (see [State kept from step to step](#state-kept-from-step-to-step)).
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

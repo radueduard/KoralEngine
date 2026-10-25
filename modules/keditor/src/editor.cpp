@@ -7366,10 +7366,23 @@ class $NAME : ResourceScript() {
                         }
                     return Choice(std::move(ids), value, set, ids.empty() ? "no node it can be" : "a node");
                 }
+                if (port.name == "usage" && (node.type == "Image" || node.type == "Buffer") && port.builder && port.builder->kind == kb::Kind::eFlags) {
+                    // What is ticked is what it has besides what uses it: that, it is made for whether ticked or not.
+                    std::set<std::string> ticked;
+                    if (const auto* items = value.Items()) for (const auto& item : *items) if (item.String()) ticked.insert(*item.String());
+                    std::string besides;
+                    for (const auto& made : Doc().Runtime().UsageOf(node.id))
+                        if (!ticked.contains(made)) besides += (besides.empty() ? "" : ", ") + made;
+                    auto ticks = TypeEditor(*port.builder, value, set, key);
+                    if (besides.empty()) return ticks;
+                    return kui::Column({ std::move(ticks), kgui::Muted("and, for what uses it: " + besides) },
+                                       kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(4.f));
+                }
                 if (port.name == "format" && node.type == "Image" && port.builder && port.builder->enumeration) {
                     // The formats an image of its use can have: one drawn into as depth, the depth formats; one drawn
                     // into or written by a shader, none that is depth or packed.
                     std::set<std::string> uses;
+                    for (auto& made : Doc().Runtime().UsageOf(node.id)) uses.insert(std::move(made));
                     if (const auto usage = node.inputs.find("usage"); usage != node.inputs.end()) {
                         if (const auto* items = usage->second.value.Items()) { for (const auto& item : *items) if (item.String()) uses.insert(*item.String()); }
                         else if (usage->second.value.String()) uses.insert(*usage->second.value.String());

@@ -247,8 +247,8 @@ namespace kgraph
         bool Essential(const std::string_view type, const std::string_view input)
         {
             static const std::map<std::string_view, std::set<std::string_view>> essential {
-                { "Buffer", { "instanceCount", "usage" } },
-                { "Image", { "format", "extent.x", "extent.y", "usage" } },
+                { "Buffer", { "instanceCount" } },
+                { "Image", { "format", "extent.x", "extent.y" } },
                 { "ImageView", { "image" } },
                 { "BufferView", { "buffer" } },
                 { "Sampler", {} },
@@ -273,10 +273,10 @@ namespace kgraph
             static const std::map<std::string_view, std::map<std::string_view, Value>> initial {
                 { "Image", {
                     { "format", "eRGBA8_UNORM" }, { "extent.x", 512 }, { "extent.y", 512 }, { "extent.z", 1 }, { "type", "e2D" },
-                    { "usage", L { "eSampled", "eTransferSrc", "eTransferDst" } }, { "mipLevels", 1 }, { "arrayLayers", 1 }, { "sampleCount", "e1" },
+                    { "mipLevels", 1 }, { "arrayLayers", 1 }, { "sampleCount", "e1" },
                     { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
                 { "Buffer", {
-                    { "instanceCount", 256 }, { "usage", L { "eStorage" } }, { "type", "eDeviceLocal" }, { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
+                    { "instanceCount", 256 }, { "type", "eDeviceLocal" }, { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
                 { "ImageView", {
                     { "viewType", "e2D" }, { "baseMipLevel", 0 }, { "mipLevelCount", 1 }, { "baseArrayLayer", 0 }, { "arrayLayerCount", 1 },
                     { "componentMapping", L { "eIdentity", "eIdentity", "eIdentity", "eIdentity" } } } },

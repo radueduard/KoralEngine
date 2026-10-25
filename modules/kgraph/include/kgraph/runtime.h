@@ -323,7 +323,8 @@ namespace kgraph
 
         /**
          * @brief From now on, copies what node @p id makes — its image or its buffer — out each frame, to be read
-         *        with Watched. An image needs eTransferSrc among its usage, and so does a Buffer node's buffer.
+         *        with Watched. An image needs eTransferSrc among its usage, and so does a Buffer node's buffer — which
+         *        an Image or a Buffer node's always has.
          *        It costs a copy a frame while it is watched: Unwatch when done.
          */
         void Watch(std::string_view id);
@@ -365,6 +366,11 @@ namespace kgraph
          *        and made again from then on as memory the CPU writes into (eDynamic). Kept while the runtime is.
          */
         void ReachedFromTheCpu(std::string_view id);
+        /**
+         * @brief The usage an Image or a Buffer node's resource was made with, by name: what its `usage` gives, what
+         *        uses it uses it as, and eTransferSrc (to be looked at). Empty for any other node, or one not built.
+         */
+        [[nodiscard]] std::vector<std::string> UsageOf(std::string_view id) const;
         /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
         void SetSelected(kecs::Entity entity);
 

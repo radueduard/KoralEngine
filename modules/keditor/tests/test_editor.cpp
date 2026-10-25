@@ -448,9 +448,10 @@ TEST_F(EditorTest, AShaderNamedBeforeItsFileIsWrittenIsPickedUpWhenItIs) {
     EXPECT_EQ(Session().EntryPoints(module), std::vector<std::string> { "computeMain" });
 }
 
-// An image's usage is ticked a flag at a time, in a scene that is running, with nothing waiting between frames. Some
-// of what that passes through cannot be made, or cannot be used as it is wired: each is said on a node, and none of
-// it reaches the GPU. Ticking eTransferSrc alone on a new image once took the program down.
+// An image's usage is ticked a flag at a time, in a scene that is running, with nothing waiting between frames. What
+// it is ticked only adds to what it is made for: what uses it — a framebuffer drawing into it, a shader sampling it, an
+// entity's shader writing it — has it made for that, ticked or not. None of it reaches the GPU wrong. Ticking
+// eTransferSrc alone on a new image once took the program down.
 TEST_F(EditorTest, AnImagesUsageIsChangedUnderARunningSceneWithoutHarm) {
     scene::MakeProject("usage");
     Open();
@@ -462,43 +463,32 @@ TEST_F(EditorTest, AnImagesUsageIsChangedUnderARunningSceneWithoutHarm) {
     frames(4);
     const auto error = [&](const char* node) { const auto* status = Doc().Runtime().Status(node); return status->ok ? std::string() : status->error; };
 
-    // A new image, with nothing set but one flag ticked, then unticked.
+    // A new image, with nothing set but one flag ticked, then unticked: made either way, to be copied from.
     const auto fresh = Doc().AddNode("Image", 0, 0, "fresh");
     Doc().SetInput(fresh, "usage", Value::List { "eTransferSrc" });
     frames(3);
     EXPECT_TRUE(Doc().Runtime().Status(fresh)->ok) << error("fresh");
     Doc().SetInput(fresh, "usage", Value::List {});
     frames(3);
-    EXPECT_NE(error("fresh").find("at least one usage"), std::string::npos) << error("fresh");
+    EXPECT_TRUE(Doc().Runtime().Status(fresh)->ok) << error("fresh");
     Doc().SetInput(fresh, "extent.x", 16);
     Doc().SetInput(fresh, "extent.y", 16);
     Doc().SetInput(fresh, "usage", Value::List { "eTransferSrc" });
     frames(3);
     EXPECT_TRUE(Doc().Runtime().Status(fresh)->ok) << "a size across and down is a size: " << error("fresh");
 
-    // The image a framebuffer draws into, without the usage that takes: the framebuffer says so, and nothing draws.
+    // The image a framebuffer draws into, without the usage that takes ticked: it is made for it all the same.
     Doc().SetInput("canvas", "usage", Value::List { "eTransferSrc" });
     frames(3);
-    EXPECT_NE(error("target").find("eColorAttachment"), std::string::npos) << error("target");
-    EXPECT_FALSE(Doc().Runtime().Status("draw")->ok);
-    Doc().SetInput("canvas", "usage", Value::List { "eColorAttachment", "eTransferSrc" });
-    frames(3);
-    EXPECT_TRUE(Doc().Runtime().Ok()) << "ticked again, it all runs";
+    EXPECT_TRUE(Doc().Runtime().Ok()) << error("target");
+    EXPECT_TRUE(Doc().Runtime().Status("draw")->ok);
 
     // What a shader samples, and what it writes, likewise: on the pipeline, or on the entity that supplies it.
     Doc().SetInput("backdrop", "usage", Value::List { "eTransferDst" });
-    frames(3);
-    EXPECT_NE(error("stamp").find("eSampled"), std::string::npos) << error("stamp");
-    Doc().SetInput("backdrop", "usage", Value::List { "eSampled", "eTransferDst" });
     Doc().SetInput("image 0", "usage", Value::List { "eSampled", "eTransferSrc" });
     frames(3);
-    EXPECT_TRUE(Doc().Runtime().Ok());
-    const auto* report = Doc().Runtime().ReportOf("run");
-    EXPECT_EQ(report->skipped, 1u) << "the entity whose image cannot be written is passed by";
-    EXPECT_NE(report->why.find("eStorage"), std::string::npos) << report->why;
-    Doc().SetInput("image 0", "usage", Value::List { "eStorage", "eSampled", "eTransferSrc" });
-    frames(3);
-    EXPECT_EQ(Doc().Runtime().ReportOf("run")->skipped, 0u);
+    EXPECT_TRUE(Doc().Runtime().Ok()) << error("stamp");
+    EXPECT_EQ(Doc().Runtime().ReportOf("run")->skipped, 0u) << "the entity's image is made to be written: " << Doc().Runtime().ReportOf("run")->why;
 
     // None of it was the GPU's to complain of.
     for (const auto& record : kor::log::HistorySince(logged))
@@ -562,7 +552,7 @@ TEST_F(EditorTest, ANewNodeStartsAsSomethingThatWorksAndGivesWhatItIsMadeOf) {
     const auto& inputs = Doc().Graph().Find(image)->inputs;
     EXPECT_EQ(inputs.at("format").value, kgraph::Value("eRGBA8_UNORM"));
     EXPECT_EQ(inputs.at("extent.x").value, kgraph::Value(512));
-    EXPECT_EQ(inputs.at("usage").value, kgraph::Value(kgraph::Value::List { "eSampled", "eTransferSrc", "eTransferDst" }));
+    EXPECT_FALSE(inputs.contains("usage")) << "it is made for what uses it";
     EXPECT_FALSE(inputs.contains("mipLevels")) << "what it can do without is not set for it";
     EXPECT_TRUE(Shows("512"));
     EXPECT_TRUE(Shows("eRGBA8_UNORM"));

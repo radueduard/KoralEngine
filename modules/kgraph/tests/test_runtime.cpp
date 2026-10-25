@@ -824,7 +824,7 @@ TEST_F(RuntimeTest, InputsStartAsSomethingThatWorks) {
     };
     EXPECT_EQ(initial("Image", "format"), Value("eRGBA8_UNORM"));
     EXPECT_EQ(initial("Image", "extent.x"), Value(512));
-    EXPECT_EQ(initial("Image", "usage"), Value(Value::List { "eSampled", "eTransferSrc", "eTransferDst" }));
+    EXPECT_TRUE(initial("Image", "usage").IsNull()) << "it is made for what uses it";
     EXPECT_EQ(initial("Image", "mipLevels"), Value(1));
     EXPECT_EQ(initial("Sampler", "minFilter"), Value("eLinear"));
     EXPECT_EQ(initial("Clear", "color"), Value(Value::List { 0, 0, 0, 1 }));
@@ -886,7 +886,38 @@ TEST_F(RuntimeTest, ImagesAndBuffersAreCopiedAndMipsFilled) {
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("copy")->error.find("a Blit scales"), std::string::npos) << runtime.Status("copy")->error;
     EXPECT_NE(runtime.Status("mips")->error.find("one mip level"), std::string::npos) << runtime.Status("mips")->error;
-    EXPECT_NE(runtime.Status("copy bytes")->error.find("eTransferDst"), std::string::npos) << runtime.Status("copy bytes")->error;
+    EXPECT_TRUE(runtime.Status("copy bytes")->ok) << "a buffer given another usage is made for being copied to besides: " << runtime.Status("copy bytes")->error;
+}
+
+// An Image given no usage is made for what uses it: cleared, computed into, and copied from to be shown, here — and
+// not sampled, which nothing does. What it is no longer used as, it is made again without; what it is given, it has too.
+TEST_F(RuntimeTest, AnImageGivenNoUsageIsMadeForWhatUsesIt) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Load(FillGraph);
+    graph.Find("target")->inputs.erase("usage");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const auto usage = [&] {
+        runtime.Watch("target");
+        std::optional<kgraph::Peek> peek;
+        for (int i = 0; i < 8 && !(peek = runtime.Watched("target")); ++i) Frame();
+        return peek ? peek->usage : std::vector<std::string> {};
+    };
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eTransferDst", "eStorage" }));
+    EXPECT_NEAR(scene->Pixel(13, 20).x, 128, 1) << "cleared, then halved by the shader";
+
+    // Cleared no more: it is not made to be copied into.
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "clear"; });
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eStorage" }));
+
+    // Given a usage, it has that besides.
+    graph.Find("target")->Set("usage", kgraph::Value::List { "eSampled" });
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eSampled", "eStorage" }));
 }
 
 // A setup page's passes record once, on the frame after they are built, and again only when they are built again:
@@ -1166,37 +1197,6 @@ TEST_F(RuntimeTest, AnIdleDispatchRecordsNothing) {
     EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 2) << "halved on the two frames with a step";
 }
 
-// A mesh's buffers, as buffers: a compute shader can read its positions and its indices — a cube's, here, copied out.
-TEST_F(RuntimeTest, AMeshsBuffersAreBuffersAShaderCanRead) {
-    auto& runtime = *scene->runtime;
-    using kgraph::Value;
-    kgraph::Graph graph;
-    graph.Add("cube", "Primitive").Set("shape", "eCube");
-    graph.Add("parts", "MeshBuffers").Wire("mesh", "cube");
-    graph.Add("copy", "Buffer").Set("instanceCount", 4096).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" });
-    graph.Add("out", "CopyBuffer").Wire("source", "parts", "vertices").Wire("destination", "copy");
-    runtime.Set(graph);
-    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
-    EXPECT_EQ(runtime.ResourceOf("parts", "vertices")->kind, "Buffer");
-    EXPECT_EQ(runtime.ResourceOf("parts", "indices")->kind, "Buffer");
-    EXPECT_EQ(runtime.ValueOf("parts", "vertexCount"), Value(24));
-    EXPECT_EQ(runtime.ValueOf("parts", "indexCount"), Value(36));
-    EXPECT_EQ(runtime.ValueOf("parts", "stride"), Value(48)) << "position, normal, a tangent of four and a UV";
-    EXPECT_EQ(runtime.ValueOf("parts", "position"), Value(0));
-    runtime.Watch("copy");
-    for (int i = 0; i < 4; ++i) Frame();
-    const auto peek = runtime.Watched("copy");
-    ASSERT_TRUE(peek && peek->bytes.size() >= 12);
-    float first[3];
-    std::memcpy(first, peek->bytes.data(), sizeof first);
-    const auto cube = kgraph::ShapeData("cube");
-    for (int axis = 0; axis < 3; ++axis) EXPECT_FLOAT_EQ(first[axis], cube->vertices[0].position[axis]) << axis;
-
-    graph.Find("parts")->Wire("mesh", "copy");
-    runtime.Set(graph);
-    EXPECT_NE(runtime.Status("parts")->error.find("needs a mesh"), std::string::npos) << runtime.Status("parts")->error;
-}
-
 // A pass nothing that runs reads rests by itself: what it makes is left as it was, and it runs again once a pass that
 // runs, or a watch, reads it. Here what is halved is read only by a copy that is idle; looked at, or the copy no longer
 // idle, it is halved again.
@@ -1236,6 +1236,37 @@ TEST_F(RuntimeTest, APassWhoseEveryReaderRestsRestsToo) {
     runtime.Set(graph);
     for (int i = 0; i < 4; ++i) Frame();
     EXPECT_FALSE(resting("halve")) << "the copy reads it again";
+}
+
+// A mesh's buffers, as buffers: a compute shader can read its positions and its indices — a cube's, here, copied out.
+TEST_F(RuntimeTest, AMeshsBuffersAreBuffersAShaderCanRead) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("cube", "Primitive").Set("shape", "eCube");
+    graph.Add("parts", "MeshBuffers").Wire("mesh", "cube");
+    graph.Add("copy", "Buffer").Set("instanceCount", 4096).Set("usage", Value::List { "eStorage", "eTransferDst", "eTransferSrc" });
+    graph.Add("out", "CopyBuffer").Wire("source", "parts", "vertices").Wire("destination", "copy");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ResourceOf("parts", "vertices")->kind, "Buffer");
+    EXPECT_EQ(runtime.ResourceOf("parts", "indices")->kind, "Buffer");
+    EXPECT_EQ(runtime.ValueOf("parts", "vertexCount"), Value(24));
+    EXPECT_EQ(runtime.ValueOf("parts", "indexCount"), Value(36));
+    EXPECT_EQ(runtime.ValueOf("parts", "stride"), Value(48)) << "position, normal, a tangent of four and a UV";
+    EXPECT_EQ(runtime.ValueOf("parts", "position"), Value(0));
+    runtime.Watch("copy");
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto peek = runtime.Watched("copy");
+    ASSERT_TRUE(peek && peek->bytes.size() >= 12);
+    float first[3];
+    std::memcpy(first, peek->bytes.data(), sizeof first);
+    const auto cube = kgraph::ShapeData("cube");
+    for (int axis = 0; axis < 3; ++axis) EXPECT_FLOAT_EQ(first[axis], cube->vertices[0].position[axis]) << axis;
+
+    graph.Find("parts")->Wire("mesh", "copy");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("parts")->error.find("needs a mesh"), std::string::npos) << runtime.Status("parts")->error;
 }
 
 namespace {
