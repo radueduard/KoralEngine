@@ -7,7 +7,7 @@ target_compile_options(kgraph PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -We
 target_compile_options(kgraph PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)   # runtime.cpp has more sections than a COFF object holds by default
 
 if(KORAL_ENGINE_BUILD_TESTS)
-    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/test_draw.cpp tests/test_buffers.cpp tests/test_builder.cpp tests/test_flow.cpp tests/test_gpu_physics.cpp tests/support.cpp)
+    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/test_draw.cpp tests/test_buffers.cpp tests/test_builder.cpp tests/test_flow.cpp tests/test_gpu_physics.cpp tests/test_scale.cpp tests/support.cpp)
     target_link_libraries(kgraph_tests PRIVATE kgraph kscript kphysics GTest::gtest GTest::gtest_main)   # kphysics: what the GPU's spheres are compared with
     koral_engine_runtime(kgraph_tests)
     target_compile_definitions(kgraph_tests PRIVATE KGRAPH_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders"

@@ -52,7 +52,7 @@ namespace forwardplus
     /** The shaders a project of it needs, by file name. Its bloom, its tone mapping and the sun's shadows are the engine's (koral_bloom, koral_tonemap, koral_shadow). */
     inline constexpr const char* Shaders[] {
         "forwardCommon.slang", "lightCulling.slang", "depth.slang", "forward.slang", "sky.slang",
-        "ambientOcclusion.slang", "reflections.slang", "clusterHeat.slang", "cullCommon.slang", "occlusionCull.slang", "frustumCull.slang", "taa.slang",
+        "ambientOcclusion.slang", "reflections.slang", "clusterHeat.slang", "cullCommon.slang", "occlusionCull.slang", "taa.slang",
         "meshletTasks.slang", "rayTraced.slang", "emitters.slang",
     };
 
@@ -373,14 +373,15 @@ namespace forwardplus
         wire("drawn meshes", "in sight", "ranges", "ranges");
         wire("drawn", "in sight", "groups", "groups");
         const std::string cameraData = bring("camera data");
-        compute("frustum", "frustumCull", "frustum", nullptr, 1320, 640);
-        wire(bring("frame state"), "frustum", "param.frameState");
-        wire("drawn meshes", "frustum", "param.ranges", "rangeBuffer");
-        wire("in sight", "frustum", "param.sightCommands", "commands");
-        wire("in sight", "frustum", "param.inSight", "visible");
-        set("run frustum", "groups.x", MostInstances / 64);
-        for (const char* axis : { "groups.y", "groups.z" }) set("run frustum", axis, 1);
-        wire("in sight", "run frustum", "push.sightCommandCount", "drawCount");
+        // What is in sight: the engine's CullInSight, seen as the camera sees it without the jitter (`seen`). Its
+        // instances are the forward Draw's, wired below.
+        node("Function", "frustum", 1320, 640);
+        set("frustum", "function", "CullInSight");
+        wire("drawn meshes", "frustum", "ranges", "rangeBuffer");
+        wire("in sight", "frustum", "commands", "commands");
+        wire("in sight", "frustum", "drawCount", "drawCount");
+        wire("in sight", "frustum", "visible", "visible");
+        wire(bring("seen"), "frustum", "viewProjection");
         node("GraphicsPipeline", "prepass", 760, 220);
         shaders("prepass", "depth", "prepassVertex", "prepassFragment");
         wire("drawn meshes", "prepass", "vertex.layout", "layout");
@@ -468,7 +469,8 @@ namespace forwardplus
         set("draw forward", "push.culled", 1);
         // The pre-pass draws with the forward Draw's buffer of instances: an instance is the same number in both.
         wire("draw forward", "draw depth", "param.instances", "instances");
-        wire("draw forward", "frustum", "param.instances", "instances");
+        wire("draw forward", "frustum", "instances", "instances");
+        wire("draw forward", "frustum", "stride", "instanceStride");
 
         // Glass and decals — what has the tag Blended — after everything solid, over it by how opaque each is: the same
         // shaders in a pipeline that blends, writes no depth, and leaves the three pictures beside the first as they
@@ -1136,7 +1138,9 @@ namespace forwardplus
         for (const char* page : { "prepass", "culling", "forward", "occlusion", "sky", "reflections" }) idleWith(page, "not vertex");
         for (const char* page : { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" }) idleWith(page, "not meshlets");
         for (const char* page : { "ray scene", "ray trace" }) idleWith(page, "not rays");
-        for (const char* page : { "shadows", "lamp shadows" }) idleWith(page, "tracing rays");
+        // Rays find their own shadows, and are lit by what gives off light, not by the point lights: the shadow maps and the
+        // lights' clusters are for the other two, and rest while rays are traced.
+        for (const char* page : { "shadows", "lamp shadows", "lights" }) idleWith(page, "tracing rays");
         doc.SetGraph(std::move(graph));
     }
 
@@ -1294,8 +1298,8 @@ namespace forwardplus
      *             occlusion and what it mirrors each found by more rays
      *
      * `renderer` (on the frame page: 0, 1 or 2) says which: the Switches take its picture, its depth and where its
-     * surfaces are on to the rest, and the passes of the other two branches idle — as do the shadow maps' while rays
-     * are traced, which find their own shadows. False, with @p error, when a node could not be added, set or wired.
+     * surfaces are on to the rest, and the passes of the other two branches idle — as do the shadow maps and the lights' clusters while rays
+     * are traced, which find their own shadows and are lit by what gives off light. False, with @p error, when a node could not be added, set or wired.
      */
     inline bool AddBranches(keditor::Document& doc, std::string& error)
     {

@@ -561,6 +561,7 @@ compiles them with the project's own, so a script reads a light as it reads its 
 | `PointLight` | `color` (1, 0.85, 0.6), `intensity` (2), `range` (5). |
 | `SpotLight` | `color`, `intensity` (3), `range` (8), `innerAngle` (20), `outerAngle` (30, degrees, from the middle of the cone). |
 | `Sky` | `zenith`, `horizon`, `ground` (colours), `ambient` (0.35), `sunSize` (1.5, degrees). |
+| `Instancer` | `count` (100000), `extent` (100, 100), `seed` (1), `scale` (0.5, 1.5), `jitter` (1), `pointDistance` (60), `drawDistance` (100000), `color` (points'). Its entity's Mesh, that many times, made and drawn on the GPU: see [Many of one mesh, on the GPU](#many-of-one-mesh-on-the-gpu). |
 
 Where a camera or a light is, and which way it faces, is its entity's transform. Nothing in the graph knows any of
 them by name: a project's script of its own is read the same way, and a component edited in the package is a
@@ -625,7 +626,7 @@ seen — but what is in files, the default meshes and pictures and the meshes ma
 source's, so nothing is read or made twice. The editor's Game panel is one: the scene's camera, beside the
 editor's own view.
 
-These values are wired like any others: into Math and Vectors nodes (`Append`, `MatrixMultiply` and
+These values are wired like any others: into Math and Vectors nodes (`Append`, `Slice` — `count` numbers of a list from its `first` —, `MatrixMultiply` and
 `MatrixInverse` among them) and into a **DataBuffer**, whose `field[n].value` inputs are packed one after
 another as a shader's block lays them out (std140: a number in four bytes, a vector of three or four
 aligned to sixteen, so a `float3` followed by a `float` share one `float4`). `field[n].type` says what a
@@ -902,6 +903,14 @@ is true), they record nothing that frame — given a number, always or never; wi
 FixedStep's `steps` compared with 0, a count), on the frames it says. A Draw's `idle` is a number for each turn of its
 `cullIndex` (see [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame)).
 
+A pass nothing that runs reads rests by itself, with no `idle` of its own: when every pass that reads what it writes is
+resting that frame — idle, or resting so in its turn — it records nothing, and what it made is left as it was until one
+reads it again. Forward+'s shadows rest so while its rays are traced, however they are made: a Function's passes as
+much as a page's. Kept running are a pass that writes the screen, memory the CPU can read, something no other pass
+reads (what the graph is for: whoever runs it reads it), or nothing at all; a setup or fixed page's, whose state goes on
+from one run to the next; and what a watch copies, on the frames between its copies too. A Draw `whenChanged` rested so is not taken as drawn: it draws once read again. The frame's `leftOut` names
+each, "resting".
+
 A **MeshBuffers** gives a mesh's buffers as buffers, for a compute shader to read its triangles: `vertices` (the buffer
 its positions are in), `indices` (32 bits each), `stride` and `position` (where in a vertex its position is, in bytes),
 `vertexCount`, `indexCount`, and a model's mesh's `firstIndex` and `vertexOffset` within the buffers its model shares.
@@ -916,6 +925,18 @@ element's own (`param.<name>` wired from a ForEach), each gets its own count.
 
 A Dispatch can also read its group counts from a buffer a pass before it wrote: wire it to `indirect`
 (the buffer needs `eIndirect`), with `indirectOffset` for where in it.
+
+**One Dispatch of every entity.** Wired to a Filter's entities (`entities`), a Dispatch runs its `groups` once for each
+of them in one dispatch, one after another along z: an element is `SV_GroupID.z / groups.z`, in the Filter's order.
+What each is to the shader is its `[entity("PER_INSTANCE")]` buffer's, as a batched Draw's — where it is, its own fields,
+and the images it holds by their bindless indices: read, `[entity("TEXTURE")]`, or written, `[entity("STORAGE")]`
+(`kor_RWTexture2D[index]`). Every element runs as many groups as `groups` says, so where their images differ in size it
+is as many as the largest takes, and the shader looks at its own image's size. Nothing else of it can be each element's:
+one wired so is an error that says which. More elements than a dispatch counts along z (65,535, by its groups along z)
+are not run, and its report says so. Ten thousand entities, an image each: a Dispatch each costs the CPU about 14 ms a
+frame (readying 4.4, recording 9.6), one Dispatch of all of them 0.3 ms (Release,
+`ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`), and stamps the same images
+(`EntityTest.OneDispatchOfEveryEntityStampsWhatADispatchEachDoes`).
 
 **TraceRays** runs a ray tracing pipeline the same way: `size` (or `size.x/y/z`) rays, or as many as
 `cover` an image parameter. Wired to a Filter's entities (`entities`), its pipeline has a material as a Draw's has: a
@@ -949,8 +970,8 @@ light from it (an `emission` above nothing), and its rays are lit by that.
 | `eDrawIndirect`, `eDrawIndexedIndirect`, `eDrawMeshTasksIndirect` | the draws a buffer holds | `indirect`, `indirectOffset`, `drawCount`, `stride` |
 | `eDrawIndirectCount`, `eDrawIndexedIndirectCount` | as many of them as another buffer says | those, and `count`, `countOffset` (`drawCount` is the most it runs) |
 
-An indirect or count buffer needs `eIndirect` among its usage, and is a use of the pass: the pass that
-writes it runs first.
+An indirect or count buffer needs `eIndirect` among its usage (a Buffer node's is made with it, wired so), and is a
+use of the pass: the pass that writes it runs first.
 
 ### Many meshes in one indirect draw
 
@@ -982,6 +1003,14 @@ they show, and a buffer of commands saying how many of each to draw, from where.
   it added. Looked at (`Runtime::Watch`, the editor's *Look at what it holds*), its `out` is the commands, a line
   each — `indexCount`, `instanceCount`, `firstIndex`, `vertexOffset`, `firstInstance`: which meshes are batched, and
   how many of each.
+- **CullInSight**, one of the engine's functions, is that compute pass for what is in sight: a thread an instance
+  tests its mesh's box (the pack's `rangeBuffer`), placed by its matrix, against `viewProjection`, and counts what is in
+  sight into the eGPU commands and `visible`. `instances` is the Draw's buffer of instances (its `instances` output),
+  `stride` bytes an element (its `instanceStride`) with its `[entity("MATRIX")]` `matrixOffset` bytes in; how many there are it reads from
+  `visible`'s size, on the GPU. The Draw is wired its `commands` as `indirect` and `visible` as a `param.`, and its shader
+  finds its instance through that: `instances[visible[first + index]]`. A mesh whose box is not known is always drawn.
+  (`ScaleTest.CullInSightDrawsOnlyWhatIsSeen`: of sixteen cubes, the eight in the picture are drawn, and one moved in or
+  out is drawn or not the next frame.)
 
 ```json
 { "id": "meshes", "type": "Filter", "inputs": { "entities": { "$link": ["all", "out"] }, "with": ["Mesh", "lit"], "groupBy": "Mesh" } },
@@ -1012,7 +1041,8 @@ struct Instance {
 ```
 
 A field marked `MATRIX`, `NORMAL_MATRIX` (both `float4x4`), `POSITION` (`float3`) or `ID` (`uint`, one more than the
-entity's index) is where the entity is, or which. Any other — a number, a vector or a `float4x4` — is the entity's own:
+entity's index) is where the entity is, or which. One marked `TEXTURE` or `STORAGE` (`uint`) is an image the entity
+holds — a field of the component, an Image — by its bindless index for reading, or for writing; ~0 for none. Any other — a number, a vector or a `float4x4` — is the entity's own:
 a field of the pipeline's component, as its unwired `param.`s and `push.`s are, shown in the inspector and set from a
 script (`world.set(cube, "<pipeline>", "color", Vec3(1f, 0f, 0f))`). An entity without the component has zeros there.
 The component is not one of the Filter's `with`: the pipeline's vertex layout comes from the pack, which comes from the
@@ -1021,9 +1051,56 @@ A `param.` wired on the Draw is used as it is, and then nothing of the buffer is
 Draws that would write the same into their buffers share one, written once a frame: of the same Filter, an element
 laid out alike — field by field, where each is and what it is — and, when any field is the entity's own, the same
 pipeline's component. A shadow pass's turns share theirs; a pass whose element also has its entity's colour has its
-own. A Draw gives its buffer as `instances`, outgrown the buffer is made again for every Draw that shares it. It is
-written each frame whether the Draw draws or idles: another pass may read it while the Draw rests (Forward+'s meshlets
+own. A Draw gives its buffer as `instances`, and the bytes of an element of it as `instanceStride`; outgrown the buffer is made again for every Draw that shares it. It is
+kept up to date whether the Draw draws or idles: another pass may read it while the Draw rests (Forward+'s meshlets
 read the forward Draw's when the vertices are not drawn).
+
+**Only what changed is written.** The buffer is laid out once, whole, into every copy of it a frame in flight reads.
+From then on an element is laid out again only when another entity is in its place (the Filter's list changed), when
+its entity moved — by itself, by what it is under, or by being put under something else (`kecs::World::MovedAt`) —
+when its entity's own fields were written or it was given or rid of the pipeline's component (`ChangedTickOf`), or
+when a picture it names was made again. Each copy is then written only the elements laid out again since it was last
+written, in runs. A frame in which none of that happened looks at none of the elements, and a Draw `whenChanged`
+compares a version of the buffer rather than what is in it. What is looked at and laid out is spread over every core,
+but for what entities under another are placed by, which is worked out one at a time. A hundred thousand entities of
+one mesh, in two buffers (a pass and its prepass), cost the runtime about 0.04 ms a frame when none of them moves, 0.5 ms
+when a thousand do and 3.3 ms when all of them do (Release, `ScaleTest` in `test_scale.cpp`); it was 13 ms in every case
+before. Nothing but the runtime writes the buffer: what else wrote into it would stay until its elements change.
+
+#### Batched: a Draw of each element, as one
+
+A Draw whose `mesh` is each element's — a Filter's `Mesh.mesh`, or a ForEach's, or a ForEach of Mesh's `field.mesh` —
+draws once for each element. Given `batched`, it is written out before it runs as one indirect draw of all of them,
+with no node in the graph for it: `<draw>/batch`, a Filter of the same entities grouped by mesh (of a ForEach, a
+Filter of an Entities node, `<draw>/all`, with what the ForEach is of and its `with` and `without`); `<draw>/pack`, a
+MeshPack of their meshes; and `<draw>/commands`, an IndirectDraws of them, which the Draw draws `eDrawIndexedIndirect`.
+What each element is to the shader is then its `[entity("PER_INSTANCE")]` buffer's, filled in the batch's order:
+
+```json
+{ "id": "drawn", "type": "ForEach", "inputs": { "component": "lit", "with": ["Mesh"] } },
+{ "id": "draw", "type": "Draw", "inputs": { "pipeline": { "$link": ["lit", "out"] }, "mesh": { "$link": ["drawn", "Mesh.mesh"] }, "batched": true } }
+```
+
+A Draw that is wired a value of each element besides its mesh — a `push.model` from the element's `matrix`, straight
+or through Math — cannot be one draw: it draws one at a time, as it did, and its note says which inputs and why. So
+does one whose ForEach says `where`, `select`, `entityId` or `groupBy` (make it a Filter), and one whose `command` is
+another than eAuto or eDrawIndexed.
+
+**Given `cull`, a batch is culled on the GPU.** Its IndirectDraws is in eGPU, and CullInSight's passes are written out
+with it — `<draw>/cull size` and `<draw>/cull`, their pipelines and a buffer of groups — reading its buffer of
+instances (`instances`, `instanceStride`, `instanceMatrixOffset`, which a Draw gives) and seeing as `cull` does. The
+Draw is `compacted`: its shader reads, in place of the buffer it fills, another as big (`drawnInstances`) into which
+the cull copies each element in sight, one after another as they are drawn. So a shader that reads its instance at
+`SV_StartInstanceLocation + SV_InstanceID`, as any of a buffer of instances does, draws only what is in sight with no
+change to it (`ScaleTest.ABatchedDrawGivenCullIsCulledOnTheGpu`). A `cull` of several matrices one after another —
+a ShadowCascades' `matrices`, with `cullIndex` a Repeat's `index` — is the `cullIndex`th: sixteen numbers from sixteen
+times it, a **Slice** of them (`<draw>/sight`). Batched Draws of the same Filter's or ForEach's meshes — a cascade's
+turns — share the batch and the pack (the first's `<draw>/batch` and `<draw>/pack`), each with commands and a cull of its
+own (`ScaleTest.CascadesOfABatchedDrawAreEachCulledByTheirOwnMatrix`).
+
+One whose shader has no buffer of instances draws every element alike, and says so. Ten thousand entities of two
+meshes draw the same picture, pixel for pixel, either way; a draw each costs the CPU about 7.8 ms a frame (readying 3.1,
+recording 4.7), and batched 0.19 ms (Release, `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess`).
 
 The rest of a draw is the node's as well:
 
@@ -1052,6 +1129,54 @@ An element that can't be drawn is skipped and counted in `runtime.ReportOf(passI
 first one: a parameter with nothing in it, a resource of the wrong kind, a mesh that has not what the vertex
 shader reads (`its mesh has not what the vertex shader reads: ...`). The node itself stays ok. `ReportOf` is null
 for a Draw that draws once and drew.
+
+### Many of one mesh, on the GPU
+
+An entity each is right for thousands of things, and too much for millions: each is a name, a place in the hierarchy
+and its components on the CPU, a couple of hundred bytes before anything is drawn. Grass, stones, a crowd seen from
+afar are an **Instancer** instead (a component of the engine's package): one entity, its Mesh, and how many of it there
+are to be, which the GPU makes, culls and draws without a number of them ever being on the CPU. Three of the engine's
+functions do it, each made of the nodes any graph has (and shaders in `packages/koral/shaders`):
+
+- **Instances** (`count`, `seed`, `extent`, `scale`, `jitter`: an Entity of the Instancer's fields) makes them into
+  one buffer: a header of what they were made from, then a box round each cluster of 256, then the instances, 20
+  bytes each — where it is, its scale, and its rotation as a quaternion packed into 32 bits. 100 million are 2 GB, in a
+  storage buffer the device must let reach 4 GB. They are scattered over the square in tiles of 16 by 16, a cluster
+  each, so a cluster's box is small. A pass of one thread compares the header with what it is given each frame and
+  writes how many groups the making and the boxing run: none when they are the same. A frame in which nothing changed
+  runs three passes that do nothing; one in which a field changed makes them all again. `instances` and `count` out.
+- **CullInstances** (`instances`, `count`, `toClip` — the entity's matrix, then the view, then the lens — `height` in
+  pixels, `meshRadius`, `pointDistance`, `drawDistance`, the mesh's `indexCount`, `firstIndex` and `vertexOffset`, a
+  MeshBuffers', and `capacity`, `pointCapacity`) works out what is seen, every frame, on the GPU. A thread a cluster
+  leaves out one whose box is out of sight or past `drawDistance`. One wholly past `pointDistance` that spans fewer
+  pixels than it has instances is as many points as it spans, of instances spread over it: there are never many more
+  points than pixels, however many instances. The rest are listed, and a thread each of their instances leaves out
+  those out of sight, and keeps the rest as their mesh (nearer than `pointDistance`) or a point, counted a wave at a
+  time. Distances are along the view, in the world's units. It gives `commands` (one indexed indirect draw, its
+  instance count the GPU's), `visible` (which instance each drawn one is), and `points`, `counters` and `groups` for
+  SplatPoints. What does not fit `capacity` or `pointCapacity` is left out, and counted in `counters`' fourth.
+- **SplatPoints** (those, `target` with eStorage, `depth` eSampled, `color`, `width`, `height`, `reversedZ`) draws
+  the points without triangles: each a square of pixels as wide as its instance looks (up to four), written into a
+  buffer of the picture's pixels with an atomic max of how near it is and its shade, then laid over `target` wherever
+  it is nearer than `depth` says the scene is.
+
+The near ones are the project's own Draw: its pipeline, the entity's mesh, `eDrawIndexedIndirect` of `commands` with
+`drawCount` 1, and a vertex shader that finds its instance through `visible`:
+
+```slang
+import koral_instances;
+ByteAddressBuffer instances;            // Instances' `instances`
+StructuredBuffer<uint> visible;         // CullInstances' `visible`
+...
+const float4x4 model = instanceMatrix(instances, visible[instanceIndex]);   // then the entity's matrix, as toClip has it
+```
+
+The CPU's frame is the same whatever the count: a hundred million cubes seen across their square, the near ones as
+cubes and the rest as points, cost the runtime 0.08 ms a frame, moved or not, and the GPU 0.3 ms (Release, an RTX 5080
+laptop GPU, a picture of 512 by 512: `ScaleTest.AnInstancersMillionsCostTheCpuNothing`, `KGRAPH_INSTANCES=100000000`).
+Making them takes the first frames about a second. What is not done yet: an instance's own colour or picture, more than
+one mesh between the near one and a point, occlusion, and instances placed other than as Instances scatters them — for
+which the function is opened and its `generate` given another shader.
 
 ### When a pipeline changes
 
@@ -1088,7 +1213,8 @@ is; then the passes left out, skipped or culled, and why; and the memory the fra
 `runtime.Watch(id)` copies what a node makes — its image or its buffer — out each frame from then on, and
 `runtime.Watched(id)` is what it held a frame or two ago: a `Peek` with an image's format, size and texels, or a
 buffer's bytes, and for a ShaderBuffer its fields by name and offset. `TexelLayoutOf(format)` says how a format's
-texels are laid out. An image needs `eTransferSrc` among its usage, and so does a Buffer node's buffer; when one
+texels are laid out. An image needs `eTransferSrc` among its usage, and so does a buffer (an Image or a Buffer node's
+always has it); when one
 cannot be looked at, `WatchProblem(id)` says why. It costs a copy a frame, so `Unwatch` when done. The copying is
 two nodes added to the graph that runs and to nothing that is saved.
 
@@ -1189,9 +1315,20 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A script's component is read from its source as far as its fields go: numbers, true or false, and vectors,
   quaternions and matrices of numbers start as written; anything else starts at zero, and the document's notes say so.
 - A BufferBuilder's layout is numbers, vectors and matrices, and fixed arrays of them: no struct in a struct.
-- A Buffer node with no `type` is the framework's default, `eDynamic`: memory the CPU writes and the GPU reads over the
-  bus — right for one a script writes every frame, many times slower for what only the GPU works on. That one says
-  `eDeviceLocal`, as every Buffer of the engine's functions does.
+- A Buffer node with no `type` has the one that suits what reaches it: `eDeviceLocal` while only passes do — the GPU's
+  own memory, where its reads, writes and atomics are fastest — and `eDynamic`, memory the CPU writes into, once the CPU
+  is handed it (a script, through `kengine_node_resource`: `Runtime::ReachedFromTheCpu`), when it is made again so and
+  stays so. Nothing else reaches a Buffer node's memory from the CPU: what is looked at, and what a WriteBack reads, is
+  copied out on the GPU. A `type` given is the one it is made with. (Forward-plus's buffers were `eDynamic` before:
+  its lights' clusters, an atomic a group over the bus, took 2.9 ms a frame; on the device, 0.02 ms.)
+- An Image or a Buffer node is made for what uses it: its usage is what each node it is wired to uses it as — an
+  attachment of a Framebuffer, a parameter a shader samples or writes, a Clear's, a copy's or a blit's source or
+  destination, an indirect draw's commands, an entity's picture — and `eTransferSrc`, so that it can always be looked
+  at. Its `usage` adds to that, and need not be given: a new node has none, and the inspector shows the rest under it
+  (`Runtime::UsageOf`). What a node is found to use it as when it is built, it is made again with at once, in the
+  same build, and what is wired to it after it; what an entity is found to use it as, the frame after. So a graph that
+  gives no usage builds its images and buffers twice the first time, and again — losing what they held — when what
+  uses one changes what it uses it as. A Buffer shared from another runtime's is that one's, as it was made there.
 - A cycle between passes is left to the frame graph. A resource as it was before this frame's writers is a Keep's
   copy of it (see [State kept from step to step](#state-kept-from-step-to-step)).
 - Tags are matched by component name. A C++ type in a namespace is named with it unless `kecs::Name` is

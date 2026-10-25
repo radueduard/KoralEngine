@@ -419,7 +419,7 @@ namespace keditor
          * @brief Says that a script was handed the resource node @p node makes — to write into, as a graphics script
          *        does. Another view of the graph (the editor's Game panel) shares those buffers rather than having its own.
          */
-        void ScriptUses(std::string_view node) { _scriptResources.emplace(node); }
+        void ScriptUses(std::string_view node) { _scriptResources.emplace(node); _runtime->ReachedFromTheCpu(node); }
         [[nodiscard]] const std::set<std::string>& ScriptResources() const { return _scriptResources; }
         /** @brief Where files named without their whole path are: a project's `assets` folder. Load and Save say it from the scene's own place. */
         void SetAssetDirectory(const std::filesystem::path& directory) { _runtime->SetAssetDirectory(directory); }

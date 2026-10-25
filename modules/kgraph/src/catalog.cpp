@@ -193,6 +193,7 @@ namespace kgraph
                 const Port::Condition counted { "command", { V("eDrawIndirectCount"), V("eDrawIndexedIndirectCount") }, "for draws counted by a buffer" };
                 const Port::Condition depth { "depthTest", { V(true) }, "while its depth test is on" };
                 const Port::Condition stencil { "stencilTest", { V(true) }, "while its stencil test is on" };
+                for (const char* name : { "batched", "compacted" }) set(name, "What is drawn");
                 for (const char* name : { "vertexCount", "firstVertex", "instances", "firstInstance" }) set(name, "What is drawn", drawn);
                 set("vertexOffset", "What is drawn", indexed);
                 set("tasks", "What is drawn", tasks);
@@ -213,6 +214,7 @@ namespace kgraph
             if (type.name == "Dispatch") {
                 for (const char* name : { "groups", "cover", "groupSize" }) set(name, "How many");
                 for (const char* name : { "indirect", "indirectOffset" }) set(name, "Indirect");
+                set("entities", "How many");
                 return;
             }
             if (type.name == "Sampler") {
@@ -245,8 +247,8 @@ namespace kgraph
         bool Essential(const std::string_view type, const std::string_view input)
         {
             static const std::map<std::string_view, std::set<std::string_view>> essential {
-                { "Buffer", { "instanceCount", "usage" } },
-                { "Image", { "format", "extent.x", "extent.y", "usage" } },
+                { "Buffer", { "instanceCount" } },
+                { "Image", { "format", "extent.x", "extent.y" } },
                 { "ImageView", { "image" } },
                 { "BufferView", { "buffer" } },
                 { "Sampler", {} },
@@ -271,10 +273,10 @@ namespace kgraph
             static const std::map<std::string_view, std::map<std::string_view, Value>> initial {
                 { "Image", {
                     { "format", "eRGBA8_UNORM" }, { "extent.x", 512 }, { "extent.y", 512 }, { "extent.z", 1 }, { "type", "e2D" },
-                    { "usage", L { "eSampled", "eTransferSrc", "eTransferDst" } }, { "mipLevels", 1 }, { "arrayLayers", 1 }, { "sampleCount", "e1" },
+                    { "mipLevels", 1 }, { "arrayLayers", 1 }, { "sampleCount", "e1" },
                     { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
                 { "Buffer", {
-                    { "instanceCount", 256 }, { "usage", L { "eStorage" } }, { "type", "eDeviceLocal" }, { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
+                    { "instanceCount", 256 }, { "type", "eDeviceLocal" }, { "isPerFrame", false }, { "sharedAcrossQueues", false } } },
                 { "ImageView", {
                     { "viewType", "e2D" }, { "baseMipLevel", 0 }, { "mipLevelCount", 1 }, { "baseArrayLayer", 0 }, { "arrayLayerCount", 1 },
                     { "componentMapping", L { "eIdentity", "eIdentity", "eIdentity", "eIdentity" } } } },
@@ -315,7 +317,7 @@ namespace kgraph
                 { "Atan2", { { "y", 0 }, { "x", 1 } } },
                 { "Length", { { "a", L { 1, 0, 0 } } } }, { "Normalize", { { "a", L { 1, 0, 0 } } } }, { "Dot", { { "a", L { 1, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
                 { "Cross", { { "a", L { 1, 0, 0 } }, { "b", L { 0, 1, 0 } } } }, { "Distance", { { "a", L { 0, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
-                { "Linear", { { "a", L { 1, 1, 1 } } } }, { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } },
+                { "Linear", { { "a", L { 1, 1, 1 } } } }, { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } }, { "Slice", { { "of", L { 0, 0, 0 } }, { "first", 0 }, { "count", 1 } } },
                 { "Less", { { "a", 0 }, { "b", 0 } } }, { "LessOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Greater", { { "a", 0 }, { "b", 0 } } },
                 { "GreaterOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Equal", { { "a", 0 }, { "b", 0 } } }, { "NotEqual", { { "a", 0 }, { "b", 0 } } },
                 { "Not", { { "a", false } } }, { "And", { { "a", false }, { "b", false } } }, { "Or", { { "a", false }, { "b", false } } }, { "Xor", { { "a", false }, { "b", false } } },
@@ -384,7 +386,7 @@ namespace kgraph
                 { "Repeat", "loop for each times iterate count mip chain" }, { "Previous", "loop last turn before feedback chain" },
                 { "Element", "loop index pick one turn result" }, { "Note", "comment text label remark annotate" }, { "Switch", "branch choose select if either option toggle" }, { "DebugView", "debug view visualize visualise buffer inspect scene view editor heat" },
                 { "ShaderBuffer", "ssbo struct storage structured uniform constant buffer map fields entities array lights" },
-                { "Append", "join concatenate vec4 combine" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
+                { "Append", "join concatenate vec4 combine" }, { "Slice", "part range sub list some numbers matrix of several cascade" }, { "MatrixMultiply", "mat4 transform compose" }, { "MatrixInverse", "mat4 invert" }, { "Pick", "select click id entity mouse read back" },
                 { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
                 { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
                 { "CopyImageToBuffer", "download read back texels image buffer transfer" },
@@ -445,7 +447,7 @@ namespace kgraph
                 { "Float", "pin" }, { "Double", "pin" }, { "Int", "tag" }, { "UInt", "tag" },
                 { "Vec2", "north_east" }, { "Vec3", "north_east" }, { "Vec4", "north_east" }, { "IVec2", "grid_4x4" }, { "IVec3", "grid_4x4" }, { "IVec4", "grid_4x4" },
                 { "UVec2", "grid_4x4" }, { "UVec3", "grid_4x4" }, { "UVec4", "grid_4x4" },
-                { "Constant", "tag" }, { "Component", "looks_one" }, { "Split", "call_split" }, { "Append", "playlist_add" },
+                { "Constant", "tag" }, { "Component", "looks_one" }, { "Split", "call_split" }, { "Append", "playlist_add" }, { "Slice", "content_cut" },
                 { "ImageExtent", "aspect_ratio" }, { "Linear", "gradient" }, { "Select", "alt_route" },
                 // Cameras.
                 { "View", "visibility" }, { "Perspective", "videocam" }, { "Orthographic", "crop_square" }, { "Frustum", "change_history" },
@@ -582,6 +584,7 @@ namespace kgraph
             value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
             value("Append", { Any("a"), Any("b") }, "vector", "The numbers of a, then those of b: a colour and its alpha as one vector of four.");
+            value("Slice", { Any("of"), Number("first"), Number("count") }, "vector", "count of the numbers of a list, from the first-th (0 the first): of a ShadowCascades' matrices, sixteen from 16 times a cascade's number is its matrix.");
             value("MatrixMultiply", { Any("a"), Any("b") }, "matrix", "a times b, as matrices of four by four: what b does, then what a does.");
             value("MatrixInverse", { Any("a") }, "matrix", "What undoes a matrix of four by four.");
             // More of what is worked out of numbers, a component at a time.
@@ -1015,7 +1018,8 @@ namespace kgraph
                                       { ResourcePort("structure", "AccelerationStructure", "The top-level structure: every instance, where its entity is. Made again when one moves "
                                                      "— what is wired to it is built again then; a shader that reads it by its bindless index from `scene` is not."),
                                         ResourcePort("scene", "Buffer", "16 bytes: uint the structure's bindless index (kor::accelerationStructure), uint how many instances; two left over. "
-                                                     "Written again whenever the structure is made again."),
+                                                     "Written again whenever the structure is made again. The index is ~0u while there is nothing to trace "
+                                                     "through — no entity yet, or none left: a shader looks before it traces."),
                                         ResourcePort("meshOf", "Buffer", "A uint an instance, by its row (InstanceID()): which mesh of the pack it is — its range, its meshlets."),
                                         { "count", PortKind::eValue, "number", false, "How many instances there are.", nullptr } },
                                       "The entities of a Filter as a scene rays are traced through: a bottom-level structure for each mesh of their pack, and a top-level one placing "
@@ -1208,6 +1212,9 @@ namespace kgraph
                                 optional(Number("groupSize.x", "How much of the covered image one group works on: the pipeline's numThreads, when not given.")), optional(Number("groupSize.y")), optional(Number("groupSize.z")),
                                 optional(ResourcePort("indirect", "Buffer", "A buffer that says how many groups, three numbers of 32 bits, written by a pass before this one: instead of groups. It needs eIndirect among its usage.")),
                                 optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")),
+                                optional({ "entities", PortKind::eValue, "entities", false, "A Filter's entities: its groups run once for each of them, one after another along z, in one dispatch — "
+                                           "element SV_GroupID.z / groups.z. What each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's, in the Filter's order: where it is, "
+                                           "its own fields, and the images it holds — read (TEXTURE) and written (STORAGE) — by their bindless indices.", nullptr }),
                                 optional({ "push", PortKind::eValue, "bundle", false, "A Bundle that gives each `push.<name>` of the same name the pipeline leaves it: a ForEach's element gives a draw its `matrix`, its `entityId`. One given by itself takes its own.", nullptr }) }, {},
                               "Runs a compute pipeline. What its pipeline leaves unwired is given here, `param.<name>` and `push.<name>`: wired from a ForEach, it "
                               "runs once for each of its elements, and otherwise once.", nullptr });
@@ -1226,6 +1233,12 @@ namespace kgraph
                     ResourcePort("pipeline", "GraphicsPipeline"),
                     optional(ResourcePort("framebuffer", "Framebuffer", "What it draws into: the pipeline's own, when not wired.")),
                     optional(ResourcePort("mesh", "Mesh", "What is drawn: a ForEach of Mesh's `field.mesh`, a mesh for each element — or one mesh, a Primitive's. None, for a vertex shader that makes its own vertices.")),
+                    optional(Bool("batched", "True to draw every element of the Filter or ForEach its mesh is wired from in one indirect draw, rather than a draw each: their meshes packed "
+                                             "as one, grouped by mesh. What each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's, not push constants; one that is wired a "
+                                             "value of each element otherwise is drawn one at a time, and its note says why. Given `cull` too, what is out of its sight is "
+                                             "left out on the GPU.")),
+                    optional(Bool("compacted", "True to have its shader read its buffer of instances as a pass before it leaves it — what is in sight, one after another as "
+                                               "it is drawn (CullInSight's `drawn`) — rather than as it is filled: given as `drawnInstances`. A batched Draw given `cull` is.")),
                     optional(Choice("command", { "eAuto", "eDraw", "eDrawIndexed", "eDrawMeshTasks", "eDrawIndirect", "eDrawIndexedIndirect", "eDrawIndirectCount",
                                                  "eDrawIndexedIndirectCount", "eDrawMeshTasksIndirect" },
                                     "Which draw. eAuto: indexed when the mesh has indices, mesh tasks when the pipeline's stages is eMesh, and plain vertices otherwise. The Indirect ones read what to draw from the buffer wired to 'indirect'.")),
@@ -1283,7 +1296,7 @@ namespace kgraph
             // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
             static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance", "Linear", "Reflect", "Refract", "Project" };
             static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };
-            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Constant", "Component", "Split", "ImageExtent", "VertexLayout", "Append",
+            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Constant", "Component", "Split", "ImageExtent", "VertexLayout", "Append", "Slice",
                                                             "Float", "Double", "Int", "UInt", "Vec2", "Vec3", "Vec4", "IVec2", "IVec3", "IVec4", "UVec2", "UVec3", "UVec4" };
             static const std::set<std::string_view> matrices { "MatrixMultiply", "MatrixInverse", "MatrixTranspose", "MatrixDeterminant", "MatrixTranslate", "MatrixRotate",
                                                                "MatrixAxisAngle", "MatrixScale", "MatrixCompose", "TransformPoint", "TransformDirection", "TransformPlane" };

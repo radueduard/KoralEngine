@@ -824,7 +824,7 @@ TEST_F(RuntimeTest, InputsStartAsSomethingThatWorks) {
     };
     EXPECT_EQ(initial("Image", "format"), Value("eRGBA8_UNORM"));
     EXPECT_EQ(initial("Image", "extent.x"), Value(512));
-    EXPECT_EQ(initial("Image", "usage"), Value(Value::List { "eSampled", "eTransferSrc", "eTransferDst" }));
+    EXPECT_TRUE(initial("Image", "usage").IsNull()) << "it is made for what uses it";
     EXPECT_EQ(initial("Image", "mipLevels"), Value(1));
     EXPECT_EQ(initial("Sampler", "minFilter"), Value("eLinear"));
     EXPECT_EQ(initial("Clear", "color"), Value(Value::List { 0, 0, 0, 1 }));
@@ -886,7 +886,38 @@ TEST_F(RuntimeTest, ImagesAndBuffersAreCopiedAndMipsFilled) {
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("copy")->error.find("a Blit scales"), std::string::npos) << runtime.Status("copy")->error;
     EXPECT_NE(runtime.Status("mips")->error.find("one mip level"), std::string::npos) << runtime.Status("mips")->error;
-    EXPECT_NE(runtime.Status("copy bytes")->error.find("eTransferDst"), std::string::npos) << runtime.Status("copy bytes")->error;
+    EXPECT_TRUE(runtime.Status("copy bytes")->ok) << "a buffer given another usage is made for being copied to besides: " << runtime.Status("copy bytes")->error;
+}
+
+// An Image given no usage is made for what uses it: cleared, computed into, and copied from to be shown, here — and
+// not sampled, which nothing does. What it is no longer used as, it is made again without; what it is given, it has too.
+TEST_F(RuntimeTest, AnImageGivenNoUsageIsMadeForWhatUsesIt) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Load(FillGraph);
+    graph.Find("target")->inputs.erase("usage");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const auto usage = [&] {
+        runtime.Watch("target");
+        std::optional<kgraph::Peek> peek;
+        for (int i = 0; i < 8 && !(peek = runtime.Watched("target")); ++i) Frame();
+        return peek ? peek->usage : std::vector<std::string> {};
+    };
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eTransferDst", "eStorage" }));
+    EXPECT_NEAR(scene->Pixel(13, 20).x, 128, 1) << "cleared, then halved by the shader";
+
+    // Cleared no more: it is not made to be copied into.
+    std::erase_if(graph.nodes, [](const kgraph::Node& node) { return node.id == "clear"; });
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eStorage" }));
+
+    // Given a usage, it has that besides.
+    graph.Find("target")->Set("usage", kgraph::Value::List { "eSampled" });
+    runtime.Set(graph);
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(usage(), (std::vector<std::string> { "eTransferSrc", "eSampled", "eStorage" }));
 }
 
 // A setup page's passes record once, on the frame after they are built, and again only when they are built again:
@@ -1164,6 +1195,47 @@ TEST_F(RuntimeTest, AnIdleDispatchRecordsNothing) {
     for (int i = 0; i < 2; ++i) { runtime.FixedStep(1.f / 60.f); Frame(); }
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_NEAR(scene->Pixel(4, 4).x, 64, 2) << "halved on the two frames with a step";
+}
+
+// A pass nothing that runs reads rests by itself: what it makes is left as it was, and it runs again once a pass that
+// runs, or a watch, reads it. Here what is halved is read only by a copy that is idle; looked at, or the copy no longer
+// idle, it is halved again.
+TEST_F(RuntimeTest, APassWhoseEveryReaderRestsRestsToo) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("inner", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eSampled", "eTransferSrc", "eTransferDst" });
+    graph.Add("outer", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 }).Set("usage", Value::List { "eStorage", "eTransferSrc" });
+    graph.Add("halving", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "inner");
+    graph.Add("halve", "Dispatch").Wire("pipeline", "halving").Set("cover", "target");
+    graph.Add("copying", "ComputePipeline").Set("compute.module", "copy").Set("compute.entry", "computeMain")
+        .Wire("param.source", "inner").Wire("param.target", "outer");
+    graph.Add("copy", "Dispatch").Wire("pipeline", "copying").Set("cover", "target").Set("idle", 1);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "outer").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto resting = [&](const std::string& id) {
+        const auto frame = runtime.Frame();
+        return std::ranges::any_of(frame.leftOut, [&](const auto& left) { return left.first == id && left.second.starts_with("resting"); });
+    };
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(resting("halve")) << "only an idle pass reads what it makes";
+    EXPECT_FALSE(resting("copy")) << "idle as it says, not for want of a reader";
+    EXPECT_FALSE(resting("show")) << "it writes the screen";
+
+    runtime.Watch("inner");
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(resting("halve")) << "looked at, what it makes is read";
+    runtime.Unwatch("inner");
+    for (int i = 0; i < 2; ++i) Frame();
+    EXPECT_TRUE(resting("halve"));
+
+    graph.Find("copy")->Set("idle", 0);
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(resting("halve")) << "the copy reads it again";
 }
 
 // A mesh's buffers, as buffers: a compute shader can read its positions and its indices — a cube's, here, copied out.

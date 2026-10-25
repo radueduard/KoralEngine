@@ -323,7 +323,8 @@ namespace kgraph
 
         /**
          * @brief From now on, copies what node @p id makes — its image or its buffer — out each frame, to be read
-         *        with Watched. An image needs eTransferSrc among its usage, and so does a Buffer node's buffer.
+         *        with Watched. An image needs eTransferSrc among its usage, and so does a Buffer node's buffer — which
+         *        an Image or a Buffer node's always has.
          *        It costs a copy a frame while it is watched: Unwatch when done.
          */
         void Watch(std::string_view id);
@@ -359,6 +360,17 @@ namespace kgraph
          *        writes reaches both. Taken again whenever the source builds another. Nothing for one that follows none.
          */
         void Share(const std::set<std::string>& nodes);
+        /**
+         * @brief Says that the CPU was handed what node @p id makes — a script, through kengine_node_resource — and may
+         *        write or read it. A Buffer given no `type` is made where only passes reach it (eDeviceLocal) until then,
+         *        and made again from then on as memory the CPU writes into (eDynamic). Kept while the runtime is.
+         */
+        void ReachedFromTheCpu(std::string_view id);
+        /**
+         * @brief The usage an Image or a Buffer node's resource was made with, by name: what its `usage` gives, what
+         *        uses it uses it as, and eTransferSrc (to be looked at). Empty for any other node, or one not built.
+         */
+        [[nodiscard]] std::vector<std::string> UsageOf(std::string_view id) const;
         /** @brief The entity that is picked: what a push constant named `selected` is given (its number; 0 for none). */
         void SetSelected(kecs::Entity entity);
 
@@ -422,7 +434,8 @@ namespace kgraph
                 std::vector<std::pair<std::string, char>> uses;
             };
             std::vector<Pass> passes;
-            /// Passes of this graph's that did not run, by node: skipped (what they need a pass left out makes) or culled (nothing needs what they make).
+            /// Passes of this graph's that did not run, by node: skipped (what they need a pass left out makes), culled (nothing needs what
+            /// they make), or resting (nothing that runs this frame reads what they make: they stay in the frame, and record nothing).
             std::vector<std::pair<std::string, std::string>> leftOut;
             std::uint64_t bytes = 0;            ///< What the frame graph allocated for what it makes itself.
             std::uint64_t unsharedBytes = 0;    ///< What that would be with nothing sharing memory.
@@ -521,6 +534,18 @@ namespace kgraph
          *        of node, and for one that draws once and drew.
          */
         [[nodiscard]] const PassReport* ReportOf(std::string_view id) const;
+        /** @brief Whether a Draw or a Dispatch runs its elements as one, could, or what it would take. */
+        struct Batching {
+            bool batched = false;           ///< One draw, or one dispatch, of every element.
+            std::size_t elements = 0;       ///< How many elements it has: draws or dispatches a frame, when it is not batched.
+            bool offered = false;           ///< A Draw that `batched`, and nothing more, would make one draw of them all.
+            std::string why;                ///< When it is not batched and not offered: what it would take, or why it cannot be.
+        };
+        /**
+         * @brief How a Draw or a Dispatch of many elements is batched: null for another kind of node, and for one of a
+         *        single element, which there is nothing to batch of.
+         */
+        [[nodiscard]] std::optional<Batching> BatchingOf(std::string_view id) const;
         /**
          * @brief The pass nodes that use what node @p id made — an image or a buffer, or a view of one, which is a use
          *        of what it views — in the order of their pages, and in a page the order of the graph: so what wrote it

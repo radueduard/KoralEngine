@@ -321,6 +321,14 @@ stencil, line width).
 
 ### A node in the inspector
 
+**A Draw or a Dispatch of many elements** says, under its name, how many it runs a frame — *4 draws a frame, one an
+element* — and what it would take to be one of them all (`kgraph::Runtime::BatchingOf`). A Draw whose shader reads each
+element from its `[entity("PER_INSTANCE")]` buffer already, and is wired nothing of each element but its mesh, is
+offered **Batch: one draw of them all**, which sets its `batched` (`Session::Batch`). Any other says which of its inputs
+are each element's — what its shader would read from that buffer instead — or why it cannot be one, by the same rules
+as `batched` itself goes by (`kgraph::WhyNotBatched`). A Dispatch is told of `entities`, a Filter's. Batched, it says
+*Batched: one draw of 4 elements*. See [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one).
+
 The inspector shows every input a node has, in the order its type lists them: the ones it has been given with their
 names lit, the rest dimmed and showing what they start as — set one, and it is given. An input given in parts
 (`extent`, `groups`) is one line of its parts, and its `o` wires it whole instead. `x` takes an input back to nothing
@@ -564,7 +572,7 @@ while the scene plays: in `koral-play`, and in the editor after Run.
 
 `koral-editor` and `koral-play` given no project open the one this user chose with **Project, Open at startup**
 (kept in `~/.config/koral-engine/startup-project`, or under `$XDG_CONFIG_HOME`), and otherwise the engine's own:
-Forward+, made with nodes (`forward-plus` in the projects folder, `KORAL_ENGINE_PROJECTS` — `/mnt/w/EngineProjects` unless the build says otherwise; see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
+Forward+, made with nodes (`forward-plus` in the projects folder, `KORAL_ENGINE_PROJECTS` — `%USERPROFILE%\KoralProjects` on Windows and `/mnt/w/EngineProjects` elsewhere, unless the build says otherwise; see `samples/forward-plus/README.md`). Both take `--validate` to run with Vulkan's
 validation layer, which they otherwise leave out: it costs a fifth of a frame and more in a scene of many draws.
 `koral-play --frames N --timings` says what the frames took and what each pass of them did.
 
@@ -638,7 +646,7 @@ time. Kotlin scripts have the same of the Gradle build the project is given.
 
 ## Where projects are made
 
-**File, New project** and **Open project** start in `/mnt/w/EngineProjects` — the build's `KORAL_ENGINE_PROJECTS`,
+**File, New project** and **Open project** start in `%USERPROFILE%\KoralProjects` (`/mnt/w/EngineProjects` off Windows) — the build's `KORAL_ENGINE_PROJECTS`,
 or the environment variable of that name — which is made if it is not there.
 
 ## Taking back, and not losing what was done

@@ -145,7 +145,7 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         EXPECT_EQ(doc.Runtime().ValueOf("light data", "count"), kgraph::Value(96));
         EXPECT_EQ(InstancesOf(doc.Runtime(), "drawn"), 1u + 6u + 35u + 96u) << "every mesh but glass, grouped by mesh";
         EXPECT_EQ(doc.Runtime().ValueOf("in sight", "drawCount"), doc.Runtime().ValueOf("drawn meshes", "count")) << "a command a mesh";
-        for (const char* draw : { "draw depth", "draw forward", "run frustum", "run mark seen", "run gather seen" })
+        for (const char* draw : { "draw depth", "draw forward", "frustum/cull", "run mark seen", "run gather seen" })
             EXPECT_TRUE(doc.Runtime().Status(draw) && doc.Runtime().Status(draw)->ok) << draw;
         // The pre-pass draws with the forward Draw's buffer of instances, so has no component for an entity to have;
         // the forward pipeline's is each entity's material, its pictures among it.
@@ -193,7 +193,7 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         std::vector<std::string> order;
         for (const auto& pass : editing.scene->Graph().Schedule()) order.push_back(pass.name);
         const auto at = [&](const char* name) { return std::ranges::find(order, name) - order.begin(); };
-        const char* const sequence[] { "run advance frame", "reset counter", "run cull lights", "cast [0]", "cast [3]", "run frustum", "draw depth", "run mark seen",
+        const char* const sequence[] { "run advance frame", "reset counter", "run cull lights", "cast [0]", "cast [3]", "frustum/cull", "draw depth", "run mark seen",
                                        "run gather seen", "draw forward", "run occlusion pass", "run blur occlusion", "run apply occlusion", "run sky", "run trace reflections",
                                        "run add reflections", "run resolve", "run keep", "run down [0]", "run down [5]", "run up [0]",
                                        "run up [4]", "run add bloom", "run tone map", "show" };
@@ -550,7 +550,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_NE(project.find("Koral.Engine.dll"), std::string::npos) << "a C# script is written with the engine's names known";
         EXPECT_NE(project.find("scripts/**/*.cs"), std::string::npos);
     }
-    EXPECT_EQ(keditor::Session::ProjectsDirectory().filename(), "EngineProjects") << "where a new project is offered to be made";
+    EXPECT_EQ(keditor::Session::ProjectsDirectory(), std::filesystem::path(KEDITOR_PROJECTS)) << "where a new project is offered to be made";
 
     // A model imported: its meshes and its pictures are listed as they are read, a picture by itself, small; and
     // what is listed is what an entity's field takes, by the name it is found by.
@@ -695,7 +695,8 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         // all idle by the choice are left out, and a page of none that only those use.
         const std::set<std::string> vertexPages { "prepass", "culling", "forward", "occlusion", "sky", "reflections" };
         const std::set<std::string> meshletPages { "meshlet tasks", "meshlet forward", "meshlet occlusion", "meshlet sky", "meshlet reflections" };
-        const std::set<std::string> rayPages { "ray scene", "ray trace" }, shadowPages { "shadows", "lamp shadows" };
+        // The shadow maps and the lights' clusters rest while rays are traced: rays find their own shadows and their own light.
+        const std::set<std::string> rayPages { "ray scene", "ray trace" }, shadowPages { "shadows", "lamp shadows", "lights" };
         const auto expectLeftOut = [&](const std::vector<const std::set<std::string>*>& out, const char* chosen) {
             const auto hidden = session.PagesNotChosen();
             std::set<std::string> expected;

@@ -28,6 +28,8 @@ void raygenMain()
     ray.TMax = 100.0;
     Payload payload;
     payload.color = float4(1.0, 0.0, 1.0, 1.0);
+    // No entity, no structure: nothing is hit.
+    if (scene[0].x == ~0u) { target[at] = float4(0.0, 0.0, 0.0, 1.0); return; }
     TraceRay(kor::accelerationStructure(scene[0].x), RAY_FLAG_NONE, 0xFF, 0, 0, 0, ray, payload);
     target[at] = payload.color;
 }

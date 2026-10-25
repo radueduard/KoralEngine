@@ -179,7 +179,7 @@ TEST_F(DrawTest, DrawsAndDispatchesAreReadFromABuffer) {
     scene->runtime->Set(graph);
     ASSERT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
 
-    // An indirect command with no buffer says so, and a buffer that cannot be drawn from too.
+    // An indirect command with no buffer says so; a buffer given another usage is made to be drawn from besides.
     graph.Find("draw")->Set("command", "eDrawIndirect");
     graph.Find("draw")->inputs.erase("count");
     graph.Find("draw")->inputs.erase("indirect");
@@ -188,7 +188,7 @@ TEST_F(DrawTest, DrawsAndDispatchesAreReadFromABuffer) {
     graph.Add("plain", "Buffer").Set("instanceCount", 32).Set("usage", Value::List { "eStorage" });
     graph.Find("draw")->Wire("indirect", "plain");
     scene->runtime->Set(graph);
-    EXPECT_NE(scene->runtime->Status("draw")->error.find("eIndirect"), std::string::npos) << scene->runtime->Status("draw")->error;
+    EXPECT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
 
     // A dispatch whose groups are in the buffer: 4 by 4 of 8 by 8 cover the picture.
     kgraph::Graph fill = Canvas();

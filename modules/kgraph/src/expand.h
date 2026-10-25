@@ -42,6 +42,11 @@ namespace kgraph
         std::map<std::string, std::set<std::string>, std::less<>> fromBundle;
         /// What a node that takes a Bundle says of it as it is: the names that matched nothing, on either side.
         std::map<std::string, std::string, std::less<>> notes;
+        /// The Draws `batched` that were written out as one indirect draw of every element: `<draw>/batch`, a Filter of
+        /// them grouped by mesh; `<draw>/pack`, their meshes as one; `<draw>/commands`, a command each mesh.
+        std::set<std::string, std::less<>> batched;
+        /// A Draw `batched` that could not be, and why: it draws one at a time.
+        std::map<std::string, std::string, std::less<>> unbatched;
     };
 
     /**
@@ -59,4 +64,11 @@ namespace kgraph
     /** @brief What a node of a loop is called on turn @p turn. */
     [[nodiscard]] std::string TurnId(std::string_view id, int turn);
     [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {});
+    /**
+     * @brief Why the Draw @p draw of @p graph (a graph as it runs: its calls and Bundles written out) cannot be written out
+     *        as one indirect draw of every element — `batched` — or nothing when it can. @p each, when given, is the
+     *        inputs it is wired a value of each element at, besides its mesh: what its shader would read from its
+     *        [entity("PER_INSTANCE")] buffer instead.
+     */
+    [[nodiscard]] std::string WhyNotBatched(const Graph& graph, const Node& draw, std::vector<std::string>* each = nullptr);
 }

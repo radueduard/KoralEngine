@@ -356,6 +356,11 @@ namespace keditor
         [[nodiscard]] bool DrawerShown() const { return _drawer; }
         /** @brief Picks node @p id, and turns to the page it is on: the graph panel brings it into view. */
         void GoTo(const std::string& id);
+        /**
+         * @brief Makes Draw @p id one draw of all its elements (`batched`): what the inspector offers a Draw whose shader
+         *        reads each element from its [entity("PER_INSTANCE")] buffer already. @see kgraph::Runtime::BatchingOf
+         */
+        void Batch(const std::string& id);
         /** @brief Where the graph panel looks: shared with it, so that whoever asks knows where a node is on the screen. */
         std::shared_ptr<kui::NodeEditorView> graphView = std::make_shared<kui::NodeEditorView>();
         /** @brief Goes up each time a node is gone to. */

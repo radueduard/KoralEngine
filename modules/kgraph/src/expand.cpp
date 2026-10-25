@@ -5,6 +5,7 @@
 #include "expand.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <functional>
@@ -355,6 +356,186 @@ namespace kgraph
         }
     }
 
+    /**
+     * A Draw `batched`, its mesh each element's of a Filter or a ForEach, written out as one indirect draw of all of them:
+     * a Filter of the same entities grouped by mesh (`<draw>/batch`), their meshes packed as one (`<draw>/pack`), and a
+     * command for each mesh (`<draw>/commands`). What each element is to the shader is then its [entity("PER_INSTANCE")]
+     * buffer's, filled in the batch's order. A Draw wired a value of each element otherwise — a `push.model` from the
+     * element's matrix — cannot be one draw: it is left a draw each, and says why.
+     */
+    /** What a wire of @p graph comes from, past References. */
+    static const Node* OriginOf(const Graph& graph, const std::string_view id)
+    {
+        const Node* node = graph.Find(id);
+        for (int hops = 0; node && node->type == "Reference" && hops < 16; ++hops) {
+            const auto named = node->inputs.find("node");
+            node = named != node->inputs.end() && named->second.value.String() ? graph.Find(*named->second.value.String()) : nullptr;
+        }
+        return node;
+    }
+
+    std::string WhyNotBatched(const Graph& graph, const Node& draw, std::vector<std::string>* each)
+    {
+        // Whether what a wire carries is each element's: an element's output of a node that is entities an element at a
+        // time, or what is worked out of one. What is of them all — how many, their groups — is not.
+        std::map<std::string, bool, std::less<>> eachOf;
+        std::function<bool(const Link&)> ofEach = [&](const Link& link) -> bool {
+            const Node* node = OriginOf(graph, link.node);
+            if (!node) return false;
+            if (node->type == "Entities" || node->type == "Filter" || node->type == "ForEach")
+                return !std::ranges::contains(std::array<std::string_view, 5> { "out", "entities", "count", "groups", "groupCount" }, link.output);
+            if (const auto known = eachOf.find(node->id); known != eachOf.end()) return known->second;
+            eachOf[node->id] = false;      // a loop of wires: not this way
+            bool found = false;
+            for (const auto& input : node->inputs | std::views::values)
+                if (input.link && ofEach(*input.link)) { found = true; break; }
+            return eachOf[node->id] = found;
+        };
+        const auto mesh = draw.inputs.find("mesh");
+        const Node* source = mesh != draw.inputs.end() && mesh->second.link ? OriginOf(graph, mesh->second.link->node) : nullptr;
+        if (!source || (source->type != "Filter" && source->type != "ForEach")) return "'mesh' is not each element's of a Filter or a ForEach";
+        const std::string& output = mesh->second.link->output;
+        const auto component = source->inputs.find("component");
+        const bool ofMesh = component != source->inputs.end() && component->second.value.String() && *component->second.value.String() == "Mesh";
+        if (output != "Mesh.mesh" && !(ofMesh && output == "field.mesh")) return std::format("'mesh' is '{}' of '{}', not its Mesh's", output, source->id);
+        if (const auto command = draw.inputs.find("command"); command != draw.inputs.end() && command->second.value.String()
+            && *command->second.value.String() != "eAuto" && *command->second.value.String() != "eDrawIndexed")
+            return std::format("'command' is {}: a batch is drawn indexed and indirect", *command->second.value.String());
+        std::vector<std::string> theirs;
+        for (const auto& [name, input] : draw.inputs)
+            if (name != "mesh" && input.link && ofEach(*input.link)) theirs.push_back(name);
+        if (each) *each = theirs;
+        if (!theirs.empty()) {
+            std::string list;
+            for (const auto& name : theirs) list += std::format("{}'{}'", list.empty() ? "" : ", ", name);
+            return std::format("{} {} each element's — what each is to the shader is its [entity(\"PER_INSTANCE\")] buffer's when it is one draw",
+                               list, theirs.size() == 1 ? "is" : "are");
+        }
+        if (source->type == "ForEach")
+            for (const char* name : { "where", "select", "entityId", "groupBy" })
+                if (source->inputs.contains(name)) return std::format("'{}' says '{}', which a batch of it does not: make it a Filter", source->id, name);
+        return {};
+    }
+
+    static void WriteBatches(Expansion& out)
+    {
+        Graph& graph = out.graph;
+        const auto origin = [&](const std::string& id) { return OriginOf(graph, id); };
+        // The batch and the pack of each mesh source a batched Draw is of, by its wire (`node.output`): one for all of them.
+        std::map<std::string, std::pair<std::string, std::string>, std::less<>> packs;
+        std::vector<std::string> draws;
+        for (const Node& node : graph.nodes)
+            if (node.type == "Draw")
+                if (const auto batched = node.inputs.find("batched"); batched != node.inputs.end() && batched->second.value.Bool() && *batched->second.value.Bool())
+                    draws.push_back(node.id);
+        for (const std::string& id : draws) {
+            Node draw = *graph.Find(id);
+            if (const std::string why = WhyNotBatched(graph, draw); !why.empty()) {
+                out.unbatched[id] = std::format("batched: {}, so it draws one at a time", why);
+                continue;
+            }
+            const auto mesh = draw.inputs.find("mesh");
+            const Node* source = origin(mesh->second.link->node);
+            const auto component = source->inputs.find("component");
+            const bool ofMesh = component != source->inputs.end() && component->second.value.String() && *component->second.value.String() == "Mesh";
+
+            // The same entities, grouped by mesh: of a Filter, those it keeps; of a ForEach, those with what it says. Draws of
+            // the meshes of one — a shadow's cascades, a turn each — share the batch and the pack, each with commands of its own.
+            std::vector<Node> made;
+            const std::string of = mesh->second.link->node + "." + mesh->second.link->output;
+            const bool sharing = packs.contains(of);
+            if (!sharing) packs[of] = { id + "/batch", id + "/pack" };
+            const std::string batch = packs[of].first, pack = packs[of].second, commands = id + "/commands";
+            Node grouped;
+            grouped.id = batch;
+            grouped.type = "Filter";
+            grouped.pass = draw.pass;
+            Value::List with { "Mesh" };
+            if (source->type == "Filter") {
+                grouped.Wire("entities", mesh->second.link->node, "out");
+            } else {
+                Node all;
+                all.id = id + "/all";
+                all.type = "Entities";
+                all.pass = draw.pass;
+                made.push_back(std::move(all));
+                grouped.Wire("entities", id + "/all", "out");
+                if (!ofMesh && component != source->inputs.end()) with.push_back(component->second.value);
+                if (const auto also = source->inputs.find("with"); also != source->inputs.end() && also->second.value.Items())
+                    for (const auto& name : *also->second.value.Items()) if (name.String() && *name.String() != "Mesh") with.push_back(name);
+                if (const auto without = source->inputs.find("without"); without != source->inputs.end()) grouped.inputs["without"] = without->second;
+            }
+            grouped.Set("with", Value(std::move(with))).Set("groupBy", "Mesh");
+            Node packed;
+            packed.id = pack;
+            packed.type = "MeshPack";
+            packed.pass = draw.pass;
+            packed.Wire("meshes", batch, "Mesh.mesh");
+            if (sharing) made.clear();      // the Entities a ForEach's batch is of, too: the first's
+            else {
+                made.push_back(std::move(grouped));
+                made.push_back(std::move(packed));
+            }
+            Node commanded;
+            commanded.id = commands;
+            commanded.type = "IndirectDraws";
+            commanded.pass = draw.pass;
+            commanded.Wire("ranges", pack, "ranges").Wire("groups", batch, "groups");
+            // Given `cull`: what is out of its sight left out on the GPU — CullInSight's passes, its commands starting with
+            // no instances each frame, and what its shader reads compacted, the elements in sight one after another as they
+            // are drawn, so that it reads its instance at first + index as it does unculled. Of several matrices one after
+            // another — a ShadowCascades' — the `cullIndex`th, sixteen numbers from sixteen times it (`<draw>/sight`).
+            const auto cull = draw.inputs.find("cull");
+            const bool sighted = cull != draw.inputs.end() && cull->second.link;
+            if (sighted) commanded.Set("mode", "eGPU");
+            made.push_back(std::move(commanded));
+            if (sighted) {
+                const std::string groups = id + "/cull groups", sizer = id + "/cull sizer", culler = id + "/culler";
+                const auto add = [&](const std::string& made_, const char* type) -> Node& {
+                    Node node;
+                    node.id = made_;
+                    node.type = type;
+                    node.pass = draw.pass;
+                    made.push_back(std::move(node));
+                    return made.back();
+                };
+                add(groups, "Buffer").Set("instanceCount", 12).Set("usage", Value::List { "eStorage", "eIndirect", "eTransferSrc", "eTransferDst" }).Set("type", "eDeviceLocal");
+                add(sizer, "ComputePipeline").Set("compute.module", "koral_cull").Set("compute.entry", "size").Wire("param.visible", commands, "visible").Wire("param.args", groups);
+                add(id + "/cull size", "Dispatch").Wire("pipeline", sizer).Set("groups", Value::List { 1, 1, 1 });
+                add(culler, "ComputePipeline").Set("compute.module", "koral_cull").Set("compute.entry", "cull").Wire("param.instances", id, "instances")
+                    .Wire("param.ranges", pack, "rangeBuffer").Wire("param.commands", commands, "commands").Wire("param.visible", commands, "visible")
+                    .Wire("param.drawn", id, "drawnInstances");
+                Node& culls = add(id + "/cull", "Dispatch").Wire("pipeline", culler).Wire("indirect", groups).Wire("push.drawCount", commands, "drawCount")
+                    .Wire("push.stride", id, "instanceStride").Wire("push.matrixOffset", id, "instanceMatrixOffset");
+                if (const auto index = draw.inputs.find("cullIndex"); index != draw.inputs.end()) {
+                    // The `cullIndex`th of several: given, sixteen times it; wired, worked out of what it is wired from.
+                    Node& sight = add(id + "/sight", "Slice");
+                    sight.inputs["of"] = cull->second;
+                    sight.Set("count", 16);
+                    if (index->second.link) {
+                        add(id + "/sight first", "Multiply").Set("b", 16).inputs["a"] = index->second;
+                        Node& slice = *std::ranges::find(made, id + "/sight", &Node::id);
+                        slice.Wire("first", id + "/sight first");
+                    } else {
+                        sight.Set("first", 16.0 * (index->second.value.Number() ? *index->second.value.Number() : 0.0));
+                    }
+                    std::ranges::find(made, id + "/cull", &Node::id)->Wire("push.viewProjection", id + "/sight");
+                } else {
+                    culls.inputs["push.viewProjection"] = cull->second;
+                }
+            }
+
+            Node& written = *graph.Find(id);
+            written.Wire("mesh", pack, "mesh").Set("command", "eDrawIndexedIndirect").Wire("indirect", commands, "commands").Wire("drawCount", commands, "drawCount");
+            if (sighted) written.Set("compacted", true);
+            // Left out of sight a draw at a time, on the CPU: no more of a batch.
+            written.inputs.erase("cull");
+            const auto at = std::ranges::find(graph.nodes, id, &Node::id);
+            graph.nodes.insert(at, std::make_move_iterator(made.begin()), std::make_move_iterator(made.end()));
+            out.batched.insert(id);
+        }
+    }
+
     Expansion Expand(const Graph& given, const ElementOf& elementOf)
     {
         Expansion out;
@@ -508,6 +689,7 @@ namespace kgraph
             for (std::size_t i = 0; i < out.graph.nodes.size(); ++i) if (!taken[i]) placed.push_back(std::move(out.graph.nodes[i]));
             out.graph.nodes = std::move(placed);
         }
+        WriteBatches(out);
         return out;
     }
 }

@@ -66,7 +66,8 @@ world.Query<Position, const Velocity>()         // has both, switched on
 - `world.Each(QueryDescription, visit)` is the same by id, a group at a time, for queries made at run
   time: a node's, a tool's.
 - **Change:** a system calls `AdvanceTick()` as each run starts and keeps what it returned. Next run,
-  `Changed<T>(thatTick)` is everything written since.
+  `Changed<T>(thatTick)` is everything written since. `ChangedTickOf(e, id)` is the tick one entity's component was
+  last added or written at (0 when it has none), for a reader that keeps its own list of entities.
 
 ## While a query runs
 
@@ -95,8 +96,9 @@ moves no entity to another archetype.
 | `DepthOf(e)`, `IsAncestor(above, e)` | |
 | `PositionOf`, `RotationOf`, `ScaleOf` and `SetPosition`, `SetRotation`, `SetScale` | Relative to the parent. Rotation is Euler angles in degrees: about X, about Y, about Z. |
 | `OrientationOf`, `SetOrientation` | The rotation as a `kecs::Quat` (x, y, z, w), which is what the matrix is made with. Set as Euler angles, it is theirs; set as a quaternion, it is kept as given (made length 1) and `RotationOf` is worked out of it — so a body turned a step at a time is not rounded off through the angles. |
-| `LocalMatrix(e)`, `WorldMatrix(e)` | The world matrix is the parents' transforms and its own. It is worked out when asked for and kept until the entity or something above it moves. |
+| `LocalMatrix(e)`, `WorldMatrix(e)` | The world matrix is the parents' transforms and its own. It is worked out when asked for and kept until the entity or something above it moves. Of entities under nothing, each may be asked for on a thread of its own at once, while nothing changes the world. |
 | `SetWorldMatrix(e, m, position, rotation, scale)` | Places it in the world by changing its own transform: only the parts asked for. |
+| `MovedAt(e)`, `MoveClock()` | When its world matrix last changed — it was made, it or something above it was transformed, or it was put under something else — by a clock that goes up with every such change. A reader keeps `MoveClock()` as it reads, and next time reads again only the entities whose `MovedAt` is past it. |
 | `SceneVersion()` | Goes up when any of this changes. |
 
 With `keepWorldTransform`, an entity moved to another parent stays where it is in the world: its own

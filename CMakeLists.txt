@@ -8,7 +8,12 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(KORAL_ENGINE_BUILD_TESTS "Build the engine's tests" ON)
 # Where the editor offers to make a new project: the KORAL_ENGINE_PROJECTS environment variable says otherwise.
-set(KORAL_ENGINE_PROJECTS "/mnt/w/EngineProjects" CACHE PATH "The folder new projects are made in, unless another is picked")
+if(WIN32)
+    file(TO_CMAKE_PATH "$ENV{USERPROFILE}/KoralProjects" KORAL_ENGINE_PROJECTS_DEFAULT)
+else()
+    set(KORAL_ENGINE_PROJECTS_DEFAULT "/mnt/w/EngineProjects")
+endif()
+set(KORAL_ENGINE_PROJECTS "${KORAL_ENGINE_PROJECTS_DEFAULT}" CACHE PATH "The folder new projects are made in, unless another is picked")
 # Address and undefined-behaviour sanitizers, for the tests: -DKORAL_ENGINE_SANITIZE=ON.
 option(KORAL_ENGINE_SANITIZE "Build with ASan and UBSan" OFF)
 if(KORAL_ENGINE_SANITIZE AND NOT MSVC)

@@ -260,6 +260,54 @@ validation and sync validation. What differs from the plan:
 
 **Gate:** a batched node gives the same picture as unbatched, and 10,000 entities are measurably faster.
 
+**Begun** (2026-10-24). Multi-draw-indirect over shared mesh buffers, and push constants as a buffer, were already
+there before E7 was begun: MeshPack, IndirectDraws and the Draw-filled `[entity("PER_INSTANCE")]` buffer (see
+[kgraph.md](kgraph.md#each-instances-said-by-the-shader)). What E7 has added so far is what made them cheap, and a way
+past entities:
+
+- **A buffer of instances is written only where something changed.** kecs stamps each entity when its world matrix
+  changes (`MovedAt`, `MoveClock`) and says when a component was last written (`ChangedTickOf`). The runtime keeps the
+  buffer's elements, lays out again only those whose entity changed, writes into each frame's copy only what changed
+  since that copy was written, and spreads what it looks at and lays out over every core. MeshPack no longer walks every
+  entity each frame to know its meshes are the same. `ScaleTest` (`modules/kgraph/tests/test_scale.cpp`): 100,000
+  entities of one mesh in a pass and its prepass took 13 ms of `Runtime::Update` a frame whatever moved; now 0.04 ms
+  when nothing moves, 0.5 ms when 1% do, 3.3 ms when all do.
+- **Many of one mesh, with no entity each:** the `Instancer` component and the engine's Instances, CullInstances and
+  SplatPoints functions (see [kgraph.md](kgraph.md#many-of-one-mesh-on-the-gpu)). Made, culled, given a level of detail —
+  the mesh near, points far, never many more points than pixels — and drawn on the GPU. 100 million cost the CPU 0.08
+  ms a frame and the GPU 0.3 ms. 100 million entities could not be: kecs alone would need some 20 GB for them.
+
+- **A Draw `batched`** of a Filter's or a ForEach's meshes is written out as one indirect draw of them all (a grouped
+  Filter, a MeshPack and an IndirectDraws, `<draw>/…`), its shader opting in with a `[entity("PER_INSTANCE")]` buffer;
+  one wired a value of each element draws one at a time and its note says why (see
+  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)). **The gate, for graphics:**
+  `ScaleTest.ABatchedDrawDrawsTheSamePictureForLess` — ten thousand entities of two meshes, the same picture pixel for
+  pixel, 7.8 ms of CPU a frame a draw each and 0.19 ms batched.
+
+- **One Dispatch of a Filter's entities** (`entities`): its groups once for each, along z, each element its
+  `[entity("PER_INSTANCE")]` buffer's, the images each holds read (`TEXTURE`) or written (`STORAGE`) by their bindless
+  indices and told to the frame graph as such (see [kgraph.md](kgraph.md#dispatch-and-draw)). **The gate, for compute:**
+  `EntityTest.OneDispatchOfEveryEntityStampsWhatADispatchEachDoes` — the same images, so the same picture — and
+  `ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`: ten thousand entities, an image each, 14 ms of CPU a frame a
+  Dispatch each and 0.3 ms as one.
+
+- **The editor says it**: a Draw or a Dispatch of many elements says in the inspector how many it runs a frame, and
+  what it would take to be one (`Runtime::BatchingOf`); a Draw whose shader reads a buffer of instances already is
+  offered `batched` at a click (see [editor.md](editor.md#a-node-in-the-inspector)).
+
+- **What is in sight, on the GPU, for any indirect draw of entities:** the engine's CullInSight function, the frustum
+  cull forward-plus had of its own made general — any buffer of instances, by its stride and where its matrix is —
+  with IndirectDraws in eGPU (see [kgraph.md](kgraph.md#many-meshes-in-one-indirect-draw)). Forward-plus's prepass is
+  culled by it, seen with its unjittered `seen`, its element's size the forward Draw's `instanceStride`; its own
+  `frustumCull.slang` is gone.
+
+- **A batched Draw given `cull` is culled on the GPU by itself**, its shader unchanged: CullInSight's passes written out
+  with it, and what its shader reads compacted to what is in sight (see
+  [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)). A shadow's cascades too: each turn culled by its own
+  of the matrices (`cullIndex`, through a new **Slice** node), and every turn sharing one pack.
+
+Still to do: more elements than a dispatch counts along z (65,535), which needs `vkCmdDispatchBase` in the framework.
+
 ### E8: A graph made both to try ideas in and to make them fast
 
 Planned 2026-10-21. The graph is to be friendlier without losing anything Vulkan can do, and to be where a frame is
@@ -317,5 +365,5 @@ and `PassRate` become `pages` and `PageRate` in one change later, writing `"page
 
 ## First steps
 
-The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. Next is **E7**:
-batching.
+The framework milestones and **E1** to **E6** are done, but for the Hub's part of E5. **E7**, batching, has passed its gate for graphics and for compute:
+what is left of it is in its section.
