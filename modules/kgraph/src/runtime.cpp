@@ -5624,7 +5624,15 @@ namespace kgraph
                                       .opaque = !(state.masked != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.masked)),
                                       .mask = static_cast<kor::u8>(state.unshadowing != kecs::NoComponent && world->Alive(entity) && world->Has(entity, state.unshadowing) ? 0x02 : 0x03) });
             }
-            if (builder.instances.empty()) return;
+            if (builder.instances.empty()) {
+                // Nothing left to place: no scene, rather than the one of what was there before.
+                node.outputs["count"].value = 0.0;
+                if (!state.top) return;
+                retiredResources.push_back(std::move(state.top));
+                const std::uint32_t none[4] { ~0u, 0u, 0u, 0u };
+                state.sceneWritten->Write(std::span<const std::uint32_t>(none));
+                return;
+            }
             auto top = builder.Build();
             if (!top.Valid()) return;
             if (state.top) retiredResources.push_back(std::move(state.top));

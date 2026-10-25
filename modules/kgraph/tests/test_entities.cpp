@@ -2099,6 +2099,12 @@ TEST_F(EntityTest, EntitiesAreASceneRaysAreTracedThrough) {
     const auto p = scene->Pixel(4, 29);
     EXPECT_TRUE(p.x > 250 && p.y < 4 && p.z < 4) << "where it went: " << int(p.x) << " " << int(p.y) << " " << int(p.z);
     EXPECT_EQ(runtime.Status("tracer")->builds, built) << "read by its index, nothing of it is built again";
+
+    // Every one of them gone: the rays find nothing, not the scene as it was.
+    for (const kecs::Entity entity : entities) world.Destroy(entity);
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const kor::u32 x : { 12u, 20u, 28u }) EXPECT_TRUE(is(x, { 0, 0, 0 })) << "nothing at " << x;
+    EXPECT_EQ(runtime.ValueOf("rays", "count"), Value(0));
 }
 
 // A ray tracing pipeline has a material too: the buffer its shader marks [entity("PER_INSTANCE")] is filled by the

@@ -1018,7 +1018,8 @@ namespace kgraph
                                       { ResourcePort("structure", "AccelerationStructure", "The top-level structure: every instance, where its entity is. Made again when one moves "
                                                      "— what is wired to it is built again then; a shader that reads it by its bindless index from `scene` is not."),
                                         ResourcePort("scene", "Buffer", "16 bytes: uint the structure's bindless index (kor::accelerationStructure), uint how many instances; two left over. "
-                                                     "Written again whenever the structure is made again."),
+                                                     "Written again whenever the structure is made again. The index is ~0u while there is nothing to trace "
+                                                     "through — no entity yet, or none left: a shader looks before it traces."),
                                         ResourcePort("meshOf", "Buffer", "A uint an instance, by its row (InstanceID()): which mesh of the pack it is — its range, its meshlets."),
                                         { "count", PortKind::eValue, "number", false, "How many instances there are.", nullptr } },
                                       "The entities of a Filter as a scene rays are traced through: a bottom-level structure for each mesh of their pack, and a top-level one placing "
