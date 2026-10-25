@@ -903,6 +903,14 @@ is true), they record nothing that frame — given a number, always or never; wi
 FixedStep's `steps` compared with 0, a count), on the frames it says. A Draw's `idle` is a number for each turn of its
 `cullIndex` (see [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame)).
 
+A pass nothing that runs reads rests by itself, with no `idle` of its own: when every pass that reads what it writes is
+resting that frame — idle, or resting so in its turn — it records nothing, and what it made is left as it was until one
+reads it again. Forward+'s shadows rest so while its rays are traced, however they are made: a Function's passes as
+much as a page's. Kept running are a pass that writes the screen, memory the CPU can read, something no other pass
+reads (what the graph is for: whoever runs it reads it), or nothing at all; a setup or fixed page's, whose state goes on
+from one run to the next; and what a watch copies, on the frames between its copies too. A Draw `whenChanged` rested so is not taken as drawn: it draws once read again. The frame's `leftOut` names
+each, "resting".
+
 A **MeshBuffers** gives a mesh's buffers as buffers, for a compute shader to read its triangles: `vertices` (the buffer
 its positions are in), `indices` (32 bits each), `stride` and `position` (where in a vertex its position is, in bytes),
 `vertexCount`, `indexCount`, and a model's mesh's `firstIndex` and `vertexOffset` within the buffers its model shares.

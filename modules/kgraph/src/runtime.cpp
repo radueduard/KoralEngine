@@ -631,6 +631,8 @@ namespace kgraph
             {
                 bool writes = plan->writesScreen;
                 for (const auto& use : declared) {
+            /// Set: idle, as its node's `idle` says this frame (a pass's other than a Draw's, whose run says).
+            std::shared_ptr<std::atomic<bool>> idle;
                     if (use.write) { builder.Write(use.name); writes = true; }
                     else builder.Read(use.name);
                 }
@@ -1277,6 +1279,12 @@ namespace kgraph
         std::map<std::string, std::string, std::less<>> bundleNotes;
         // The Draws `batched` written out as one indirect draw, and those that could not be, with why.
         // The nodes whose resource the CPU was handed (a script, through kengine_node_resource): a Buffer of them given no
+        // What each pass reads and writes, by the names the frame graph knows them by, as Resolve last told it; those of the
+        // names that are memory the CPU can read; and the passes resting this frame because nothing that runs reads what
+        // they make (RestUnread).
+        std::map<std::string, std::vector<Declared>, std::less<>> usesOf;
+        std::set<std::string, std::less<>> seenByTheCpu;
+        std::set<std::string, std::less<>> restingUnread;
         // `type` is memory the CPU writes into.
         std::set<std::string, std::less<>> reachedFromTheCpu;
         std::set<std::string, std::less<>> batched;
@@ -3081,6 +3089,7 @@ namespace kgraph
         Expected<void> BuildLens(const Node& node, const Inputs& inputs, Built& out)
         {
             static constexpr float Radians = 3.14159265358979323846f / 180.f;
+                    plan->idle = resting;
             const auto given = [&](const char* name) -> const Value* {
                 const auto it = inputs.find(name);
                 return it == inputs.end() || it->second.value.IsNull() ? nullptr : &it->second.value;
@@ -7406,10 +7415,82 @@ namespace kgraph
             }
             // A set nothing uses any more holds on to nothing.
             for (auto& [name, set] : sets)
+            RestUnread();
                 if (!live.contains(name) && !set.members.empty()) { set.set->Clear(); set.members.clear(); }
 
             std::vector<std::vector<Declared>> declared(wanted.size());
             for (std::size_t i = 0; i < uses.size(); ++i) {
+        /**
+         * Rests what nothing that runs reads: a pass whose resources other passes read, but none of them one that runs
+         * this frame — the shadows a renderer draws with, while another renderer makes the picture — records nothing, as
+         * if idle, until one does. Kept are what writes the screen, memory the CPU reads, a resource no other pass reads
+         * (what the graph is for, read by whoever runs it), or nothing at all; a page's setup, or its fixed step, whose
+         * state goes on from one run to the next; and a watch's copy, with what it copies. A Draw rested so is not taken
+         * as drawn: `whenChanged`, it is due again once read again.
+         */
+        void RestUnread()
+        {
+            restingUnread.clear();
+            if (usesOf.empty()) return;
+            const auto rests = [&](const std::string& id) {
+                const auto& plan = *built.at(id).pass;
+                return plan.resting->load() || (plan.idle && plan.idle->load()) || (plan.entities && plan.entities->idle);
+            };
+            // Each resource, and the passes that read it, resting or not.
+            std::map<std::string_view, std::vector<std::string_view>> readers;
+            for (const auto& [id, uses] : usesOf)
+                for (const Declared& use : uses)
+                    if (use.read) readers[use.name].push_back(id);
+            const auto readByAnother = [&](const std::string& id, const Declared& use) {
+                const auto by = readers.find(use.name);
+                return by != readers.end() && std::ranges::any_of(by->second, [&](const std::string_view reader) { return reader != id; });
+            };
+            std::vector<const std::string*> awake;
+            std::map<std::string_view, std::vector<const std::string*>> writers;     // a resource, and the passes that run and write it
+            std::set<std::string_view> needed;
+            std::vector<std::string_view> next;
+            for (const auto& id : wanted) {
+                // A watch's copy keeps what it copies going on the frames between its copies too: one that goes on from
+                // what it made — a simulation looked at — would otherwise go on only when looked at.
+                if (id.starts_with('$') && needed.insert(id).second) next.push_back(id);
+                if (rests(id)) continue;
+                awake.push_back(&id);
+                const auto uses = usesOf.find(id);
+                if (uses != usesOf.end())
+                    for (const Declared& use : uses->second)
+                        if (use.write) writers[use.name].push_back(&id);
+                const Node* node = current ? current->Find(id) : nullptr;
+                const bool kept = uses == usesOf.end() || id.starts_with('$') || built.at(id).pass->writesScreen
+                                  || (node && (current->IsSetup(node->pass) || current->IsFixed(node->pass)))
+                                  || std::ranges::none_of(uses->second, &Declared::write)
+                                  || std::ranges::any_of(uses->second, [&](const Declared& use) {
+                                         return use.write && (seenByTheCpu.contains(use.name) || !readByAnother(id, use));
+                                     });
+                if (kept && needed.insert(id).second) next.push_back(id);
+            }
+            // What a pass that is needed reads, the passes that write it are needed for.
+            while (!next.empty()) {
+                const std::string_view id = next.back();
+                next.pop_back();
+                const auto uses = usesOf.find(id);
+                if (uses == usesOf.end()) continue;
+                for (const Declared& use : uses->second) {
+                    if (!use.read) continue;
+                    const auto by = writers.find(use.name);
+                    if (by == writers.end()) continue;
+                    for (const std::string* writer : by->second)
+                        if (needed.insert(*writer).second) next.push_back(*writer);
+                }
+            }
+            for (const std::string* id : awake) {
+                if (needed.contains(*id)) continue;
+                const auto& plan = *built.at(*id).pass;
+                plan.resting->store(true);
+                if (plan.entities) plan.entities->idle = true;
+                restingUnread.insert(*id);
+            }
+        }
+
                 const std::string& name = groups.at(root(i)).name;
                 auto& list = declared[uses[i].pass];
                 const auto known = std::ranges::find(list, name, &Declared::name);
@@ -7533,6 +7614,12 @@ namespace kgraph
                         steppedOrder.push_back(std::format("{}\nstep {}", order[j], step + 1));
                         stepped.push_back(ordered[j]);
                     }
+            usesOf.clear();
+            for (std::size_t pass = 0; pass < wanted.size(); ++pass) usesOf[wanted[pass]] = declared[pass];
+            seenByTheCpu.clear();
+            for (const auto& group : groups | std::views::values)
+                if (std::ranges::any_of(group.members, [](const Member& member) { return member.buffer.Get() && member.buffer->IsHostVisible(); }))
+                    seenByTheCpu.insert(group.name);
             }
             order = std::move(steppedOrder);
             ordered = std::move(stepped);
@@ -7681,6 +7768,9 @@ namespace kgraph
             const kb::Description* image = kb::Find("Image");
             const kb::Setting* setting = image ? image->FindSetting("format") : nullptr;
             if (!setting || setting->arguments.empty() || !setting->arguments.front().type->enumeration) return {};
+            // What the passes used is told again below: what was told of the graph before is of other resources, and
+            // nothing rests for want of a reader until it is.
+            usesOf.clear();
             for (const auto& entry : setting->arguments.front().type->enumeration->values)
                 if (entry.value == static_cast<std::uint64_t>(format)) return std::string(entry.name);
             return {};
@@ -8462,6 +8552,7 @@ namespace kgraph
             layout.emplace_back(Value::Members { { "name", "forward" }, { "type", "eVec3" } });
             layout.emplace_back(Value::Members { { "name", "matrix" }, { "type", "eMat4" } });
             presets.push_back({ type.name, "ForEach", type.name,
+        for (const auto& id : _impl->restingUnread) report.leftOut.emplace_back(id, "resting: nothing that runs this frame reads what it makes");
                                 std::format("Every entity with a {}, an element at a time: {}, and where it is.", type.name, fields),
                                 { { "component", Value(type.name) } } });
             presets.push_back({ type.name + " Buffer", "BufferBuilder", type.name,

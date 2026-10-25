@@ -428,7 +428,8 @@ namespace kgraph
                 std::vector<std::pair<std::string, char>> uses;
             };
             std::vector<Pass> passes;
-            /// Passes of this graph's that did not run, by node: skipped (what they need a pass left out makes) or culled (nothing needs what they make).
+            /// Passes of this graph's that did not run, by node: skipped (what they need a pass left out makes), culled (nothing needs what
+            /// they make), or resting (nothing that runs this frame reads what they make: they stay in the frame, and record nothing).
             std::vector<std::pair<std::string, std::string>> leftOut;
             std::uint64_t bytes = 0;            ///< What the frame graph allocated for what it makes itself.
             std::uint64_t unsharedBytes = 0;    ///< What that would be with nothing sharing memory.

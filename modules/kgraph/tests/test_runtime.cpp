@@ -1197,6 +1197,47 @@ TEST_F(RuntimeTest, AMeshsBuffersAreBuffersAShaderCanRead) {
     EXPECT_NE(runtime.Status("parts")->error.find("needs a mesh"), std::string::npos) << runtime.Status("parts")->error;
 }
 
+// A pass nothing that runs reads rests by itself: what it makes is left as it was, and it runs again once a pass that
+// runs, or a watch, reads it. Here what is halved is read only by a copy that is idle; looked at, or the copy no longer
+// idle, it is halved again.
+TEST_F(RuntimeTest, APassWhoseEveryReaderRestsRestsToo) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.Add("inner", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eSampled", "eTransferSrc", "eTransferDst" });
+    graph.Add("outer", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 }).Set("usage", Value::List { "eStorage", "eTransferSrc" });
+    graph.Add("halving", "ComputePipeline").Set("compute.module", "fill").Set("compute.entry", "computeMain").Wire("param.target", "inner");
+    graph.Add("halve", "Dispatch").Wire("pipeline", "halving").Set("cover", "target");
+    graph.Add("copying", "ComputePipeline").Set("compute.module", "copy").Set("compute.entry", "computeMain")
+        .Wire("param.source", "inner").Wire("param.target", "outer");
+    graph.Add("copy", "Dispatch").Wire("pipeline", "copying").Set("cover", "target").Set("idle", 1);
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "outer").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto resting = [&](const std::string& id) {
+        const auto frame = runtime.Frame();
+        return std::ranges::any_of(frame.leftOut, [&](const auto& left) { return left.first == id && left.second.starts_with("resting"); });
+    };
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(resting("halve")) << "only an idle pass reads what it makes";
+    EXPECT_FALSE(resting("copy")) << "idle as it says, not for want of a reader";
+    EXPECT_FALSE(resting("show")) << "it writes the screen";
+
+    runtime.Watch("inner");
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(resting("halve")) << "looked at, what it makes is read";
+    runtime.Unwatch("inner");
+    for (int i = 0; i < 2; ++i) Frame();
+    EXPECT_TRUE(resting("halve"));
+
+    graph.Find("copy")->Set("idle", 0);
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(resting("halve")) << "the copy reads it again";
+}
+
 namespace {
     /** One of the engine's functions, as its file has it: packages/koral/functions/<name>.kfunc. */
     std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
