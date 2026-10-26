@@ -1,8 +1,8 @@
 # kgraph: a scene's pass graph, as data and running. Needs the framework.
-add_library(kgraph STATIC src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/meshes.cpp src/scene.cpp src/blocks.cpp src/expand.cpp)
+add_library(kgraph STATIC src/textures.cpp src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/meshes.cpp src/scene.cpp src/blocks.cpp src/expand.cpp)
 add_library(KoralEngine::kgraph ALIAS kgraph)
 target_include_directories(kgraph PUBLIC include)
-target_link_libraries(kgraph PUBLIC kecs Koral::Koral PRIVATE Koral::koral-image-import Koral::koral-model-import)
+target_link_libraries(kgraph PUBLIC kecs Koral::Koral PRIVATE Koral::koral-image-import Koral::koral-image-compress Koral::koral-model-import)
 target_compile_options(kgraph PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>)
 target_compile_options(kgraph PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)   # runtime.cpp has more sections than a COFF object holds by default
 

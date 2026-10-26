@@ -110,28 +110,107 @@ bool sphereOutOfSight(float3 middle, float reach, float4x4 model, float4x4 viewP
     return false;
 }
 
-[shader("amplification")]
-[numthreads(32, 1, 1)]
-void meshletTask(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID)
+// ---- occlusion: what is behind what was drawn is not drawn ---------------------------------------------------------
+// Two draws a frame. The early one draws what last frame's depth pyramid shows, as last frame's camera saw it, and notes
+// which it drew; the pyramid is made again of what it drew (meshletTasks.slang's `reduce`), and the late one draws what
+// the early one left out that this frame's pyramid shows. What came into sight this frame is found by the late one: no
+// hole where something stops hiding it. The glass, drawn after both, is tested against this frame's pyramid.
+
+Texture2D<float> depthPyramid;              // each texel the farthest depth of what it covers: 1024 by 512, then halves
+RWStructuredBuffer<uint> meshletsDrawnEarly;    // a task's: which of its meshlets the early draw drew, a bit each
+static const float2 PyramidSize = float2(1024.0, 512.0);
+static const uint PyramidLevels = 10;
+
+/**
+ * Whether a sphere, moved by @p model and seen by @p viewProjection, is behind what the depth pyramid holds: its nearest
+ * point farther than the farthest depth over the pixels it covers. One reaching behind the camera is not.
+ */
+bool sphereHidden(float3 middle, float reach, float4x4 model, float4x4 viewProjection, float2 pictureSize)
 {
-    if (thread == 0) meshletsSeen = 0;
+    const float3 at = mul(float4(middle, 1.0), model).xyz;
+    const float r = reach * max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+    float2 low = float2(1.0, 1.0), high = float2(0.0, 0.0);
+    float nearest = 1.0;
+    for (uint corner = 0; corner < 8; ++corner) {
+        const float3 offset = float3(corner & 1 ? r : -r, corner & 2 ? r : -r, corner & 4 ? r : -r);
+        const float4 clip = mul(float4(at + offset, 1.0), viewProjection);
+        if (clip.w <= 1e-4) return false;
+        const float3 seen = clip.xyz / clip.w;
+        low = min(low, seen.xy * 0.5 + 0.5);
+        high = max(high, seen.xy * 0.5 + 0.5);
+        nearest = min(nearest, seen.z);
+    }
+    if (nearest <= 0.0) return false;
+    // A pixel more each way: the depth was drawn jittered, by up to half of one.
+    low = saturate(low - 1.0 / pictureSize);
+    high = saturate(high + 1.0 / pictureSize);
+    // The level where it covers at most a texel each way, so at most two of them: those four read.
+    const float2 covered = (high - low) * PyramidSize;
+    const uint level = min(PyramidLevels - 1, uint(ceil(log2(max(max(covered.x, covered.y), 1.0)))));
+    const int2 size = int2(max(floor(PyramidSize / float(1u << level)), 1.0));
+    const int2 first = min(int2(low * float2(size)), size - 1), last = min(int2(high * float2(size)), size - 1);
+    float farthest = 0.0;
+    for (int y = first.y; y <= last.y; ++y)
+        for (int x = first.x; x <= last.x; ++x) farthest = max(farthest, depthPyramid.Load(int3(x, y, level)));
+    return nearest > farthest;
+}
+
+static const uint NoOcclusion = 0, EarlyDraw = 1, LateDraw = 2, BehindDrawn = 3;
+groupshared uint drawnEarly;
+
+/** A task's meshlets in sight, handed to the mesh shader: each tested as @p occlusion says (see above). */
+void taskOf(uint thread, uint group, uint occlusion)
+{
+    if (thread == 0) { meshletsSeen = 0; drawnEarly = 0; }
     GroupMemoryBarrierWithGroupSync();
-    uint tasksLength, stride;
+    uint tasksLength, drawnLength, stride;
     meshletTasks.GetDimensions(tasksLength, stride);
-    const uint4 task = group.x < tasksLength ? meshletTasks[group.x] : uint4(0, 0, 0, 0);
+    meshletsDrawnEarly.GetDimensions(drawnLength, stride);
+    const uint4 task = group < tasksLength ? meshletTasks[group] : uint4(0, 0, 0, 0);
     if (thread < task.z) {
         const Meshlet meshlet = meshlets[task.y + thread];
         const FrameState state = frameState[0];
-        if (state.begun != Begun || !sphereOutOfSight(meshlet.sphere.xyz, meshlet.sphere.w, instances[task.x].model, state.viewProjection)) {
+        const float4x4 model = instances[task.x].model;
+        const uint bit = 1u << thread;
+        const bool drewEarly = occlusion == LateDraw && group < drawnLength && (meshletsDrawnEarly[group] & bit) != 0;
+        bool drawn = !drewEarly && (state.begun != Begun || !sphereOutOfSight(meshlet.sphere.xyz, meshlet.sphere.w, model, state.viewProjection));
+        if (drawn && state.begun == Begun) {
+            // Early, by last frame's pyramid and camera — every one, when there was no last frame to have drawn it.
+            if (occlusion == EarlyDraw) drawn = state.history == 0 || !sphereHidden(meshlet.sphere.xyz, meshlet.sphere.w, model, state.previousViewProjection, state.size);
+            else if (occlusion != NoOcclusion) drawn = !sphereHidden(meshlet.sphere.xyz, meshlet.sphere.w, model, state.viewProjection, state.size);
+        }
+        if (drawn) {
             uint slot;
             InterlockedAdd(meshletsSeen, 1, slot);
             meshletPayload.meshlets[slot] = task.y + thread;
+            if (occlusion == EarlyDraw) InterlockedOr(drawnEarly, bit);
         }
     }
     if (thread == 0) meshletPayload.instance = task.x;
     GroupMemoryBarrierWithGroupSync();
+    if (occlusion == EarlyDraw && thread == 0 && group < drawnLength) meshletsDrawnEarly[group] = drawnEarly;
     DispatchMesh(meshletsSeen, 1, 1, meshletPayload);
 }
+
+/** Every meshlet in the camera's sight. */
+[shader("amplification")]
+[numthreads(32, 1, 1)]
+void meshletTask(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID) { taskOf(thread, group.x, NoOcclusion); }
+
+/** Those last frame's depth shows, noted in meshletsDrawnEarly. */
+[shader("amplification")]
+[numthreads(32, 1, 1)]
+void meshletTaskEarly(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID) { taskOf(thread, group.x, EarlyDraw); }
+
+/** Those the early draw did not draw that this frame's depth shows. */
+[shader("amplification")]
+[numthreads(32, 1, 1)]
+void meshletTaskLate(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID) { taskOf(thread, group.x, LateDraw); }
+
+/** Those this frame's depth shows, without a draw before them to leave out: the glass. */
+[shader("amplification")]
+[numthreads(32, 1, 1)]
+void meshletTaskBehind(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID) { taskOf(thread, group.x, BehindDrawn); }
 
 [shader("mesh")]
 [numthreads(64, 1, 1)]
@@ -317,7 +396,7 @@ Output fragment(RasterInfo raster)
     surface.toEye = normalize(camera.position - world);
     if (dot(surface.normal, surface.toEye) < 0.0) surface.normal = -surface.normal;    // seen from behind, it faces the eye
     float3 texel = pictureOf(draw.normalMap, textureSampler, raster.uv).xyz;
-    if (any(texel < 0.99)) surface.normal = mapped(surface.normal, world, raster.uv, normalize(texel * 2.0 - 1.0));   // (white: it has none)
+    if (any(texel < 0.99)) surface.normal = mapped(surface.normal, world, raster.uv, unpackedNormal(texel));   // (white: it has none)
     surface.metallic = saturate(draw.metallic * material.b);
     surface.alpha = max(roughness * roughness, 0.0001);
     // Wider where the normal turns fast across a pixel, or a small highlight sparkles (Tokuyoshi and Kaplanyan).

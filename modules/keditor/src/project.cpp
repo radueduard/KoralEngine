@@ -55,9 +55,16 @@ namespace keditor
         for (const auto& scene : scenes) list += std::format("{}{}", list.empty() ? "" : ", ", kecs::json::Quote(scene));
         std::ofstream out(directory / "project.json", std::ios::trunc);
         if (!out) { error = std::format("'{}' cannot be written", (directory / "project.json").string()); return false; }
-        out << std::format("{{\n  \"koral-engine-project\": 1,\n  \"name\": {},\n  \"scenes\": [{}],\n  \"start\": {}{}\n}}\n",
+        // How its pictures are compressed, when that is not as it starts: what each kind is offered as, and whether to ask.
+        std::string textures;
+        if (!textureFormats.empty() || !askToCompress) {
+            std::string formats;
+            for (const auto& [kind, format] : textureFormats) formats += std::format("{}{}: {}", formats.empty() ? "" : ", ", kecs::json::Quote(kind), kecs::json::Quote(format));
+            textures = std::format(",\n  \"textures\": {{ \"askToCompress\": {}, \"formats\": {{ {} }} }}", askToCompress ? "true" : "false", formats);
+        }
+        out << std::format("{{\n  \"koral-engine-project\": 1,\n  \"name\": {},\n  \"scenes\": [{}],\n  \"start\": {}{}{}\n}}\n",
                            kecs::json::Quote(name), list, kecs::json::Quote(start),
-                           scripts.empty() ? std::string() : std::format(",\n  \"scripts\": {}", kecs::json::Quote(scripts)));
+                           scripts.empty() ? std::string() : std::format(",\n  \"scripts\": {}", kecs::json::Quote(scripts)), textures);
         return true;
     }
 
@@ -89,6 +96,11 @@ namespace keditor
             for (const auto& scene : scenes->items) out.scenes.push_back(scene.string);
         if (const auto* start = file.Find("start")) out.start = start->string;
         if (const auto* scripts = file.Find("scripts")) out.scripts = scripts->string;
+        if (const auto* textures = file.Find("textures")) {
+            if (const auto* ask = textures->Find("askToCompress"); ask && ask->kind == kecs::json::Value::Kind::eBool) out.askToCompress = ask->boolean;
+            if (const auto* formats = textures->Find("formats"))
+                for (const auto& [kind, format] : formats->members) if (format.kind == kecs::json::Value::Kind::eString) out.textureFormats[kind] = format.string;
+        }
         if (out.start.empty() && !out.scenes.empty()) out.start = out.scenes.front();
         return true;
     }

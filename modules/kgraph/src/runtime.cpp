@@ -37,6 +37,9 @@
 #include <buffer.h>
 #include <bufferView.h>
 #include <bindless.h>
+#include <imageView.h>
+
+#include "cook.h"
 #include <koral_c.h>
 #include <log.h>
 #include <mesh.h>
@@ -1193,6 +1196,21 @@ namespace kgraph
             for (const auto& [index, binding] : bindings)
                 buffers.emplace_back(Value::Members { { "binding", index }, { "stride", binding.first }, { "inputRate", binding.second ? "eInstance" : "eVertex" } });
             return Value(Value::Members { { "bindings", std::move(buffers) }, { "attributes", std::move(out) }, { "positionAttribute", position } });
+        }
+
+        /**
+         * The name a file in the assets is found by, `@` and all: its path from @p directory, or its whole path for one
+         * outside them. Worked out by the names alone, as a name is joined to the directory: a folder linked into the
+         * assets is in them, wherever the link leads.
+         */
+        std::string AssetName(const std::filesystem::path& file, const std::filesystem::path& directory, const int mesh)
+        {
+            std::filesystem::path name = file;
+            std::error_code ec;
+            if (!directory.empty() && file.is_absolute())
+                if (const auto whole = std::filesystem::absolute(directory, ec); !ec)
+                    if (const auto relative = file.lexically_normal().lexically_relative(whole.lexically_normal()); !relative.empty() && *relative.begin() != "..") name = relative;
+            return mesh < 0 ? std::format("@{}", name.generic_string()) : std::format("@{}#{}", name.generic_string(), mesh);
         }
     }
 
@@ -3888,7 +3906,8 @@ namespace kgraph
 
         /** Where files named without their whole path are: the source's, for one that follows another. */
         [[nodiscard]] const std::filesystem::path& Assets() const { return source ? source->Assets() : assetDirectory; }
-        [[nodiscard]] std::filesystem::path AssetFile(const std::string_view name) const
+        /** A file named @p name — without the `@` — where it is: under @p directory, unless the name is a whole path. */
+        static std::filesystem::path FileNamed(const std::string_view name, const std::filesystem::path& directory)
         {
             std::filesystem::path path(name);
 #ifdef _WIN32
@@ -3896,16 +3915,10 @@ namespace kgraph
             if (name.size() >= 6 && name.starts_with("/mnt/") && std::isalpha(static_cast<unsigned char>(name[5])) && (name.size() == 6 || name[6] == '/'))
                 path = std::format("{}:/{}", static_cast<char>(std::toupper(static_cast<unsigned char>(name[5]))), name.substr(std::min<std::size_t>(name.size(), 7)));
 #endif
-            return path.is_absolute() || Assets().empty() ? path : Assets() / path;
+            return path.is_absolute() || directory.empty() ? path : directory / path;
         }
-        [[nodiscard]] std::string AssetId(const std::filesystem::path& file, const int mesh) const
-        {
-            std::error_code ec;
-            std::filesystem::path named = file;
-            if (!Assets().empty() && file.is_absolute())
-                if (const auto relative = std::filesystem::relative(file, Assets(), ec); !ec && !relative.empty() && *relative.begin() != "..") named = relative;
-            return mesh < 0 ? std::format("@{}", named.generic_string()) : std::format("@{}#{}", named.generic_string(), mesh);
-        }
+        [[nodiscard]] std::filesystem::path AssetFile(const std::string_view name) const { return FileNamed(name, Assets()); }
+        [[nodiscard]] std::string AssetId(const std::filesystem::path& file, const int mesh) const { return AssetName(file, Assets(), mesh); }
 
         /** A picture of one texel: `white`, `black`, or `normal` — a surface's own normal, as a normal map has it. */
         Held DefaultImage(const std::string_view name)
@@ -3932,10 +3945,47 @@ namespace kgraph
             std::vector<std::pair<std::string, VertexData>> meshes; // each by the name it is found by
             std::map<std::string, std::string> names;               // and what the file calls it
         };
-        struct Arrived {
-            std::vector<std::pair<std::string, VertexData>> meshes; // a model's, each by the name it is found by
-            std::map<std::string, std::string> names;
-        };
+        /**
+         * A model's meshes of the same attributes in the same buffers, as one: a part of a model is a run of its whole's
+         * indices. Parts that differ in what their vertices have cannot share a mesh, and are in one of their own. Each
+         * part is all it is but the device's mesh (source), which the whole is made into on the frame.
+         */
+        struct Whole { VertexData all; std::vector<Held> parts; };
+        struct Arrived { std::vector<Whole> wholes; };     // a model's meshes, read and put together off the frame
+
+        /** A model's meshes put together into wholes, each part bounded: the work of it, done where the file was read. */
+        static Arrived Together(std::vector<std::pair<std::string, VertexData>> meshes, const std::map<std::string, std::string>& names)
+        {
+            std::map<std::string, Whole> wholes;
+            for (auto& [id, data] : meshes) {
+                Whole& whole = wholes[LayoutKey(data)];
+                if (whole.parts.empty()) {
+                    whole.all.buffers = data.buffers;
+                    for (const auto& attribute : data.attributes) whole.all.attributes.push_back({ attribute.semantic, attribute.type, attribute.count, {} });
+                }
+                Held part = std::make_shared<Resource>();
+                part->kind = "Mesh";
+                part->node = id;
+                part->part = true;
+                if (const auto called = names.find(id); called != names.end()) part->label = called->second;
+                part->firstIndex = static_cast<std::uint32_t>(whole.all.indices.size());
+                part->indexCount = static_cast<std::uint32_t>(data.indices.size());
+                part->vertexOffset = static_cast<std::int32_t>(whole.all.vertexCount);
+                part->vertexCount = data.vertexCount;
+                Bound(*part, data, 0, data.vertexCount);
+                for (std::size_t a = 0; a < data.attributes.size(); ++a) {
+                    auto& words = whole.all.attributes[a].words;
+                    words.insert(words.end(), data.attributes[a].words.begin(), data.attributes[a].words.end());
+                }
+                whole.all.indices.insert(whole.all.indices.end(), data.indices.begin(), data.indices.end());
+                whole.all.vertexCount += data.vertexCount;
+                data = {};
+                whole.parts.push_back(std::move(part));
+            }
+            Arrived arrived;
+            for (auto& whole : wholes | std::views::values) arrived.wholes.push_back(std::move(whole));
+            return arrived;
+        }
         std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
         std::vector<kor::Task<void>> reading;                   // the files being read
         /// A PointShadows node's lights as their maps were last drawn — where each was, and how far it reached — and
@@ -3948,7 +3998,8 @@ namespace kgraph
         std::map<std::string, std::optional<std::vector<Model::Attribute>>, std::less<>> probed;
         std::map<std::string, MeshImport, std::less<>> meshImports;    // how each model file is read, by its name in ids
         std::map<std::string, std::string, std::less<>> unread; // a file that could not be read, and why
-        std::deque<Arrived> arrivedMeshes;                      // models read, and not yet the device's: one a frame
+        std::deque<Arrived> arrivedMeshes;                      // models read, and not yet the device's: each, the next frame
+        std::optional<std::chrono::steady_clock::time_point> modelsWaiting;  // since when a model read waits for the others
         std::vector<Held> arrivedPictures;                      // the stand-ins whose pictures came, for the nodes that hold one
 
         /** A model file's numbers, as they are in the file: touches nothing of the runtime's, so it is read on any thread. */
@@ -4032,13 +4083,7 @@ namespace kgraph
 
         static std::optional<ReadModel> Read(const std::filesystem::path& file, const std::filesystem::path& assetDirectory, const MeshImport& import)
         {
-            const auto named = [&](const std::filesystem::path& path, const int mesh) {
-                std::error_code ec;
-                std::filesystem::path name = path;
-                if (!assetDirectory.empty() && path.is_absolute())
-                    if (const auto relative = std::filesystem::relative(path, assetDirectory, ec); !ec && !relative.empty() && *relative.begin() != "..") name = relative;
-                return mesh < 0 ? std::format("@{}", name.generic_string()) : std::format("@{}#{}", name.generic_string(), mesh);
-            };
+            const auto named = [&](const std::filesystem::path& path, const int mesh) { return AssetName(path, assetDirectory, mesh); };
             const auto importer = kmdl::Importer::Load(file);
             if (!importer) return std::nullopt;
             auto scene = importer->LoadScene();
@@ -4126,13 +4171,15 @@ namespace kgraph
         {
             co_await kor::Context::SwitchToBackgroundThread();
             auto read = Read(file, assetDirectory, import);
+            std::optional<Arrived> together;
+            if (read) together = Together(std::move(read->meshes), read->names);
             co_await kor::Context::SwitchToMainThread();
             if (!*alive) co_return;
             self->readingModels.erase(key);
             // How it is to be read changed while it was being read: what was read is not that, and it is read again.
             if (self->rereadModels.erase(key)) { self->WantModel(file); co_return; }
             if (!read) { self->models[key] = nullptr; self->unread[key] = std::format("'{}' could not be read as a model", key); co_return; }
-            self->arrivedMeshes.push_back({ std::move(read->meshes), std::move(read->names) });
+            self->arrivedMeshes.push_back(std::move(*together));
             self->models[key] = std::move(read->model);
         }
 
@@ -4155,19 +4202,206 @@ namespace kgraph
             if (!why.empty()) self->unread[key] = why;
         }
 
-        /** Reads a picture off the frame, and leads whoever holds its stand-in to it. */
-        static kor::Task<void> ReadPicture(Impl* self, std::shared_ptr<std::atomic<bool>> alive, std::string id, std::filesystem::path file, Held standIn)
+        /**
+         * Reads a picture off the frame — its file, or the file cooked of it, kept as @p format — and leads whoever holds
+         * @p standIn to it.
+         */
+        static kor::Task<void> ReadPicture(Impl* self, std::shared_ptr<std::atomic<bool>> alive, std::string id, std::filesystem::path file, Held standIn,
+                                           const TextureFormat format = TextureFormat::eAsRead)
         {
             kor::Resource<kor::Image> image = co_await kimg::LoadImageAsync(file, true);
             co_await kor::Context::SwitchToMainThread();
             if (!*alive) co_return;
             if (!image.Valid()) { self->unread[id] = std::format("'{}' could not be read as a picture", file.generic_string()); co_return; }
-            Held real = MakeResource(std::move(image));
-            real->node = id;
-            standIn->replacedBy = real;
-            ++replacements;
-            self->assets[id] = real;
-            self->arrivedPictures.push_back(std::move(standIn));
+            self->unread.erase(id);
+            self->PictureArrived(id, standIn, Spread(MakeResource(std::move(image)), format));
+        }
+
+        // ---- pictures kept block-compressed ----------------------------------------------------------------------
+
+        std::map<std::string, TextureImport, std::less<>> textureImports;     // as the graph has them, by file
+        std::map<std::string, TexturePack, std::less<>> texturePacks;         // by pack
+        std::map<std::string, std::pair<std::string, int>, std::less<>> packedIn;   // a file a pack is made of: the pack, and the channel it went into
+        std::deque<cook::Recipe> toCook;                        // asked to be cooked, and not yet begun
+        std::vector<kor::Task<void>> cookingTasks;              // the one cooking them, while it is
+        Runtime::CookProgress cooking;
+
+        /** Where pictures are cooked to: the project's `cache/textures`, beside its `assets`. */
+        [[nodiscard]] std::filesystem::path TextureCache() const { return Assets().empty() ? std::filesystem::path() : Assets().parent_path() / "cache" / "textures"; }
+        /** Where a picture file of an asset id is, worked out by a copy of the directory: for a thread off the frame. */
+        [[nodiscard]] cook::FileOf FileOf() const
+        {
+            return [directory = Assets()](const std::string_view id) { return FileNamed(id.starts_with('@') ? id.substr(1) : id, directory); };
+        }
+        /** What picture @p id is cooked of, and how, as the graph says: a pack's channels, a file's import, or as it is read. */
+        [[nodiscard]] cook::Recipe RecipeOf(const std::string_view id) const
+        {
+            cook::Recipe recipe { std::string(id) };
+            if (const auto pack = texturePacks.find(id); pack != texturePacks.end()) {
+                recipe.format = pack->second.format;
+                recipe.quality = pack->second.quality;
+                recipe.pack = pack->second;
+            } else if (const auto import = textureImports.find(id); import != textureImports.end() && TextureCompressible(id)) {
+                recipe.format = import->second.format;
+                recipe.quality = import->second.quality;
+            }
+            return recipe;
+        }
+        /** Whether picture @p id has a file cooked of it as it is now, with the settings as they are now. */
+        [[nodiscard]] bool Cooked(const std::string_view id) const
+        {
+            const cook::Recipe recipe = RecipeOf(id);
+            if (recipe.format == TextureFormat::eAsRead) return false;
+            const auto cooked = cook::CookedPath(TextureCache(), recipe, FileOf());
+            std::error_code ec;
+            return cooked && std::filesystem::exists(*cooked, ec);
+        }
+
+        /** A view of picture @p image whose channels are read as @p mapping says: it holds the picture, which stays as long. */
+        static Held ViewOf(const Held& image, const kor::ImageView::ComponentMapping& mapping)
+        {
+            if (!image || image->kind != "Image" || !image->handle) return image;
+            auto view = kor::ImageView::Builder(kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(image->handle))).SetComponentMapping(mapping).Build();
+            if (!view.Valid()) return image;
+            Held held = MakeResource(std::move(view));
+            held->source = image;
+            return held;
+        }
+        /** A picture kept as @p format, as it is to be read: BC4's one channel in red, green and blue; BC5's blue — a z it has not — 1. */
+        static Held Spread(Held image, const TextureFormat format)
+        {
+            using S = kor::ImageView::Swizzle;
+            if (format == TextureFormat::eBC4) return ViewOf(image, kor::ImageView::ComponentMapping { S::eR, S::eR, S::eR, S::eOne });
+            if (format == TextureFormat::eBC5) return ViewOf(image, kor::ImageView::ComponentMapping { S::eR, S::eG, S::eOne, S::eOne });
+            return image;
+        }
+        /** A file a pack is made of, as whoever holds it reads it: the pack's channel it went into, in red, green and blue. */
+        static Held Channel(const Held& pack, const int channel)
+        {
+            using S = kor::ImageView::Swizzle;
+            // The pack may itself be a view (a BC4 or BC5 one): its picture's channels are what is spread.
+            const Held& image = pack && pack->kind == "ImageView" && pack->source ? pack->source : pack;
+            const S from = channel == 1 ? S::eG : channel == 2 ? S::eB : channel == 3 ? S::eA : S::eR;
+            return ViewOf(image, kor::ImageView::ComponentMapping { from, from, from, S::eOne });
+        }
+
+        /** Whoever holds @p from — a stand-in, or picture @p id as it was read before — holds @p to from here on. */
+        void Lead(const std::string& id, const Held& from, Held to)
+        {
+            to->node = id;
+            if (from && from != to) { from->replacedBy = to; ++replacements; arrivedPictures.push_back(from); }
+            assets[id] = std::move(to);
+        }
+        /** Picture @p id is here: what held @p standIn holds it, and each file it is a pack of reads its channel of it. */
+        void PictureArrived(const std::string& id, const Held& standIn, Held real)
+        {
+            Lead(id, standIn, real);
+            for (const auto& [member, in] : packedIn)
+                if (in.first == id)
+                    if (const auto held = assets.find(member); held != assets.end() && held->second) Lead(member, held->second, Channel(real, in.second));
+        }
+
+        /**
+         * Starts reading picture @p id into the place of @p standIn: of a file a pack is made of, nothing — it is the
+         * pack's channel, once the pack is there; the file cooked of it, when there is one of it as it is; a pack's
+         * files, put together; or its file.
+         */
+        void StartPicture(const std::string& id, const Held& standIn)
+        {
+            if (const auto member = packedIn.find(id); member != packedIn.end()) {
+                const Held pack = Asset(member->second.first);
+                if (pack && !pack->pending) Lead(id, standIn, Channel(pack, member->second.second));
+                return;     // the pack, when it arrives, leads it on
+            }
+            const cook::Recipe recipe = RecipeOf(id);
+            if (recipe.format != TextureFormat::eAsRead)
+                if (const auto cooked = cook::CookedPath(TextureCache(), recipe, FileOf()); cooked && std::filesystem::exists(*cooked)) {
+                    reading.push_back(ReadPicture(this, alive, id, *cooked, standIn, recipe.format));
+                    return;
+                }
+            if (recipe.pack) { reading.push_back(ReadPack(this, alive, recipe, FileOf(), standIn)); return; }
+            reading.push_back(ReadPicture(this, alive, id, AssetFile(id.substr(1)), standIn));
+        }
+
+        /** A pack not cooked yet: its files read and put together off the frame, made a picture of four bytes a texel, with its mips. */
+        static kor::Task<void> ReadPack(Impl* self, std::shared_ptr<std::atomic<bool>> alive, cook::Recipe recipe, cook::FileOf fileOf, Held standIn)
+        {
+            co_await kor::Context::SwitchToBackgroundThread();
+            auto pixels = cook::Pixels(recipe, fileOf);
+            co_await kor::Context::SwitchToMainThread();
+            if (!*alive) co_return;
+            if (!pixels) { self->unread[recipe.id] = std::format("'{}': {}", recipe.id, pixels.error()); co_return; }
+            kor::u32 levels = 1;
+            for (kor::u32 size = std::max(pixels->extent.x, pixels->extent.y); size > 1; size /= 2) ++levels;
+            auto image = kor::Image::Builder().SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2(pixels->extent.x, pixels->extent.y))
+                .SetMipLevels(levels).SetUsage(kor::Flags<kor::Image::Usage>(kor::Image::Usage::eSampled))
+                .SetData(pixels->pixels.data(), pixels->pixels.size()).Build();
+            if (!image.Valid()) { self->unread[recipe.id] = std::format("'{}' could not be made a picture", recipe.id); co_return; }
+            self->unread.erase(recipe.id);
+            self->PictureArrived(recipe.id, standIn, MakeResource(std::move(image)));
+        }
+
+        /**
+         * How picture files are kept, as the graph says: each picture whose settings changed — its import, its pack, or
+         * the pack it is in — is read again, as it is now to be.
+         */
+        void SetTextureImports(const std::map<std::string, TextureImport>& imports, const std::map<std::string, TexturePack>& packs)
+        {
+            if (source) return;     // the source reads the files, as its own graph says
+            std::set<std::string> changed;
+            for (const auto& [id, import] : imports) if (const auto it = textureImports.find(id); it == textureImports.end() || it->second != import) changed.insert(id);
+            for (const auto& id : textureImports | std::views::keys) if (!imports.contains(id)) changed.insert(id);
+            const auto members = [&](const TexturePack& pack) { for (const auto& channel : pack.channels) if (!channel.from.empty()) changed.insert(channel.from); };
+            for (const auto& [id, pack] : packs)
+                if (const auto it = texturePacks.find(id); it == texturePacks.end() || it->second != pack) { changed.insert(id); members(pack); if (it != texturePacks.end()) members(it->second); }
+            for (const auto& [id, pack] : texturePacks) if (!packs.contains(id)) { changed.insert(id); members(pack); }
+            if (changed.empty()) return;
+            textureImports = std::map<std::string, TextureImport, std::less<>>(imports.begin(), imports.end());
+            texturePacks = std::map<std::string, TexturePack, std::less<>>(packs.begin(), packs.end());
+            packedIn.clear();
+            for (const auto& [id, pack] : texturePacks)
+                for (int c = 0; c < 4; ++c)
+                    if (const auto& from = pack.channels[static_cast<std::size_t>(c)].from; !from.empty()) packedIn.try_emplace(from, id, c);
+            // Packs first: a file of one is its channel, and the pack read again leads it on.
+            std::vector<std::string> order(changed.begin(), changed.end());
+            std::ranges::stable_partition(order, [&](const std::string& id) { return texturePacks.contains(id); });
+            for (const auto& id : order)
+                if (const auto it = assets.find(id); it != assets.end() && it->second) StartPicture(id, it->second);
+        }
+
+        /** Cooks what is asked, one picture after another, off the frame; each read again from what was cooked of it. */
+        static kor::Task<void> CookAll(Impl* self, std::shared_ptr<std::atomic<bool>> alive)
+        {
+            while (*alive && !self->toCook.empty()) {
+                cook::Recipe recipe = std::move(self->toCook.front());
+                self->toCook.pop_front();
+                self->cooking.current = recipe.id;
+                const std::filesystem::path cache = self->TextureCache();
+                const cook::FileOf fileOf = self->FileOf();
+                co_await kor::Context::SwitchToBackgroundThread();
+                auto cooked = cook::Cook(cache, recipe, fileOf);
+                co_await kor::Context::SwitchToMainThread();
+                if (!*alive) co_return;
+                ++self->cooking.done;
+                if (!cooked) { self->cooking.failed.push_back(cooked.error()); continue; }
+                // Read again, from what was cooked — while it is still to be kept as it was cooked.
+                if (const auto it = self->assets.find(recipe.id); it != self->assets.end() && it->second && self->RecipeOf(recipe.id) == recipe)
+                    self->StartPicture(recipe.id, it->second);
+            }
+            self->cooking.current.clear();
+        }
+        void Cook(const std::vector<std::string>& ids)
+        {
+            if (source) { source->Cook(ids); return; }
+            if (cooking.done == cooking.total) cooking = {};
+            for (const auto& id : ids) {
+                cook::Recipe recipe = RecipeOf(id);
+                if (recipe.format == TextureFormat::eAsRead || std::ranges::find(toCook, recipe) != toCook.end()) continue;
+                toCook.push_back(std::move(recipe));
+                ++cooking.total;
+            }
+            std::erase_if(cookingTasks, [](const kor::Task<void>& task) { return task.Done(); });
+            if (cookingTasks.empty() && !toCook.empty()) cookingTasks.push_back(CookAll(this, alive));
         }
 
         /** Starts reading a model file, unless it is read or being read. */
@@ -4237,51 +4471,34 @@ namespace kgraph
                 if (!texel.Valid()) return nullptr;
                 standIn = MakeResource(std::move(texel));
                 standIn->pending = true;
-                reading.push_back(ReadPicture(this, alive, std::string(id), AssetFile(named), standIn));
             }
             standIn->node = std::string(id);
-            return assets.emplace(std::string(id), std::move(standIn)).first->second;
+            assets.emplace(std::string(id), standIn);
+            if (standIn->kind != "Mesh") StartPicture(std::string(id), standIn);
+            return assets.find(id)->second;
         }
 
-        /** Each frame: what was read since is made the device's — a few meshes at a time — and what holds a stand-in is led on. */
+        /** Each frame: what was read since is made the device's, and what holds a stand-in is led on. */
         void Arrive()
         {
             std::erase_if(reading, [](const kor::Task<void>& task) { return task.Done(); });
             // A model's meshes are one mesh on the device, each a run of its indices: a pass that draws a hundred of
-            // them binds one thing, where a mesh each would be bound a hundred times.
-            if (!arrivedMeshes.empty()) {
+            // them binds one thing, where a mesh each would be bound a hundred times. Every model read since arrives
+            // in the same frame: what packs their meshes (a MeshPack, its Meshlets, a RayScene) is built again once for
+            // them all, where a model a frame built it again for each.
+            // While other models are still being read, those read wait for them a moment — a model read alone at
+            // first, the rest a moment after, was every pack built twice over.
+            bool hold = false;
+            if (!arrivedMeshes.empty() && !readingModels.empty()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (!modelsWaiting) modelsWaiting = now;
+                hold = now - *modelsWaiting < std::chrono::milliseconds(400);
+            }
+            if (!hold) modelsWaiting.reset();
+            while (!hold && !arrivedMeshes.empty()) {
                 Arrived arrived = std::move(arrivedMeshes.front());
                 arrivedMeshes.pop_front();
-                // Those of the same attributes in the same buffers are one: a part of a model is a run of its whole's
-                // indices. Parts that differ in what their vertices have cannot share a mesh, and are in one of their own.
-                struct Whole { VertexData all; std::vector<Held> parts; };
-                std::map<std::string, Whole> wholes;
-                for (auto& [id, data] : arrived.meshes) {
-                    Whole& whole = wholes[LayoutKey(data)];
-                    if (whole.parts.empty()) {
-                        whole.all.buffers = data.buffers;
-                        for (const auto& attribute : data.attributes) whole.all.attributes.push_back({ attribute.semantic, attribute.type, attribute.count, {} });
-                    }
-                    Held part = std::make_shared<Resource>();
-                    part->kind = "Mesh";
-                    part->node = id;
-                    part->part = true;
-                    if (const auto called = arrived.names.find(id); called != arrived.names.end()) part->label = called->second;
-                    part->firstIndex = static_cast<std::uint32_t>(whole.all.indices.size());
-                    part->indexCount = static_cast<std::uint32_t>(data.indices.size());
-                    part->vertexOffset = static_cast<std::int32_t>(whole.all.vertexCount);
-                    part->vertexCount = data.vertexCount;
-                    Bound(*part, data, 0, data.vertexCount);
-                    for (std::size_t a = 0; a < data.attributes.size(); ++a) {
-                        auto& words = whole.all.attributes[a].words;
-                        words.insert(words.end(), data.attributes[a].words.begin(), data.attributes[a].words.end());
-                    }
-                    whole.all.indices.insert(whole.all.indices.end(), data.indices.begin(), data.indices.end());
-                    whole.all.vertexCount += data.vertexCount;
-                    data = {};
-                    whole.parts.push_back(std::move(part));
-                }
-                for (auto& [key, whole] : wholes) {
+                for (auto& whole : arrived.wholes) {
                     const auto made = MeshOf(whole.all);
                     if (!made) {
                         for (const auto& part : whole.parts) unread[part->node] = std::format("'{}': {}", part->node, made.error());
@@ -5538,67 +5755,118 @@ namespace kgraph
 
             struct Meshlet { std::uint32_t vertexOffset, vertexCount, triangleOffset, triangleCount; float sphere[4]; float cone[4]; };
             static_assert(sizeof(Meshlet) == 48);
-            std::vector<Meshlet> meshlets;
-            std::vector<std::uint32_t> vertices, triangles, meshRanges;
-            std::vector<std::uint32_t> local(vertexCount, ~0u);      // a mesh vertex's place in the meshlet being made
-            std::vector<std::uint32_t> made;                         // the vertices of the meshlet being made
-            std::vector<kor::Vec3> faces;                            // its triangles' normals
-            double most = 0;
-            const auto finish = [&](Meshlet meshlet) {
-                if (meshlet.triangleCount == 0) return;
-                kor::Vec3 low(1e30f), high(-1e30f);
-                for (const std::uint32_t v : made) { low = kor::Min(low, at(v)); high = kor::Max(high, at(v)); }
-                const kor::Vec3 middle = (low + high) * 0.5f;
-                float reach = 0.f;
-                for (const std::uint32_t v : made) reach = std::max(reach, kor::Length(at(v) - middle));
-                kor::Vec3 axis(0.f);
-                for (const auto& face : faces) axis = axis + face;
-                float cutoff = 1.f;     // no cone: never culled by it
-                if (const float length = kor::Length(axis); length > 1e-6f && !faces.empty()) {
-                    axis = axis / length;
-                    float least = 1.f;
-                    for (const auto& face : faces) least = std::min(least, kor::Dot(axis, face));
-                    if (least > 0.1f) cutoff = std::sqrt(1.f - least * least);
-                }
-                meshlet.sphere[0] = middle.x; meshlet.sphere[1] = middle.y; meshlet.sphere[2] = middle.z; meshlet.sphere[3] = reach;
-                meshlet.cone[0] = axis.x; meshlet.cone[1] = axis.y; meshlet.cone[2] = axis.z; meshlet.cone[3] = cutoff;
-                for (const std::uint32_t v : made) local[v] = ~0u;
-                made.clear();
-                faces.clear();
-                meshlets.push_back(meshlet);
-            };
-            for (const auto& range : *ranges) {
+            // A run of a mesh's triangles, cut by itself: its meshlets' offsets count from its own vertices and triangles.
+            struct Piece { std::vector<Meshlet> meshlets; std::vector<std::uint32_t> vertices, triangles; };
+            struct Task { std::size_t range; std::uint64_t first, count; std::int64_t offset; };
+            // Each mesh's triangles in runs of so many, cut at once on as many threads: a run ends a meshlet where the
+            // mesh would have gone on with it, and nowhere else is it cut otherwise than one after another.
+            constexpr std::uint64_t RunTriangles = 1u << 18;
+            std::vector<Task> tasks;
+            for (std::size_t r = 0; r < ranges->size(); ++r) {
+                const Value& range = (*ranges)[r];
                 const auto field = [&](const char* name) { const Value* found = range.Find(name); return found && found->Number() ? *found->Number() : 0.0; };
                 const auto first = static_cast<std::uint64_t>(field("firstIndex")), count = static_cast<std::uint64_t>(field("indexCount"));
                 const auto offset = static_cast<std::int64_t>(field("vertexOffset"));
-                const auto firstMeshlet = static_cast<std::uint32_t>(meshlets.size());
-                Meshlet meshlet { static_cast<std::uint32_t>(vertices.size()), 0, static_cast<std::uint32_t>(triangles.size()), 0, {}, {} };
-                for (std::uint64_t t = 0; t + 3 <= count && first + t + 3 <= indices.size(); t += 3) {
+                if (count < 3) { tasks.push_back({ r, first, 0, offset }); continue; }
+                for (std::uint64_t at = 0; at + 3 <= count; at += RunTriangles * 3)
+                    tasks.push_back({ r, first + at, std::min<std::uint64_t>(RunTriangles * 3, count - at), offset });
+            }
+            std::vector<Piece> pieces(tasks.size());
+            const auto cutRun = [&](const Task& task, std::vector<std::uint32_t>& local) {
+                Piece& piece = pieces[&task - tasks.data()];
+                // Its vertices' places in the meshlet being made, by the vertex less the least of the run's.
+                std::uint32_t least = ~0u, greatest = 0;
+                for (std::uint64_t i = 0; i < task.count && task.first + i < indices.size(); ++i) {
+                    const auto v = static_cast<std::int64_t>(indices[task.first + i]) + task.offset;
+                    if (v < 0 || static_cast<kor::u64>(v) >= vertexCount) continue;
+                    least = std::min(least, static_cast<std::uint32_t>(v));
+                    greatest = std::max(greatest, static_cast<std::uint32_t>(v));
+                }
+                if (least > greatest) return;
+                if (local.size() < greatest - least + 1) local.assign(greatest - least + 1, ~0u);
+                std::vector<std::uint32_t> made;                         // the vertices of the meshlet being made
+                std::vector<kor::Vec3> faces;                            // its triangles' normals
+                const auto finish = [&](Meshlet meshlet) {
+                    if (meshlet.triangleCount == 0) return;
+                    kor::Vec3 low(1e30f), high(-1e30f);
+                    for (const std::uint32_t v : made) { low = kor::Min(low, at(v)); high = kor::Max(high, at(v)); }
+                    const kor::Vec3 middle = (low + high) * 0.5f;
+                    float reach = 0.f;
+                    for (const std::uint32_t v : made) reach = std::max(reach, kor::Length(at(v) - middle));
+                    kor::Vec3 axis(0.f);
+                    for (const auto& face : faces) axis = axis + face;
+                    float cutoff = 1.f;     // no cone: never culled by it
+                    if (const float length = kor::Length(axis); length > 1e-6f && !faces.empty()) {
+                        axis = axis / length;
+                        float lowest = 1.f;
+                        for (const auto& face : faces) lowest = std::min(lowest, kor::Dot(axis, face));
+                        if (lowest > 0.1f) cutoff = std::sqrt(1.f - lowest * lowest);
+                    }
+                    meshlet.sphere[0] = middle.x; meshlet.sphere[1] = middle.y; meshlet.sphere[2] = middle.z; meshlet.sphere[3] = reach;
+                    meshlet.cone[0] = axis.x; meshlet.cone[1] = axis.y; meshlet.cone[2] = axis.z; meshlet.cone[3] = cutoff;
+                    for (const std::uint32_t v : made) local[v - least] = ~0u;
+                    made.clear();
+                    faces.clear();
+                    piece.meshlets.push_back(meshlet);
+                };
+                Meshlet meshlet { 0, 0, 0, 0, {}, {} };
+                for (std::uint64_t t = 0; t + 3 <= task.count && task.first + t + 3 <= indices.size(); t += 3) {
                     std::uint32_t corner[3];
-                    for (int c = 0; c < 3; ++c) corner[c] = static_cast<std::uint32_t>(static_cast<std::int64_t>(indices[first + t + c]) + offset);
+                    for (int c = 0; c < 3; ++c) corner[c] = static_cast<std::uint32_t>(static_cast<std::int64_t>(indices[task.first + t + c]) + task.offset);
                     if (corner[0] >= vertexCount || corner[1] >= vertexCount || corner[2] >= vertexCount) continue;
                     int fresh = 0;
-                    for (int c = 0; c < 3; ++c) fresh += local[corner[c]] == ~0u && (c == 0 || corner[c] != corner[0]) && (c < 2 || corner[c] != corner[1]) ? 1 : 0;
+                    for (int c = 0; c < 3; ++c) fresh += local[corner[c] - least] == ~0u && (c == 0 || corner[c] != corner[0]) && (c < 2 || corner[c] != corner[1]) ? 1 : 0;
                     if (meshlet.vertexCount + fresh > mostVertices || meshlet.triangleCount + 1 > mostTriangles) {
                         finish(meshlet);
-                        meshlet = { static_cast<std::uint32_t>(vertices.size()), 0, static_cast<std::uint32_t>(triangles.size()), 0, {}, {} };
+                        meshlet = { static_cast<std::uint32_t>(piece.vertices.size()), 0, static_cast<std::uint32_t>(piece.triangles.size()), 0, {}, {} };
                     }
                     std::uint32_t packed = 0;
                     for (int c = 0; c < 3; ++c) {
-                        if (local[corner[c]] == ~0u) {
-                            local[corner[c]] = meshlet.vertexCount++;
-                            vertices.push_back(corner[c]);
+                        std::uint32_t& place = local[corner[c] - least];
+                        if (place == ~0u) {
+                            place = meshlet.vertexCount++;
+                            piece.vertices.push_back(corner[c]);
                             made.push_back(corner[c]);
                         }
-                        packed |= local[corner[c]] << (8 * c);
+                        packed |= place << (8 * c);
                     }
-                    triangles.push_back(packed);
+                    piece.triangles.push_back(packed);
                     ++meshlet.triangleCount;
                     const kor::Vec3 a = at(corner[0]), b = at(corner[1]), c = at(corner[2]);
                     const kor::Vec3 n = kor::Cross(b - a, c - a);
                     if (const float length = kor::Length(n); length > 1e-12f) faces.push_back(n / length);
                 }
                 finish(meshlet);
+            };
+            {
+                std::atomic<std::size_t> next { 0 };
+                const auto work = [&] {
+                    std::vector<std::uint32_t> local;   // all ~0 between meshlets: finish puts back what it took
+                    for (std::size_t i; (i = next++) < tasks.size();) cutRun(tasks[i], local);
+                };
+                const std::size_t threads = std::min<std::size_t>({ std::max(1u, std::thread::hardware_concurrency()), 16, tasks.size() });
+                std::vector<std::jthread> helpers;
+                for (std::size_t t = 1; t < threads; ++t) helpers.emplace_back(work);
+                work();
+            }
+            // The runs one after another, as one mesh's meshlets were cut: each mesh's are together, in order.
+            std::vector<Meshlet> meshlets;
+            std::vector<std::uint32_t> vertices, triangles, meshRanges;
+            double most = 0;
+            for (std::size_t i = 0, r = 0; r < ranges->size(); ++r) {
+                const auto firstMeshlet = static_cast<std::uint32_t>(meshlets.size());
+                for (; i < tasks.size() && tasks[i].range == r; ++i) {
+                    Piece& piece = pieces[i];
+                    const auto vertexBase = static_cast<std::uint32_t>(vertices.size()), triangleBase = static_cast<std::uint32_t>(triangles.size());
+                    for (Meshlet meshlet : piece.meshlets) {
+                        meshlet.vertexOffset += vertexBase;
+                        meshlet.triangleOffset += triangleBase;
+                        meshlets.push_back(meshlet);
+                    }
+                    vertices.insert(vertices.end(), piece.vertices.begin(), piece.vertices.end());
+                    triangles.insert(triangles.end(), piece.triangles.begin(), piece.triangles.end());
+                    piece = {};
+                }
                 const auto cut = static_cast<std::uint32_t>(meshlets.size()) - firstMeshlet;
                 most = std::max(most, static_cast<double>(cut));
                 meshRanges.insert(meshRanges.end(), { firstMeshlet, cut, 0u, 0u });
@@ -6181,6 +6449,25 @@ namespace kgraph
                 Value::Members merged = *given;
                 for (const auto& [field, value] : *defaults)
                     if (std::ranges::find_if(merged, [&](const auto& m) { return m.first == field; }) == merged.end()) merged.emplace_back(field, value);
+                // So does each struct of a list in it: a blend attachment given its factors still writes every channel, as
+                // the framework's has it, not none.
+                static const std::map<std::string, Value::Members, std::less<>> itemDefaults {
+                    { "colorBlendState.attachments", { { "blendEnable", false }, { "srcColorBlendFactor", "eOne" }, { "dstColorBlendFactor", "eZero" },
+                                                       { "colorBlendOp", "eAdd" }, { "srcAlphaBlendFactor", "eOne" }, { "dstAlphaBlendFactor", "eZero" },
+                                                       { "alphaBlendOp", "eAdd" }, { "colorWriteMask", Value::List { "eR", "eG", "eB", "eA" } } } },
+                };
+                for (auto& [field, value] : merged) {
+                    const auto items = itemDefaults.find(listed + "." + field);
+                    if (items == itemDefaults.end() || !value.Items()) continue;
+                    Value::List completed;
+                    for (const Value& item : *value.Items()) {
+                        Value::Members each = item.Named() ? *item.Named() : Value::Members {};
+                        for (const auto& [name, initial] : items->second)
+                            if (std::ranges::find_if(each, [&](const auto& m) { return m.first == name; }) == each.end()) each.emplace_back(name, initial);
+                        completed.push_back(item.Named() ? Value(std::move(each)) : item);
+                    }
+                    value = Value(std::move(completed));
+                }
                 input.value = Value(std::move(merged));
             }
         }
@@ -7860,6 +8147,7 @@ namespace kgraph
         _graph = std::move(graph);
         ++_revision;
         _impl->SetMeshImports(_graph.meshImports);
+        _impl->SetTextureImports(_graph.textureImports, _graph.texturePacks);
         _impl->SetDefaultMeshTangents(_graph.defaultMeshTangents);
         Run();
     }
@@ -8004,6 +8292,18 @@ namespace kgraph
             if (held && id.starts_with('@')) ids.push_back(id);
         return ids;
     }
+
+    std::vector<std::string> Runtime::Pictures() const
+    {
+        std::vector<std::string> ids;
+        for (const auto& [id, held] : _impl->source ? _impl->source->assets : _impl->assets)
+            if (held && id.starts_with('@') && id.find('#') == std::string::npos && held->kind != "Mesh") ids.push_back(id);
+        return ids;
+    }
+    bool Runtime::Cooked(const std::string_view id) const { return (_impl->source ? *_impl->source : *_impl).Cooked(id); }
+    void Runtime::Cook(const std::vector<std::string>& ids) { _impl->Cook(ids); }
+    const Runtime::CookProgress& Runtime::Cooking() const { return (_impl->source ? _impl->source : _impl.get())->cooking; }
+    std::filesystem::path Runtime::TextureCache() const { return _impl->TextureCache(); }
 
     std::size_t Runtime::Reading() const { return _impl->reading.size() + _impl->arrivedMeshes.size(); }
     std::vector<std::string> Runtime::Unread() const
@@ -8541,6 +8841,8 @@ namespace kgraph
                 pass.gpuMs = timing->second.gpuMs;
                 pass.recordMs = timing->second.recordMs;
                 pass.gpuMeasured = timing->second.gpuMeasured;
+                pass.gpuStartMs = timing->second.gpuStartMs;
+                pass.gpuLastMs = timing->second.gpuLastMs;
             }
             for (const auto& use : ours->second->declared) pass.uses.emplace_back(named(use.name), use.read && use.write ? 'b' : use.write ? 'w' : 'r');
             if (ours->second->plan->readsScreen || ours->second->plan->writesScreen)
@@ -8556,6 +8858,12 @@ namespace kgraph
         report.bytes = graph.Memory().bytes;
         report.unsharedBytes = graph.Memory().unsharedBytes;
         return report;
+    }
+
+    Runtime::FrameTimes Runtime::Times() const
+    {
+        auto times = _impl->frameGraph.Times();
+        return { std::move(times.frameMs), std::move(times.gpuMs) };
     }
 
     void Runtime::RunSetupAgain() { _impl->setupAgain = true; }

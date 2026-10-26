@@ -124,6 +124,13 @@ namespace keditor
         [[nodiscard]] std::vector<std::string> ScriptsNotRunning();
         /** @brief Saves, starts the editor again on this project with its scripts, and closes this one. */
         bool ReopenWithScripts();
+        /** @brief One thing wrong now: what is said of it, the node it is of (when it is a node's), and whether it is only a warning. */
+        struct Problem { std::string text, node; bool warning = false; };
+        /**
+         * @brief What is wrong now: the graph's problems and what its passes could not run for, the project's scripts
+         *        that nothing runs, and what was noted reading the scene. The editor logs each as it comes and as it goes.
+         */
+        [[nodiscard]] std::vector<Problem> Problems();
         /**
          * @brief The project whose scripts the program this editor runs in runs: what a scripts' runner opened the
          *        editor for. Empty in `koral-editor`, which runs none.
@@ -191,6 +198,8 @@ namespace keditor
         void Frame(kecs::Entity entity);
         /** @brief Frames a second, averaged over the last quarter of one. */
         [[nodiscard]] int Fps() const { return _fps; }
+        /** @brief How long a frame takes, in ms, averaged over the same quarter of a second. */
+        [[nodiscard]] double FrameMs() const { return _frameMs; }
 
         /**
          * @brief How the Scene panel shows the scene: as its graph draws it (lit); a channel of its materials, which
@@ -591,6 +600,41 @@ namespace keditor
         std::string selectedAsset;          ///< The asset the inspector shows, when it is picked: by its id.
         /** @brief A small picture of a listed mesh, once it is drawn; empty until then. */
         [[nodiscard]] kor::ResourceRef<const kor::Image> MeshPicture(std::string_view id) const;
+        /**
+         * @brief How many small pictures of meshes have been drawn: what shows one follows this, and is built again alone
+         *        when a new one is made — one every few frames while the Assets panel's are drawn, each was the whole interface.
+         */
+        [[nodiscard]] std::uint64_t MeshPicturesMade() const { return _meshPicturesMade; }
+
+        // ---- pictures kept block-compressed ---------------------------------------------------------------------
+
+        /** @brief A picture file the scene reads, as the Compress textures dialog lists it. */
+        struct SceneTexture {
+            std::string id;                     ///< `@main_sponza/textures/wall_Normal.png`
+            std::string field;                  ///< A field of an entity's that holds it — `normalMap` — or empty.
+            kgraph::TextureKind kind = kgraph::TextureKind::eColor;    ///< What it is for, as its name and field tell.
+            kgraph::TextureImport import;       ///< How the scene's graph keeps it.
+            std::string pack;                   ///< The pack it is a channel of; empty for none.
+            bool cooked = false;                ///< Read from a file cooked of it — or of its pack — as it is now.
+            bool compressible = true;           ///< Not an HDR picture, nor one compressed already: kgraph::TextureCompressible.
+        };
+        /** @brief Every picture file the scene reads, by id; not the packs (the graph's texturePacks). */
+        [[nodiscard]] std::vector<SceneTexture> SceneTextures();
+        /** @brief What a picture of @p kind is offered as, as the project says; DefaultTextureFormat when it says nothing. */
+        [[nodiscard]] kgraph::TextureFormat OfferedFormat(kgraph::TextureKind kind) const;
+        /** @brief What pictures of @p kind are offered as from now on: kept in the project. */
+        void SetOfferedFormat(kgraph::TextureKind kind, kgraph::TextureFormat format);
+        /**
+         * @brief How the scene's pictures are kept — each file's import, and the packs — an edit of the graph like any;
+         *        with @p cook, every picture kept in a block format that has no file cooked of it as it is now is cooked,
+         *        off the frame, and read from it as it is. The project's `cache/` is kept out of git, where it has one.
+         */
+        void KeepTextures(std::map<std::string, kgraph::TextureImport> imports, std::map<std::string, kgraph::TexturePack> packs, bool cook);
+        [[nodiscard]] const kgraph::Runtime::CookProgress& Cooking();
+        /** @brief Once a scene opened has been read: true, once, when it has pictures that are not compressed and the project asks. */
+        [[nodiscard]] bool TakeAskToCompress() { return std::exchange(_askToCompress, false); }
+        /** @brief Not to ask again, for this project. */
+        void DontAskToCompress();
         std::string assetFilter;            ///< What the Assets panel lists is what has this in its name, wherever it is; a folder's own, when empty.
         std::string assetFolder;            ///< The folder the Assets panel shows: empty, the project's own.
         int assetKind = -1;                 ///< An Asset::Kind the panel shows nothing but, wherever it is; -1, every kind.
@@ -662,7 +706,8 @@ namespace keditor
         /** @brief The last thing done, for the foot of the window; and whether it went wrong. */
         [[nodiscard]] const std::string& Status() const { return _status; }
         [[nodiscard]] bool Failed() const { return _failed; }
-        void Say(std::string status, bool failed = false) { _status = std::move(status); _failed = failed; ++_changes; }
+        /** @brief Says @p status at the foot of the window, and in the log: as an error when it @p failed. */
+        void Say(std::string status, bool failed = false);
 
         /** @brief Asks for the list of nodes to add, as a right click on the graph does: the interface opens it. */
         // ---- looking at what a node holds -------------------------------------------------------------------
@@ -797,6 +842,7 @@ namespace keditor
         std::string _snapshot;              // the entities as they were when play began
         std::vector<ObjectTemplate> _objects;
         int _fps = 0, _framesCounted = 0;
+        double _frameMs = 0.0;
         float _secondsCounted = 0.f;
         std::optional<kor::Vec2> _lastMouse;
         std::optional<kor::MouseButton> _viewDrag;
@@ -820,6 +866,10 @@ namespace keditor
         std::vector<std::pair<std::string, std::shared_ptr<kgraph::Resource>>> _assetsHeld, _assetsHeldBefore;   // what the Assets panel shows, and showed
         std::size_t _reading = 0;
         std::unique_ptr<Thumbnails> _thumbnails;
+        std::uint64_t _meshPicturesMade = 0;
+        std::string _compressAskedFor;          // the scene it was last asked of, once it was read: asked once a scene
+        bool _askToCompress = false;
+        std::size_t _cookedShown = 0;           // how many cooked, as the status bar last said
         // The scene as it was, a state a thing done: its graph and its entities, each as text.
         struct Was { std::string graph, world; };
         std::vector<Was> _undo, _redo;

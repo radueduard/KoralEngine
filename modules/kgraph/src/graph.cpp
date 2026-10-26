@@ -151,6 +151,33 @@ namespace kgraph
             }
             out += "\n  },";
         }
+        if (!textureImports.empty()) {
+            // How picture files are kept: each one's format, and how hard it was worked at.
+            out += "\n  \"textureImports\": {";
+            bool first = true;
+            for (const auto& [file, import] : textureImports) {
+                out += std::format("{}\n    {}: {}", first ? "" : ",", json::Quote(file),
+                                   Value(Value::Members { { "format", std::string(TextureFormatName(import.format)) }, { "quality", std::string(TextureQualityName(import.quality)) } }).ToJson());
+                first = false;
+            }
+            out += "\n  },";
+        }
+        if (!texturePacks.empty()) {
+            // Pictures made of others' channels: red, green, blue and alpha, each a file's channel or a number.
+            out += "\n  \"texturePacks\": {";
+            bool first = true;
+            for (const auto& [id, pack] : texturePacks) {
+                Value::List channels;
+                for (const auto& channel : pack.channels)
+                    channels.emplace_back(channel.from.empty() ? Value(Value::Members { { "constant", static_cast<double>(channel.constant) } })
+                                                               : Value(Value::Members { { "from", channel.from }, { "channel", static_cast<double>(channel.channel) } }));
+                out += std::format("{}\n    {}: {}", first ? "" : ",", json::Quote(id),
+                                   Value(Value::Members { { "format", std::string(TextureFormatName(pack.format)) }, { "quality", std::string(TextureQualityName(pack.quality)) },
+                                                          { "channels", Value(std::move(channels)) } }).ToJson());
+                first = false;
+            }
+            out += "\n  },";
+        }
         if (defaultMeshTangents != Graph().defaultMeshTangents)
             out += std::format("\n  \"defaultMeshTangents\": {},", json::Quote(TangentsName(defaultMeshTangents)));
         if (!overview.empty()) {
@@ -244,6 +271,32 @@ namespace kgraph
                         if (!semantics.empty()) import.buffers.push_back(std::move(semantics));
                     }
                 if (!import.Default()) graph.meshImports[file] = std::move(import);
+            }
+        if (const json::Value* imports = root.Find("textureImports"); imports && imports->kind == json::Value::Kind::eObject)
+            for (const auto& [file, entry] : imports->members) {
+                TextureImport import;
+                if (const json::Value* format = entry.Find("format"); format && format->kind == json::Value::Kind::eString)
+                    if (const auto named = TextureFormatNamed(format->string)) import.format = *named;
+                if (const json::Value* quality = entry.Find("quality"); quality && quality->kind == json::Value::Kind::eString)
+                    if (const auto named = TextureQualityNamed(quality->string)) import.quality = *named;
+                if (!import.Default()) graph.textureImports[file] = import;
+            }
+        if (const json::Value* packs = root.Find("texturePacks"); packs && packs->kind == json::Value::Kind::eObject)
+            for (const auto& [id, entry] : packs->members) {
+                TexturePack pack;
+                if (const json::Value* format = entry.Find("format"); format && format->kind == json::Value::Kind::eString)
+                    if (const auto named = TextureFormatNamed(format->string)) pack.format = *named;
+                if (const json::Value* quality = entry.Find("quality"); quality && quality->kind == json::Value::Kind::eString)
+                    if (const auto named = TextureQualityNamed(quality->string)) pack.quality = *named;
+                if (const json::Value* channels = entry.Find("channels"))
+                    for (std::size_t c = 0; c < std::min<std::size_t>(4, channels->items.size()); ++c) {
+                        const json::Value& channel = channels->items[c];
+                        auto& into = pack.channels[c];
+                        if (const json::Value* from = channel.Find("from"); from && from->kind == json::Value::Kind::eString) into.from = from->string;
+                        if (const json::Value* which = channel.Find("channel"); which && which->kind == json::Value::Kind::eNumber) into.channel = static_cast<int>(which->number);
+                        if (const json::Value* constant = channel.Find("constant"); constant && constant->kind == json::Value::Kind::eNumber) into.constant = static_cast<float>(constant->number);
+                    }
+                graph.texturePacks[id] = std::move(pack);
             }
         if (const json::Value* tangents = root.Find("defaultMeshTangents"); tangents && tangents->kind == json::Value::Kind::eString)
             if (const auto named = TangentsNamed(tangents->string)) graph.defaultMeshTangents = *named;

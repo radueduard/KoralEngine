@@ -348,7 +348,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
                 const float3 u = (e1 * d2.y - e2 * d1.y) / det, v = (e2 * d1.x - e1 * d2.x) / det;
                 const float3 tangent = normalize(u - normal * dot(normal, u));
                 const float3 bitangent = cross(normal, tangent) * (dot(cross(normal, tangent), v) < 0.0 ? -1.0 : 1.0);
-                const float3 n = normalize(texel * 2.0 - 1.0);
+                const float3 n = unpackedNormal(texel);
                 normal = normalize(tangent * n.x + bitangent * n.y + normal * n.z);
             }
         }

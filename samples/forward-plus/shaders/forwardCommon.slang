@@ -111,6 +111,14 @@ public struct Emitter {
     public float unused;
 };
 
+// A normal map's texel as a direction: x and y as stored, z worked out from them — so that a map kept in two channels
+// (BC5, whose blue reads 1) faces as it did. For one of three channels it is what normalizing them gives.
+public float3 unpackedNormal(float3 texel)
+{
+    const float2 xy = texel.xy * 2.0 - 1.0;
+    return float3(xy, sqrt(saturate(1.0 - dot(xy, xy))));
+}
+
 /** One of an instance's pictures at @p uv: @p none where it has no picture there. */
 public float4 pictureOf(uint index, SamplerState sampler, float2 uv, float4 none = float4(1.0, 1.0, 1.0, 1.0))
 {

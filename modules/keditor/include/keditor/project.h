@@ -6,6 +6,7 @@
 #pragma once
 
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -21,6 +22,13 @@ namespace keditor
          * `project.json`. Empty until then: one with scripts from before is taken to be in theirs (Language).
          */
         std::string scripts;
+        /**
+         * What the scene's pictures are offered as when they are compressed, by kind (kgraph::TextureKindName → kgraph::
+         * TextureFormatName): `"normal": "BC5"`. A kind not here is offered kgraph::DefaultTextureFormat. In `project.json`.
+         */
+        std::map<std::string, std::string> textureFormats;
+        /** Whether a scene opened with pictures not compressed asks to compress them. In `project.json` when it does not. */
+        bool askToCompress = true;
 
         /** @brief Makes a project in @p directory, which is made too: one empty scene, "main", and a `shaders` folder. */
         static bool Create(const std::filesystem::path& directory, std::string name, Project& out, std::string& error);

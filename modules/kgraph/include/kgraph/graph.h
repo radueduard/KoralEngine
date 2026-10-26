@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "meshes.h"
+#include "textures.h"
 #include "value.h"
 
 namespace kgraph
@@ -105,6 +106,17 @@ namespace kgraph
          * read whole, in one buffer. Changed, the file is read again, and what held its meshes holds the new ones.
          */
         std::map<std::string, MeshImport> meshImports;
+        /**
+         * How each picture file the scene reads is kept, by its asset id (`@wall.png`): block-compressed, cooked into the
+         * project's `cache/textures`, or — not here — as it is read. Changed, it is read again, cooked or not.
+         */
+        std::map<std::string, TextureImport> textureImports;
+        /**
+         * Pictures made of the channels of others, by their own ids (`@wall_ORM.pack`). Each file one is made of reads,
+         * to whoever holds it, as the pack's channel it went into: the scene names the files, and the device has one
+         * picture of them.
+         */
+        std::map<std::string, TexturePack> texturePacks;
         /**
          * What the default meshes (`$cube`, a Shape node's) have of their surface's directions: a TANGENT of four
          * numbers, a TANGENT and a BITANGENT, or neither. Changed, they are made again, and what held them holds the new.

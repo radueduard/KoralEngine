@@ -186,6 +186,12 @@ namespace keditor
          */
         void SetMeshImport(const std::string& file, kgraph::MeshImport import);
         [[nodiscard]] kgraph::MeshImport MeshImportOf(std::string_view file) const;
+        /**
+         * @brief How the scene's picture files are kept, and the packs of their channels (Graph::textureImports,
+         *        texturePacks): an edit of the graph like any, taken back and saved with the scene. Each picture whose
+         *        settings changed is read again, as it is now kept.
+         */
+        void SetTextureSettings(std::map<std::string, kgraph::TextureImport> imports, std::map<std::string, kgraph::TexturePack> packs);
         /** @brief What the default meshes have of their surface's directions (Graph::defaultMeshTangents): a change to undo. */
         void SetDefaultMeshTangents(kgraph::Tangents tangents);
         /**

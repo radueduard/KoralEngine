@@ -103,6 +103,20 @@ TEST_F(DrawTest, ADepthAttachmentGivenOnlyItsViewClearsToTheFarthest) {
     EXPECT_TRUE(Black(28, 28));
 }
 
+// So does each blend attachment given in part: one that says only how it blends still writes every channel, as the
+// framework's attachment does — not none, which drew glass that left the picture as it was.
+TEST_F(DrawTest, ABlendAttachmentGivenOnlyItsFactorsWritesEveryChannel) {
+    kgraph::Graph graph = Canvas();
+    Triangles(graph);
+    graph.Find("triangles")->Set("colorBlendState", Value::Members { { "attachments", Value::List { Value::Members {
+        { "blendEnable", true }, { "srcColorBlendFactor", "eSrcAlpha" }, { "dstColorBlendFactor", "eOneMinusSrcAlpha" } } } } });
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 3)) << "the triangle, blended over the clear";
+}
+
 // What the pipeline leaves to the draw is the draw's to say: where it draws, and what it clears to.
 TEST_F(DrawTest, ADrawSaysWhereItDrawsAndWhatItClearsTo) {
     kgraph::Graph graph = Canvas();

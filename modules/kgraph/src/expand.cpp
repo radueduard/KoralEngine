@@ -63,6 +63,8 @@ namespace kgraph
             graph.fixed = given.fixed;
             graph.fixedStepsAtMost = given.fixedStepsAtMost;
             graph.meshImports = given.meshImports;
+            graph.textureImports = given.textureImports;
+            graph.texturePacks = given.texturePacks;
             graph.defaultMeshTangents = given.defaultMeshTangents;
             graph.nodes = given.nodes;
             // What each edge stands for, by its id: a wire to it is a wire to that.
@@ -384,6 +386,10 @@ namespace kgraph
             if (!node) return false;
             if (node->type == "Entities" || node->type == "Filter" || node->type == "ForEach")
                 return !std::ranges::contains(std::array<std::string_view, 5> { "out", "entities", "count", "groups", "groupCount" }, link.output);
+            // What gathers every element into one — a list of them, a buffer of them, their meshes packed — is of them all: the
+            // lights' buffer a pipeline reads, a PointShadows' idle worked out of a Collect of the lights, a pack's layout.
+            static constexpr std::array<std::string_view, 7> gathering { "Collect", "BufferBuilder", "ShaderBuffer", "MeshPack", "IndirectDraws", "Meshlets", "RayScene" };
+            if (std::ranges::contains(gathering, node->type)) return false;
             if (const auto known = eachOf.find(node->id); known != eachOf.end()) return known->second;
             eachOf[node->id] = false;      // a loop of wires: not this way
             bool found = false;
@@ -548,6 +554,8 @@ namespace kgraph
         out.graph.fixed = written.fixed;
         out.graph.fixedStepsAtMost = written.fixedStepsAtMost;
         out.graph.meshImports = written.meshImports;
+        out.graph.textureImports = written.textureImports;
+        out.graph.texturePacks = written.texturePacks;
         out.graph.defaultMeshTangents = written.defaultMeshTangents;
 
         // The loops: a Repeat, and how many turns it has.

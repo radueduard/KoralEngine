@@ -6,10 +6,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <bit>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <numbers>
 
 #include <capiInterop.h>
 #include <input.h>
@@ -1181,6 +1183,97 @@ TEST(ForwardPlus, TheSceneIsDrawnThreeWays) {
     (void)ran;
     ASSERT_TRUE(doc.SetInput("renderer", "value", 0));
     settle(4);
+}
+
+// Meshlets are culled by what hides them: with a wall just before the camera, the early draw draws little of what is
+// in its sight — the wall. And the wall gone, what it hid is drawn from the first frame on, by the late draw, though
+// the pyramid the early draw went by still had the wall: no frame shows what is behind what it hid instead.
+TEST(ForwardPlus, MeshletsBehindAWallAreNotDrawnAndAreOnceItIsGone) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    const keditor::Project project = MakeProject("-occluded");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    std::string error;
+    ASSERT_TRUE(forwardplus::BuildGraph(doc, error)) << error;
+    forwardplus::BuildScene(doc);
+    ASSERT_TRUE(doc.SetInput("renderer", "value", 1));
+    kgraph::Runtime& runtime = doc.Runtime();
+    const auto settle = [&](const int frames) {
+        for (int i = 0; i < frames; ++i) Frame();
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    };
+    settle(30);
+    ASSERT_TRUE(runtime.Ok());
+
+    // Of the meshlets of the tasks listed — those of the instances in sight — how many the early draw drew.
+    const auto drawnEarly = [&]() -> std::pair<std::size_t, std::size_t> {
+        const std::array<std::string, 3> buffers { "meshlets drawn early", "meshlet task count", "meshlet task list" };
+        for (const auto& id : buffers) runtime.Watch(id);
+        std::array<std::optional<kgraph::Peek>, 3> peeks;
+        for (int i = 0; i < 8 && !std::ranges::all_of(peeks, [](const auto& p) { return p.has_value(); }); ++i) {
+            Frame();
+            for (std::size_t b = 0; b < buffers.size(); ++b) peeks[b] = runtime.Watched(buffers[b]);
+        }
+        for (const auto& id : buffers) runtime.Unwatch(id);
+        if (!std::ranges::all_of(peeks, [](const auto& p) { return p.has_value(); })) return { 0, 0 };
+        const auto word = [](const kgraph::Peek& peek, const std::size_t at) {
+            std::uint32_t value = 0;
+            if ((at + 1) * 4 <= peek.bytes.size()) std::memcpy(&value, peek.bytes.data() + at * 4, 4);
+            return value;
+        };
+        std::size_t drawn = 0, listed = 0;
+        for (std::uint32_t task = 0; task < word(*peeks[1], 0); ++task) {
+            drawn += static_cast<std::size_t>(std::popcount(word(*peeks[0], task)));
+            listed += word(*peeks[2], task * 4 + 2);
+        }
+        return { drawn, listed };
+    };
+    const auto [open, openListed] = drawnEarly();
+    ASSERT_GT(openListed, 0u);
+
+    // What is at the middle of the picture, and how far from the camera: where things are, as the meshlets drew them.
+    const auto middle = [&] {
+        const auto peek = runtime.Watched("meshlet position");
+        std::array<float, 4> position {};
+        if (!peek) return position;
+        const std::size_t at = (std::size_t { peek->extent.y / 2 } * peek->extent.x + peek->extent.x / 2) * 16;
+        if (at + 16 <= peek->bytes.size()) std::memcpy(position.data(), peek->bytes.data() + at, 16);
+        return position;
+    };
+    const auto away = [](const std::array<float, 4>& at) { return at[3] == 1.f ? std::hypot(at[0], at[1] - 5.5f, at[2] - 15.f) : 0.f; };
+    runtime.Watch("meshlet position");
+    for (int i = 0; i < 8 && !runtime.Watched("meshlet position"); ++i) Frame();
+    const float seen = away(middle());
+    ASSERT_GT(seen, 4.f) << "something drawn at the middle, beyond where the wall will be";
+
+    // A wall two metres before the camera, square to the way it looks, over all it sees.
+    const kecs::Entity wall = doc.CreateEntity("Wall");
+    doc.SetPosition(wall, { 0.f, 5.5f - 2.f * std::sin(std::numbers::pi_v<float> * 22.f / 180.f), 15.f - 2.f * std::cos(std::numbers::pi_v<float> * 22.f / 180.f) });
+    doc.SetRotation(wall, { -22.f, 0.f, 0.f });
+    doc.SetScale(wall, { 20.f, 20.f, 0.2f });
+    doc.AddComponent(wall, "Mesh");
+    doc.SetField(wall, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("cube")));
+    ASSERT_TRUE(doc.AddComponent(wall, "forward"));
+    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(wall, "forward", map, kgraph::Value("$white"));
+    settle(30);
+    const auto [walled, walledListed] = drawnEarly();
+    ASSERT_GT(walledListed, 0u);
+    EXPECT_LT(walled * 4, open) << "behind the wall, next to nothing is drawn early: " << walled << " meshlets of " << walledListed << ", against " << open << " of " << openListed << " without it";
+
+    EXPECT_NEAR(away(middle()), 2.f, 0.3f) << "the wall, at the middle";
+
+    // The wall gone: from the first picture that does not show it, the middle is what it was before the wall.
+    ASSERT_TRUE(doc.DestroyEntity(wall));
+    int after = 0;
+    for (int i = 0; i < 12; ++i) {
+        Frame();
+        const float now = away(middle());
+        if (std::abs(now - 2.f) < 0.3f) continue;     // a picture of before, still
+        ++after;
+        EXPECT_NEAR(now, seen, 0.3f) << "frame " << i << " after the wall went: what it hid is not drawn";
+    }
+    runtime.Unwatch("meshlet position");
+    EXPECT_GT(after, 8);
 }
 
 // A thin thing lit from behind lets some of the light through: a panel with the sun on its back is the brighter on its

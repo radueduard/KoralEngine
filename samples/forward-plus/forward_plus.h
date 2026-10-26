@@ -62,6 +62,7 @@ namespace forwardplus
     inline void IdleUnchosen(keditor::Document& doc);
     inline void GiveRayMaterials(keditor::Document& doc);
     inline bool AddEmitters(keditor::Document& doc, std::string& error);
+    inline bool AddMeshletOcclusion(keditor::Document& doc, std::string& error);
 
     /**
      * Adds the graph to @p doc. False, with @p error, when a node could not be added, set or wired.
@@ -1088,6 +1089,124 @@ namespace forwardplus
         return ok;
     }
 
+    /// The depth pyramid the meshlets are culled by: its first level, whatever the picture's size, and how many it has
+    /// (forward.slang's PyramidSize and PyramidLevels).
+    inline constexpr int PyramidWidth = 1024, PyramidHeight = 512, PyramidLevels = 10;
+
+    /**
+     * The meshlets culled by what hides them, as well as by the camera's sight: drawn twice a frame. The early draw
+     * draws what last frame's depth pyramid shows and notes which; the pyramid is made again of what it drew; the late
+     * draw draws, over it, what the early one left out that this frame's pyramid shows, and the glass is tested against
+     * it too. All on the meshlet forward page, the late draw and the pyramid before the glass in the node list: the
+     * three draw into one picture, in that order. Added to a graph that has the meshlets and not this yet (a project
+     * made before it); true, and nothing done, when it has it.
+     */
+    inline bool AddMeshletOcclusion(keditor::Document& doc, std::string& error)
+    {
+        if (doc.Graph().Find("depth pyramid")) return true;      // it has it already
+        if (!doc.Graph().Find("draw meshlets") || !doc.Graph().Find("meshlet blended")) { error = "there are no meshlets, or no meshlet glass, to cull"; return false; }
+        bool ok = true;
+        const std::string pass = "meshlet forward";
+        const auto failed = [&](const std::string& what) { ok = false; if (error.empty()) error = what; };
+        const auto node = [&](const char* type, const std::string& id, const double x, const double y) {
+            if (doc.AddNode(type, x, y, id, pass) != id) failed(std::format("there is a node '{}' already", id));
+        };
+        const auto set = [&](const std::string& id, const std::string& input, Value value) {
+            if (!doc.SetInput(id, input, std::move(value))) failed(std::format("'{}' could not be given '{}'", id, input));
+        };
+        const auto wire = [&](const std::string& from, const std::string& id, const std::string& input, const std::string& output = "out") {
+            if (!doc.Connect(from, output, id, input)) failed(std::format("'{}' could not be wired to '{}.{}'", from, id, input));
+        };
+        std::vector<std::string> before;
+        for (const auto& each : doc.Graph().nodes) before.push_back(each.id);
+
+        // Which meshlets of each task the early draw drew, and the pyramid it is made into.
+        node("Buffer", "meshlets drawn early", 320, 2000);
+        set("meshlets drawn early", "instanceCount", MostMeshletTasks * 4);
+        set("meshlets drawn early", "usage", Value(Value::List { "eStorage", "eTransferSrc" }));
+        node("Image", "depth pyramid", 320, 2140);
+        set("depth pyramid", "format", "eR32_SFLOAT");
+        set("depth pyramid", "extent.x", PyramidWidth);
+        set("depth pyramid", "extent.y", PyramidHeight);
+        set("depth pyramid", "mipLevels", PyramidLevels);
+        set("depth pyramid", "usage", Value(Value::List { "eStorage", "eSampled", "eTransferSrc" }));
+        node("ImageView", "meshlet depth view", 320, 2280);
+        wire("meshlet depth", "meshlet depth view", "image");
+
+        // The early draw: by last frame's pyramid, noting what it drew.
+        set("meshlet forward", "task.entry", "meshletTaskEarly");
+        wire("depth pyramid", "meshlet forward", "param.depthPyramid");
+        wire("meshlets drawn early", "meshlet forward", "param.meshletsDrawnEarly");
+
+        // The pyramid made again, a level a turn, each of the one before: the first of the early draw's depth.
+        node("Repeat", "pyramid levels", 600, 2000);
+        set("pyramid levels", "count", PyramidLevels);
+        node("ImageView", "pyramid level", 600, 2140);
+        wire("depth pyramid", "pyramid level", "image");
+        wire("pyramid levels", "pyramid level", "baseMipLevel", "index");
+        set("pyramid level", "mipLevelCount", 1);
+        node("Previous", "pyramid level below", 600, 2280);
+        set("pyramid level below", "of", "pyramid level");
+        set("pyramid level below", "first", "meshlet depth view");
+        node("ComputePipeline", "reduce depth", 880, 2140);
+        set("reduce depth", "compute.module", "meshletTasks");
+        set("reduce depth", "compute.entry", "reduce");
+        wire("pyramid level below", "reduce depth", "param.finer");
+        wire("pyramid level", "reduce depth", "param.coarser");
+        node("Dispatch", "run reduce depth", 1140, 2140);
+        wire("reduce depth", "run reduce depth", "pipeline");
+        set("run reduce depth", "cover", "coarser");
+
+        // The late draw: what the early one left out, by this frame's pyramid, over its picture. Its pipeline is the
+        // early one's, wired as it is (a copy of its inputs: wiring makes the graph anew), but for its task shader.
+        node("GraphicsPipeline", "meshlet late", 1040, 2420);
+        const auto early = doc.Graph().Find("meshlet forward")->inputs;
+        const std::string taskCount = doc.Graph().Find("draw meshlets")->inputs.at("indirect").link->node;
+        for (const auto& [input, from] : early) {
+            if (input == "task.entry") continue;
+            if (from.link) wire(from.link->node, "meshlet late", input, from.link->output);
+            else set("meshlet late", input, from.value);
+        }
+        set("meshlet late", "task.entry", "meshletTaskLate");
+        node("Draw", "draw late meshlets", 1320, 2420);
+        wire("meshlet late", "draw late meshlets", "pipeline");
+        set("draw late meshlets", "load", true);
+        set("draw late meshlets", "command", "eDrawMeshTasksIndirect");
+        wire(taskCount, "draw late meshlets", "indirect");
+        set("draw late meshlets", "drawCount", 1);
+        set("draw late meshlets", "stride", 12);
+
+        // The glass, by this frame's pyramid. (Its task shader is the others', which name what the early draw drew: given
+        // it, and not reading it.)
+        set("meshlet blended", "task.entry", "meshletTaskBehind");
+        wire("depth pyramid", "meshlet blended", "param.depthPyramid");
+        wire("meshlets drawn early", "meshlet blended", "param.meshletsDrawnEarly");
+        if (!ok) return false;
+
+        // What was added goes before the glass in the node list: the late draw and the pyramid draw into the picture
+        // and its depth after the early draw, and before the glass is laid over them.
+        kgraph::Graph graph = doc.Graph();
+        std::vector<kgraph::Node> added;
+        std::erase_if(graph.nodes, [&](kgraph::Node& each) {
+            if (std::ranges::contains(before, each.id)) return false;
+            added.push_back(std::move(each));
+            return true;
+        });
+        const auto glass = std::ranges::find_if(graph.nodes, [](const kgraph::Node& each) { return each.id == "meshlet blended" || each.id == "draw meshlet blended"; });
+        graph.nodes.insert(glass, std::make_move_iterator(added.begin()), std::make_move_iterator(added.end()));
+        // Idle, with the rest of the page, while the meshlets are not chosen (IdleUnchosen's doing for the passes it had).
+        const std::string notChosen = "not meshlets (in meshlet forward)";
+        if (!graph.Find(notChosen)) {
+            kgraph::Node& reference = graph.Add(notChosen, "Reference").Set("node", "not meshlets");
+            reference.pass = pass;
+            reference.x = 40;
+            reference.y = -120;
+        }
+        for (const char* id : { "run reduce depth", "draw late meshlets" }) graph.Find(id)->Wire("idle", notChosen);
+        doc.SetGraph(std::move(graph));
+        return true;
+    }
+
     /**
      * The branches not chosen idle: their passes are there, built, and do nothing. Each page of a branch is given what
      * says it is not chosen (a Reference to it), and each of its passes wired from that — its `idle`, or, for one that
@@ -1564,6 +1683,6 @@ namespace forwardplus
 
         IdleUnchosen(doc);
         if (!ok && error.empty()) error = "a node of the branches could not be set up";
-        return ok && AddBlendedToBranches(doc, error) && AddEmitters(doc, error);
+        return ok && AddBlendedToBranches(doc, error) && AddEmitters(doc, error) && AddMeshletOcclusion(doc, error);
     }
 }

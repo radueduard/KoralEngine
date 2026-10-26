@@ -127,7 +127,7 @@ Write("Watcher.cs", """
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
 // The project's, and the engine's package's: compiled with them, so that a script reads a light as it reads its own.
-Check(host.Scripts.Order().SequenceEqual(["Camera", "DirectionalLight", "Feeder", "PointLight", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
+Check(host.Scripts.Order().SequenceEqual(["Camera", "DirectionalLight", "Feeder", "Instancer", "PointLight", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
       $"each is a script, the package's among them: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 {

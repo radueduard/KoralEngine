@@ -4,6 +4,7 @@
 #include "physics.h"
 
 #include <algorithm>
+#include <numeric>
 #include <cmath>
 #include <cstdlib>
 #include <format>
@@ -51,6 +52,7 @@
 #include <deviceFeatures.h>
 #include <kscript/declarations.h>
 #include <kgraph/meshes.h>
+#include <log.h>
 
 namespace keditor
 {
@@ -58,6 +60,18 @@ namespace keditor
     namespace kb = kor::builders;
 
     // ---- the session ------------------------------------------------------------------------------------------
+
+    void Session::Say(std::string status, const bool failed)
+    {
+        // Said again, it is not logged again: what is pressed twice is one line of the log.
+        if (status != _status || failed != _failed) {
+            if (failed) kor::log::Error("{}", status);
+            else if (!status.empty()) kor::log::Info("{}", status);
+        }
+        _status = std::move(status);
+        _failed = failed;
+        ++_changes;
+    }
 
     bool Session::NewProject(const std::filesystem::path& directory)
     {
@@ -121,6 +135,18 @@ namespace keditor
     }
 
     namespace {
+        /**
+         * The picture a picture file's resource is of: itself, or — for one read through a view (a compressed one whose
+         * channels are spread, a file of a pack) — the image the view is of. Empty for anything else.
+         */
+        kor::ResourceRef<const kor::Image> PictureOf(const kgraph::Resource* held)
+        {
+            if (!held || !held->handle) return {};
+            if (held->kind == "Image") return kor::capi::ImageOf(held->handle);
+            if (held->kind == "ImageView") return kor::capi::ImageViewOf(held->handle)->SourceImage();
+            return {};
+        }
+
         /** A command's word, quoted for a shell. */
         std::string Quoted(const std::string& text) { return "\"" + text + "\""; }
 
@@ -232,6 +258,34 @@ namespace keditor
         }
         std::ranges::sort(idle);
         return idle;
+    }
+
+    std::vector<Session::Problem> Session::Problems()
+    {
+        const kgraph::Runtime& runtime = Doc().Runtime();
+        std::vector<Problem> problems;
+        for (auto& problem : runtime.Problems()) {
+            std::string node = problem.substr(0, problem.find(':'));
+            problems.push_back({ std::move(problem), std::move(node) });
+        }
+        for (const auto& node : Doc().Graph().nodes)
+            if (const auto* report = runtime.ReportOf(node.id); report && (report->skipped > 0 || (report->ran == 0 && !report->why.empty())))
+                problems.push_back({ report->skipped > 0 ? std::format("{}: {} passed by. {}", node.id, report->skipped, report->why)
+                                                         : std::format("{}: {}", node.id, report->why), node.id });
+        if (_hasProject) {
+            // Scripts in a language that is not the project's: nothing runs them.
+            for (const auto& file : _project.ScriptsInAnotherLanguage())
+                problems.push_back({ std::format("scripts/{}: the project's scripts are in {}, and this one is not. Nothing runs it.", file.filename().string(),
+                                                 _project.Language() == 'k' ? "Kotlin" : "C#") });
+            // Scripts that are in the project and that nothing is running.
+            if (const auto idle = ScriptsNotRunning(); !idle.empty()) {
+                std::string names;
+                for (const auto& name : idle) names += std::format("{}{}", names.empty() ? "" : ", ", name);
+                problems.push_back({ std::format("Nothing is running the project's scripts ({}): this editor was started without them. Press this, or Project, Open with its scripts.", names) });
+            }
+        }
+        for (const auto& note : Doc().Notes()) problems.push_back({ note, {}, true });
+        return problems;
     }
 
     bool Session::ReopenWithScripts()
@@ -636,6 +690,7 @@ namespace keditor
         if (_secondsCounted >= 0.25f) {
             const int now = static_cast<int>(std::lround(static_cast<float>(_framesCounted) / _secondsCounted));
             _fps = now;     // read by what shows it, every frame: nothing else is built again for it
+            _frameMs = 1000.0 * _secondsCounted / _framesCounted;
             _framesCounted = 0;
             _secondsCounted = 0.f;
         }
@@ -646,10 +701,44 @@ namespace keditor
         Overlay* const over = _play.Over();
         if (over) over->SetSelected(selected);
         // Its picture is made again when the panel is another size: the interface is told, to show the one there is now.
-        // The meshes the Assets panel lists are drawn small, a few frames each, until each has its picture.
-        if (_thumbnails && _thumbnails->Update()) ++_changes;
+        // The meshes the Assets panel lists are drawn small, a few frames each, until each has its picture: what shows
+        // one is built again by itself (MeshPicturesMade), not the whole interface.
+        if (_thumbnails && _thumbnails->Update()) ++_meshPicturesMade;
         // A file read since: what the Assets panel shows of it is another thing now.
         if (const std::size_t reading = Doc().Reading(); reading != _reading) { _reading = reading; ++_changes; }
+        // Cooking pictures: the status bar says how far it is, and what could not be cooked once it is done.
+        if (const auto& cooking = Doc().Runtime().Cooking(); cooking.total > 0 && cooking.done != _cookedShown) {
+            _cookedShown = cooking.done;
+            if (cooking.done == cooking.total) {
+                if (cooking.failed.empty()) Say(std::format("{} {} compressed", cooking.total, cooking.total == 1 ? "texture" : "textures"));
+                else Say(std::format("{} of {} textures could not be compressed: {}", cooking.failed.size(), cooking.total, cooking.failed.front()), true);
+            }
+            ++_changes;
+        }
+        // A scene read, with pictures not compressed: asked, once, whether to compress them.
+        if (_hasProject && _project.askToCompress && !InPlayMode() && Doc().Reading() == 0) {
+            const std::string scene = (_project.directory / _scene).generic_string();
+            if (scene != _compressAskedFor) {
+                const auto pictures = Doc().Runtime().Pictures();
+                if (!pictures.empty()) {
+                    _compressAskedFor = scene;
+                    const kgraph::Graph& graph = Doc().Graph();
+                    const auto packed = [&](const std::string& id) {
+                        return std::ranges::any_of(graph.texturePacks | std::views::values, [&](const kgraph::TexturePack& pack) {
+                            return std::ranges::any_of(pack.channels, [&](const auto& channel) { return channel.from == id; });
+                        });
+                    };
+                    // Not kept compressed — or kept so, with nothing cooked of it here: the cache is each machine's own,
+                    // and a project just cloned has none.
+                    _askToCompress = std::ranges::any_of(pictures, [&](const std::string& id) {
+                        if (!kgraph::TextureCompressible(id)) return false;
+                        if (kgraph::IsTexturePack(id)) return graph.texturePacks.contains(id) && !Doc().Runtime().Cooked(id);
+                        if (graph.textureImports.contains(id)) return !Doc().Runtime().Cooked(id);
+                        return !packed(id);
+                    });
+                }
+            }
+        }
         // The one it shows meanwhile is kept until it has stopped showing it, a few frames on.
         std::erase_if(_overBefore, [](auto& kept) { return --kept.second <= 0; });
         const auto hold = [this](std::shared_ptr<kgraph::Resource>& showing, std::shared_ptr<kgraph::Resource> held) {
@@ -2686,7 +2775,9 @@ class $NAME : ResourceScript() {
                  it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
                 if (!it->is_directory(ignored)) continue;
                 const std::string name = it->path().filename().string();
-                if (name.starts_with(".") || skipped.contains(name)) { it.disable_recursion_pending(); continue; }
+                // Nor the textures compressed into its cache: each the machine's own copy of a file shown elsewhere.
+                const bool cache = name == "cache" && it.depth() == 0;
+                if (name.starts_with(".") || skipped.contains(name) || cache) { it.disable_recursion_pending(); continue; }
                 add(it->path().lexically_relative(_project.directory).generic_string());
             }
         }
@@ -2787,6 +2878,92 @@ class $NAME : ResourceScript() {
     {
         return _thumbnails ? _thumbnails->Of(id) : kor::ResourceRef<const kor::Image>();
     }
+
+    std::vector<Session::SceneTexture> Session::SceneTextures()
+    {
+        Document& doc = Doc();
+        const kgraph::Graph& graph = doc.Graph();
+        // Which field holds each: the first found, by walking the entities as they are saved.
+        std::map<std::string, std::string, std::less<>> fields;
+        for (const kecs::Entity entity : doc.World().All()) {
+            const kgraph::Value written = doc.WriteEntity(entity);
+            const kgraph::Value* components = written.Find("components");
+            if (!components || !components->Named()) continue;
+            for (const auto& values : *components->Named() | std::views::values)
+                if (values.Named())
+                    for (const auto& [field, value] : *values.Named())
+                        if (const std::string* id = value.String(); id && id->starts_with('@') && id->find('#') == std::string::npos) fields.try_emplace(*id, field);
+        }
+        std::map<std::string, std::string, std::less<>> packOf;
+        for (const auto& [pack, made] : graph.texturePacks)
+            for (const auto& channel : made.channels) if (!channel.from.empty()) packOf.try_emplace(channel.from, pack);
+        std::vector<SceneTexture> textures;
+        for (const auto& id : doc.Runtime().Pictures()) {
+            if (kgraph::IsTexturePack(id)) continue;
+            SceneTexture texture;
+            texture.id = id;
+            if (const auto it = fields.find(id); it != fields.end()) texture.field = it->second;
+            texture.kind = kgraph::TextureKindOf(texture.field, id);
+            if (const auto it = graph.textureImports.find(id); it != graph.textureImports.end()) texture.import = it->second;
+            if (const auto it = packOf.find(id); it != packOf.end()) texture.pack = it->second;
+            texture.cooked = doc.Runtime().Cooked(texture.pack.empty() ? id : texture.pack);
+            texture.compressible = kgraph::TextureCompressible(id);
+            textures.push_back(std::move(texture));
+        }
+        std::ranges::sort(textures, {}, &SceneTexture::id);
+        return textures;
+    }
+
+    kgraph::TextureFormat Session::OfferedFormat(const kgraph::TextureKind kind) const
+    {
+        if (const auto it = _project.textureFormats.find(std::string(kgraph::TextureKindName(kind))); it != _project.textureFormats.end())
+            if (const auto format = kgraph::TextureFormatNamed(it->second)) return *format;
+        return kgraph::DefaultTextureFormat(kind);
+    }
+
+    void Session::SetOfferedFormat(const kgraph::TextureKind kind, const kgraph::TextureFormat format)
+    {
+        if (OfferedFormat(kind) == format) return;
+        _project.textureFormats[std::string(kgraph::TextureKindName(kind))] = std::string(kgraph::TextureFormatName(format));
+        std::string error;
+        if (_hasProject && !_project.Save(error)) Say(error, true);
+    }
+
+    void Session::DontAskToCompress()
+    {
+        _project.askToCompress = false;
+        std::string error;
+        if (_hasProject && !_project.Save(error)) Say(error, true);
+    }
+
+    void Session::KeepTextures(std::map<std::string, kgraph::TextureImport> imports, std::map<std::string, kgraph::TexturePack> packs, const bool cook)
+    {
+        Doc().SetTextureSettings(std::move(imports), std::move(packs));
+        ++_changes;
+        if (!cook) return;
+        // What is cooked is the machine's own, made again from the files: kept out of the project's history.
+        if (_hasProject && (std::filesystem::exists(_project.directory / ".git") || std::filesystem::exists(_project.directory / ".gitignore"))) {
+            std::ifstream in(_project.directory / ".gitignore");
+            std::string line;
+            bool ignored = false;
+            while (std::getline(in, line)) ignored = ignored || line == "cache/" || line == "/cache/" || line == "cache";
+            in.close();
+            if (!ignored) {
+                std::ifstream before(_project.directory / ".gitignore", std::ios::binary);
+                const std::string text((std::istreambuf_iterator<char>(before)), std::istreambuf_iterator<char>());
+                before.close();
+                std::ofstream(_project.directory / ".gitignore", std::ios::app) << (text.empty() || text.back() == '\n' ? "" : "\n") << "cache/\n";
+            }
+        }
+        kgraph::Runtime& runtime = Doc().Runtime();
+        std::vector<std::string> toCook;
+        for (const auto& id : runtime.Pictures()) if (!runtime.Cooked(id)) toCook.push_back(id);
+        for (const auto& pack : Doc().Graph().texturePacks | std::views::keys) if (!runtime.Cooked(pack) && std::ranges::find(toCook, pack) == toCook.end()) toCook.push_back(pack);
+        runtime.Cook(toCook);
+        _cookedShown = 0;
+    }
+
+    const kgraph::Runtime::CookProgress& Session::Cooking() { return Doc().Runtime().Cooking(); }
 
     std::shared_ptr<kgraph::Resource> Session::AssetHeld(const std::string_view id) const
     {
@@ -4241,6 +4418,51 @@ class $NAME : ResourceScript() {
         };
 
         /**
+         * A mesh's small picture where it is shown — an asset's tile, the inspector, the drawer — built again on its own
+         * when a new one is drawn: one every few frames while the Assets panel's meshes are, and each was the whole
+         * interface built again (some 45 ms with a scene of hundreds of entities).
+         */
+        class MeshThumbnail final : public kui::StatefulWidget {
+        public:
+            using Find = std::function<kor::ResourceRef<const kor::Image>()>;
+            using Show = std::function<kui::Widget(kor::ResourceRef<const kor::Image>)>;
+            /// @p find gives the picture, empty until it is drawn; @p show what is shown of it, given it or nothing.
+            MeshThumbnail(std::shared_ptr<Session> session, Find find, Show show) : _session(std::move(session)), _find(std::move(find)), _show(std::move(show)) {}
+
+            void InitState() override
+            {
+                _seen = _session->MeshPicturesMade();
+                Animate([this](float) {
+                    if (const auto made = _session->MeshPicturesMade(); made != _seen) {
+                        _seen = made;
+                        if (_find().Get() != _shown) SetState();
+                    }
+                    return true;
+                });
+            }
+            void DidUpdateWidget(const kui::StatefulWidget& newer) override
+            {
+                const auto& given = static_cast<const MeshThumbnail&>(newer);
+                _find = given._find;
+                _show = given._show;
+                _seen = _session->MeshPicturesMade();
+            }
+            kui::Widget Build() override
+            {
+                const auto picture = _find();
+                _shown = picture.Get();
+                return _show(picture);
+            }
+
+        private:
+            std::shared_ptr<Session> _session;
+            Find _find;
+            Show _show;
+            std::uint64_t _seen = 0;
+            const void* _shown = nullptr;
+        };
+
+        /**
          * One of the window's own buttons in the title bar — smaller, bigger or back, close — shaped as the buttons down the
          * dock's sides are: a square of their size with their corners, lit under the pointer; close, red.
          */
@@ -4392,6 +4614,122 @@ class $NAME : ResourceScript() {
 
         // ---- the root -------------------------------------------------------------------------------------------
 
+        /**
+         * The log: what the engine, the framework and the editor have said, and what has gone wrong and been mended, oldest
+         * at the top and coloured by how serious it was. It follows what is logged by itself, ten times a second at most,
+         * and is all that is built again for it. Errors, warnings and the rest are each ticked to be shown, and what is
+         * typed keeps the lines that have it. A line of a node goes to it, pressed; right-clicked, a line is copied.
+         */
+        class LogPanel final : public kui::StatefulWidget {
+        public:
+            explicit LogPanel(std::shared_ptr<Session> session) : _session(std::move(session)) {}
+
+            void InitState() override
+            {
+                Pull();
+                Animate([this](float) {
+                    const auto now = std::chrono::steady_clock::now();
+                    if (now - _at < std::chrono::milliseconds(100) || kor::log::LastSequence() == _seen) return true;
+                    _at = now;
+                    SetState([&] { Pull(); });
+                    return true;
+                });
+            }
+
+            kui::Widget Build() override
+            {
+                using Level = kor::log::Level;
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                const std::string wanted = lower(_filter);
+                std::size_t counts[3] {};
+                _shownLines.clear();
+                for (std::size_t i = 0; i < _log.size(); ++i) {
+                    const auto level = static_cast<std::size_t>(_log[i].level);
+                    ++counts[level];
+                    if (_levels & (1u << level) && (wanted.empty() || lower(_log[i].message).find(wanted) != std::string::npos)) _shownLines.push_back(i);
+                }
+                const auto levelBox = [this](const Level level, const char* label, const std::size_t n) {
+                    const unsigned bit = 1u << static_cast<unsigned>(level);
+                    return kui::Checkbox(_levels & bit, [this, bit](const bool on) { SetState([&] { _levels = on ? _levels | bit : _levels & ~bit; }); },
+                                         std::format("{}  {}", label, n));
+                };
+                kui::Widget bar = kui::Row({
+                    levelBox(Level::eError, "Errors", counts[2]),
+                    levelBox(Level::eWarn, "Warnings", counts[1]),
+                    levelBox(Level::eInfo, "Messages", counts[0]),
+                    kui::Expanded(kui::TextField(kui::TextFieldOptions { .text = _filter, .placeholder = "Find in the log",
+                        .onChanged = [this](const std::string& typed) { SetState([&] { _filter = typed; }); } }).Key("log filter")),
+                    kui::Tooltip("Copies the lines shown", SmallIcon("content_copy", [this] {
+                        std::string text;
+                        for (const std::size_t i : _shownLines) text += std::format("[{:.2f}] {}\n", _log[i].time, _log[i].message);
+                        kor::Window::SetClipboardText(text);
+                    })),
+                    kui::Tooltip("Clears the log: what is said from now on is shown", SmallIcon("delete_sweep", [this] { SetState([&] { _log.clear(); _following = true; }); })),
+                }, kui::FlexOptions {}.SetGap(10.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                kui::Widget list = _shownLines.empty()
+                    ? kui::Padding(kui::EdgeInsets::Symmetric(10.f, 6.f), kgui::Muted(_log.empty() ? "Nothing has been logged." : "Nothing logged is ticked, or has what is typed."))
+                    : kui::LazyList(kui::LazyListOptions {
+                          .count = _shownLines.size(), .estimatedExtent = 20.f, .gap = 2.f, .paddingStart = 4.f, .paddingEnd = 10.f,
+                          // Scrolled up from its end, it stays where it is read as more is logged; back at its end, it follows again.
+                          .onRange = [this, count = _shownLines.size()](std::size_t, const std::size_t last) { _following = last >= count; },
+                          .jumpIndex = _shownLines.size() - 1, .jump = _jump },
+                      [this](const std::size_t i) { return Line(_log[_shownLines[i]]); });
+                return kui::Column({
+                    kui::Padding(kui::EdgeInsets::Symmetric(10.f, 6.f), std::move(bar)),
+                    kui::Expanded(std::move(list)),
+                }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
+            }
+
+        private:
+            /** What has been logged since it last looked: kept, the oldest let go of as the framework's history lets go of them. */
+            void Pull()
+            {
+                if (kor::log::LastSequence() < _seen) { _log.clear(); _seen = 0; }     // the history was cleared under it
+                auto fresh = kor::log::HistorySince(_seen);
+                if (fresh.empty()) return;
+                _seen = fresh.back().sequence;
+                for (auto& record : fresh) _log.push_back(std::move(record));
+                if (const std::size_t most = std::max<std::size_t>(kor::log::HistoryLimit(), 1); _log.size() > most)
+                    _log.erase(_log.begin(), _log.begin() + static_cast<std::ptrdiff_t>(_log.size() - most));
+                if (_following) ++_jump;    // read at its end, it stays at its end
+            }
+
+            kui::Widget Line(const kor::log::Record& record)
+            {
+                using Level = kor::log::Level;
+                const kui::Theme& t = kui::Theme::Current();
+                const kui::Color ink = record.level == Level::eError ? kui::Color::Hex(0xFF6B6B) : record.level == Level::eWarn ? kui::Color::Hex(0xE0A33A) : t.text;
+                const char* icon = record.level == Level::eError ? "error" : record.level == Level::eWarn ? "warning" : "info";
+                kui::Widget line = kui::Padding(kui::EdgeInsets::Symmetric(10.f, 1.f), kui::Row({
+                    kui::SizedBox(48.f, 16.f, kui::Text(std::format("{:.2f}", record.time), kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eEnd, false)),
+                    kui::SizedBox(14.f, 14.f, kui::Icon(icon, kui::IconStyle::eFilled, record.level == Level::eInfo ? t.textMuted : ink)),
+                    kui::Expanded(kui::Text(record.message, kui::TextStyle {}.SetSize(12.5f).SetColor(ink))),
+                }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)));
+                // What pressing it does: a node's line goes to the node; the project's scripts not running opens it with them.
+                std::function<void()> press;
+                const std::string_view message = std::string_view(record.message).starts_with("Resolved: ") ? std::string_view(record.message).substr(10) : std::string_view(record.message);
+                if (const auto colon = message.find(':'); colon != std::string_view::npos && colon > 0) {
+                    std::string node(message.substr(0, colon));
+                    if (std::ranges::any_of(_session->Doc().Graph().nodes, [&](const auto& n) { return n.id == node; }))
+                        press = [this, node = std::move(node)] { _session->GoTo(node); };
+                }
+                if (record.level != Level::eInfo && message.starts_with("Nothing is running the project's scripts")) press = [this] { _session->ReopenWithScripts(); };
+                if (press) line = kui::GestureDetector(kui::GestureOptions {}.OnTap(std::move(press)), std::move(line));
+                return kui::ContextMenu({ { .label = "Copy", .onSelected = [text = record.message] { kor::Window::SetClipboardText(text); } } }, std::move(line))
+                    .Key(std::to_string(record.sequence));
+            }
+
+            std::shared_ptr<Session> _session;
+            std::vector<kor::log::Record> _log;
+            std::vector<std::size_t> _shownLines;      // of the log, those ticked and with what is typed
+            std::uint64_t _seen = 0;
+            unsigned _levels = 0b111;
+            std::string _filter;
+            bool _following = true;
+            std::uint32_t _jump = 1;
+            std::chrono::steady_clock::time_point _at {};
+        };
+
         class Root final : public kui::StatefulWidget {
         public:
             explicit Root(std::shared_ptr<Session> session) : _session(std::move(session))
@@ -4459,6 +4797,8 @@ class $NAME : ResourceScript() {
                     if (_session->TakeAskForNodes()) AskForNode(NewNodeAt());
                     if (_session->TakeAskForNewShader()) SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; });
                     if (_session->TakeAskToArrange()) Arrange();
+                    // A scene read with pictures that are not compressed: asked, once, whether to compress them.
+                    if (_session->TakeAskToCompress() && _dialog == Dialog::eNone) OpenCompressTextures(true);
                     // A node gone to — found, or pressed among the problems — is brought into the graph's view.
                     if (const auto went = _session->Went(); went != _went) { _went = went; _view->Reveal(_session->selectedNode); SetState(); }
                     // A model to be imported, while what its meshes have is read: shown when it is known.
@@ -4479,6 +4819,7 @@ class $NAME : ResourceScript() {
                         SetState();
                     }
                     if (const auto version = _session->Version(); version != _shown) SetState([&] { _shown = version; });
+                    if (const auto now = std::chrono::steady_clock::now(); now - _problemsAt > std::chrono::milliseconds(250)) { _problemsAt = now; ReportProblems(); }
                     // Played, the picked entity's inspector follows what is done to it on its own (Following).
                     return true;
                 });
@@ -4503,7 +4844,7 @@ class $NAME : ResourceScript() {
                         Docked("passes", "Passes", "layers", PassList()),
                         Docked("here", "Here to use", "inventory_2", HereToUse()),
                         Docked("inspector", "Inspector", "tune", Inspector()),
-                        Docked("problems", "Problems", "warning", Problems()),
+                        Docked("problems", "Log", "terminal", kui::Make<LogPanel>(_session)),
                         Docked("frame", "Frame", "timeline", FramePanel()),
                         Docked("flow", "Pass flow", "account_tree", FlowPanel()),
                         Docked("assets", "Assets", "folder", AssetsPanel()),
@@ -4520,7 +4861,7 @@ class $NAME : ResourceScript() {
             }
 
         private:
-            enum class Dialog { eNone, eAddNode, ePortChoice, eNewProject, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab };
+            enum class Dialog { eNone, eAddNode, ePortChoice, eNewProject, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures };
             static constexpr float ListSize = 28.f;     // the least the Assets panel shows a thing at: a line of a list
 
             /**
@@ -4900,6 +5241,8 @@ class $NAME : ResourceScript() {
                         { "Import a model or a picture...", [this] { SetState([&] { _dialog = Dialog::eImportModel; }); } },
                         { "New shader...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; }); }) },
                         { "New script...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewScript; _newId.clear(); _newKind = 0; }); }) },
+                        { .separator = true },
+                        { "Compress textures...", needsProject([this] { OpenCompressTextures(false); }) },
                     } },
                     { "Scene", {
                         _session->IsPlaying() ? kui::MenuItem { "Pause", [this] { _session->Pause(); } }
@@ -4949,6 +5292,7 @@ class $NAME : ResourceScript() {
             kui::Widget DialogBody()
             {
                 switch (_dialog) {
+                case Dialog::eCompressTextures: return CompressTexturesDialog();
                 case Dialog::eAddNode: return AddNodeDialog();
                 case Dialog::ePortChoice: return PortChoiceDialog();
                 case Dialog::eNewProject:
@@ -5780,8 +6124,10 @@ class $NAME : ResourceScript() {
                     kui::Widget picture;
                     // An image's picture is made anew every few seconds, and the last let go of: drawn as a node's card draws it, found again each time.
                     if (runtime.ImageOf(id).Get() && _session->ThumbnailOf(id).Get()) picture = kui::Make<NodePicture>(_session, id, false, kor::Vec2 { preview, preview }, false);
-                    else if (const auto made = _session->NodePicture(id); made.Get()) picture = kui::SizedBox(preview, preview, kui::Image(made, kui::ImageFit::eContain));
-                    else picture = kui::SizedBox(preview, preview, kui::Icon(type && !type->icon.empty() ? type->icon : "category", kui::IconStyle::eFilled, here ? t.primary : t.textMuted));
+                    else picture = kui::Make<MeshThumbnail>(_session, [session = _session, id] { return session->NodePicture(id); },
+                        [preview, icon = type && !type->icon.empty() ? type->icon : std::string("category"), tint = here ? t.primary : t.textMuted](const kor::ResourceRef<const kor::Image> made) {
+                            return kui::SizedBox(preview, preview, made.Get() ? kui::Image(made, kui::ImageFit::eContain) : kui::Icon(icon, kui::IconStyle::eFilled, tint));
+                        });
                     const std::string holds = Holds(id);
                     std::string said = holds.empty() || holds == node->type ? node->type : std::format("{}  ·  {}", node->type, holds);
                     if (runtime.ResourceOf(id)) said += "\n" + WrittenBefore(UsesAt(id, page));
@@ -6516,7 +6862,15 @@ class $NAME : ResourceScript() {
                 std::vector<kui::MenuItem> meshes, lights, cameras, others;
                 std::vector<kui::MenuItem> menu;
                 for (const auto& object : _session->Objects()) {
-                    kui::MenuItem item { object.name, [this, object, parent, before] { if (before) before(); _session->Create(object, parent); } };
+                    // By its name, found again when it is picked: every entity's row has this menu, and a copy of each
+                    // object in each was most of what building the interface again cost.
+                    kui::MenuItem item { object.name, [this, name = object.name, parent, before] {
+                        const auto& objects = _session->Objects();
+                        const auto found = std::ranges::find(objects, name, &ObjectTemplate::name);
+                        if (found == objects.end()) return;
+                        if (before) before();
+                        _session->Create(*found, parent);
+                    } };
                     if (object.name == "Empty") {
                         item.label = "Empty entity";
                         if (parent.IsNull()) item.onSelected = [this] { _session->Select(Doc().CreateEntity()); };     // called what any new entity is
@@ -6660,25 +7014,9 @@ class $NAME : ResourceScript() {
                 }
             }
 
-            /** What an asset is shown by: a texture that is loaded by itself; anything else by what kind of thing it is. */
-            kui::Widget AssetPreview(const Session::Asset& asset, const float size, const bool pictured = true)
+            /** An asset by what kind of thing it is, as an icon of its colour: faint for one not loaded. */
+            static kui::Widget KindIcon(const Session::Asset& asset, const float size)
             {
-                if (!pictured) {}
-                else if (asset.kind == Session::Asset::Kind::eTexture) {
-                    if (const auto held = _session->AssetHeld(asset.id); held && held->handle)
-                        return kui::SizedBox(size, size, kui::Image(kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(held->handle)), kui::ImageFit::eContain));
-                }
-                else if (asset.kind == Session::Asset::Kind::eMesh) {
-                    // A mesh's small picture, once it is drawn; by its kind until then.
-                    if (const auto picture = _session->MeshPicture(asset.id); picture.Get()) return kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain));
-                }
-                else if (const Session::Material* material = Session::MaterialOf(asset.id)) {
-                    // A material by its colour, a disc of it: rimmed with the light it gives when it gives any.
-                    const auto channel = [](const float v) { return static_cast<std::uint32_t>(std::clamp(v, 0.f, 1.f) * 255.f + 0.5f); };
-                    const kui::Color colour = kui::Color::Hex((channel(material->albedo[0]) << 16) | (channel(material->albedo[1]) << 8) | channel(material->albedo[2]));
-                    const bool glows = material->emission[0] + material->emission[1] + material->emission[2] > 0.f;
-                    return kui::SizedBox(size, size, kui::Icon(glows ? "light_mode" : material->metallic > 0.5f ? "lens_blur" : "circle", kui::IconStyle::eFilled, colour));
-                }
                 const char* icon = asset.kind == Session::Asset::Kind::eModel ? "category" : asset.kind == Session::Asset::Kind::eMesh ? "view_in_ar"
                                  : asset.kind == Session::Asset::Kind::eTexture ? "image" : asset.kind == Session::Asset::Kind::eShader ? "code"
                                  : asset.kind == Session::Asset::Kind::eScene ? "landscape" : asset.kind == Session::Asset::Kind::ePrefab ? "widgets" : "description";
@@ -6687,6 +7025,31 @@ class $NAME : ResourceScript() {
                                       : asset.kind == Session::Asset::Kind::eScene ? kui::Color::Hex(0xD9A441) : asset.kind == Session::Asset::Kind::ePrefab ? kui::Color::Hex(0x4FB3BF)
                                       : kui::Theme::Current().textMuted;
                 return kui::SizedBox(size, size, kui::Icon(icon, kui::IconStyle::eFilled, asset.loaded || asset.kind >= Session::Asset::Kind::eShader ? tint : tint.WithAlpha(0.55f)));
+            }
+
+            /** What an asset is shown by: a texture that is loaded by itself; anything else by what kind of thing it is. */
+            kui::Widget AssetPreview(const Session::Asset& asset, const float size, const bool pictured = true)
+            {
+                if (!pictured) {}
+                else if (asset.kind == Session::Asset::Kind::eTexture) {
+                    if (const auto picture = PictureOf(_session->AssetHeld(asset.id).get()); picture.Get())
+                        return kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain));
+                }
+                else if (asset.kind == Session::Asset::Kind::eMesh) {
+                    // A mesh's small picture, once it is drawn; by its kind until then.
+                    return kui::Make<MeshThumbnail>(_session, [session = _session, id = asset.id] { return session->MeshPicture(id); },
+                        [size, kind = KindIcon(asset, size)](const kor::ResourceRef<const kor::Image> picture) {
+                            return picture.Get() ? kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain)) : kind;
+                        });
+                }
+                else if (const Session::Material* material = Session::MaterialOf(asset.id)) {
+                    // A material by its colour, a disc of it: rimmed with the light it gives when it gives any.
+                    const auto channel = [](const float v) { return static_cast<std::uint32_t>(std::clamp(v, 0.f, 1.f) * 255.f + 0.5f); };
+                    const kui::Color colour = kui::Color::Hex((channel(material->albedo[0]) << 16) | (channel(material->albedo[1]) << 8) | channel(material->albedo[2]));
+                    const bool glows = material->emission[0] + material->emission[1] + material->emission[2] > 0.f;
+                    return kui::SizedBox(size, size, kui::Icon(glows ? "light_mode" : material->metallic > 0.5f ? "lens_blur" : "circle", kui::IconStyle::eFilled, colour));
+                }
+                return KindIcon(asset, size);
             }
 
             /** A folder of the Assets panel, by its last name: `textures` for `assets/textures`. */
@@ -7146,6 +7509,247 @@ class $NAME : ResourceScript() {
                 });
             }
 
+            // ---- compressing the scene's pictures ----------------------------------------------------------------------
+
+            /** A picture as the Compress textures dialog has it: what it is, and the format chosen for it — none, as its kind is offered. */
+            struct TextureChoice { Session::SceneTexture texture; std::optional<kgraph::TextureFormat> format; };
+            /** A pack as the dialog has it: whether it is to be made, and whether it was only suggested. */
+            struct PackChoice { std::string id; kgraph::TexturePack pack; bool on = true; bool suggested = false; };
+            std::vector<TextureChoice> _textureChoices;
+            std::vector<PackChoice> _packChoices;
+            std::array<kgraph::TextureFormat, 4> _offered {};      // by kind
+            kgraph::TextureQuality _textureQuality = kgraph::TextureQuality::eNormal;
+            bool _compressAsked = false, _dontAskToCompress = false;
+
+            static constexpr std::array<kgraph::TextureKind, 4> TextureKinds { kgraph::TextureKind::eColor, kgraph::TextureKind::eNormal, kgraph::TextureKind::eMask, kgraph::TextureKind::eData };
+            static const char* KindLabel(const kgraph::TextureKind kind)
+            {
+                switch (kind) {
+                case kgraph::TextureKind::eNormal: return "Normal maps";
+                case kgraph::TextureKind::eMask: return "Masks, one number";
+                case kgraph::TextureKind::eData: return "Numbers together";
+                default: return "Colours";
+                }
+            }
+            static std::string FormatLabel(const kgraph::TextureFormat format)
+            {
+                switch (format) {
+                case kgraph::TextureFormat::eBC1: return "BC1 · RGB, 4 bits";
+                case kgraph::TextureFormat::eBC3: return "BC3 · RGBA, 8 bits";
+                case kgraph::TextureFormat::eBC4: return "BC4 · one channel, 4 bits";
+                case kgraph::TextureFormat::eBC5: return "BC5 · two channels, 8 bits";
+                case kgraph::TextureFormat::eBC7: return "BC7 · RGBA, best, 8 bits";
+                default: return "As read, not compressed";
+                }
+            }
+            static std::vector<std::string> FormatLabels()
+            {
+                std::vector<std::string> labels;
+                for (const auto format : kgraph::TextureFormats()) labels.push_back(FormatLabel(format));
+                return labels;
+            }
+            static int FormatIndex(const kgraph::TextureFormat format)
+            {
+                const auto& all = kgraph::TextureFormats();
+                return static_cast<int>(std::ranges::find(all, format) - all.begin());
+            }
+            /** A picture's own name, without its folder: `wall_Normal.png`. */
+            static std::string PictureName(const std::string_view id)
+            {
+                const auto slash = id.find_last_of('/');
+                return std::string(slash == std::string_view::npos ? id.substr(id.starts_with('@') ? 1 : 0) : id.substr(slash + 1));
+            }
+
+            /** Opens the dialog with the scene's pictures as the graph keeps them, and the packs it has and those their names suggest. */
+            void OpenCompressTextures(const bool asked)
+            {
+                const kgraph::Graph& graph = Doc().Graph();
+                _textureChoices.clear();
+                std::vector<std::string> ids;
+                for (auto& texture : _session->SceneTextures()) {
+                    ids.push_back(texture.id);
+                    const std::optional<kgraph::TextureFormat> format = texture.import.Default() ? std::nullopt : std::optional(texture.import.format);
+                    if (!texture.import.Default()) _textureQuality = texture.import.quality;
+                    _textureChoices.push_back({ std::move(texture), format });
+                }
+                _packChoices.clear();
+                for (const auto& [id, pack] : graph.texturePacks) { _packChoices.push_back({ id, pack, true, false }); _textureQuality = pack.quality; }
+                for (auto& [id, pack] : kgraph::SuggestTexturePacks(ids))
+                    if (!graph.texturePacks.contains(id)) _packChoices.push_back({ id, std::move(pack), true, true });
+                for (std::size_t k = 0; k < TextureKinds.size(); ++k) _offered[k] = _session->OfferedFormat(TextureKinds[k]);
+                _compressAsked = asked;
+                _dontAskToCompress = false;
+                SetState([&] { _dialog = Dialog::eCompressTextures; });
+            }
+
+            /** The pack a picture goes into, of those to be made; empty for none. */
+            [[nodiscard]] std::string PackedIn(const std::string& id) const
+            {
+                for (const auto& choice : _packChoices)
+                    if (choice.on && std::ranges::any_of(choice.pack.channels, [&](const auto& channel) { return channel.from == id; })) return choice.id;
+                return {};
+            }
+            [[nodiscard]] kgraph::TextureFormat FormatOf(const TextureChoice& choice) const
+            {
+                return choice.format.value_or(_offered[static_cast<std::size_t>(choice.texture.kind)]);
+            }
+
+            /** Keeps the dialog's choices in the graph and the project; with @p cook, compresses what is not yet. */
+            void KeepTextureChoices(const bool cook)
+            {
+                std::map<std::string, kgraph::TextureImport> imports;
+                for (const auto& choice : _textureChoices) {
+                    const kgraph::TextureFormat format = FormatOf(choice);
+                    if (choice.texture.compressible && format != kgraph::TextureFormat::eAsRead && PackedIn(choice.texture.id).empty())
+                        imports[choice.texture.id] = { format, _textureQuality };
+                }
+                std::map<std::string, kgraph::TexturePack> packs;
+                for (auto choice : _packChoices) {
+                    if (!choice.on) continue;
+                    choice.pack.quality = _textureQuality;
+                    packs[choice.id] = std::move(choice.pack);
+                }
+                for (std::size_t k = 0; k < TextureKinds.size(); ++k) _session->SetOfferedFormat(TextureKinds[k], _offered[k]);
+                if (_dontAskToCompress) _session->DontAskToCompress();
+                _session->KeepTextures(std::move(imports), std::move(packs), cook);
+                SetState([&] { _dialog = Dialog::eNone; });
+            }
+
+            /** One pack's rows: whether it is made, its format, and what each of its channels is. */
+            void PackRows(std::vector<kui::Widget>& rows, const std::size_t index)
+            {
+                PackChoice& choice = _packChoices[index];
+                const std::string name = PictureName(choice.id);
+                rows.push_back(kui::Row({
+                    kui::Expanded(kui::Checkbox(choice.on, [this, index](const bool on) { SetState([&] { _packChoices[index].on = on; }); },
+                                                choice.suggested ? std::format("{}  (suggested)", name) : name)),
+                    kui::Dropdown(FormatLabels(), FormatIndex(choice.pack.format), [this, index](const int picked) {
+                        SetState([&] { _packChoices[index].pack.format = kgraph::TextureFormats()[static_cast<std::size_t>(picked)]; });
+                    }, kui::DropdownOptions {}.SetWidth(220.f)),
+                }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                if (!choice.on) return;
+                // What a channel can be: a number, or a channel of a picture of the scene's — of those whose names begin as the pack's, for one suggested.
+                std::string base = PictureName(choice.id);
+                if (const auto end = base.rfind("_ORM.pack"); end != std::string::npos) base = base.substr(0, end);
+                else base.clear();
+                std::vector<std::string> sources { "", "" }, labels { "0", "1" };
+                for (const auto& texture : _textureChoices) {
+                    const std::string picture = PictureName(texture.texture.id);
+                    if (!base.empty() && !picture.starts_with(base)) continue;
+                    sources.push_back(texture.texture.id);
+                    labels.push_back(picture);
+                }
+                static constexpr std::array<const char*, 4> Names { "Red", "Green", "Blue", "Alpha" };
+                for (std::size_t c = 0; c < 4; ++c) {
+                    const auto& channel = choice.pack.channels[c];
+                    int selected = channel.from.empty() ? (channel.constant >= 0.5f ? 1 : 0) : 0;
+                    if (!channel.from.empty()) {
+                        if (const auto at = std::ranges::find(sources, channel.from); at != sources.end()) selected = static_cast<int>(at - sources.begin());
+                        else { sources.push_back(channel.from); labels.push_back(PictureName(channel.from)); selected = static_cast<int>(sources.size()) - 1; }
+                    }
+                    std::vector<kui::Widget> line {
+                        kui::Dropdown(labels, selected, [this, index, c, sources](const int picked) {
+                            SetState([&] {
+                                auto& into = _packChoices[index].pack.channels[c];
+                                into.from = sources[static_cast<std::size_t>(picked)];
+                                into.constant = picked == 1 ? 1.f : 0.f;
+                                into.channel = 0;
+                            });
+                        }, kui::DropdownOptions {}.SetWidth(300.f)),
+                    };
+                    if (!channel.from.empty())
+                        line.push_back(kui::Dropdown({ "its red", "its green", "its blue", "its alpha" }, std::clamp(channel.channel, 0, 3), [this, index, c](const int picked) {
+                            SetState([&] { _packChoices[index].pack.channels[c].channel = picked; });
+                        }, kui::DropdownOptions {}.SetWidth(110.f)));
+                    rows.push_back(kui::Padding(kui::EdgeInsets::Only(24.f, 0.f, 0.f, 0.f),
+                        kgui::Labeled(Names[c], kui::Row(std::move(line), kui::FlexOptions {}.SetGap(6.f)), 60.f)));
+                }
+            }
+
+            kui::Widget CompressTexturesDialog()
+            {
+                std::vector<kui::Widget> rows;
+                rows.push_back(Heading("Compress textures"));
+                const auto compressed = std::ranges::count_if(_textureChoices, [](const TextureChoice& choice) { return choice.texture.cooked; });
+                const auto kept = std::ranges::count_if(_textureChoices, [](const TextureChoice& choice) { return !choice.texture.compressible; });
+                rows.push_back(kgui::Muted(std::format(
+                    "{} textures in this scene, {} compressed{}. Each is compressed once, into the project's cache/textures — a few seconds a 4K texture, "
+                    "off the frame — and read from there from then on: smaller on the GPU, and much quicker to load. The scene still names the files; "
+                    "a file changed is compressed again.", _textureChoices.size() - kept, compressed,
+                    kept == 0 ? std::string() : std::format("; and {} HDR, kept as read — these formats hold eight bits a channel", kept))));
+                if (const auto& cooking = _session->Cooking(); cooking.done < cooking.total)
+                    rows.push_back(kgui::Muted(std::format("Compressing {} of {}: {}", cooking.done + 1, cooking.total, PictureName(cooking.current))));
+
+                rows.push_back(ListHeading("BY KIND"));
+                std::array<int, 4> counts {};
+                for (const auto& choice : _textureChoices) ++counts[static_cast<std::size_t>(choice.texture.kind)];
+                for (std::size_t k = 0; k < TextureKinds.size(); ++k)
+                    rows.push_back(kgui::Labeled(std::format("{} ({})", KindLabel(TextureKinds[k]), counts[k]),
+                        kui::Dropdown(FormatLabels(), FormatIndex(_offered[k]), [this, k](const int picked) {
+                            SetState([&] { _offered[k] = kgraph::TextureFormats()[static_cast<std::size_t>(picked)]; });
+                        }, kui::DropdownOptions {}.SetWidth(260.f)), 170.f));
+                rows.push_back(kgui::Labeled("Quality", kui::Tooltip(
+                    "How hard the encoder works. Fast: about 4 s a 4K texture; normal: about 7 s; best: longer still, for a little more. "
+                    "Normal maps take longest.",
+                    kui::Dropdown({ "Fast", "Normal", "Best" }, static_cast<int>(_textureQuality), [this](const int picked) {
+                        SetState([&] { _textureQuality = static_cast<kgraph::TextureQuality>(picked); });
+                    }, kui::DropdownOptions {}.SetWidth(260.f))), 170.f));
+                rows.push_back(kgui::Muted("BC5 keeps a normal map's x and y; the shader works out z (the forward+ shaders do). BC4 keeps one channel and reads it in red, green and blue."));
+
+                rows.push_back(ListHeading("PACKS", kui::Tooltip("A pack of your own: its channels taken from any of the scene's textures.", Small("Add a pack", [this] {
+                    std::string folder = "@";
+                    if (!_textureChoices.empty()) { const auto& first = _textureChoices.front().texture.id; folder = first.substr(0, first.find_last_of('/') + 1); }
+                    std::string id;
+                    for (int n = 1; id.empty() || std::ranges::any_of(_packChoices, [&](const PackChoice& choice) { return choice.id == id; }); ++n) id = std::format("{}pack{}.pack", folder, n);
+                    kgraph::TexturePack pack;
+                    pack.channels[3].constant = 1.f;
+                    SetState([&] { _packChoices.push_back({ id, pack, true, false }); });
+                }))));
+                rows.push_back(kgui::Muted("Several textures as the channels of one: one texture on the GPU in place of several. Each file in a pack still reads as itself — "
+                                           "its channel, in red, green and blue — so the scene and its shaders need no change."));
+                if (_packChoices.empty()) rows.push_back(kgui::Muted("None suggested: no material here has its occlusion, roughness and metalness in files of their own."));
+                for (std::size_t i = 0; i < _packChoices.size(); ++i) PackRows(rows, i);
+
+                rows.push_back(ListHeading("TEXTURES"));
+                const kui::Theme& t = kui::Theme::Current();
+                for (std::size_t i = 0; i < _textureChoices.size(); ++i) {
+                    const TextureChoice& choice = _textureChoices[i];
+                    // First, what its kind is offered as: what it follows until it is given one of its own.
+                    std::vector<std::string> labels { std::format("As its kind · {}", kgraph::TextureFormatName(_offered[static_cast<std::size_t>(choice.texture.kind)])) };
+                    for (const auto format : kgraph::TextureFormats()) labels.push_back(FormatLabel(format));
+                    const std::string packed = PackedIn(choice.texture.id);
+                    const kgraph::TextureFormat format = FormatOf(choice);
+                    std::string state = !choice.texture.compressible ? "kept as read"
+                                      : !packed.empty() ? std::format("in {}", PictureName(packed))
+                                      : format == kgraph::TextureFormat::eAsRead ? "not compressed"
+                                      : choice.texture.cooked && choice.texture.import.format == format ? "compressed" : "to compress";
+                    kui::Widget pick = !packed.empty() || !choice.texture.compressible ? kui::SizedBox(240.f, 24.f)
+                        : kui::Dropdown(labels, choice.format ? FormatIndex(*choice.format) + 1 : 0, [this, i](const int picked) {
+                              SetState([&] { _textureChoices[i].format = picked == 0 ? std::nullopt : std::optional(kgraph::TextureFormats()[static_cast<std::size_t>(picked - 1)]); });
+                          }, kui::DropdownOptions {}.SetWidth(240.f));
+                    rows.push_back(kui::Row({
+                        kui::Expanded(kui::Tooltip(std::format("{}{}", choice.texture.id, choice.texture.field.empty() ? std::string() : "\nheld as " + choice.texture.field),
+                                                   kui::Text(PictureName(choice.texture.id), kui::TextStyle {}.SetSize(13.f), kui::TextAlign::eStart, false, 1, true))),
+                        kui::SizedBox(110.f, 18.f, kgui::Muted(KindLabel(choice.texture.kind), 11.f)),
+                        std::move(pick),
+                        kui::SizedBox(110.f, 18.f, kui::Text(state, kui::TextStyle {}.SetSize(11.f).SetColor(state == "compressed" ? kui::Color::Hex(0x46A758) : t.textMuted)))
+                    }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                }
+
+                if (_compressAsked)
+                    rows.push_back(kui::Checkbox(_dontAskToCompress, [this](const bool on) { SetState([&] { _dontAskToCompress = on; }); }, "Don't ask again for this project"));
+                rows.push_back(kui::Row({
+                    kui::Button("Compress", [this] { KeepTextureChoices(true); }),
+                    kui::Tooltip("Keep these settings in the scene; nothing is compressed until you press Compress.",
+                                 kui::Button("Keep settings only", [this] { KeepTextureChoices(false); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary))),
+                    kui::Button(_compressAsked ? "Not now" : "Cancel", [this] {
+                        if (_dontAskToCompress) _session->DontAskToCompress();
+                        SetState([&] { _dialog = Dialog::eNone; });
+                    }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
+                }, kui::FlexOptions {}.SetGap(8.f)));
+                return kui::Padding(kui::EdgeInsets::All(16.f), kui::ScrollView(Rows(std::move(rows), 8.f)).Width(820.f));
+            }
+
             kui::Widget ImportOptionsDialog()
             {
                 auto& runtime = Doc().Runtime();
@@ -7191,8 +7795,7 @@ class $NAME : ResourceScript() {
                 switch (asset.kind) {
                 case Session::Asset::Kind::eTexture:
                     if (asset.pending) rows.push_back(kgui::Muted("Still being read."));
-                    else if (held && held->handle) {
-                        const auto image = kor::capi::ImageOf(held->handle);
+                    else if (const auto image = PictureOf(held.get()); image.Get()) {
                         const auto extent = image->Extent();
                         rows.push_back(kgui::Labeled("Size", kgui::Line(std::format("{} x {}", extent.x, extent.y)), LabelWidth));
                         rows.push_back(kgui::Labeled("Levels", kgui::Line(std::to_string(image->MipLevels())), LabelWidth));
@@ -7200,6 +7803,19 @@ class $NAME : ResourceScript() {
                         rows.push_back(Small("Open in the viewer", [this, id = asset.id] { _session->View(id); }));
                     } else rows.push_back(kgui::Muted("Not in the scene: it is read when something is given it."));
                     rows.push_back(kgui::Labeled("Held as", kgui::Line(asset.id), LabelWidth));
+                    if (held) {
+                        // How the scene keeps it: as read, or compressed — and whether what was compressed of it is what is read.
+                        const kgraph::Graph& graph = Doc().Graph();
+                        std::string kept = "as read, not compressed";
+                        for (const auto& [pack, made] : graph.texturePacks)
+                            if (std::ranges::any_of(made.channels, [&](const auto& channel) { return channel.from == asset.id; }))
+                                kept = std::format("in {}, {}", PictureName(pack), Doc().Runtime().Cooked(pack) ? "compressed" : "not compressed yet");
+                        if (!kgraph::TextureCompressible(asset.id)) kept = "as read: HDR, or compressed already";
+                        else if (const auto it = graph.textureImports.find(asset.id); it != graph.textureImports.end())
+                            kept = std::format("{}, {}", kgraph::TextureFormatName(it->second.format), Doc().Runtime().Cooked(asset.id) ? "compressed" : "not compressed yet");
+                        rows.push_back(kgui::Labeled("Kept", kgui::Line(kept), LabelWidth));
+                        rows.push_back(Small("Compress textures...", [this] { OpenCompressTextures(false); }));
+                    }
                     rows.push_back(kgui::Muted("Drag it from the Assets panel onto a picture field of an entity: an albedoMap, a normalMap."));
                     break;
                 case Session::Asset::Kind::eMesh:
@@ -7208,7 +7824,10 @@ class $NAME : ResourceScript() {
                         rows.push_back(kgui::Labeled("Reaches", kgui::Line(std::format("{:.2f}, {:.2f}, {:.2f}  to  {:.2f}, {:.2f}, {:.2f}", held->bounds[0], held->bounds[1], held->bounds[2],
                                                                                        held->bounds[3], held->bounds[4], held->bounds[5])), LabelWidth));
                     } else rows.push_back(kgui::Muted(asset.pending ? "Still being read." : "A mesh."));
-                    if (const auto picture = _session->MeshPicture(asset.id); picture.Get()) rows.push_back(kui::Image(picture, kui::ImageFit::eContain, { -1.f, 160.f }));
+                    if (!asset.pending)
+                        rows.push_back(kui::Make<MeshThumbnail>(_session, [session = _session, id = asset.id] { return session->MeshPicture(id); }, [](const kor::ResourceRef<const kor::Image> picture) {
+                            return picture.Get() ? kui::Image(picture, kui::ImageFit::eContain, { -1.f, 160.f }) : kui::SizedBox(0.f, 0.f);
+                        }));
                     if (!asset.pending) rows.push_back(Small("Open in the viewer", [this, id = asset.id] { _session->View(id); }));
                     rows.push_back(kgui::Labeled("Held as", kgui::Line(asset.id), LabelWidth));
                     if (asset.builtIn) {
@@ -8060,12 +8679,16 @@ class $NAME : ResourceScript() {
                         // What it holds is shown beside its name, small: a picture by itself, a mesh by the picture of it.
                         kui::Widget shownBeside;
                         if (field.type == "Mesh") {
-                            if (const auto picture = _session->MeshPicture(holds); picture.Get()) shownBeside = kui::Image(picture, kui::ImageFit::eContain);
+                            // By its kind until its picture is drawn.
+                            if (!holds.empty())
+                                shownBeside = kui::Make<MeshThumbnail>(_session, [session = _session, holds] { return session->MeshPicture(holds); }, [](const kor::ResourceRef<const kor::Image> picture) {
+                                    return picture.Get() ? kui::Image(picture, kui::ImageFit::eContain) : kui::Icon("view_in_ar", kui::IconStyle::eFilled, kui::Color::Hex(0x6FA87A).WithAlpha(0.55f));
+                                });
                         } else if (!holds.empty()) {
                             if (const auto held = doc.Runtime().ResourceOf(holds); held && held->handle && (held->kind == "Image" || held->kind == "ImageView") && doc.Runtime().ImageOf(holds).Get())
                                 shownBeside = kui::Image(doc.Runtime().ImageOf(holds), kui::ImageFit::eContain);
                             else if (holds.starts_with('@'))
-                                if (const auto file = doc.Runtime().ResourceOf(holds); file && file->handle) shownBeside = kui::Image(kor::ResourceRef<const kor::Image>(kor::capi::ImageOf(file->handle)), kui::ImageFit::eContain);
+                                if (const auto file = PictureOf(doc.Runtime().ResourceOf(holds).get()); file.Get()) shownBeside = kui::Image(file, kui::ImageFit::eContain);
                         }
                         if (holds.starts_with('@')) editor = kui::Tooltip(holds, std::move(editor));
                         if (shownBeside)
@@ -8413,100 +9036,388 @@ class $NAME : ResourceScript() {
 
             kui::Widget FramePanel()
             {
-                // Built again when what it shows changes: the passes, their order and queues, and their times to a hundredth.
+                // Read four times a second, and built again only when what it shows has changed: numbers steady enough to read.
                 return kui::Make<LiveValue>(_session, [this] {
                     // Nothing is read, or shown, while it is behind another tab.
                     if (!_layout->IsShown("frame")) return Value();
-                    const auto frame = Doc().Runtime().Frame();
-                    std::string seen;
-                    for (const auto& pass : frame.passes) seen += std::format("{}|{}|{}|{:.2f};", pass.name, pass.level, pass.async, pass.gpuMs);
+                    const auto now = std::chrono::steady_clock::now();
+                    // Paused, it is the frame it was paused on.
+                    if (!_frameSeen.IsNull() && (_framePaused || now - _frameReadAt < std::chrono::milliseconds(250))) return _frameSeen;
+                    _frameReadAt = now;
+                    const kgraph::Runtime& runtime = Doc().Runtime();
+                    _frameShot = { runtime.Frame(), runtime.Times(), _session->FrameMs(), 0.0, _session->Fps() };
+                    for (const auto& timing : runtime.Timings() | std::views::values) _frameShot.prepareMs += timing.prepareMs;
+                    const auto& frame = _frameShot.frame;
+                    std::string seen = std::format("{:.1f}|{}|", _frameShot.frameMs, _frameShot.fps);
+                    for (const auto& pass : frame.passes) seen += std::format("{}|{}|{:.2f}|{:.2f}|{:.2f};", pass.name, pass.async, pass.gpuMs, pass.recordMs, pass.gpuStartMs);
                     for (const auto& [node, why] : frame.leftOut) seen += node + why;
-                    return Value(seen);
+                    _frameSeen = Value(seen);
+                    return _frameSeen;
                 }, [this](const Value& seen) { return seen.IsNull() ? kui::SizedBox(0.f, 0.f) : FrameRows(); });
             }
 
+            /**
+             * The frame: how long it takes against the time a frame has, then a line for each pass node — a fixed page's
+             * steps one line, opened to see each — with its GPU time, its CPU's and its share of the GPU's, in the order
+             * they run or the costliest first. What did not run is shut at the foot, by why. A line pressed goes to its node.
+             */
             kui::Widget FrameRows()
             {
+                using Pass = kgraph::Runtime::FrameReport::Pass;
                 const kui::Theme& t = kui::Theme::Current();
-                const auto frame = Doc().Runtime().Frame();
-                std::vector<kui::Widget> rows;
-                double total = 0.0, longest = 0.0;
-                std::size_t async = 0;
-                for (const auto& pass : frame.passes) { total += pass.gpuMs; longest = std::max(longest, pass.gpuMs); async += pass.async ? 1 : 0; }
-                rows.push_back(kgui::Muted(std::format("{} passes, {} on the async queue  ·  GPU {:.2f} ms", frame.passes.size(), async, total), 12.f));
-                if (frame.unsharedBytes > frame.bytes)
-                    rows.push_back(kgui::Muted(std::format("{:.1f} MiB made by the frame graph, {:.1f} MiB saved by sharing memory", frame.bytes / 1048576.0, (frame.unsharedBytes - frame.bytes) / 1048576.0), 11.f));
-                if (frame.passes.empty()) rows.push_back(kgui::Muted("Nothing has run yet."));
+                const auto& frame = _frameShot.frame;
                 // Where a pass of the frame is on the graph: a call's node is gone to by its call, a loop's turn by its node.
                 const auto onGraph = [](std::string id) {
                     if (const auto slash = id.find('/'); slash != std::string::npos) id.resize(slash);
                     if (const auto turn = id.find(" ["); turn != std::string::npos) id.resize(turn);
                     return id;
                 };
+                // A call's node is said as its call's, then its own.
+                const auto said = [](std::string id) {
+                    for (std::size_t slash; (slash = id.find('/')) != std::string::npos;) id.replace(slash, 1, " › ");
+                    return id;
+                };
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                const std::string wanted = lower(_frameFilter);
+
+                // A node's passes as one line: each fixed step a frame runs is a pass of the frame graph, and all of them the node's.
+                struct Line { std::string node; std::vector<const Pass*> steps; double gpuMs = 0.0, recordMs = 0.0; bool measured = true, async = false; };
+                std::vector<Line> lines;
+                std::map<std::string, std::size_t> lineOf;
+                double gpu = 0.0, record = 0.0;
                 for (const auto& pass : frame.passes) {
-                    const double share = total > 0.0 ? pass.gpuMs / total : 0.0;
-                    const kui::Color heat = HeatColor(share);
-                    const std::string name = pass.name.contains('\n') ? std::format("{}  (step {})", pass.node, pass.name.substr(pass.name.rfind(' ') + 1)) : pass.node;
-                    std::string uses;
-                    for (const auto& [resource, how] : pass.uses)
-                        uses += std::format("{}{} {}", uses.empty() ? "" : "  ·  ", how == 'b' ? "reads and writes" : how == 'w' ? "writes" : "reads", resource);
-                    const float bar = longest > 0.0 ? static_cast<float>(pass.gpuMs / longest) : 0.f;
-                    rows.push_back(kui::GestureDetector(kui::GestureOptions {}.OnTap([this, id = onGraph(pass.node)] { _session->GoTo(id); }), kui::Column({
-                        kui::Row({
-                            kui::SizedBox(26.f, -1.f, kui::Text(std::to_string(pass.level), kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eEnd, false)),
-                            pass.async ? ListPill("async", kui::Theme::Current().textMuted) : kui::SizedBox(0.f, 0.f),
-                            kui::Expanded(kui::Text(name, kui::TextStyle {}.SetSize(12.5f), kui::TextAlign::eStart, false, 1, true)),
-                            kui::Text(pass.gpuMeasured ? std::format("{:.3f} ms", pass.gpuMs) : std::format("record {:.3f} ms", pass.recordMs),
-                                      kui::TextStyle {}.SetSize(11.f).SetColor(heat), kui::TextAlign::eEnd, false),
-                        }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
-                        // As long as its GPU time, against the longest's.
-                        kui::Padding(kui::EdgeInsets::Only(34.f, 0.f, 0.f, 0.f), kui::Row({
-                            kui::Expanded(kui::Container(kui::ContainerOptions {}.SetHeight(4.f).SetDecoration(kui::Decoration {}.SetColor(heat.WithAlpha(0.8f)).SetRadius(2.f))),
-                                          std::max(bar, 0.005f)),
-                            kui::Expanded(kui::SizedBox(0.f, 4.f), std::max(1.f - bar, 0.f) + 0.0001f) })),
-                        kui::Padding(kui::EdgeInsets::Only(34.f, 0.f, 0.f, 0.f), kui::Text(uses.empty() ? std::string("uses nothing it declares") : uses,
-                                                                                         kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eStart, false, 2, true)),
-                    }, kui::FlexOptions {}.SetGap(3.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch))));
+                    // The editor's own passes — the pictures on the graph's cards — are one line: they cost the frame too.
+                    const std::string node = pass.node.starts_with('$') ? std::string("$") : pass.node;
+                    const auto [at, made] = lineOf.try_emplace(node, lines.size());
+                    if (made) lines.push_back({ node });
+                    Line& line = lines[at->second];
+                    line.steps.push_back(&pass);
+                    line.gpuMs += pass.gpuMs;
+                    line.recordMs += pass.recordMs;
+                    line.measured = line.measured && pass.gpuMeasured;
+                    line.async = line.async || pass.async;
+                    gpu += pass.gpuMs;
+                    record += pass.recordMs;
                 }
-                if (!frame.leftOut.empty()) rows.push_back(kgui::Muted("Left out", 11.f));
-                for (const auto& [node, why] : frame.leftOut)
-                    rows.push_back(kui::GestureDetector(kui::GestureOptions {}.OnTap([this, id = onGraph(node)] { _session->GoTo(id); }),
-                                                        kgui::Muted(std::format("{}  ·  {}", node, why), 11.f)));
+                const double prepare = _frameShot.prepareMs;
+                if (_frameView == 1) std::ranges::stable_sort(lines, std::greater {}, [](const Line& line) { return std::max(line.gpuMs, line.recordMs); });
+
+                std::vector<kui::Widget> rows;
+                // How long a frame takes, against the time one has at the rate picked: over it, the bar says so.
+                const double frameMs = _frameShot.frameMs, budget = 1000.0 / _frameHz;
+                const auto fact = [&](std::string text, std::string tip) { return kui::Tooltip(std::move(tip), kgui::Muted(std::move(text), 12.f)); };
+                const int rates[] { 30, 60, 120, 144 };
+                std::vector<kui::Widget> head {
+                    Heading(std::format("{:.1f} ms", frameMs)),
+                    kgui::Muted(std::format("{} fps", _frameShot.fps), 12.f),
+                    fact(std::format("GPU {:.2f} ms", gpu), "What the GPU spends on the graph's passes, added together"),
+                    fact(std::format("CPU {:.2f} ms", prepare + record), std::format("Preparing the passes ({:.2f} ms) and recording them ({:.2f} ms)", prepare, record)),
+                };
+                if (frame.bytes > 0)
+                    head.push_back(fact(std::format("{:.0f} MiB", frame.bytes / 1048576.0), frame.unsharedBytes > frame.bytes
+                        ? std::format("Made by the frame graph; {:.1f} MiB less than without sharing memory", (frame.unsharedBytes - frame.bytes) / 1048576.0)
+                        : std::string("Made by the frame graph")));
+                head.push_back(kui::Expanded(kui::SizedBox(0.f, 0.f)));
+                head.push_back(kui::Tooltip(_framePaused ? "Paused on this frame: pressed, it follows the frames again" : "Pauses on this frame, to look at it",
+                    SmallIcon(_framePaused ? "play_arrow" : "pause", [this] { SetState([&] { _framePaused = !_framePaused; }); })));
+                head.push_back(kui::Tooltip("The rate a frame is measured against", kui::SizedBox(110.f, -1.f,
+                    kui::Dropdown({ "30 Hz", "60 Hz", "120 Hz", "144 Hz" }, static_cast<int>(std::ranges::find(rates, _frameHz) - std::begin(rates)),
+                                  [this, rates](const int index) { SetState([&] { _frameHz = rates[std::clamp(index, 0, 3)]; }); }))));
+                rows.push_back(kui::Row(std::move(head), kui::FlexOptions {}.SetGap(12.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                rows.push_back(kui::Tooltip(std::format("The last frames, each a bar as high as it took; the line across is the {:.1f} ms a frame has at {} Hz, "
+                                                        "and the frames over it are red. The GPU's time for the passes is the line along them.", budget, _frameHz),
+                                            FrameHistory(_frameShot.times, budget)));
+                rows.push_back(kui::Row({
+                    kui::SizedBox(290.f, -1.f, kui::TabBar({ "Order run", "Cost", "Timeline" }, _frameView, [this](const int tab) { SetState([&] { _frameView = tab; }); })),
+                    kui::Expanded(kui::TextField(kui::TextFieldOptions { .text = _frameFilter, .placeholder = "Find a pass",
+                        .onChanged = [this](const std::string& typed) { SetState([&] { _frameFilter = typed; }); } }).Key("frame filter")),
+                }, kui::FlexOptions {}.SetGap(12.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                if (frame.passes.empty()) { rows.push_back(kgui::Muted("Nothing has run yet.")); return Panel(std::move(rows)); }
+                if (_frameView == 2) {
+                    rows.push_back(Timeline(frame, wanted, onGraph, said));
+                    return Panel(std::move(rows));
+                }
+
+                // The columns: what each number is.
+                const auto number = [](std::string text, const float width, const kui::Color& ink) {
+                    return kui::SizedBox(width, -1.f, kui::Text(std::move(text), kui::TextStyle {}.SetSize(11.5f).SetColor(ink), kui::TextAlign::eEnd, false));
+                };
+                const auto heading = [&](std::string text, const float width) { return number(std::move(text), width, t.textMuted); };
+                rows.push_back(kui::Padding(kui::EdgeInsets::Only(10.f, 0.f, 6.f, 0.f), kui::Row({
+                    kui::SizedBox(16.f, 0.f), kui::Expanded(kgui::Muted("PASS", 10.5f)), kui::SizedBox(72.f, 0.f),
+                    heading("GPU", 64.f), heading("CPU", 64.f), heading("SHARE", 44.f),
+                }, kui::FlexOptions {}.SetGap(8.f))));
+                // A pass's numbers: its GPU time ("—" where it cannot be timed), its recording's, and its share of the GPU's as a bar and a figure.
+                const auto numbers = [&](std::vector<kui::Widget>& line, const double gpuMs, const double recordMs, const bool measured) {
+                    const double share = gpu > 0.0 ? gpuMs / gpu : 0.0;
+                    const kui::Color heat = HeatColor(share);
+                    const float bar = static_cast<float>(std::clamp(share, 0.0, 1.0));
+                    line.push_back(kui::SizedBox(72.f, 6.f, kui::Row({
+                        kui::Expanded(kui::Container(kui::ContainerOptions {}.SetHeight(6.f).SetDecoration(kui::Decoration {}.SetColor(t.primary.WithAlpha(0.35f + 0.65f * bar)).SetRadius(3.f))), std::max(bar, 0.01f)),
+                        kui::Expanded(kui::Container(kui::ContainerOptions {}.SetHeight(6.f).SetDecoration(kui::Decoration {}.SetColor(t.text.WithAlpha(0.06f)).SetRadius(3.f))), std::max(1.f - bar, 0.f) + 0.0001f) })));
+                    line.push_back(number(measured ? std::format("{:.2f} ms", gpuMs) : std::string("—"), 64.f, measured ? heat : t.textMuted));
+                    line.push_back(number(std::format("{:.2f} ms", recordMs), 64.f, t.textMuted));
+                    line.push_back(number(measured ? std::format("{:.0f}%", 100.0 * share) : std::string(), 44.f, heat));
+                };
+                std::size_t listed = 0;
+                for (const Line& line : lines) {
+                    const bool editors = line.node == "$";
+                    const std::string shown = editors ? std::string("The editor's previews") : said(line.node);
+                    if (!wanted.empty() && lower(shown).find(wanted) == std::string::npos) continue;
+                    ++listed;
+                    const std::string id = editors ? std::string() : onGraph(line.node);
+                    const bool stepped = line.steps.size() > 1, open = _frameOpen.contains(line.node);
+                    std::vector<kui::Widget> cells;
+                    cells.push_back(stepped
+                        ? kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon(open ? "expand_more" : "chevron_right", kui::IconStyle::eFilled, t.textMuted)),
+                                      [this, node = line.node] { SetState([&] { if (!_frameOpen.erase(node)) _frameOpen.insert(node); }); },
+                                      kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))
+                        : kui::SizedBox(16.f, 16.f));
+                    cells.push_back(kui::Expanded(kui::Text(stepped ? std::format("{}  ×{}", shown, line.steps.size()) : shown,
+                                                            kui::TextStyle {}.SetSize(12.5f).SetColor(editors ? t.textMuted : t.text), kui::TextAlign::eStart, false, 1, true)));
+                    if (line.async) cells.push_back(ListPill("async", t.textMuted));
+                    numbers(cells, line.gpuMs, line.recordMs, line.measured);
+                    // Said when the pointer rests on it: where it runs among the rest, and what it reads and writes.
+                    const Pass& first = *line.steps.front();
+                    std::string reads, writes;
+                    for (const auto& [resource, how] : first.uses) {
+                        if (how != 'w') reads += std::format("{}{}", reads.empty() ? "" : ", ", resource);
+                        if (how != 'r') writes += std::format("{}{}", writes.empty() ? "" : ", ", resource);
+                    }
+                    const bool fixed = std::ranges::any_of(line.steps, [](const Pass* pass) { return pass->name.contains("\nstep"); });
+                    std::string tip = std::format("{}{}{}", line.async ? "On the async compute queue. " : "",
+                                                  first.level == 0 ? std::string("Level 0: it waits for no other pass.") : std::format("Level {}: what it waits for runs at lower levels.", first.level),
+                                                  !stepped ? std::string() : fixed ? std::format(" Run once for each of the {} fixed steps this frame.", line.steps.size())
+                                                                                   : std::format(" It is {} passes of the frame graph.", line.steps.size()));
+                    if (!reads.empty()) tip += "\nReads " + reads;
+                    if (!writes.empty()) tip += "\nWrites " + writes;
+                    if (first.uses.empty()) tip += "\nUses nothing it declares";
+                    tip += "\nPressed, it is gone to in the graph.";
+                    if (editors) tip = "What the editor draws for itself: the pictures on the graph's cards, and of what is looked at. Not the scene's: a player does without them.";
+                    const auto go = [this, id] { if (!id.empty()) _session->GoTo(id); };
+                    rows.push_back(kui::Tooltip(std::move(tip), ListLine("frame:" + line.node, !id.empty() && _session->selectedNode == id, std::move(cells), go)));
+                    if (stepped && open)
+                        for (std::size_t step = 0; step < line.steps.size(); ++step) {
+                            const Pass& pass = *line.steps[step];
+                            // A fixed step by its number; another pass of the node's by its own name, past the node's.
+                            std::string name = pass.name.contains('\n') ? pass.name.substr(pass.name.find('\n') + 1) : fixed ? std::string("step 1")
+                                             : editors ? pass.name.substr(pass.name.find(' ') + 1) : pass.name;
+                            std::vector<kui::Widget> sub { kui::SizedBox(16.f, 16.f), kui::Expanded(kgui::Muted(std::move(name), 12.f)) };
+                            numbers(sub, pass.gpuMs, pass.recordMs, pass.gpuMeasured);
+                            rows.push_back(kui::Padding(kui::EdgeInsets::Only(18.f, 0.f, 0.f, 0.f), ListLine(std::format("frame:{}#{}", line.node, step), false, std::move(sub), go)));
+                        }
+                }
+                if (listed == 0) rows.push_back(kgui::Muted("No pass has what is typed."));
+
+                // What did not run, shut at the foot: by why, each why said once.
+                struct Why { const char* kind; const char* means; std::vector<std::pair<std::string, std::string>> nodes; };
+                Why whys[] {
+                    { "skipped", "what they need is made by a pass that is left out", {} },
+                    { "culled", "nothing needs what they make", {} },
+                    { "resting", "nothing that runs this frame reads what they make: they stay in the frame, and record nothing", {} },
+                };
+                std::size_t notRun = 0;
+                for (const auto& [node, why] : frame.leftOut) {
+                    if (!wanted.empty() && lower(node).find(wanted) == std::string::npos) continue;
+                    auto* kind = std::ranges::find_if(whys, [&](const Why& w) { return why.starts_with(w.kind); });
+                    if (kind == std::end(whys)) kind = &whys[0];
+                    const auto colon = why.find(": ");
+                    kind->nodes.emplace_back(node, kind == &whys[0] && colon != std::string::npos ? why.substr(colon + 2) : std::string());
+                    ++notRun;
+                }
+                if (notRun > 0) {
+                    std::string counts;
+                    for (const Why& why : whys)
+                        if (!why.nodes.empty()) counts += std::format("{}{} {}", counts.empty() ? "" : " · ", why.nodes.size(), why.kind);
+                    rows.push_back(ListLine("frame:not run", false, {
+                        kui::SizedBox(16.f, 16.f, kui::Icon(_frameNotRunOpen ? "expand_more" : "chevron_right", kui::IconStyle::eFilled, t.textMuted)),
+                        kui::Expanded(kgui::Muted(std::format("Not run ({}): {}", notRun, counts), 12.f)),
+                    }, [this] { SetState([&] { _frameNotRunOpen = !_frameNotRunOpen; }); }));
+                    if (_frameNotRunOpen)
+                        for (const Why& why : whys) {
+                            if (why.nodes.empty()) continue;
+                            rows.push_back(kui::Padding(kui::EdgeInsets::Only(34.f, 4.f, 6.f, 0.f), kgui::Muted(std::format("{} — {}", Upper(why.kind), why.means), 10.5f)));
+                            for (const auto& [node, detail] : why.nodes) {
+                                const std::string id = onGraph(node);
+                                std::vector<kui::Widget> cells { kui::SizedBox(16.f, 16.f), kui::Text(said(node), kui::TextStyle {}.SetSize(12.5f), kui::TextAlign::eStart, false, 1, true) };
+                                cells.push_back(kui::Expanded(detail.empty() ? kui::SizedBox(0.f, 0.f) : kgui::Muted(detail, 11.f)));
+                                rows.push_back(kui::Padding(kui::EdgeInsets::Only(18.f, 0.f, 0.f, 0.f),
+                                    ListLine("frame:not run:" + node, _session->selectedNode == id, std::move(cells), [this, id] { _session->GoTo(id); })));
+                            }
+                        }
+                }
                 return Panel(std::move(rows));
             }
-
-            kui::Widget Problems()
+            /** The last frames' times as bars, with the time a frame has across them and the GPU's along them. */
+            static kui::Widget FrameHistory(const kgraph::Runtime::FrameTimes& times, const double budget)
             {
-                const kgraph::Runtime& runtime = Doc().Runtime();
-                std::vector<kui::Widget> rows;
-                for (const auto& problem : runtime.Problems()) {
-                    const std::string node = problem.substr(0, problem.find(':'));
-                    rows.push_back(Problem(problem).OnTap([this, node] { _session->GoTo(node); }));
+                return kui::CustomPaint([times, budget](kui::Canvas& c, const kor::Vec2 size) {
+                    const kui::Theme& t = kui::Theme::Current();
+                    c.DrawRRect({ kui::Rect::FromSize(size), kui::Radii(4.f) }, kui::Paint::Fill(t.text.WithAlpha(0.04f)));
+                    // The frames there have been, of the last 120: before the graph ran, there are none.
+                    std::size_t first = times.frameMs.size() > 120 ? times.frameMs.size() - 120 : 0;
+                    while (first < times.frameMs.size() && times.frameMs[first] <= 0.f) ++first;
+                    const std::size_t count = times.frameMs.size() - first;
+                    if (count == 0) return;
+                    float most = static_cast<float>(budget) * 1.25f;
+                    for (std::size_t i = first; i < times.frameMs.size(); ++i) most = std::max(most, times.frameMs[i]);
+                    const float step = size.x / 120.f, height = size.y - 2.f;
+                    const auto y = [&](const float ms) { return size.y - 1.f - height * std::min(ms / most, 1.f); };
+                    std::vector<kor::Vec2> gpu;
+                    for (std::size_t i = 0; i < count; ++i) {
+                        const float ms = times.frameMs[first + i], x = size.x - static_cast<float>(count - i) * step;
+                        c.DrawRect(kui::Rect::LTRB(x + 0.5f, y(ms), x + std::max(step - 1.f, 1.f), size.y - 1.f),
+                                   kui::Paint::Fill(ms > budget ? kui::Color::Hex(0xFF6B6B) : t.primary.WithAlpha(0.55f)));
+                        if (first + i < times.gpuMs.size()) gpu.push_back({ x + step * 0.5f, y(times.gpuMs[first + i]) });
+                    }
+                    if (gpu.size() > 1) c.DrawPolyline(gpu, kui::Paint::Stroked(t.text.WithAlpha(0.6f), 1.f));
+                    const float line = y(static_cast<float>(budget));
+                    c.DrawLine({ 0.f, line }, { size.x, line }, kui::Paint::Stroked(t.text.WithAlpha(0.35f), 1.f));
+                }, { -1.f, 40.f });
+            }
+
+            /**
+             * One frame on the GPU: a lane for each queue, and each pass a block from when it started to when it ended,
+             * so that what runs beside what on the async queue, and where the GPU waits, are seen. The last frame measured,
+             * not an average: paused, it is the one paused on. Under the pointer a block is said; pressed, its node is gone to.
+             */
+            kui::Widget Timeline(const kgraph::Runtime::FrameReport& frame, const std::string& wanted,
+                                 const std::function<std::string(std::string)>& onGraph, const std::function<std::string(std::string)>& said)
+            {
+                struct Block { std::string node, name; double start, ms; bool async, editors; };
+                auto blocks = std::make_shared<std::vector<Block>>();
+                double end = 0.0;
+                bool async = false;
+                for (const auto& pass : frame.passes) {
+                    if (pass.gpuStartMs < 0.0) continue;
+                    const bool editors = pass.node.starts_with('$');
+                    std::string name = editors ? "editor: " + pass.node.substr(pass.node.find(' ') + 1) : said(pass.node);
+                    if (pass.name.contains('\n')) name += " (" + pass.name.substr(pass.name.find('\n') + 1) + ")";
+                    blocks->push_back({ pass.node, std::move(name), pass.gpuStartMs, pass.gpuLastMs, pass.async, editors });
+                    end = std::max(end, pass.gpuStartMs + pass.gpuLastMs);
+                    async = async || pass.async;
                 }
-                for (const auto& node : Doc().Graph().nodes)
-                    if (const auto* report = runtime.ReportOf(node.id); report && (report->skipped > 0 || (report->ran == 0 && !report->why.empty())))
-                        rows.push_back(Problem(report->skipped > 0 ? std::format("{}: {} passed by. {}", node.id, report->skipped, report->why)
-                                                                   : std::format("{}: {}", node.id, report->why)).OnTap([this, id = node.id] { _session->GoTo(id); }));
-                // Scripts in a language that is not the project's: nothing runs them.
-                if (_session->HasProject())
-                    for (const auto& file : _session->CurrentProject().ScriptsInAnotherLanguage())
-                        rows.push_back(Problem(std::format("scripts/{}: the project's scripts are in {}, and this one is not. Nothing runs it.", file.filename().string(),
-                                                           _session->CurrentProject().Language() == 'k' ? "Kotlin" : "C#")));
-                // Scripts that are in the project and that nothing is running: pressed, the editor is opened with them.
-                if (const auto idle = _session->ScriptsNotRunning(); !idle.empty()) {
-                    std::string names;
-                    for (const auto& name : idle) names += std::format("{}{}", names.empty() ? "" : ", ", name);
-                    rows.push_back(Problem(std::format("Nothing is running the project's scripts ({}): this editor was started without them. Press this, or Project, Open with its scripts.", names))
-                                       .OnTap([this] { _session->ReopenWithScripts(); }));
+                if (blocks->empty() || end <= 0.0) return kgui::Muted("No pass has been timed on the GPU yet: this device may not time them.");
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                std::vector<char> dimmed;
+                for (const auto& block : *blocks) dimmed.push_back(!wanted.empty() && lower(block.name).find(wanted) == std::string::npos);
+                constexpr float Label = 104.f, Lane = 30.f, Axis = 18.f;
+                const int lanes = async ? 2 : 1;
+                const float height = Axis + Lane * static_cast<float>(lanes);
+                // Where each block was last drawn, for what is under the pointer.
+                auto drawn = std::make_shared<std::vector<kui::Rect>>(blocks->size());
+                const std::string picked = _session->selectedNode;
+                const std::string hover = _timelineHover;
+                kui::Widget canvas = kui::CustomPaint([blocks, drawn, dimmed, end, lanes, picked, hover, onGraph](kui::Canvas& c, const kor::Vec2 size) {
+                    const kui::Theme& t = kui::Theme::Current();
+                    const float span = std::max(size.x - Label - 8.f, 1.f);
+                    const auto x = [&](const double ms) { return Label + static_cast<float>(ms / end) * span; };
+                    // The queues' names, their lanes, and the time along the top.
+                    const char* names[] { "Graphics", "Async compute" };
+                    for (int lane = 0; lane < lanes; ++lane) {
+                        const float top = Axis + Lane * static_cast<float>(lane);
+                        c.DrawRRect({ kui::Rect::LTRB(Label, top + 2.f, size.x, top + Lane - 2.f), kui::Radii(4.f) }, kui::Paint::Fill(t.text.WithAlpha(0.04f)));
+                        c.DrawText(names[lane], { 0.f, top + 8.f }, kui::TextStyle {}.SetSize(11.5f).SetColor(t.textMuted));
+                    }
+                    for (int tick = 0; tick <= 4; ++tick) {
+                        const double ms = end * tick / 4.0;
+                        const float at = x(ms);
+                        c.DrawLine({ at, Axis - 3.f }, { at, Axis + Lane * static_cast<float>(lanes) }, kui::Paint::Stroked(t.text.WithAlpha(0.08f), 1.f));
+                        const std::string text = std::format("{:.{}f} ms", ms, end < 0.1 ? 3 : end < 10.0 ? 2 : 1);   // as fine as the frame is short
+                        c.DrawText(text, { tick == 4 ? at - 7.f * static_cast<float>(text.size()) : tick == 0 ? at : at - 3.5f * static_cast<float>(text.size()), 0.f },
+                                   kui::TextStyle {}.SetSize(10.5f).SetColor(t.textMuted));
+                    }
+                    for (std::size_t i = 0; i < blocks->size(); ++i) {
+                        const auto& block = (*blocks)[i];
+                        const float top = Axis + (block.async && lanes > 1 ? Lane : 0.f);
+                        const kui::Rect rect = kui::Rect::LTRB(x(block.start), top + 4.f, std::max(x(block.start + block.ms), x(block.start) + 2.f), top + Lane - 4.f);
+                        (*drawn)[i] = rect;
+                        const bool lit = !block.editors && onGraph(block.node) == picked, over = block.node == hover;
+                        kui::Color fill = block.editors ? t.textMuted.WithAlpha(0.35f) : t.primary.WithAlpha(lit ? 0.95f : 0.6f);
+                        if (dimmed[i]) fill = fill.WithAlpha(0.15f);
+                        c.DrawRRect({ rect, kui::Radii(3.f) }, kui::Paint::Fill(fill));
+                        if (over || lit) c.DrawRRect({ rect, kui::Radii(3.f) }, kui::Paint::Stroked(t.text, 1.f));
+                        // Its name, where it fits.
+                        if (rect.Width() > 28.f) {
+                            c.Save();
+                            c.ClipRect(kui::Rect::LTRB(rect.left + 4.f, rect.top, rect.right - 3.f, rect.bottom));
+                            c.DrawText(block.name, { rect.left + 5.f, rect.top + 4.f }, kui::TextStyle {}.SetSize(11.f).SetColor(dimmed[i] ? t.textMuted : t.text));
+                            c.Restore();
+                        }
+                    }
+                }, { -1.f, height });
+                const auto under = [blocks, drawn](const kor::Vec2 at) -> const Block* {
+                    for (std::size_t i = 0; i < drawn->size(); ++i)
+                        if ((*drawn)[i].Contains(at)) return &(*blocks)[i];
+                    return nullptr;
+                };
+                canvas = kui::GestureDetector(kui::GestureOptions {}
+                    .OnHover([this, under](const kor::Vec2 at) {
+                        const Block* block = under(at);
+                        if (const std::string node = block ? block->node : std::string(); node != _timelineHover) SetState([&] { _timelineHover = node; });
+                    })
+                    .OnExit([this] { if (!_timelineHover.empty()) SetState([&] { _timelineHover.clear(); }); })
+                    .OnTapDown([this, under, onGraph](const kor::Vec2 at) {
+                        if (const Block* block = under(at); block && !block->editors) _session->GoTo(onGraph(block->node));
+                    }), std::move(canvas));
+                // What is under the pointer, said under it; else how to read it.
+                std::string said_;
+                for (const auto& block : *blocks)
+                    if (block.node == _timelineHover) {
+                        said_ = std::format("{}  ·  {} queue  ·  starts at {:.3f} ms, takes {:.3f} ms", block.name, block.async ? "async compute" : "graphics", block.start, block.ms);
+                        break;
+                    }
+                const double busy = std::accumulate(blocks->begin(), blocks->end(), 0.0, [](const double sum, const Block& block) { return block.async ? sum : sum + block.ms; });
+                return Rows({
+                    std::move(canvas),
+                    said_.empty()
+                        ? kgui::Muted(std::format("The last frame measured: {:.2f} ms from its first pass starting to its last ending, the graphics queue busy {:.0f}% of it. "
+                                                  "A gap is the GPU waiting — for the CPU, a barrier or the other queue. Point at a pass to see it; press it to go to it.",
+                                                  end, 100.0 * busy / end), 11.f)
+                        : kui::Text(said_, kui::TextStyle {}.SetSize(12.f)),
+                }, 6.f);
+            }
+
+            // The Frame panel: the rate a frame is measured against, how its passes are shown, what is typed to find,
+            // the lines with steps opened, whether what did not run is opened, and what was last read of the frame, and when.
+            int _frameHz = 60;
+            int _frameView = 0;     // its passes in the order they run, by cost, or on a timeline
+            bool _framePaused = false, _frameNotRunOpen = false;
+            // The frame as it was last read — paused, as it was when it was — and what is under the pointer on its timeline.
+            struct FrameShot { kgraph::Runtime::FrameReport frame; kgraph::Runtime::FrameTimes times; double frameMs = 0.0, prepareMs = 0.0; int fps = 0; };
+            FrameShot _frameShot;
+            std::string _timelineHover;
+            std::string _frameFilter;
+            std::set<std::string> _frameOpen;
+            Value _frameSeen;
+            std::chrono::steady_clock::time_point _frameReadAt {};
+
+            /**
+             * What is wrong, told to the log as it comes — with what to do about it, where that is known — and as it goes.
+             * A few times a second, whatever panel is open: what went wrong is in the log whether it was in sight or not.
+             */
+            void ReportProblems()
+            {
+                std::set<std::string> now;
+                for (auto& problem : _session->Problems()) {
+                    if (!_reported.contains(problem.text)) {
+                        const std::string hint = HintFor(problem.text);
+                        const std::string said = hint.empty() ? problem.text : std::format("{}\n→ {}", problem.text, hint);
+                        if (problem.warning) kor::log::Warn("{}", said);
+                        else kor::log::Error("{}", said);
+                    }
+                    now.insert(std::move(problem.text));
                 }
-                for (const auto& note : Doc().Notes()) rows.push_back(kgui::Muted(note));
-                if (rows.empty()) rows.push_back(kgui::Muted("Nothing is wrong."));
-                return Panel(std::move(rows));
+                for (const auto& gone : _reported)
+                    if (!now.contains(gone)) kor::log::Info("Resolved: {}", gone);
+                _reported = std::move(now);
             }
 
             std::shared_ptr<Session> _session;
             std::shared_ptr<kui::DockLayout> _layout;
             std::uint64_t _shown = 0;
+            std::set<std::string> _reported;     // what is wrong, as the log was last told
+            std::chrono::steady_clock::time_point _problemsAt {};
             Dialog _dialog = Dialog::eNone;
             bool _viewModesOpen = false, _gridOpen = false;     // the Scene panel's popups: how it shows the scene, the grid's settings
             kor::Vec2 _addAt {};

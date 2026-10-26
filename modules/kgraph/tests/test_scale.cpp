@@ -679,6 +679,46 @@ TEST_F(ScaleTest, ABatchedDrawGivenCullIsCulledOnTheGpu) {
     EXPECT_LT(p.z, 50) << "not the magenta of an element no entity is in";
 }
 
+// What gathers every element of a ForEach into one — a Collect, a buffer of them, their meshes packed — is of them all,
+// not each element's: a batched Draw wired from one (a lamp's shadow, idle by a PointShadows of a Collect of the lights;
+// a pipeline laid out as a MeshPack of the same entities) is still one draw.
+TEST_F(ScaleTest, ADrawWiredFromAllTheElementsAtOnceIsStillBatched) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    for (int i = 0; i < 4; ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { -0.75f + 0.5f * static_cast<float>(i), 0.f, 0.5f });
+        world.SetScale(entity, { 0.2f, 0.2f, 0.2f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+    }
+    const kecs::Entity lamp = world.Create();
+    support::Give(world, lamp, "PointLight", { { "range", { 5 } } });
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas");
+    graph.Add("drawn", "ForEach").Set("component", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "drawn", "field.mesh");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("lamps", "ForEach").Set("component", "PointLight");
+    graph.Add("reaches", "Collect").Wire("value", "lamps", "field.range");
+    graph.Add("first reach", "Slice").Wire("of", "reaches").Set("first", 0).Set("count", 1);
+    graph.Add("never", "Multiply").Wire("a", "first reach").Set("b", 0);
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "drawn", "field.mesh").Set("batched", true).Wire("idle", "never");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_NE(runtime.Status("draw"), nullptr);
+    EXPECT_TRUE(runtime.Status("draw")->note.empty()) << runtime.Status("draw")->note;
+    EXPECT_NE(runtime.Status("draw/pack"), nullptr) << "written out as one draw: its meshes packed";
+}
+
 // A shadow's cascades, as a batched Draw has them: a turn each of a Repeat, `cull` several matrices one after another and
 // `cullIndex` the turn's number. Each turn is culled on the GPU by its own — the `cullIndex`th — and all of them share the
 // batch and the pack. Here the first sees the cubes in the picture, the second those beside it. The entities have none of

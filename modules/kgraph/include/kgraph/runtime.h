@@ -316,6 +316,31 @@ namespace kgraph
          *        stand-in (Resource::pending) while the file is being read.
          */
         [[nodiscard]] std::vector<std::string> Assets() const;
+
+        // ---- pictures kept block-compressed ------------------------------------------------------------------------
+
+        /** @brief Every picture file it reads, and every pack (Graph::texturePacks) it was asked for: by asset id. */
+        [[nodiscard]] std::vector<std::string> Pictures() const;
+        /**
+         * @brief Whether picture @p id has a file cooked of it — of its file as it is now, with the graph's settings as
+         *        they are now — in TextureCache: what is read in its place. False for one kept as it is read.
+         */
+        [[nodiscard]] bool Cooked(std::string_view id) const;
+        /** @brief What cooking is at: of those asked since it last had nothing to do, how many are done, which is being cooked, and what could not be. */
+        struct CookProgress {
+            std::size_t done = 0, total = 0;
+            std::string current;
+            std::vector<std::string> failed;    ///< Why each that could not be cooked could not.
+        };
+        /**
+         * @brief Cooks pictures @p ids — files and packs the graph keeps in a block format — into TextureCache, one
+         *        after another off the frame; each is read again from what was cooked of it as soon as it is. Those kept
+         *        as they are read, and those already asked for, are passed over.
+         */
+        void Cook(const std::vector<std::string>& ids);
+        [[nodiscard]] const CookProgress& Cooking() const;
+        /** @brief Where pictures are cooked to: `cache/textures` in the folder the asset directory is in. Empty without one. */
+        [[nodiscard]] std::filesystem::path TextureCache() const;
         /** @brief Why each file that could not be read could not. */
         [[nodiscard]] std::vector<std::string> Unread() const;
 
@@ -430,6 +455,9 @@ namespace kgraph
                 bool async = false;         ///< On the async compute queue.
                 double gpuMs = 0.0, recordMs = 0.0;
                 bool gpuMeasured = false;
+                /// The last frame measured, as it was: when it started on the GPU, in ms after that frame's first pass did,
+                /// and how long it took. -1 when it is not known. A timeline of one frame.
+                double gpuStartMs = -1.0, gpuLastMs = 0.0;
                 /// What it uses, by the node that made each (or the entities' set it is): 'r' read, 'w' written, 'b' both.
                 std::vector<std::pair<std::string, char>> uses;
             };
@@ -441,6 +469,9 @@ namespace kgraph
             std::uint64_t unsharedBytes = 0;    ///< What that would be with nothing sharing memory.
         };
         [[nodiscard]] FrameReport Frame() const;
+        /** @brief How long the last frames took, oldest first, in ms: the CPU's frame time and the GPU's time for the passes. */
+        struct FrameTimes { std::vector<float> frameMs, gpuMs; };
+        [[nodiscard]] FrameTimes Times() const;
         /** @brief How far the frame being made is from the last fixed step to the next, 0 to 1: a FixedStep's `alpha`. */
         void SetFixedFraction(float fraction);
         /** @brief How many fixed steps the frame being made has in it: what its fixed pages are run for. */

@@ -42,6 +42,48 @@ TEST(Graph, IsSavedAndLoadedAsItWas) {
     EXPECT_EQ(*node->inputs.at("constant.level").value.Number(), 0.25);
 }
 
+// How picture files are kept is saved with the graph: each file's format, and the packs of others' channels.
+TEST(Graph, KeepsHowItsPicturesAreKept) {
+    kgraph::Graph graph;
+    graph.textureImports["@wall_BaseColor.png"] = { kgraph::TextureFormat::eBC7, kgraph::TextureQuality::eBest };
+    graph.textureImports["@wall_Normal.png"] = { kgraph::TextureFormat::eBC5 };
+    kgraph::TexturePack pack;
+    pack.channels = { kgraph::TexturePack::Channel { "@wall_AO.png", 0 }, { "@wall_Roughness.png", 1 }, { {}, 0, 0.25f }, { {}, 0, 1.f } };
+    pack.format = kgraph::TextureFormat::eBC1;
+    graph.texturePacks["@wall_ORM.pack"] = pack;
+    kgraph::Graph loaded;
+    std::string error;
+    ASSERT_TRUE(kgraph::Graph::FromJson(graph.ToJson(), loaded, error)) << error;
+    EXPECT_EQ(loaded.textureImports, graph.textureImports);
+    EXPECT_EQ(loaded.texturePacks, graph.texturePacks);
+}
+
+// What a picture is for is told by its file's name, then by the field that holds it; and the files of a material's
+// occlusion, roughness and metalness suggest one pack of them, laid out as glTF has it.
+TEST(Textures, AreToldApartAndSuggestPacks) {
+    using kgraph::TextureKind;
+    EXPECT_EQ(kgraph::TextureKindOf("albedoMap", "@t/wall_BaseColor.png"), TextureKind::eColor);
+    EXPECT_EQ(kgraph::TextureKindOf("", "@t/wall_Normal.png"), TextureKind::eNormal);
+    EXPECT_EQ(kgraph::TextureKindOf("roughnessMap", "@t/wall_Roughness.png"), TextureKind::eMask);
+    EXPECT_EQ(kgraph::TextureKindOf("roughnessMap", "@t/wall_RoughnessMetalness.png"), TextureKind::eData) << "two numbers in one";
+    EXPECT_EQ(kgraph::TextureKindOf("normalMap", "@t/stone.png"), TextureKind::eNormal) << "nothing in its name: the field's";
+    EXPECT_EQ(kgraph::DefaultTextureFormat(TextureKind::eNormal), kgraph::TextureFormat::eBC5);
+
+    const auto packs = kgraph::SuggestTexturePacks({ "@t/wall_AO.png", "@t/wall_Roughness.png", "@t/wall_Metalness.png", "@t/wall_BaseColor.png",
+                                                     "@t/floor_Roughness.png", "@t/floor-metallic.png", "@t/lone_Roughness.png" });
+    ASSERT_EQ(packs.size(), 2u) << "wall and floor; lone has only one";
+    const auto& wall = packs.at("@t/wall_ORM.pack");
+    EXPECT_EQ(wall.channels[0].from, "@t/wall_AO.png");
+    EXPECT_EQ(wall.channels[1].from, "@t/wall_Roughness.png");
+    EXPECT_EQ(wall.channels[2].from, "@t/wall_Metalness.png");
+    EXPECT_TRUE(wall.channels[3].from.empty());
+    EXPECT_EQ(wall.channels[3].constant, 1.f);
+    const auto& floor = packs.at("@t/floor_ORM.pack");
+    EXPECT_TRUE(floor.channels[0].from.empty()) << "no occlusion: none, 1";
+    EXPECT_EQ(floor.channels[0].constant, 1.f);
+    EXPECT_EQ(floor.channels[2].from, "@t/floor-metallic.png");
+}
+
 TEST(Graph, RefusesWhatIsNotOne) {
     Graph graph;
     std::string error;

@@ -1295,6 +1295,31 @@ TEST_F(EntityTest, AModelsAttributesAreReadAsTheSceneSays) {
     std::filesystem::remove(file);
 }
 
+// A folder of the assets may be a link to one kept elsewhere: a model in it is found by its name in the assets, and its
+// meshes arrive under the names they were asked for, not as stand-ins forever.
+TEST_F(EntityTest, AModelInAFolderLinkedIntoTheAssetsArrives) {
+    const auto root = std::filesystem::temp_directory_path() / "kgraph-linked-assets";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "elsewhere");
+    std::filesystem::create_directories(root / "assets");
+    std::ofstream(root / "elsewhere" / "quad.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3\nf 1 3 4\n";
+    std::filesystem::create_directory_symlink(root / "elsewhere", root / "assets" / "linked");
+    auto& runtime = *scene->runtime;
+    runtime.Set(kgraph::Graph {});
+    runtime.SetAssetDirectory(root / "assets");
+    const std::string id = "@linked/quad.obj#0";
+    EXPECT_EQ(runtime.AssetId(root / "assets" / "linked" / "quad.obj", 0), id);
+    const auto held = runtime.ResourceOf(id);
+    ASSERT_NE(held, nullptr);
+    for (int i = 0; i < 400 && !held->replacedBy; ++i) Frame();
+    EXPECT_NE(held->replacedBy, nullptr) << "the stand-in is led to the mesh read";
+    const auto now = runtime.ResourceOf(id);
+    ASSERT_NE(now, nullptr);
+    EXPECT_FALSE(now->pending);
+    runtime.SetAssetDirectory({});
+    std::filesystem::remove_all(root);
+}
+
 // Many entities of a few meshes drawn by one indirect draw: a Filter groups them by their mesh, a MeshPack packs the
 // meshes as one, and an IndirectDraws writes a command for each mesh — its part of the pack, its group's instances.
 TEST_F(EntityTest, EntitiesGroupedByMeshAreDrawnByOneIndirectDraw) {
@@ -1852,6 +1877,130 @@ TEST_F(EntityTest, EachInstanceReadsItsOwnPictureByIndex) {
     }
     EXPECT_TRUE(is(8, { 255, 0, 0 }));
     EXPECT_TRUE(is(24, { 0, 0, 0 })) << "the one gone is not drawn";
+}
+
+// A picture file kept block-compressed is cooked into the project's cache and read from there, in its place: the scene
+// still names the file. A pack is one picture of others' channels; each file it is made of reads, to whoever holds it,
+// as the pack's channel it went into, in red, green and blue — before it is cooked (put together as it is read) and
+// after. BC4 reads its one channel in red, green and blue; BC5 its two, with 1 for the z it has not.
+TEST_F(EntityTest, PicturesKeptBlockCompressedAreCookedAndReadFromTheCache) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto root = std::filesystem::temp_directory_path() / "kgraph-cooked-pictures";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "assets");
+    // Pictures of one colour each, 8 texels a side: a colour, and three numbers a material's ORM is made of.
+    const auto write = [&](const std::string& name, const std::vector<unsigned char>& texel) {
+        std::ofstream file(root / "assets" / name, std::ios::binary);
+        file << (texel.size() == 3 ? "P6" : "P5") << "\n8 8\n255\n";
+        for (int i = 0; i < 64; ++i) file.write(reinterpret_cast<const char*>(texel.data()), static_cast<std::streamsize>(texel.size()));
+    };
+    write("red.ppm", { 200, 40, 10 });
+    write("m_AO.pgm", { 30 });
+    write("m_Roughness.pgm", { 100 });
+    write("m_Metalness.pgm", { 220 });
+    runtime.SetAssetDirectory(root / "assets");
+
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    std::vector<kecs::Entity> entities;
+    for (const float x : { -0.5f, 0.5f }) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, 0, 0.5f });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        entities.push_back(entity);
+    }
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("pictured", "GraphicsPipeline").Set("vertex.module", "pictured").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "pictured").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "pictured").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    graph.textureImports["@red.ppm"] = { kgraph::TextureFormat::eBC7 };
+    kgraph::TexturePack orm;
+    orm.channels = { kgraph::TexturePack::Channel { "@m_AO.pgm" }, { "@m_Roughness.pgm" }, { "@m_Metalness.pgm" }, { {}, 0, 1.f } };
+    graph.texturePacks["@m_ORM.pack"] = orm;
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    const kecs::ComponentId pictured = world.Find("pictured");
+    ASSERT_NE(pictured, kecs::NoComponent);
+    world.Add(entities[0], pictured);
+    world.Add(entities[1], pictured);
+    kgraph::Parameters(world, entities[0], pictured).Set("picture", runtime.ResourceOf("@red.ppm"));
+    kgraph::Parameters(world, entities[1], pictured).Set("picture", runtime.ResourceOf("@m_Roughness.pgm"));
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 6 && std::abs(p.y - rgb[1]) < 6 && std::abs(p.z - rgb[2]) < 6;
+    };
+    const auto shown = [&](const kor::u32 x) { const auto p = scene->Pixel(x, 16); return std::format("({}, {}, {})", p.x, p.y, p.z); };
+    for (int i = 0; i < 200 && (runtime.Reading() > 0 || !is(24, { 100, 100, 100 })); ++i) Frame();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(8, { 200, 40, 10 })) << "not cooked yet: the file, as it is read — " << shown(8);
+    EXPECT_TRUE(is(24, { 100, 100, 100 })) << "a file of a pack not cooked yet: its channel of the pack put together as it is read — " << shown(24);
+    EXPECT_FALSE(runtime.Cooked("@red.ppm"));
+    const auto pictures = runtime.Pictures();
+    EXPECT_NE(std::ranges::find(pictures, "@m_ORM.pack"), pictures.end()) << "the pack is a picture it reads";
+
+    const auto cookAll = [&] {
+        runtime.Cook(runtime.Pictures());
+        for (int i = 0; i < 3000 && runtime.Cooking().done < runtime.Cooking().total; ++i) Frame();
+        for (const auto& why : runtime.Cooking().failed) ADD_FAILURE() << why;
+        for (int i = 0; i < 200 && runtime.Reading() > 0; ++i) Frame();
+        for (int i = 0; i < 3; ++i) Frame();
+    };
+    cookAll();
+    EXPECT_EQ(runtime.Cooking().total, 2u) << "the file, and the pack: the files the pack is made of are not cooked by themselves";
+    EXPECT_TRUE(runtime.Cooked("@red.ppm"));
+    EXPECT_TRUE(runtime.Cooked("@m_ORM.pack"));
+    std::size_t files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root / "cache" / "textures")) files += entry.path().extension() == ".ktx2";
+    EXPECT_EQ(files, 2u) << "in the project's cache, beside its assets";
+    const auto red = runtime.ResourceOf("@red.ppm");
+    ASSERT_TRUE(red && red->kind == "Image");
+    EXPECT_EQ(kor::capi::ImageOf(red->handle)->PixelFormat(), kor::Image::Format::eBC7_UNORM) << "read from what was cooked";
+    const auto rough = runtime.ResourceOf("@m_Roughness.pgm");
+    ASSERT_TRUE(rough && rough->kind == "ImageView" && rough->source);
+    EXPECT_EQ(kor::capi::ImageOf(rough->source->handle)->PixelFormat(), kor::Image::Format::eBC7_UNORM) << "a view of the cooked pack";
+    EXPECT_TRUE(is(8, { 200, 40, 10 })) << "cooked, it reads as the file did — " << shown(8);
+    EXPECT_TRUE(is(24, { 100, 100, 100 })) << "and the file of the pack, as its channel of the cooked one — " << shown(24);
+
+    // Kept otherwise: cooked again, as that, and what it reads follows.
+    graph.textureImports["@red.ppm"] = { kgraph::TextureFormat::eBC4 };
+    runtime.Set(graph);
+    EXPECT_FALSE(runtime.Cooked("@red.ppm")) << "what was cooked was of other settings";
+    cookAll();
+    EXPECT_TRUE(is(8, { 200, 200, 200 })) << "BC4: its red, in red, green and blue — " << shown(8);
+    graph.textureImports["@red.ppm"] = { kgraph::TextureFormat::eBC5 };
+    runtime.Set(graph);
+    cookAll();
+    EXPECT_TRUE(is(8, { 200, 40, 255 })) << "BC5: its red and green, and 1 — " << shown(8);
+    files = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root / "cache" / "textures")) files += entry.path().extension() == ".ktx2";
+    EXPECT_EQ(files, 2u) << "what was cooked of it before is let go of";
+
+    // Kept as it is read again: the file, and nothing of the cache.
+    graph.textureImports.clear();
+    runtime.Set(graph);
+    for (int i = 0; i < 200 && runtime.Reading() > 0; ++i) Frame();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(is(8, { 200, 40, 10 })) << shown(8);
+    EXPECT_NE(kor::capi::ImageOf(runtime.ResourceOf("@red.ppm")->handle)->PixelFormat(), kor::Image::Format::eBC5_UNORM);
+    runtime.SetAssetDirectory({});
+    std::filesystem::remove_all(root);
 }
 
 // A function is nodes as one: each call written out into them, given what the call is given and giving what they give.

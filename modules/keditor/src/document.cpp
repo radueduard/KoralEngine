@@ -814,6 +814,16 @@ namespace keditor
         Apply(std::move(graph));
     }
 
+    void Document::SetTextureSettings(std::map<std::string, kgraph::TextureImport> imports, std::map<std::string, kgraph::TexturePack> packs)
+    {
+        std::erase_if(imports, [](const auto& entry) { return entry.second.Default(); });
+        if (imports == Graph().textureImports && packs == Graph().texturePacks) return;
+        kgraph::Graph graph = Graph();
+        graph.textureImports = std::move(imports);
+        graph.texturePacks = std::move(packs);
+        Apply(std::move(graph));
+    }
+
     void Document::SetDefaultMeshTangents(const kgraph::Tangents tangents)
     {
         if (Graph().defaultMeshTangents == tangents) return;

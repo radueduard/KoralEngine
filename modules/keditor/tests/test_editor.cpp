@@ -20,6 +20,8 @@
 #include <fstream>
 #include <thread>
 
+#include <capiInterop.h>
+#include <image.h>
 #include <keditor/editor.h>
 #include <log.h>
 #include <koralUI.h>
@@ -65,6 +67,15 @@ namespace {
             for (int i = 0; i < 4; ++i) Frame();
             return std::ranges::any_of(kui::debug::Texts(editor->Interface()), [&](const std::string& shown) { return shown.find(text) != std::string::npos; });
         }
+        /** Whether something is wrong now that says @p text: what the editor logs as it comes. */
+        [[nodiscard]] bool HasProblem(const std::string_view text) {
+            for (int i = 0; i < 4; ++i) Frame();
+            return std::ranges::any_of(Session().Problems(), [&](const auto& problem) { return problem.text.find(text) != std::string::npos; });
+        }
+        [[nodiscard]] bool NothingIsWrong() {
+            for (int i = 0; i < 4; ++i) Frame();
+            return Session().Problems().empty();
+        }
         void Click(const kor::Vec2 at) {
             auto& input = editor->SceneInput();
             input.FeedMousePosition(at);
@@ -108,19 +119,19 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     scene::MakeProject("editor");
     Open();
     EXPECT_TRUE(Shows("No entities yet."));
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
 
     // A node, half made: it is on the graph, and what it lacks is said under Problems.
     Doc().AddNode("Dispatch", 40, 40, "canvas");
     EXPECT_TRUE(Shows("canvas"));
-    EXPECT_FALSE(Shows("Nothing is wrong."));
-    EXPECT_TRUE(Shows("canvas: 'pipeline' needs a ComputePipeline wired in")) << "its problem, by name";
+    EXPECT_FALSE(NothingIsWrong());
+    EXPECT_TRUE(HasProblem("canvas: 'pipeline' needs a ComputePipeline wired in")) << "its problem, by name";
 
     // The whole scene, as the tests build it.
     Doc().RemoveNodes({ "canvas" });
     scene::BuildGraph(Doc());
     const auto entities = scene::BuildEntities(Doc());
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     for (const char* node : { "stamp", "show", "draw", "tint backdrop", "square" }) EXPECT_TRUE(Shows(node)) << node;
     EXPECT_TRUE(Shows("Quarter 2")) << "in the outliner";
 
@@ -173,15 +184,51 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
 
     // What goes wrong with an entity is said too.
     Doc().SetField(entities[0], "show", "source", kgraph::Value {});
-    EXPECT_TRUE(Shows("1 passed by."));
-    EXPECT_TRUE(Shows("'source' has nothing in it"));
+    EXPECT_TRUE(HasProblem("1 passed by."));
+    EXPECT_TRUE(HasProblem("'source' has nothing in it"));
     Doc().SetField(entities[0], "show", "source", "image 0");
-    EXPECT_FALSE(Shows("passed by."));
+    EXPECT_FALSE(HasProblem("passed by."));
 
     Session().Select(std::string("stamp"));
     Sheet("node");
     Session().Select(entities[2]);
     Sheet("entity");
+}
+
+TEST_F(EditorTest, WhatGoesWrongIsLogged) {
+    scene::MakeProject("editor");
+    Open();
+    // What the editor says at its foot is logged, once however often it is said, and as an error when it went wrong.
+    auto before = kor::log::LastSequence();
+    Session().Say("Made nothing in particular.");
+    Session().Say("Made nothing in particular.");
+    Session().Say("It could not be done.", true);
+    const auto said = kor::log::HistorySince(before);
+    ASSERT_EQ(said.size(), 2u);
+    EXPECT_EQ(said[0].level, kor::log::Level::eInfo);
+    EXPECT_EQ(said[0].message, "Made nothing in particular.");
+    EXPECT_EQ(said[1].level, kor::log::Level::eError);
+
+    // A problem is logged as an error when it comes, and once it is mended, that it is.
+    const auto logged = [&](const std::string_view text) {
+        for (int i = 0; i < 30; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(20)); Frame(); }
+        return std::ranges::count_if(kor::log::HistorySince(before), [&](const auto& record) { return record.message.find(text) != std::string::npos; });
+    };
+    before = kor::log::LastSequence();
+    Doc().AddNode("Dispatch", 40, 40, "canvas");
+    EXPECT_EQ(logged("canvas: 'pipeline' needs a ComputePipeline wired in"), 1) << "once, however long it stays wrong";
+    const auto since = kor::log::HistorySince(before);
+    const auto error = std::ranges::find_if(since, [](const auto& record) { return record.message.starts_with("canvas: 'pipeline'"); });
+    ASSERT_NE(error, since.end());
+    EXPECT_EQ(error->level, kor::log::Level::eError);
+    Doc().RemoveNodes({ "canvas" });
+    EXPECT_EQ(logged("Resolved: canvas: 'pipeline' needs a ComputePipeline wired in"), 1);
+
+    // The Log panel, from the rail down the side, lists them, the latest in sight.
+    Click({ 20.f, 787.f });
+    EXPECT_TRUE(Shows("Resolved: canvas: 'pipeline' needs"));
+    EXPECT_TRUE(Shows("Errors  "));
+    Sheet("log");
 }
 
 // A Draw or a Dispatch run once an element says how many it runs a frame, and what it would take to be one: what of it is
@@ -192,7 +239,7 @@ TEST_F(EditorTest, ADrawOfEachElementIsOfferedBeingOne) {
     Open();
     scene::BuildGraph(Doc());
     scene::BuildEntities(Doc());
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
 
     Session().Select(std::string("draw"));
     EXPECT_TRUE(Shows("4 draws a frame, one an element."));
@@ -214,7 +261,7 @@ TEST_F(EditorTest, ADrawOfEachElementIsOfferedBeingOne) {
     EXPECT_EQ(Doc().Graph().Find("draw")->inputs.at("batched").value, kgraph::Value(true));
     EXPECT_TRUE(Shows("Batched: one draw of 4 elements."));
     EXPECT_FALSE(Shows("Batch: one draw of them all"));
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
 }
 
 TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
@@ -251,7 +298,7 @@ TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
     EXPECT_TRUE(Session().HasProject()) << Session().Status();
     EXPECT_TRUE(Shows("Opened from-the-editor."));
     EXPECT_TRUE(Shows("Quarter 3"));
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     EXPECT_EQ(Doc().Entities().size(), 4u);
     EXPECT_EQ(Doc().Runtime().ReportOf("draw")->ran, 4u);
 
@@ -444,7 +491,7 @@ TEST_F(EditorTest, AShaderNamedBeforeItsFileIsWrittenIsPickedUpWhenItIs) {
         built = Doc().Runtime().Status(pipeline)->ok;
     }
     EXPECT_TRUE(built) << Doc().Runtime().Status(pipeline)->error;
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     EXPECT_EQ(Session().EntryPoints(module), std::vector<std::string> { "computeMain" });
 }
 
@@ -672,7 +719,7 @@ TEST_F(EditorTest, ATriangleIsDrawnWithNodesAndNoMesh) {
     Doc().Connect(image, "out", show, "source");
     Doc().Connect(screen, "out", show, "destination");
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     EXPECT_EQ(Doc().Runtime().ReportOf(draw), nullptr) << "it draws once: nothing it is given follows a ForEach";
 
     // The draw has the rest there as it starts, each in its part: how many vertices, where, over what. A part of nothing
@@ -725,7 +772,7 @@ TEST_F(EditorTest, AShadersBufferIsFilledFromAComponentsFields) {
 
     Doc().Connect(lamps, "field.color", buffer, "field.color");
     Doc().Connect(lamps, "worldPosition", buffer, "field.position");
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     EXPECT_EQ(Doc().Runtime().ValueOf(buffer, "count"), kgraph::Value(1));
     Doc().AddComponent(Doc().CreateEntity("Another"), "PointLight");
     Frame();
@@ -808,7 +855,7 @@ TEST_F(EditorTest, TheStandardSceneDrawsMeshesInAColourEach) {
 
     const kecs::Entity sphere = keditor::AddStandardScene(Doc());
     for (const char* name : { "Camera", "Sun", "Sphere", "Cylinder" }) EXPECT_TRUE(Shows(name)) << name;
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     ASSERT_NE(Doc().Runtime().ReportOf("draw"), nullptr);
     EXPECT_EQ(Doc().Runtime().ReportOf("draw")->ran, 2u) << "the sphere and the cylinder: " << Doc().Runtime().ReportOf("draw")->why;
     Session().Select(sphere);
@@ -840,7 +887,7 @@ TEST_F(EditorTest, TheLitSceneDrawsLitMeshesUnderASky) {
 
     const kecs::Entity sphere = keditor::AddLitScene(Doc());
     for (const char* name : { "Sky", "Camera", "Sun", "Sphere" }) EXPECT_TRUE(Shows(name)) << name;
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     ASSERT_NE(Doc().Runtime().ReportOf("draw scene"), nullptr);
     EXPECT_EQ(Doc().Runtime().ReportOf("draw scene")->ran, 1u) << Doc().Runtime().ReportOf("draw scene")->why;
     Session().Select(sphere);
@@ -1611,12 +1658,12 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     // One in the other language, put there by hand, runs nowhere: it is said so.
     std::ofstream(directory / "scripts" / "Stray.cs") << "// not the project's language";
     EXPECT_EQ(Session().CurrentProject().ScriptsInAnotherLanguage().size(), 1u);
-    EXPECT_TRUE(Shows("scripts/Stray.cs: the project's scripts are in Kotlin"));
+    EXPECT_TRUE(HasProblem("scripts/Stray.cs: the project's scripts are in Kotlin"));
 
     // This editor was not started with them: nothing runs them, and it says so rather than play a scene whose
     // scripts do nothing.
     EXPECT_EQ(Session().ScriptsNotRunning(), (std::vector<std::string> { "Drifter", "Roller" }));
-    EXPECT_TRUE(Shows("Nothing is running the project's scripts (Drifter, Roller)"));
+    EXPECT_TRUE(HasProblem("Nothing is running the project's scripts (Drifter, Roller)"));
     Session().StartPlaying();
     EXPECT_TRUE(Session().Failed());
     EXPECT_TRUE(Shows("nothing runs Drifter and 1 more"));
@@ -1848,7 +1895,7 @@ TEST_F(EditorTest, DISABLED_WritesAProject) {
     ASSERT_TRUE(Session().Save()) << Session().Status();
     Session().SetLookThroughCamera(true);
     for (int i = 0; i < 6; ++i) Frame();
-    EXPECT_TRUE(Shows("Nothing is wrong."));
+    EXPECT_TRUE(NothingIsWrong());
     Sheet("project");
     // Opened again from what was written, it is all there and nothing is wrong with it.
     const std::size_t count = Doc().World().EntityCount();
@@ -2696,4 +2743,85 @@ TEST(PassFlowLayout, BranchesAreBandsAndWiresAreShort) {
     for (const auto& [a, at] : layout.at)
         for (const auto& [b, other] : layout.at)
             if (a < b && at.first == other.first) EXPECT_GE(std::abs(at.second - other.second), 90.f) << a << " and " << b << " overlap";
+}
+
+// A scene whose pictures are not compressed asks, once it is read, whether to compress them: the dialog lists them, by
+// kind, with the packs their names suggest. Kept compressed, each is cooked into the project's cache — kept out of git —
+// and read from there; the files of a pack read as its channels. Asked again of another scene only.
+TEST_F(EditorTest, TheScenesTexturesAreCompressedWhenItAsks) {
+    const auto project = scene::MakeProject("textures");
+    const auto assets = project.directory / "assets";
+    std::filesystem::create_directories(assets);
+    std::ofstream(project.directory / ".gitignore") << "assets/";      // no newline at its end: one is put before what is added
+    const auto write = [&](const std::string& name, const std::vector<unsigned char>& texel) {
+        std::ofstream file(assets / name, std::ios::binary);
+        file << (texel.size() == 3 ? "P6" : "P5") << "\n8 8\n255\n";
+        for (int i = 0; i < 64; ++i) file.write(reinterpret_cast<const char*>(texel.data()), static_cast<std::streamsize>(texel.size()));
+    };
+    write("wall_BaseColor.ppm", { 200, 40, 10 });
+    write("wall_Normal.ppm", { 128, 128, 255 });
+    write("wall_AO.pgm", { 30 });
+    write("wall_Roughness.pgm", { 100 });
+    write("wall_Metalness.pgm", { 220 });
+    Open(project.directory);
+    for (const char* id : { "@wall_BaseColor.ppm", "@wall_Normal.ppm", "@wall_AO.pgm", "@wall_Roughness.pgm", "@wall_Metalness.pgm" })
+        ASSERT_NE(Doc().Runtime().ResourceOf(id), nullptr) << id;
+    for (int i = 0; i < 200 && Doc().Reading() > 0; ++i) Frame();
+
+    EXPECT_TRUE(Shows("Compress textures")) << "asked, once the scene is read";
+    EXPECT_TRUE(Shows("wall_ORM.pack  (suggested)"));
+    EXPECT_TRUE(Shows("5 textures in this scene, 0 compressed"));
+    Sheet("compress-textures");
+
+    const auto textures = Session().SceneTextures();
+    ASSERT_EQ(textures.size(), 5u);
+    const auto kind = [&](const std::string& id) { return std::ranges::find(textures, id, &keditor::Session::SceneTexture::id)->kind; };
+    EXPECT_EQ(kind("@wall_Normal.ppm"), kgraph::TextureKind::eNormal);
+    EXPECT_EQ(kind("@wall_Roughness.pgm"), kgraph::TextureKind::eMask);
+
+    // As the dialog keeps them: each by its kind, but the files of the pack, which is the pack's.
+    std::map<std::string, kgraph::TextureImport> imports {
+        { "@wall_BaseColor.ppm", { kgraph::TextureFormat::eBC7, kgraph::TextureQuality::eFast } },
+        { "@wall_Normal.ppm", { kgraph::TextureFormat::eBC5, kgraph::TextureQuality::eFast } } };
+    auto packs = kgraph::SuggestTexturePacks({ "@wall_AO.pgm", "@wall_Roughness.pgm", "@wall_Metalness.pgm" });
+    ASSERT_EQ(packs.size(), 1u);
+    packs.begin()->second.quality = kgraph::TextureQuality::eFast;
+    Session().KeepTextures(imports, packs, true);
+    for (int i = 0; i < 3000 && Session().Cooking().done < Session().Cooking().total; ++i) Frame();
+    for (int i = 0; i < 200 && Doc().Reading() > 0; ++i) Frame();
+    EXPECT_EQ(Session().Cooking().total, 3u) << "two files and a pack";
+    for (const auto& why : Session().Cooking().failed) ADD_FAILURE() << why;
+    EXPECT_TRUE(Shows("3 textures compressed")) << "said when it is done";
+    for (const auto& texture : Session().SceneTextures()) EXPECT_TRUE(texture.cooked) << texture.id;
+    const auto rough = Doc().Runtime().ResourceOf("@wall_Roughness.pgm");
+    ASSERT_TRUE(rough && rough->kind == "ImageView" && rough->source) << "a channel of the pack";
+    EXPECT_EQ(kor::capi::ImageOf(rough->source->handle)->PixelFormat(), kor::Image::Format::eBC7_UNORM);
+    std::ifstream ignore(project.directory / ".gitignore");
+    const std::string ignored((std::istreambuf_iterator<char>(ignore)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(ignored, "assets/\ncache/\n") << "the cache is the machine's own";
+    EXPECT_EQ(Doc().Graph().textureImports, imports) << "kept in the scene's graph";
+    EXPECT_EQ(Doc().Graph().texturePacks.size(), 1u);
+    EXPECT_FALSE(Session().TakeAskToCompress()) << "asked once a scene";
+}
+
+// The Frame panel: how long a frame takes against the time one has, then a line for each pass node with its GPU and CPU
+// time and its share, in the order they run or by what they cost; the editor's own passes one line of their own.
+TEST_F(EditorTest, TheFrameIsALineForEachPassWithWhatItCosts) {
+    scene::MakeProject("editor");
+    Open();
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    for (int i = 0; i < 60; ++i) Frame();
+    Click({ 20.f, 855.f });     // the Frame panel, from the rail down the side
+    for (int i = 0; i < 40; ++i) { std::this_thread::sleep_for(std::chrono::milliseconds(10)); Frame(); }
+    for (const char* shown : { " fps", "GPU ", "CPU ", "60 Hz", "SHARE", "tint backdrop", "The editor's previews" }) EXPECT_TRUE(Shows(shown)) << shown;
+    EXPECT_FALSE(Shows("$peek")) << "the editor's passes are not each a line";
+    Click({ 170.f, 768.f });    // by what they cost
+    EXPECT_TRUE(Shows("tint backdrop"));
+    Sheet("frame");
+    // On a timeline: the last frame measured, each pass from when it started on the GPU to when it ended.
+    Click({ 240.f, 768.f });
+    EXPECT_TRUE(Shows("The last frame measured")) << "or the device times no pass";
+    EXPECT_FALSE(Shows("SHARE")) << "no list of lines";
+    Sheet("frame-timeline");
 }
