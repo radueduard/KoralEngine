@@ -26,6 +26,18 @@ namespace keditor
     }
 
     namespace {
+        /** What a window presents in, by the name a Screen node gives it. */
+        std::string ScreenFormat(const kor::Window& window)
+        {
+            switch (window.PixelFormat()) {
+            case kor::Window::Format::eBGRA8_UNORM: return "eBGRA8_UNORM";
+            case kor::Window::Format::eBGRA8_SRGB: return "eBGRA8_SRGB";
+            case kor::Window::Format::eRGBA8_UNORM: return "eRGBA8_UNORM";
+            case kor::Window::Format::eRGBA8_SRGB: return "eRGBA8_SRGB";
+            }
+            return "eBGRA8_UNORM";
+        }
+
         std::map<const Document*, PlayScene*>& Scenes()
         {
             static std::map<const Document*, PlayScene*> scenes;
@@ -130,6 +142,7 @@ namespace keditor
         _document->Scripts().Prepare();
         // What the graph is told of the frame: how big the window is, and whose debug shapes a DebugDraw node draws.
         _document->Runtime().SetScreenExtent(SceneWindow().Extent());
+        _document->Runtime().SetScreenLook(ScreenFormat(SceneWindow()), SceneWindow().PixelRatio());
         // How far the frame is between the last fixed step and the next: what is drawn between two steps' states.
         _document->Runtime().SetFixedFraction(SceneTime().FixedStepFraction());
         // The editor's shapes are drawn by the editor's own passes, when there are any: not by a node of the scene's.
@@ -195,8 +208,13 @@ namespace keditor
         if (_play.Restarts() != _restarts) { _restarts = _play.Restarts(); _runtime->RunSetupAgain(); }
         // What the scripts write into is the document's own buffer, here too: not one of this view's.
         _runtime->Share(document.ScriptResources());
-        // Whatever the editor sees from, this sees from the scene's camera; and nothing is picked here.
+        // Whatever the editor sees from, this sees from the scene's camera — or, as a second view of the editor's, its
+        // own place, as the editor's view is drawn; and nothing is picked here.
+        _runtime->SetView(_view);
+        _runtime->SetEditorView(_view.has_value());
+        _runtime->SetHidden(_view ? _hidden : std::set<kecs::Entity> {});
         _runtime->SetScreenExtent(SceneWindow().Extent());
+        _runtime->SetScreenLook(ScreenFormat(SceneWindow()), SceneWindow().PixelRatio());
         _runtime->Update();
     }
 

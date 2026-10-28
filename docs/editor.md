@@ -24,7 +24,9 @@ A scene file holds the graph as [kgraph](kgraph.md) saves it and the world as [k
 A resource an entity holds is saved as the id of the node that makes it.
 
 `koral-editor` and `koral-play` take `--no-vsync`, to draw frames as fast as they are made rather than at
-the display's rate, and `--frames N` to stop after so many.
+the display's rate, and `--frames N` to stop after so many. `koral-editor <project> --arrange` puts every page of the
+project's scene in order — Arrange every page — saves it and exits: a graph a script wrote, laid out as the editor
+would (its window is open while it does).
 
 ## The panels
 
@@ -594,7 +596,9 @@ is that option (or are on only then), or when only that option is reached from i
 columns, is above them. A Switch that
 chooses between branches is a card of its own, with a list to choose by; a page whose passes did not run, or idle
 (a branch not chosen), is dimmed. Its cards show their cost on the GPU, and — a page being made of nodes — a stack,
-and the steps of its most abstract node. Pressed twice, a page is shown in the Graph. Nothing else is edited there.
+and the steps of its most abstract node. Pressed twice, a page is shown in the Graph. A card can be dragged, and its
+menu puts it back or shows its page; the flow's own menu has **Arrange the flow** — every card where the flow puts it,
+what was dragged forgotten, all of it framed — and **Frame everything**. Nothing else is edited there.
 
 ## The Scene panel
 
@@ -604,6 +608,41 @@ only, move, rotate, scale — framing what is picked, how the scene is shown, th
 
 **File, New project** makes a project with nothing in it. Only a scene that was in no project yet — made in an
 editor opened on none — goes into the one that is made: that is where it is saved.
+
+### The scene view's tools
+
+Along the top of the Scene panel are two toolbars; where the panel is narrow they go onto more than one line.
+
+**What is picked, and how it is moved** (top left):
+
+- **Select, Move, Rotate, Scale.** With Select, a drag from where nothing is picks what is inside the box (an entity
+  whose mesh's box has its middle inside it). Ctrl or Shift and a click adds to what is picked, or takes away what
+  is picked already. The gizmo moves everything picked as one, turned and scaled round the first; the rest are shown
+  by a box round each.
+- **World or own axes** for the gizmo.
+- **Snap**, with its steps beside it (metres moved, degrees turned, a scale's step). Ctrl held while dragging does
+  the other: free when snapped, snapped when free.
+- **On surfaces**: moved, what is picked goes onto the surface under the pointer, its box's foot on it, rather
+  than along an axis.
+- **Frame**, **Hide** (H), **Show by itself** (Shift+H), and **Show all** (Alt+H) once something is hidden. Hiding is
+  the scene view's alone: the Game panel and the saved scene are as they were, and lights still light.
+- **Ruler**: two clicks on surfaces, and the length between them, with its x, y and z, at the foot of the view.
+- **Probe**: what is under the pointer — the entity, where on its surface, which way the surface faces, and how far
+  from the view. Both read the depth round the pixel (the Pick node's `depth`).
+- How the scene is shown, the grid, and the frames a second, as before.
+
+**How it is seen** (top right): how fast the view flies (the wheel while the right button is held changes it);
+the **view** popup — look along an axis (Top, Front, Right, and their opposites), perspective or orthographic, and
+the view's **bookmarks** (a digit goes to one, Ctrl and a digit saves the view as it; kept per scene, in the editor's
+own settings); the **icons** of lights, cameras and entities that draw nothing, which a click picks; the frame's
+**numbers** (what was drawn, computed, traced and copied, the GPU's time, the entities, the memory the frame
+made); and **two views** side by side. The second view is the scene drawn the same way from a place of its own,
+steered as the first is, with no outline or gizmo over it.
+
+In the corner at the foot is which way the view looks: the world's axes, X red, Y green, Z blue. Pressing an
+axis's end looks along it, straight on; the middle switches between perspective and orthographic.
+
+A model or a prefab dropped on the scene goes on the surface it is dropped on.
 
 ## Assets
 
@@ -617,8 +656,16 @@ have it — the way a file browser does.
 - **Beside them, what is in the folder that is shown**: its folders first, then its files by name, each a picture
   and a name. A texture that is loaded is its own picture, and a mesh has a small one of it once it is drawn; the rest are shown by their kind. The slider at the
   foot says how big; at its least, each is a line of a list. Over it, the folders to where it is, each to go back to.
-- **Pressed twice**, a folder is gone into, a shader or a script opens in Visual Studio Code, and a model shows
-  its meshes after it (the arrow on a model does the same).
+- **A shader is listed by its module** (`shader:<module>`), shut: opened, its entry points are after it — one for
+  each `[shader(...)]` function, named for the entry with its module under it (`shader:<module>#<entry>`), in the
+  order the module declares them. Looked for, the entries are found as they are. An entry's icon is its
+  stage's — a page with the stage's glyph and its short name (VERT, TESC, TESE, GEOM, TASK, MESH, FRAG, COMP, RGEN,
+  RCHIT, RAHIT, RMISS, RINT, RCALL), the glyph by itself on a line of the list — in the stage's colour, of the node
+  editor's palette: the ray tracing stages are the cool ones. A module is grey, as SLANG; one that declares no entry
+  (one others import) has no arrow. The SVGs are `modules/keditor/icons/shaders`, built into the editor.
+- **Pressed twice**, a folder is gone into, a shader entry opens in Visual Studio Code at its function, a script (or a
+  module of no entry) opens there, a model shows its meshes after it and a module its entries (the arrow on either
+  does the same; a module's file is opened from its menu).
 - **The search** looks in every folder, for part of a name; the choice beside it shows one kind only.
 - **+ Create** makes a folder in the one shown, a shader, a script, or brings a model's file in.
 - **The right button**, on a thing: open it, import a model into the scene, show it in the file manager, copy its
@@ -627,7 +674,7 @@ have it — the way a file browser does.
 - The line at the foot says where what is picked is.
 
 - **Picked**, an asset is what the inspector shows: its file; a texture's size and levels and the picture; a
-  mesh's triangles and the box it is in; a shader's module and entry points; for a model, a button that imports
+  mesh's triangles and the box it is in; a shader entry's module, name and stage, and the other entries of its module; for a model, a button that imports
   it into the scene.
 - **A mesh or a texture is dragged** from the panel onto the field of an entity that is to hold it — an entity's
   Mesh, a material's `albedoMap` — which then holds it by the name it is found by (`@textures/wall.png`,
@@ -670,6 +717,10 @@ or the environment variable of that name — which is made if it is not there.
 | Ctrl+A, Escape | In the graph: pick every node; pick none |
 | Q, W, E, R | Select only; move, rotate, scale |
 | F | Frame what is picked — in the graph, the nodes that are picked, or the whole page |
+| 1 to 9 | Over the scene view: go to that bookmark of the view; with Ctrl, save the view as it |
+| H, Shift+H, Alt+H | Over the scene view: hide what is picked, show it by itself, show everything again |
+| Ctrl (dragging the gizmo) | Snap when free, free when snapped |
+| The wheel (right button held) | Fly faster or slower |
 | Right button held | Look round from where the view is; with W A S D, E and Q, fly — Shift faster. As a scene's `FlyCamera` does when it plays. |
 
 ## The graph, read at a glance
@@ -687,7 +738,7 @@ or the environment variable of that name — which is made if it is not there.
 - **Find a node**, in the list of passes, goes to the node whose name or kind has what is typed; Enter again goes
   on to the next.
 - A **Note** node is words on the graph. It makes nothing.
-- A Switch whose index a Number or a Bool node gives is a choice in the Scene panel's tools, by what each option
+- A Switch whose index an Int, a UInt or a Bool node gives is a choice in the Scene panel's tools, by what each option
   is called: the picture, or a debug view of it.
 
 ## What is wrong, where it is mended
@@ -733,6 +784,9 @@ that again after the panels have been moved.
   them, greyed, are the ports that can't take it, each with why. `keditor::PortChoices` is the same, for code.
 - **Copy, paste and duplicate** keep the wires among what is copied, and the wires from the rest of the graph.
   A copy has a name of its own (`draw forward 2`); pasted, it goes on the page that is shown.
+- **Arrange every page** (Graph in the menu bar) does the same to each page in turn — each shown, and put in order once
+  it has been drawn, its nodes as big as they come out — and then shows the page that was shown before
+  (`Session::ArrangeEveryPage`).
 - **Arrange this page** (the graph's menu, or Graph in the menu bar) puts the page's nodes in columns, each after
   what it is wired from and as near what it is wired to as that leaves it, and down each column in the order that
   crosses the fewest wires it can find: each column ordered by where what it is wired to is on either side, at the
@@ -837,5 +891,6 @@ pipeline's a button that goes to the pipeline.
 - An input given whole or in parts is one line of its parts in the inspector, and wired whole from there.
 
 **A texture or a shader dropped on the graph** from the Assets panel is the node it makes, there: an ImageFile, or
-a pipeline of the shader's entry points (a compute one when it has a compute entry point).
+a pipeline of the shader's entry: a compute entry is a ComputePipeline of it; any other a GraphicsPipeline, the dropped
+entry in its stage's slot and the module's first of the other stage beside it.
 

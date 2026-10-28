@@ -1,0 +1,694 @@
+{
+ "koral-function": 1,
+ "purpose": "Culling",
+ "description": "What of an indirect draw of entities is seen, in two draws (Wihlidal's two phases), on the GPU. Two IndirectDraws in eGPU, `early` and `late`, and two Draws of them: the first \u2014 commands `early`, which draws into `depth` \u2014 draws what was seen the frame before and is in sight; a depth pyramid (HiZ) is made of what it drew; the second, loading what the first drew, draws what is in sight, was not seen the frame before and is not behind it. Whether each was seen is kept for the next frame, `count` of them. instances, stride, matrixOffset and ranges are as CullInSight's: each draw's shader finds its instance through its own `visible`.",
+ "tags": [
+  "cull",
+  "occlusion",
+  "two phase",
+  "hiz",
+  "depth pyramid",
+  "gpu driven",
+  "indirect",
+  "instances",
+  "visibility"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "instances",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     60
+    ],
+    "inputs": {
+     "name": "instances",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "stride",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     150
+    ],
+    "inputs": {
+     "name": "stride",
+     "kind": "eValue",
+     "default": 64
+    }
+   },
+   {
+    "id": "matrixOffset",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     240
+    ],
+    "inputs": {
+     "name": "matrixOffset",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "ranges",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     330
+    ],
+    "inputs": {
+     "name": "ranges",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "drawCount",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     420
+    ],
+    "inputs": {
+     "name": "drawCount",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "viewProjection",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     510
+    ],
+    "inputs": {
+     "name": "viewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "early",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     600
+    ],
+    "inputs": {
+     "name": "early",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "earlyVisible",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     690
+    ],
+    "inputs": {
+     "name": "earlyVisible",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "late",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     780
+    ],
+    "inputs": {
+     "name": "late",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "lateVisible",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     870
+    ],
+    "inputs": {
+     "name": "lateVisible",
+     "kind": "eBuffer"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     960
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     1050
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "count",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     1140
+    ],
+    "inputs": {
+     "name": "count",
+     "kind": "eValue",
+     "default": 65536
+    }
+   },
+   {
+    "id": "seen bytes",
+    "type": "Multiply",
+    "at": [
+     260,
+     60
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "count",
+       "out"
+      ]
+     },
+     "b": 4
+    }
+   },
+   {
+    "id": "seen",
+    "type": "Buffer",
+    "at": [
+     260,
+     150
+    ],
+    "inputs": {
+     "instanceCount": {
+      "$link": [
+       "seen bytes",
+       "out"
+      ]
+     },
+     "usage": [
+      "eStorage"
+     ],
+     "type": "eDeviceLocal"
+    }
+   },
+   {
+    "id": "groups",
+    "type": "Buffer",
+    "at": [
+     260,
+     240
+    ],
+    "inputs": {
+     "instanceCount": 12,
+     "usage": [
+      "eStorage",
+      "eIndirect"
+     ],
+     "type": "eDeviceLocal"
+    }
+   },
+   {
+    "id": "size",
+    "type": "ComputePass",
+    "at": [
+     520,
+     60
+    ],
+    "inputs": {
+     "module": "koral_cull",
+     "entry": "size",
+     "param.visible": {
+      "$link": [
+       "earlyVisible",
+       "out"
+      ]
+     },
+     "param.args": {
+      "$link": [
+       "groups",
+       "out"
+      ]
+     },
+     "groups": [
+      1,
+      1,
+      1
+     ]
+    }
+   },
+   {
+    "id": "cull early",
+    "type": "ComputePass",
+    "at": [
+     520,
+     150
+    ],
+    "inputs": {
+     "module": "koral_occlusion",
+     "entry": "early",
+     "param.commands": {
+      "$link": [
+       "early",
+       "out"
+      ]
+     },
+     "param.visible": {
+      "$link": [
+       "earlyVisible",
+       "out"
+      ]
+     },
+     "param.instances": {
+      "$link": [
+       "instances",
+       "out"
+      ]
+     },
+     "param.ranges": {
+      "$link": [
+       "ranges",
+       "out"
+      ]
+     },
+     "param.seen": {
+      "$link": [
+       "seen",
+       "out"
+      ]
+     },
+     "indirect": {
+      "$link": [
+       "groups",
+       "out"
+      ]
+     },
+     "push.viewProjection": {
+      "$link": [
+       "viewProjection",
+       "out"
+      ]
+     },
+     "push.drawCount": {
+      "$link": [
+       "drawCount",
+       "out"
+      ]
+     },
+     "push.stride": {
+      "$link": [
+       "stride",
+       "out"
+      ]
+     },
+     "push.matrixOffset": {
+      "$link": [
+       "matrixOffset",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "push.levels": 9
+    }
+   },
+   {
+    "id": "pyramid",
+    "type": "Image",
+    "at": [
+     780,
+     60
+    ],
+    "inputs": {
+     "format": "eR32_SFLOAT",
+     "extent": [
+      512,
+      256,
+      1
+     ],
+     "mipLevels": 9
+    }
+   },
+   {
+    "id": "first level",
+    "type": "ImageView",
+    "at": [
+     780,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     },
+     "baseMipLevel": 0,
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "make first level",
+    "type": "ComputePass",
+    "at": [
+     1040,
+     60
+    ],
+    "inputs": {
+     "module": "koral_hiz",
+     "entry": "first",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "first level",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "levels",
+    "type": "Repeat",
+    "at": [
+     780,
+     240
+    ],
+    "inputs": {
+     "count": 8
+    }
+   },
+   {
+    "id": "level",
+    "type": "ImageView",
+    "at": [
+     1040,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     },
+     "baseMipLevel": {
+      "$link": [
+       "level number",
+       "out"
+      ]
+     },
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "level number",
+    "type": "Add",
+    "at": [
+     780,
+     330
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "levels",
+       "index"
+      ]
+     },
+     "b": 1
+    }
+   },
+   {
+    "id": "level before",
+    "type": "Previous",
+    "at": [
+     1040,
+     240
+    ],
+    "inputs": {
+     "of": "level",
+     "first": "first level"
+    }
+   },
+   {
+    "id": "make level",
+    "type": "ComputePass",
+    "at": [
+     1300,
+     60
+    ],
+    "inputs": {
+     "module": "koral_hiz",
+     "entry": "reduce",
+     "param.source": {
+      "$link": [
+       "level before",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "level",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "whole pyramid",
+    "type": "ImageView",
+    "at": [
+     1300,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "cull late",
+    "type": "ComputePass",
+    "at": [
+     1300,
+     240
+    ],
+    "inputs": {
+     "module": "koral_occlusion",
+     "entry": "late",
+     "param.commands": {
+      "$link": [
+       "late",
+       "out"
+      ]
+     },
+     "param.visible": {
+      "$link": [
+       "lateVisible",
+       "out"
+      ]
+     },
+     "param.pyramid": {
+      "$link": [
+       "whole pyramid",
+       "out"
+      ]
+     },
+     "param.instances": {
+      "$link": [
+       "instances",
+       "out"
+      ]
+     },
+     "param.ranges": {
+      "$link": [
+       "ranges",
+       "out"
+      ]
+     },
+     "param.seen": {
+      "$link": [
+       "seen",
+       "out"
+      ]
+     },
+     "indirect": {
+      "$link": [
+       "groups",
+       "out"
+      ]
+     },
+     "push.viewProjection": {
+      "$link": [
+       "viewProjection",
+       "out"
+      ]
+     },
+     "push.drawCount": {
+      "$link": [
+       "drawCount",
+       "out"
+      ]
+     },
+     "push.stride": {
+      "$link": [
+       "stride",
+       "out"
+      ]
+     },
+     "push.matrixOffset": {
+      "$link": [
+       "matrixOffset",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "push.levels": 9
+    }
+   },
+   {
+    "id": "early out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     60
+    ],
+    "inputs": {
+     "name": "early",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "early",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "earlyVisible out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     150
+    ],
+    "inputs": {
+     "name": "earlyVisible",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "earlyVisible",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "late out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     240
+    ],
+    "inputs": {
+     "name": "late",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "late",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "lateVisible out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     330
+    ],
+    "inputs": {
+     "name": "lateVisible",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "lateVisible",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "pyramid out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     420
+    ],
+    "inputs": {
+     "name": "pyramid",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "whole pyramid",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -31,7 +31,8 @@ namespace kgraph
 
     kor::Mat4 View::Projection(const float aspect, const bool flipY) const
     {
-        kor::Mat4 projection = kor::Perspective(fieldOfView, aspect, near, far);
+        const float high = orthographic * 0.5f, wide = high * aspect;
+        kor::Mat4 projection = orthographic > 0.f ? kor::Orthographic(-wide, wide, -high, high, near, far) : kor::Perspective(fieldOfView, aspect, near, far);
         if (flipY) projection[1][1] = -projection[1][1];
         return projection;
     }

@@ -93,6 +93,7 @@ namespace kgraph
                     const std::string prefix = call.id + "/";
                     Expansion::Call& record = out.calls[call.id];
                     record.function = *name;
+                    record.called = call.id;
                     // Its edges, in the order they are on its page: top to bottom, then left to right.
                     std::vector<const Node*> ins, outs;
                     for (const auto& node : function.nodes) {
@@ -151,10 +152,21 @@ namespace kgraph
                         record.nodes.push_back(made.id);
                         graph.nodes.push_back(std::move(made));
                     }
-                    // What was wired from the call is wired from what its outputs are.
+                    // What was wired from the call is wired from what its outputs are: straight from it, or from a
+                    // Reference to it (another page's use of it) — once the call is written out, there is no node it names.
+                    const auto ofCall = [&](std::string_view id) {
+                        for (int hops = 0; hops < 16; ++hops) {
+                            if (id == call.id) return true;
+                            const Node* node = graph.Find(id);
+                            const std::string* target = node && node->type == "Reference" ? Text(*node, "node") : nullptr;
+                            if (!target) return false;
+                            id = *target;
+                        }
+                        return false;
+                    };
                     for (auto& node : graph.nodes)
                         for (auto it = node.inputs.begin(); it != node.inputs.end();) {
-                            if (!it->second.link || it->second.link->node != call.id) { ++it; continue; }
+                            if (!it->second.link || !ofCall(it->second.link->node)) { ++it; continue; }
                             const auto gives = record.gives.find(it->second.link->output);
                             if (gives == record.gives.end()) {
                                 out.errors[call.id] = std::format("'{}' is wired from its '{}', and its function has no such output", node.id, it->second.link->output);
@@ -214,6 +226,47 @@ namespace kgraph
                     link = written.link ? *written.link : Link { {}, {} };
                 }
             for (auto& [id, value] : out.aliases) value = follow(value);
+            // A Reference to a call — another page's use of it — is that call where it is: what is wired from it was
+            // wired from the call's outputs above, and what it gives and how it fares are the call's.
+            const auto calledBy = [&](const Node& reference) -> const Expansion::Call* {
+                const Node* node = &reference;
+                for (int hops = 0; node && node->type == "Reference" && hops < 16; ++hops) {
+                    const std::string* target = Text(*node, "node");
+                    if (!target) return nullptr;
+                    if (const auto call = out.calls.find(*target); call != out.calls.end()) return &call->second;
+                    node = graph.Find(*target);
+                }
+                return nullptr;
+            };
+            std::vector<std::pair<std::string, Expansion::Call>> referred;
+            for (const auto& node : graph.nodes)
+                if (node.type == "Reference")
+                    if (const Expansion::Call* call = calledBy(node)) referred.emplace_back(node.id, *call);
+            for (auto& [id, call] : referred) {
+                std::erase_if(graph.nodes, [&](const Node& node) { return node.id == id; });
+                out.calls[id] = std::move(call);
+            }
+            // What was wired to one through a call's input — written out after the call it refers to was — is
+            // wired from the call's outputs too.
+            const auto through = [&](Link& link) {
+                if (!std::ranges::contains(referred, link.node, &std::pair<std::string, Expansion::Call>::first)) return true;
+                const auto& gives = out.calls.at(link.node).gives;
+                const auto it = gives.find(link.output);
+                if (it == gives.end()) return false;
+                link = it->second;
+                return true;
+            };
+            for (auto& node : graph.nodes)
+                for (auto it = node.inputs.begin(); it != node.inputs.end();) {
+                    if (it->second.link && !through(*it->second.link)) {
+                        out.errors[node.id] = std::format("'{}' is wired from '{}' of '{}', and its function has no such output", it->first, it->second.link->output, it->second.link->node);
+                        it = node.inputs.erase(it);
+                        continue;
+                    }
+                    ++it;
+                }
+            for (auto& record : out.calls | std::views::values)
+                for (auto& link : record.gives | std::views::values) (void)through(link);
             return graph;
         }
     }
@@ -365,6 +418,176 @@ namespace kgraph
      * buffer's, filled in the batch's order. A Draw wired a value of each element otherwise — a `push.model` from the
      * element's matrix — cannot be one draw: it is left a draw each, and says why.
      */
+    /**
+     * A ComponentBuffer written out as what it is: a ForEach of its component (`<buffer>/each`), and the node itself a
+     * BufferBuilder laid out as the fields it holds — the component's, in the order it declares them, then where the
+     * entity is — each wired from the ForEach's output of it, unless the node is wired another for it.
+     */
+    static void WriteComponentBuffers(Graph& graph, Expansion& out, const FieldsOf& fieldsOf)
+    {
+        std::vector<std::pair<std::string, Node>> made;     // each ForEach, and the buffer it goes before
+        for (Node& node : graph.nodes) {
+            if (node.type != "ComponentBuffer") continue;
+            const std::string* component = Text(node, "component");
+            if (!component || component->empty()) { out.errors[node.id] = "'component' is the component whose entities it holds: name one"; continue; }
+            const auto fields = fieldsOf ? fieldsOf(*component) : std::nullopt;
+            if (!fields) { out.errors[node.id] = std::format("there is no component '{}'", *component); continue; }
+            // Which it holds: those ticked; told nothing, every field of its own and where the entity is.
+            std::optional<std::set<std::string, std::less<>>> ticked;
+            if (const auto given = node.inputs.find("fields"); given != node.inputs.end() && given->second.value.Items()) {
+                ticked.emplace();
+                for (const auto& name : *given->second.value.Items())
+                    if (name.String()) ticked->insert(*name.String());
+            }
+            const auto holds = [&](const std::string_view name, const bool unticked) { return ticked ? ticked->contains(name) : unticked; };
+
+            Node each;
+            each.id = node.id + "/each";
+            each.type = "ForEach";
+            each.pass = node.pass;
+            each.Set("component", *component);
+            for (const char* name : { "with", "without", "where" })
+                if (const auto given = node.inputs.find(name); given != node.inputs.end()) each.inputs[name] = given->second;
+            Value::List layout;
+            std::set<std::string, std::less<>> has;
+            const auto add = [&](const std::string& name, const std::string_view type, std::string output) {
+                layout.emplace_back(Value::Members { { "name", name }, { "type", std::string(type) } });
+                if (!node.inputs.contains("field." + name)) node.Wire("field." + name, each.id, std::move(output));
+            };
+            for (const auto& [name, type] : *fields) {
+                has.insert(name);
+                if (holds(name, true)) add(name, type, "field." + name);
+            }
+            // Where the entity is, unless a field of its own has the name: that one is the component's.
+            for (const auto& [name, type] : PlaceFields()) {
+                if (!has.insert(std::string(name)).second) continue;
+                if (holds(name, PlacedByDefault(name))) add(std::string(name), type, std::string(name));
+            }
+            // What it does not hold is left out, said: a name the component has not, a field wired that is not ticked.
+            std::string unknown, unticked;
+            if (ticked)
+                for (const auto& name : *ticked)
+                    if (!has.contains(name)) unknown += std::format("{}'{}'", unknown.empty() ? "" : ", ", name);
+            std::vector<std::string> wired;
+            for (const auto& name : node.inputs | std::views::keys)
+                if (name.starts_with("field.") && !std::ranges::contains(layout, Value(name.substr(6)), [](const Value& field) { return *field.Find("name"); }))
+                    wired.push_back(name);
+            for (const auto& name : wired) {
+                node.inputs.erase(name);
+                unticked += std::format("{}'{}'", unticked.empty() ? "" : ", ", name.substr(6));
+            }
+            std::string note;
+            if (!unknown.empty()) note = std::format("{} has no {}: it is left out", *component, unknown);
+            if (!unticked.empty()) note += std::format("{}{} is wired and not ticked: it is left out", note.empty() ? "" : "; ", unticked);
+            if (!note.empty()) out.notes[node.id] = std::move(note);
+            if (layout.empty()) { out.errors[node.id] = "it holds no field: tick one in 'fields'"; continue; }
+
+            node.type = "BufferBuilder";
+            for (const char* name : { "component", "fields", "with", "without", "where" }) node.inputs.erase(name);
+            node.Set("layout", Value(std::move(layout)));
+            made.emplace_back(node.id, std::move(each));
+        }
+        for (auto& [before, each] : made)
+            graph.nodes.insert(std::ranges::find(graph.nodes, before, &Node::id), std::move(each));
+    }
+
+    /**
+     * What is one node for the one who writes the graph, and several for what runs it, written out as those:
+     *
+     * - a ComputePass is a ComputePipeline (`<pass>/pipeline`) of its module, entry, parameters and constants, and the
+     *   node itself a Dispatch of it, with the rest;
+     * - a RenderTarget is an Image, sized by the Screen (`<target>/screen`) or the image it is sized by, times its scale,
+     *   rounded up and at least one (`<target>/extent`); what is wired from its `extent` is wired from that;
+     * - a History is a Keep on a page of its own before every other (`@history`): copied when the frame begins, before
+     *   anything writes what it copies, so that what reads it during a frame reads it as the frame before left it.
+     */
+    static void WriteShorthands(Graph& graph, Expansion& out)
+    {
+        std::vector<std::pair<std::string, Node>> made;     // each node made, and the one it goes before
+        std::map<std::string, std::string, std::less<>> extents;    // a RenderTarget's `extent`, by its id: what gives it now
+        const auto add = [&](const Node& at, std::string id, std::string type) -> Node& {
+            Node node;
+            node.id = std::move(id);
+            node.type = std::move(type);
+            node.pass = at.pass;
+            made.emplace_back(at.id, std::move(node));
+            return made.back().second;
+        };
+        bool history = false;
+        for (Node& node : graph.nodes) {
+            if (node.type == "ComputePass") {
+                Node& pipeline = add(node, node.id + "/pipeline", "ComputePipeline");
+                for (const auto& [from, to] : { std::pair { "module", "compute.module" }, { "entry", "compute.entry" } })
+                    if (const auto given = node.inputs.find(from); given != node.inputs.end()) pipeline.inputs[to] = given->second;
+                // A parameter or a constant is the pipeline's, the same for every dispatch; what else it is given, the Dispatch's.
+                for (auto it = node.inputs.begin(); it != node.inputs.end();) {
+                    if (it->first.starts_with("param.") || it->first.starts_with("constant.")) {
+                        pipeline.inputs[it->first] = it->second;
+                        it = node.inputs.erase(it);
+                    } else if (it->first == "module" || it->first == "entry") {
+                        it = node.inputs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                node.type = "Dispatch";
+                node.Wire("pipeline", pipeline.id);
+            } else if (node.type == "RenderTarget") {
+                const auto sizeOf = node.inputs.find("sizeOf");
+                const auto extent = node.inputs.find("extent");
+                Input size;
+                if (extent != node.inputs.end()) {
+                    size = extent->second;
+                } else if (sizeOf != node.inputs.end() && sizeOf->second.link) {
+                    Node& of = add(node, node.id + "/size", "ImageExtent");
+                    of.inputs["image"] = sizeOf->second;
+                    size = Input { {}, Link { of.id, "out" } };
+                } else {
+                    add(node, node.id + "/screen", "Screen");
+                    size = Input { {}, Link { node.id + "/screen", "extent" } };
+                }
+                // Times the scale — a number the same each way, or one for each — rounded up, and at least a pixel.
+                Input scale { Value(1), std::nullopt };
+                if (const auto given = node.inputs.find("scale"); given != node.inputs.end()) {
+                    scale = given->second;
+                    if (const auto* each = scale.value.Items(); each && each->size() == 2) scale.value = Value(Value::List { (*each)[0], (*each)[1], 1 });
+                    else if (const double* n = scale.value.Number()) scale.value = Value(Value::List { *n, *n, 1 });
+                }
+                Node& scaled = add(node, node.id + "/scaled", "Multiply");
+                scaled.inputs["a"] = size;
+                scaled.inputs["b"] = scale;
+                add(node, node.id + "/rounded", "Ceil").Wire("a", scaled.id);
+                add(node, node.id + "/extent", "Max").Wire("a", node.id + "/rounded").Set("b", 1);
+                extents[node.id] = node.id + "/extent";
+                // As many mips as there are down to a pixel, for 0: one more than the log2 of its larger side, rounded down.
+                if (const auto mips = node.inputs.find("mipLevels"); mips != node.inputs.end() && mips->second.value.Number() && *mips->second.value.Number() == 0) {
+                    add(node, node.id + "/sides", "Split").Wire("vector", node.id + "/extent");
+                    add(node, node.id + "/side", "Max").Wire("a", node.id + "/sides", "x").Wire("b", node.id + "/sides", "y");
+                    add(node, node.id + "/halvings", "Log2").Wire("a", node.id + "/side");
+                    add(node, node.id + "/whole halvings", "Floor").Wire("a", node.id + "/halvings");
+                    add(node, node.id + "/mips", "Add").Wire("a", node.id + "/whole halvings").Set("b", 1);
+                    node.Wire("mipLevels", node.id + "/mips");
+                }
+                for (const char* name : { "sizeOf", "scale" }) node.inputs.erase(name);
+                node.type = "Image";
+                node.Wire("extent", node.id + "/extent");
+                if (!node.inputs.contains("format")) node.Set("format", "eRGBA16_SFLOAT");
+            } else if (node.type == "History") {
+                node.type = "Keep";
+                node.pass = "@history";
+                history = true;
+            }
+        }
+        for (auto& [before, node] : made)
+            graph.nodes.insert(std::ranges::find(graph.nodes, before, &Node::id), std::move(node));
+        if (history && !std::ranges::contains(graph.passes, std::string("@history"))) graph.passes.insert(graph.passes.begin(), "@history");
+        // What is wired from a RenderTarget's extent is wired from what works it out.
+        for (Node& node : graph.nodes)
+            for (auto& input : node.inputs | std::views::values)
+                if (input.link && input.link->output == "extent")
+                    if (const auto found = extents.find(input.link->node); found != extents.end()) input.link = Link { found->second, "out" };
+    }
+
     /** What a wire of @p graph comes from, past References. */
     static const Node* OriginOf(const Graph& graph, const std::string_view id)
     {
@@ -542,13 +765,15 @@ namespace kgraph
         }
     }
 
-    Expansion Expand(const Graph& given, const ElementOf& elementOf)
+    Expansion Expand(const Graph& given, const ElementOf& elementOf, const FieldsOf& fieldsOf)
     {
         Expansion out;
         // The calls first: what a function holds may be a loop, and a call may be in one. Then the Bundles, which a
         // function may give or take.
         Graph written = WriteCalls(given, out);
         WriteBundles(written, out, elementOf);
+        WriteComponentBuffers(written, out, fieldsOf);
+        WriteShorthands(written, out);
         out.graph.passes = written.passes;
         out.graph.setup = written.setup;
         out.graph.fixed = written.fixed;

@@ -12,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <array>
 #include <set>
 #include <string>
 #include <string_view>
@@ -40,6 +41,8 @@ namespace keditor
         kor::Vec3 target { 0.f };
         float yaw = 34.f, pitch = -22.f, distance = 4.f;
         float fieldOfView = 60.f, near = 0.05f, far = 1000.f;
+        /// Seen straight on: no nearer thing bigger, as tall as the target is far — a plan, an elevation.
+        bool orthographic = false;
 
         [[nodiscard]] kor::Vec3 Position() const;
         [[nodiscard]] kgraph::View View() const;
@@ -94,6 +97,9 @@ namespace keditor
         /** @brief The scene as it plays, seen from its own camera: the Game panel's. Null in an editor with none. */
         [[nodiscard]] GameScene* Game() { return _game; }
         void SetGame(GameScene* game) { _game = game; }
+        /** @brief The scene's second view, beside the first while the view is split: a GameScene seen from secondCamera. */
+        [[nodiscard]] GameScene* SecondView() { return _second; }
+        void SetSecondView(GameScene* second) { _second = second; }
         [[nodiscard]] bool HasProject() const { return _hasProject; }
         [[nodiscard]] const Project& CurrentProject() const { return _project; }
         [[nodiscard]] const std::string& SceneName() const { return _scene; }
@@ -171,6 +177,14 @@ namespace keditor
         [[nodiscard]] std::vector<std::string> ShaderModules() const;
         /** @brief The entry points a module of the project declares, in the order it does. */
         [[nodiscard]] std::vector<std::string> EntryPoints(const std::string& module) const;
+        /** @brief An entry point of a module, and the stage its `[shader("...")]` declares it for. */
+        struct ShaderEntry {
+            std::string name;
+            std::string stage;
+            int line = 0;           ///< Where its function is declared, from 1.
+        };
+        /** @brief The entry points a module of the project declares, each with its stage, in the order it does. */
+        [[nodiscard]] std::vector<ShaderEntry> ShaderEntries(const std::string& module) const;
 
         // ---- the scene view ---------------------------------------------------------------------------------
 
@@ -196,6 +210,97 @@ namespace keditor
         std::shared_ptr<kgui::ViewportState> viewport = std::make_shared<kgui::ViewportState>();
         /** @brief Points the editor's view at @p entity, and stops looking through the scene's camera to show it. */
         void Frame(kecs::Entity entity);
+        // ---- the scene view's tools ------------------------------------------------------------------------------
+
+        /** @brief How the gizmo snaps: in steps of so many units moved, degrees turned, and of a scale's factor. */
+        struct Snap {
+            bool on = false;    ///< Snapped; Ctrl held does the other while dragging.
+            float move = 0.25f, turn = 15.f, scale = 0.1f;
+            bool operator==(const Snap&) const = default;
+        };
+        Snap snap;
+        /** Whether the gizmo is along the world's axes rather than what it is on's own. */
+        bool gizmoWorld = false;
+        /** How fast the view flies, as a factor: the wheel while the right button is held changes it. */
+        float flySpeed = 1.f;
+        /** Lights, cameras and what draws nothing, shown by an icon in the scene where they are: a click on one picks it. */
+        bool iconsShown = true;
+        /** The scene's numbers in a corner of its view: what was drawn, dispatched, traced, and what it took. */
+        bool statsShown = false;
+        /** Dragged with the gizmo, put on the surface under the pointer rather than moved along an axis. */
+        bool surfaceSnap = false;
+
+        /** @brief Which way the view looks straight along an axis: from above, below, the front... */
+        enum class Axis : std::uint8_t { eTop, eBottom, eFront, eBack, eRight, eLeft };
+        /**
+         * @brief Looks along @p axis at what it looks at now, and seen straight on (orthographic) unless @p perspective:
+         *        the editor's view, or @p view (the second one).
+         */
+        void LookAlong(Axis axis, bool perspective = false, EditorCamera* view = nullptr);
+        /** @brief Seen straight on, or in perspective. */
+        void SetOrthographic(bool orthographic);
+
+        /**
+         * @brief What is picked besides selectedEntity — Ctrl or Shift and a click, or a box dragged round them. The
+         *        gizmo moves them all as one, round the first.
+         */
+        std::vector<kecs::Entity> alsoSelected;
+        /** @brief Every picked entity, the first first. */
+        [[nodiscard]] std::vector<kecs::Entity> Selection() const;
+        /** @brief Adds @p entity to what is picked, or takes it away when it is picked already. */
+        void SelectAlso(kecs::Entity entity);
+        /** @brief Picks what of the scene's entities with a Mesh is inside the box, in the view's pixels; @p adding to what is picked. */
+        void SelectInBox(kor::Vec2 from, kor::Vec2 to, bool adding);
+
+        /** @brief Saves where the view is as bookmark @p slot (0 to 8: Ctrl and a digit), for the scene. */
+        void SaveBookmark(int slot);
+        /** @brief Goes to bookmark @p slot (a digit); false when there is none. */
+        bool GoToBookmark(int slot);
+        [[nodiscard]] bool HasBookmark(int slot) const;
+
+        /** @brief What the pointer is over in the scene view, a few frames late: the entity, and where on its surface. */
+        struct Probe {
+            bool hit = false;           ///< A surface is there.
+            kecs::Entity entity = kecs::NullEntity;
+            kor::Vec3 position { 0.f }, normal { 0.f, 1.f, 0.f };
+            float distance = 0.f;       ///< From where the view is.
+        };
+        /** @brief What measuring does with a click: nothing, a ruler between two points, or saying what is under the pointer. */
+        enum class Measure : std::uint8_t { eOff, eRuler, eProbe };
+        Measure measure = Measure::eOff;
+        void SetMeasure(Measure m) { measure = m; ruler.clear(); ++_changes; }
+        [[nodiscard]] const Probe& Probed() const { return _probe; }
+        /** The ruler's ends, as they are clicked: none, one, or both. */
+        std::vector<kor::Vec3> ruler;
+
+        /**
+         * @brief Something dropped on the scene view at @p u across and @p v down (0 to 1): what surface is there is
+         *        asked for, and @p then runs once it is known — what it places (a prefab, a model imported) is put on it.
+         */
+        void DropAt(float u, float v, std::function<void()> then);
+        /** Where the next prefab placed or model imported goes: on the surface it was dropped on. None, where it would. */
+        std::optional<kor::Vec3> placeAt;
+
+        /** @brief Hides what is picked in the scene view (not in the game, not in the saved scene). */
+        void HideSelected();
+        /** @brief Shows what is picked by itself in the scene view: everything else drawn is hidden. */
+        void Isolate();
+        /** @brief Shows everything hidden in the scene view again. */
+        void ShowAll();
+        [[nodiscard]] const std::set<kecs::Entity>& ViewHidden() const { return _viewHidden; }
+        [[nodiscard]] bool Isolated() const { return _isolated; }
+
+        /**
+         * A second view of the scene beside the first, from its own place: the Scene panel split in two. It is drawn as
+         * the first is — its view mode, what is hidden — without the editor's lines over it: it is looked through, and
+         * turned, moved and zoomed as the first is; what is picked and moved is the first's.
+         */
+        bool splitView = false;
+        EditorCamera secondCamera;
+        std::shared_ptr<kgui::ViewportState> secondViewport = std::make_shared<kgui::ViewportState>();
+        /** @brief Splits the view in two, the second from where the first is; or back to one. */
+        void SetSplit(bool split);
+
         /** @brief Frames a second, averaged over the last quarter of one. */
         [[nodiscard]] int Fps() const { return _fps; }
         /** @brief How long a frame takes, in ms, averaged over the same quarter of a second. */
@@ -402,8 +507,8 @@ namespace keditor
 
         std::string selectedNode;                       ///< The node the inspector shows, when no entity is picked.
         kecs::Entity selectedEntity = kecs::NullEntity; ///< The entity it shows.
-        void Select(std::string node) { selectedNode = std::move(node); selectedEntity = kecs::NullEntity; selectedAsset.clear(); ++_changes; }
-        void Select(const kecs::Entity entity) { selectedEntity = entity; selectedNode.clear(); selectedAsset.clear(); ++_changes; }
+        void Select(std::string node) { selectedNode = std::move(node); selectedEntity = kecs::NullEntity; alsoSelected.clear(); selectedAsset.clear(); ++_changes; }
+        void Select(const kecs::Entity entity) { selectedEntity = entity; alsoSelected.clear(); selectedNode.clear(); selectedAsset.clear(); ++_changes; }
 
         // ---- what an entity is, and where it goes ------------------------------------------------------------
 
@@ -555,18 +660,19 @@ namespace keditor
             enum class Kind : std::uint8_t { eModel, eMesh, eTexture, eShader, eScript, eScene, ePrefab, eMaterial };
             Kind kind = Kind::eTexture;
             /// What it is picked by, and — for a mesh or a texture — what an entity's field holds to have it:
-            /// `@textures/wall.png`, `@sponza.gltf#3`. A shader is `shader:<module>`, a script `script:<file>` and a
-            /// prefab `prefab:<file>`.
+            /// `@textures/wall.png`, `@sponza.gltf#3`. A shader module is `shader:<module>` and each entry point of
+            /// it `shader:<module>#<entry>`; a script `script:<file>` and a prefab `prefab:<file>`.
             std::string id;
-            std::string label;              ///< What it is called: a mesh by the name its model gives it, anything else by its file's.
-            std::string group;              ///< A mesh's: the model it is of.
+            std::string label;              ///< What it is called: a mesh by the name its model gives it, a shader by its entry's, anything else by its file's.
+            std::string group;              ///< A mesh's: the model it is of. A shader's: its module.
+            std::string stage;              ///< A shader's: the stage its entry is declared for (`vertex`, `compute`); empty for a module of none.
             std::filesystem::path file;
             bool pending = false;           ///< Still being read.
             bool loaded = false;            ///< The scene has it: something of it asked for it.
             /// The folder it is shown in, as the Assets panel has them: the one its file is in, from the project's
             /// own (`assets/textures`, `shaders`) — or, for a file that is not in the project, under OutsideFolder.
             std::string folder;
-            std::string parent;             ///< A mesh's: the model it is of, by that model's id.
+            std::string parent;             ///< A mesh's: the model it is of, by that model's id. A shader entry's: its module's.
             /// The editor's own, of no file: a default mesh (`$cube`, under Meshes/Primitives) or a default material
             /// (`material:Gold`, under Materials/Defaults).
             bool builtIn = false;
@@ -660,15 +766,16 @@ namespace keditor
         bool TrashAsset(const std::filesystem::path& path);
         /** @brief What a field that holds something of a file is shown as: the mesh's or the file's own name, not where it is. */
         [[nodiscard]] std::string AssetLabel(const std::string& id) const;
-        void SelectAsset(std::string id) { selectedAsset = std::move(id); selectedNode.clear(); selectedEntity = kecs::NullEntity; ++_changes; }
+        void SelectAsset(std::string id) { selectedAsset = std::move(id); selectedNode.clear(); selectedEntity = kecs::NullEntity; alsoSelected.clear(); ++_changes; }
 
         /**
          * @brief Opens the project's folder in an editor of code — Visual Studio Code, or what the KORAL_ENGINE_CODE
-         *        environment variable names — at @p file when one is given: a shader, a script. The project is
+         *        environment variable names — at @p file when one is given (a shader, a script), at its @p line
+         *        when that is given too (from 1). The project is
          *        given what that editor needs to know it first (WriteEditorSetup), and its Kotlin build when it has
          *        Kotlin scripts, so that a script is written with the engine's names offered.
          */
-        bool OpenInCode(const std::filesystem::path& file = {});
+        bool OpenInCode(const std::filesystem::path& file = {}, int line = 0);
         /** @brief How a command is run: the system's shell, unless something else is put here (a test). */
         static inline std::function<bool(const std::string& command)> launch;
         /** @brief How the editor closes once it has handed over to another: App::Quit, unless something else is put here (a test). */
@@ -818,6 +925,15 @@ namespace keditor
         /** @brief Asks for the page the graph shows to be put in order: its nodes left to right, by what is wired to what. */
         void AskToArrange() { _wantsArrange = true; ++_changes; }
         [[nodiscard]] bool TakeAskToArrange() { return std::exchange(_wantsArrange, false); }
+        /**
+         * @brief Asks for every page to be put in order, one after another: each shown, and put in order once it has been
+         *        drawn — its nodes as big as they come out. The page shown before is shown again after.
+         */
+        void ArrangeEveryPage();
+        /** @brief The pages still to be put in order, the next first: none when none is. */
+        [[nodiscard]] const std::vector<std::string>& PagesToArrange() const { return _toArrange; }
+        /** @brief The page shown has been put in order: the next is shown, or — none left — the one shown before. */
+        void ArrangedPage();
 
         /** @brief Goes up when anything the panels show changed: the document, what is picked, the status. */
         [[nodiscard]] std::uint64_t Version() { return Doc().Version() + _changes; }
@@ -825,6 +941,7 @@ namespace keditor
     private:
         PlayScene& _play;
         GameScene* _game = nullptr;
+        GameScene* _second = nullptr;
         Project _project;
         bool _hasProject = false;
         std::filesystem::path _scriptsHost;
@@ -848,7 +965,23 @@ namespace keditor
         std::optional<kor::MouseButton> _viewDrag;
         std::optional<kor::Vec2> _pressAt;
         bool _gizmoMoved = false, _wasDown = false;
+        Probe _probe;
+        int _probing = 0;                       // frames since the pointer's surface was last asked for
+        void Probed(const kgraph::Runtime::PickHit& hit);
+        std::vector<std::pair<kecs::Entity, kor::Vec3>> _icons;     // this frame's, where each is: a click near one picks it
+        std::set<kecs::Entity> _viewHidden;
+        bool _isolated = false;
+        std::array<std::optional<EditorCamera>, 9> _bookmarks;
+        std::string _bookmarksOf;               // the scene they are of: read for it once, written when one is saved
+        void ReadBookmarks();
+        std::optional<kor::Mat4> _groupBefore;  // the first picked one's matrix as the gizmo found it, moving the rest with it
+        std::optional<kor::Vec2> _boxFrom;      // where a box being dragged round entities began
+        std::optional<kor::MouseButton> _secondDrag;    // the button turning or moving the second view
+        /** Turns, moves and zooms @p view as the mouse over @p port says, with @p drag the button doing it. */
+        void Steer(EditorCamera& view, kgui::ViewportState& port, std::optional<kor::MouseButton>& drag, const kor::Input& input, kor::Vec2 delta, float seconds);
         bool _wantsNodes = false, _wantsArrange = false;
+        std::vector<std::string> _toArrange;
+        std::string _arrangedFrom;
         bool _wantsShader = false;
         std::uint32_t _went = 0;
         // What the outliner asks of every entity, worked out once for the scene as it is.
@@ -1030,6 +1163,7 @@ namespace keditor
         bool _handOver = false;
         PlayScene* _play = nullptr;
         GameScene* _game = nullptr;
+        GameScene* _second = nullptr;      // the Scene panel's second view, while it is split
         std::shared_ptr<Session> _session;
         std::unique_ptr<kui::Ui> _ui;
     };

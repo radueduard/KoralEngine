@@ -163,7 +163,7 @@ float4 fragment(Raster raster) : SV_Target
 
             // Which entity is where: its number, nearest first.
             image("ids", "eR32_UINT", { "eColorAttachment", "eSampled", "eTransferSrc" });
-            image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
+            image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment", "eTransferSrc" });
             graph.Add("ids target", "Framebuffer").Wire("color[0].view", "ids").Set("color[0].name", "ids").Set("color[0].clear", clear("UInt", "u"))
                 .Wire("depthStencil.view", "depth").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
             graph.Add("entities", "GraphicsPipeline").Set("vertex.module", "koralEditorIds").Set("vertex.entry", "vertex")
@@ -184,7 +184,8 @@ float4 fragment(Raster raster) : SV_Target
             graph.Add("chosen unwanted", "LessOrEqual").Wire("a", "chosen wanted").Set("b", 0);
             graph.Add("draw chosen", "Draw").Wire("pipeline", "entities").Wire("cull", "seen").Wire("idle", "chosen unwanted")
                 .Wire("mesh", "chosen", "Mesh.mesh").Wire("push.model", "chosen", "matrix").Wire("push.entityId", "chosen", "entityId");
-            graph.Add("pick", "Pick").Wire("ids", "ids");
+            // (With the depth round the pixel: where on a surface it is, for what is placed or measured there.)
+            graph.Add("pick", "Pick").Wire("ids", "ids").Wire("depth", "depth");
 
             // Over the scene's picture: the line round what is picked, then the editor's shapes.
             image("over", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
@@ -354,7 +355,9 @@ float4 fragment(Raster raster) : SV_Target
         return problems;
     }
     void Overlay::SetSelected(const kecs::Entity entity) { _runtime->SetSelected(entity); }
+    void Overlay::SetHidden(std::set<kecs::Entity> hidden) { _runtime->SetHidden(std::move(hidden)); }
     bool Overlay::Pick(const float u, const float v, std::function<void(kecs::Entity)> then) { return _runtime->Pick(u, v, std::move(then)); }
+    bool Overlay::PickAt(const float u, const float v, std::function<void(const kgraph::Runtime::PickHit&)> then) { return _runtime->PickAt(u, v, std::move(then)); }
     kor::ResourceRef<const kor::Image> Overlay::Picture() const { return _runtime->ImageOf("over"); }
     std::shared_ptr<kgraph::Resource> Overlay::PictureHeld() const { return _runtime->ResourceOf("over"); }
     kor::Mat4 Overlay::ViewProjection() const { return _runtime->ViewProjection(); }

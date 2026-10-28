@@ -101,7 +101,7 @@ TEST(Catalog, HasANodeForEveryBuilderAndTheEnginesOwn) {
         return std::ranges::find(type.inputs, input, &kgraph::Port::name) != type.inputs.end();
     };
     for (const char* name : { "Image", "ImageView", "Sampler", "Buffer", "BufferView", "Shader", "Framebuffer", "ComputePipeline", "GraphicsPipeline",
-                              "RayTracingPipeline", "Number", "Vector", "Add", "Ceil", "ImageExtent", "Screen", "Reference", "Clear", "Blit", "Dispatch" })
+                              "RayTracingPipeline", "Double", "Vec3", "Add", "Ceil", "ImageExtent", "Screen", "Reference", "Clear", "Blit", "Dispatch" })
         EXPECT_NE(kgraph::FindType(name), nullptr) << name;
     EXPECT_EQ(kgraph::FindType("DescriptorSet"), nullptr);
 
@@ -416,7 +416,6 @@ TEST(Catalog, SaysWhatANumberIsKeptWithin) {
     EXPECT_EQ(port("CopyBufferToImage", "mip").max, 15.f);
     EXPECT_EQ(port("Framebuffer", "depthStencil.depth").max, 1.f);
     EXPECT_EQ(port("Sampler", "mipLodBias").min, -16.f);
-    EXPECT_EQ(port("Component", "index").max, 3.f);
     // A field of a builder's struct: a stencil's mask, a depth range, a vertex attribute's numbers.
     EXPECT_EQ(kgraph::LimitsOf("KoralStencilOpState", "writeMask").max, 255.f);
     EXPECT_EQ(kgraph::LimitsOf("KoralDepthStencilState", "maxDepth").max, 1.f);
@@ -431,8 +430,8 @@ TEST(Catalog, SaysWhatANumberIsKeptWithin) {
     EXPECT_EQ(port("UVec3", "z").min, 0.f);
     EXPECT_TRUE(port("IVec2", "y").integer);
     EXPECT_EQ(port("Vec4", "w").min, -any);
-    EXPECT_FALSE(kgraph::FindType("Number")->listed) << "kept for the graphs made with it, offered as its kinds";
-    EXPECT_FALSE(kgraph::FindType("Vector")->listed);
+    EXPECT_EQ(kgraph::FindType("Number"), nullptr) << "a number is said of its kind: Float, Double, Int or UInt";
+    EXPECT_EQ(kgraph::FindType("Vector"), nullptr);
     EXPECT_TRUE(kgraph::FindType("Vec3")->listed);
 }
 
@@ -549,7 +548,7 @@ TEST(PassRates, ArePutInTheOrderTheyRunAndSetOneAtATime) {
 TEST(Catalog, EveryNodeIsOfALevelAndAFunctionsCallIsOfNodes) {
     using kgraph::Level;
     const auto level = [](const char* type) { const kgraph::NodeType* found = kgraph::FindType(type); return found ? found->level : Level::eValue; };
-    EXPECT_EQ(level("Number"), Level::eValue);
+    EXPECT_EQ(level("Double"), Level::eValue);
     EXPECT_EQ(level("MatrixMultiply"), Level::eValue);
     EXPECT_EQ(level("Perspective"), Level::eValue);
     EXPECT_EQ(level("Switch"), Level::eValue);

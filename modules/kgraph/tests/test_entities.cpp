@@ -23,6 +23,7 @@
 #include <mesh.h>
 #include <vertexLayout.h>
 
+#include <kecs/json.h>
 #include <kecs/serialize.h>
 #include <kgraph/entities.h>
 
@@ -868,19 +869,25 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");
     graph.Add("unseen", "MatrixInverse").Wire("a", "seen");
     graph.Add("sky", "Entity").Set("component", "Sky");
-    graph.Add("zenith", "Linear").Wire("a", "sky", "field.zenith");
+    graph.Add("zenith", "ColorConvert").Wire("color", "sky", "field.zenith").Set("from", "eGamma22").Set("to", "eLinear");
     graph.Add("sun", "Entity").Set("component", "DirectionalLight");
     graph.Add("lamps", "ForEach").Set("component", "PointLight");
     graph.Add("place and reach", "Append").Wire("a", "lamps", "worldPosition").Wire("b", "lamps", "field.range");
     graph.Add("lights", "Collect").Wire("value", "place and reach");
-    graph.Add("far", "ComponentValue").Set("component", "Camera").Set("field", "far");
-    graph.Add("twice as far", "Multiply").Wire("a", "far").Set("b", 2);
-    graph.Add("where", "EntityTransform").Set("entity", "Lamp");
-    graph.Add("placed", "Append").Wire("a", "camera", "position").Wire("b", "far");
+    graph.Add("far", "Entity").Set("component", "Camera");
+    graph.Add("twice as far", "Multiply").Wire("a", "far", "field.far").Set("b", 2);
+    graph.Add("where", "Entity").Set("entity", "Lamp");     // of no component: the one so named, wherever it is
+    graph.Add("placed", "Append").Wire("a", "camera", "position").Wire("b", "far", "field.far");
     graph.Add("back", "MatrixMultiply").Wire("a", "seen").Wire("b", "unseen");
     // A block as a shader declares it: a matrix, a float3 with a float after it in its fourth place, a uint4.
-    graph.Add("block", "DataBuffer").Wire("field[0].value", "seen").Wire("field[1].value", "camera", "position")
-        .Wire("field[2].value", "twice as far").Wire("field[3].value", "lights", "count").Set("field[3].type", "eUVec4");
+    const auto layout = [](const char* third) {
+        Value::List fields;
+        for (const auto& [name, type] : { std::pair { "seen", "eMat4" }, { "eye", "eVec3" }, { "reach", third }, { "count", "eUVec4" } })
+            fields.emplace_back(Value::Members { { "name", name }, { "type", type } });
+        return Value(std::move(fields));
+    };
+    graph.Add("block", "BufferBuilder").Set("usage", "eUniform").Set("layout", layout("eFloat")).Wire("field.seen", "seen").Wire("field.eye", "camera", "position")
+        .Wire("field.reach", "twice as far").Wire("field.count", "lights", "count");
     graph.Add("taken", "Reference").Set("node", "lens");
     graph.Find("taken")->pass = "later";
     graph.Add("from afar", "Add").Wire("a", "taken", "far").Set("b", 1);
@@ -899,7 +906,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     EXPECT_TRUE(near(runtime.ValueOf("camera", "position"), { 1, 2, 3 })) << runtime.ValueOf("camera", "position").ToJson();
     EXPECT_NEAR(*runtime.ValueOf("lens", "fieldOfView").Number(), 90, 1e-4);
     EXPECT_EQ(runtime.ValueOf("lens", "far"), Value(50));
-    EXPECT_EQ(runtime.ValueOf("far"), Value(50));
+    EXPECT_EQ(runtime.ValueOf("far", "field.far"), Value(50));
     EXPECT_EQ(runtime.ValueOf("twice as far"), Value(100));
     EXPECT_TRUE(near(runtime.ValueOf("placed"), { 1, 2, 3, 50 }));
     EXPECT_EQ(runtime.ValueOf("where", "worldPosition"), Value(Value::List { 0, 4, 0 }));
@@ -983,7 +990,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     ASSERT_NE(follows.ResourceOf("block"), nullptr);
     EXPECT_NE(follows.ResourceOf("block"), runtime.ResourceOf("block")) << "what a node makes is its own";
     // The graph edited: the other follows it.
-    graph.Add("thrice as far", "Multiply").Wire("a", "far").Set("b", 3);
+    graph.Add("thrice as far", "Multiply").Wire("a", "far", "field.far").Set("b", 3);
     graph.Add("numbers", "Buffer").Set("instanceCount", 8).Set("usage", Value::List { "eStorage" });
     runtime.Set(graph);
     Frame();
@@ -1029,36 +1036,26 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     EXPECT_EQ(runtime.ValueOf("eye", "present"), Value(0));
 
     // What a field is not, and what a block cannot be, is said.
-    graph.Find("far")->Set("field", "nearness");
-    graph.Find("block")->Set("field[2].type", "eBlob");
+    graph.Add("written", "WriteComponent").Set("component", "Camera").Set("field", "nearness").Set("value", 1);
+    graph.Find("block")->Set("layout", layout("eBlob"));
     graph.Add("all lamps", "ForEach").Set("component", "PointLight").Set("select", "eFirst");
     runtime.Set(graph);
-    EXPECT_NE(runtime.Status("far")->error.find("'Camera' has no field 'nearness'"), std::string::npos) << runtime.Status("far")->error;
+    EXPECT_NE(runtime.Status("written")->error.find("'Camera' has no field 'nearness'"), std::string::npos) << runtime.Status("written")->error;
     EXPECT_FALSE(runtime.Status("block")->ok);
     EXPECT_NE(runtime.Status("all lamps")->error.find("an Entity node is one"), std::string::npos) << runtime.Status("all lamps")->error;
 }
 
-// Every component of the world is offered as two nodes: a ForEach of it, and a buffer laid out as its element is.
-TEST_F(EntityTest, EachComponentIsOfferedAsANodeAndABuffer) {
-    using kgraph::Value;
+// Every component of the world is offered as a ForEach of it; its buffer is one ComponentBuffer node, told which.
+TEST_F(EntityTest, EachComponentIsOfferedAsANode) {
     const auto presets = scene->runtime->Presets();
     const auto find = [&](const std::string_view name) { return std::ranges::find(presets, name, &kgraph::Preset::name); };
     for (const char* name : { "Camera", "PointLight", "SpotLight", "DirectionalLight", "Sky" }) {
         const auto each = find(name);
         ASSERT_NE(each, presets.end()) << name;
         EXPECT_EQ(each->type, "ForEach");
-        ASSERT_NE(find(std::string(name) + " Buffer"), presets.end()) << name;
+        EXPECT_EQ(find(std::string(name) + " Buffer"), presets.end()) << name << ": no buffer of each component";
     }
-    const auto buffer = find("SpotLight Buffer");
-    EXPECT_EQ(buffer->type, "BufferBuilder");
-    const Value& layout = buffer->inputs.front().second;
-    ASSERT_TRUE(layout.Items());
-    std::vector<std::string> names;
-    for (const auto& field : *layout.Items()) names.push_back(*field.Find("name")->String());
-    EXPECT_EQ(names, (std::vector<std::string> { "color", "intensity", "range", "innerAngle", "outerAngle", "worldPosition", "forward", "matrix" }));
-
-    // A component made since — a script's — is offered as well, and the buffer of it is laid out as its ForEach's outputs
-    // are: each field wired from the output of its name.
+    // A component made since — a script's — is offered as well.
     kscript::ScriptType glow;
     glow.name = "Glow";
     glow.size = 4;
@@ -1066,19 +1063,8 @@ TEST_F(EntityTest, EachComponentIsOfferedAsANodeAndABuffer) {
     glow.fields = { { "strength", "f32", 0, 4 } };
     ASSERT_NE(scene->scripts.Declare(glow), kecs::NoComponent);
     const auto now = scene->runtime->Presets();
-    const auto glowBuffer = std::ranges::find(now, "Glow Buffer", &kgraph::Preset::name);
-    ASSERT_NE(glowBuffer, now.end());
-    support::Give(scene->world, scene->world.Create(), "Glow", { { "strength", { 2.f } } });
-    kgraph::Graph graph;
-    graph.Add("glows", "ForEach").Set("component", "Glow");
-    auto& data = graph.Add("glow data", "BufferBuilder");
-    for (const auto& [input, value] : glowBuffer->inputs) data.Set(input, value);
-    data.Wire("field.strength", "glows", "field.strength");
-    for (const char* where : { "worldPosition", "forward", "matrix" }) data.Wire(std::string("field.") + where, "glows", where);
-    scene->runtime->Set(graph);
-    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
-    EXPECT_EQ(scene->runtime->ValueOf("glow data", "count"), Value(1));
-    EXPECT_EQ(scene->runtime->ValueOf("glow data", "stride"), Value(112)) << "a float, two float3s each on sixteen, and a matrix";
+    EXPECT_NE(std::ranges::find(now, "Glow", &kgraph::Preset::name), now.end());
+    EXPECT_NE(kgraph::FindType("ComponentBuffer"), nullptr);
 }
 
 // A graph is in passes: each node on the page of one, the passes in the order they are drawn. Saved and read back,
@@ -1756,7 +1742,7 @@ TEST_F(EntityTest, AnIdleDrawsBufferOfInstancesFollowsTheEntitiesForWhatReadsIt)
     graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
         .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
     // Resting, always — told so by a value, as a branch not chosen is: its buffer is what the other reads.
-    graph.Add("rest", "Number").Set("value", 1);
+    graph.Add("rest", "Double").Set("value", 1);
     graph.Add("resting", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
         .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("idle", "rest");
     graph.Add("reader", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
@@ -2026,7 +2012,7 @@ TEST_F(EntityTest, AFunctionsCallsAreItsNodesWrittenOut) {
     for (int i = 0; i < 2; ++i) support::Give(scene->world, scene->world.Create(), "PointLight", { { "range", { 3.f } } });
     kgraph::Graph graph;
     graph.functions = { { "tripled", tripled }, { "counted", counted } };
-    graph.Add("two", "Number").Set("value", 2);
+    graph.Add("two", "Double").Set("value", 2);
     graph.Add("a", "Function").Set("function", "tripled").Wire("x", "two");
     graph.Add("b", "Function").Set("function", "tripled").Set("x", 10).Set("plus", 0);
     graph.Add("both", "Add").Wire("a", "a", "result").Wire("b", "b", "result");
@@ -2071,7 +2057,7 @@ TEST_F(EntityTest, AFunctionsCallsAreItsNodesWrittenOut) {
 
     // A function opened in place: its edges in the graph itself stand for what they are given.
     kgraph::Graph open;
-    open.Add("five", "Number").Set("value", 5);
+    open.Add("five", "Double").Set("value", 5);
     open.Add("edge", "FunctionInput").Set("name", "x").Wire("value", "five");
     open.Add("times", "Multiply").Wire("a", "edge").Set("b", 3);
     open.Add("out", "FunctionOutput").Set("name", "result").Wire("value", "times");
@@ -2320,4 +2306,104 @@ TEST_F(EntityTest, RaysAreShadedByTheirPipelinesOwnMaterial) {
     for (int i = 0; i < 3; ++i) Frame();
     EXPECT_TRUE(is(4, { 255, 255, 0 })) << "the cube made yellow";
     EXPECT_EQ(runtime.Status("tracer")->builds, built);
+}
+
+// Where an entity was the frame before is an output of each: what a shader works out motion from. The box round some of
+// them is a SceneBounds'; a WriteComponent writes a value into one, and only when it is not what it holds.
+TEST_F(EntityTest, WhereEachWasTheBoxRoundThemAndAValueWrittenIntoOne) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    const kecs::Entity lamp = world.Create(), other = world.Create();
+    world.Rename(lamp, "Lamp");
+    support::Give(world, lamp, "PointLight", { { "range", { 3.f } } });
+    support::Give(world, other, "PointLight", { { "range", { 3.f } } });
+    world.SetPosition(lamp, { 1, 0, 0 });
+    world.SetPosition(other, { -1, 2, 0 });
+    kgraph::Graph graph;
+    graph.Add("lamp", "Entity").Set("entity", "Lamp");
+    graph.Add("all", "Entities");
+    graph.Add("lamps", "Filter").Wire("entities", "all").Set("with", Value::List { "PointLight" });
+    graph.Add("box", "SceneBounds").Wire("entities", "lamps");
+    graph.Add("reach", "Multiply").Set("a", 4).Set("b", 2);
+    graph.Add("write", "WriteComponent").Set("component", "PointLight").Set("field", "range").Set("entity", "Lamp").Wire("value", "reach");
+    graph.Add("shapes", "DebugShapes").Set("kind", "eBox").Wire("min", "box", "min").Wire("max", "box", "max");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("box", "min"), Value(Value::List { -1, 0, 0 }));
+    EXPECT_EQ(runtime.ValueOf("box", "max"), Value(Value::List { 1, 2, 0 }));
+    EXPECT_EQ(runtime.ValueOf("box", "count"), Value(2));
+    EXPECT_EQ(runtime.ValueOf("write", "written"), Value(true));
+    const kecs::ComponentId lights = world.Find("PointLight");
+    const kecs::FieldDescription* range = world.Describe(lights).FindField("range");
+    float written = 0.f;
+    std::memcpy(&written, static_cast<const std::byte*>(world.Get(lamp, lights)) + range->offset, 4);
+    EXPECT_EQ(written, 8.f) << "4 times 2, into the lamp's range";
+    const auto changes = world.ChangesOf(lights);
+    Frame();
+    EXPECT_EQ(world.ChangesOf(lights), changes) << "what it holds already is not written again";
+
+    // Moved: where it was the frame before, and where it is now.
+    world.SetPosition(lamp, { 5, 0, 0 });
+    Frame();
+    const auto at = [&](const char* output) { const Value m = runtime.ValueOf("lamp", output); return *(*m.Items())[12].Number(); };
+    EXPECT_EQ(at("matrix"), 5.0);
+    EXPECT_EQ(at("previousMatrix"), 1.0) << "where it was the frame before";
+    Frame();
+    EXPECT_EQ(at("previousMatrix"), 5.0) << "it moved no more";
+}
+
+namespace {
+    /** One of the engine's functions, as its file has it: packages/koral/functions/<name>.kfunc. */
+    std::shared_ptr<const kgraph::Graph> PackageFunction(const std::string& name)
+    {
+        const std::filesystem::path file = std::filesystem::path(KGRAPH_PACKAGE_SHADERS).parent_path() / "functions" / (name + ".kfunc");
+        std::ifstream in(file, std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        kecs::json::Value parsed;
+        std::string error;
+        auto graph = std::make_shared<kgraph::Graph>();
+        if (!kecs::json::Parse(text, parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
+            ADD_FAILURE() << name << ": " << error;
+        return graph;
+    }
+}
+
+// The engine's Lights: every light in one buffer as koral_lights.slang has it — the directional ones, then the points,
+// then the spots — each colour in linear terms times its intensity.
+TEST_F(EntityTest, TheEnginesLightsAreEveryLightInOneBuffer) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    const kecs::Entity sun = world.Create(), lamp = world.Create(), other = world.Create(), spot = world.Create();
+    support::Give(world, sun, "DirectionalLight", { { "color", { 1, 1, 1 } }, { "intensity", { 3.f } } });
+    support::Give(world, lamp, "PointLight", { { "color", { 1, 0, 0 } }, { "intensity", { 2.f } }, { "range", { 5.f } } });
+    support::Give(world, other, "PointLight", { { "color", { 0, 1, 0 } }, { "intensity", { 1.f } }, { "range", { 6.f } } });
+    support::Give(world, spot, "SpotLight", { { "color", { 1, 1, 1 } }, { "intensity", { 1.f } }, { "range", { 9.f } }, { "innerAngle", { 0.f } }, { "outerAngle", { 60.f } } });
+    world.SetPosition(lamp, { 1, 2, 3 });
+    kgraph::Graph graph;
+    graph.functions["Lights"] = PackageFunction("Lights");
+    graph.Add("lights", "Function").Set("function", "Lights");
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(4));
+    EXPECT_EQ(runtime.ValueOf("lights", "points"), Value(2));
+    EXPECT_EQ(runtime.ValueOf("lights", "spots"), Value(1));
+    const auto held = runtime.ResourceOf("lights", "lights");
+    ASSERT_TRUE(held);
+    const auto floats = kor::capi::BufferOf(held->handle)->Read<float>();
+    ASSERT_GE(floats.size(), 64u) << "four of sixteen numbers: a KoralLight is 64 bytes";
+    const auto kind = [&](const std::size_t light) { std::uint32_t k; std::memcpy(&k, &floats[light * 16 + 7], 4); return k; };
+    EXPECT_EQ(kind(0), 0u) << "the sun first";
+    EXPECT_EQ(floats[8], 3.f) << "white times three";
+    EXPECT_EQ(kind(1), 1u);
+    EXPECT_EQ(floats[16 + 0], 1.f) << "where the first lamp is";
+    EXPECT_EQ(floats[16 + 2], 3.f);
+    EXPECT_EQ(floats[16 + 3], 5.f) << "and how far it reaches";
+    EXPECT_EQ(floats[16 + 8], 2.f) << "red, twice";
+    EXPECT_EQ(kind(3), 2u) << "the spot last";
+    EXPECT_NEAR(floats[48 + 11], 1.f, 1e-5) << "the cosine of none";
+    EXPECT_NEAR(floats[48 + 12], 0.5f, 1e-5) << "of sixty degrees";
 }

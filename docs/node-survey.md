@@ -15,6 +15,15 @@ Abstraction levels used throughout:
 | **L3** | Scene/data binding | Reads the ECS world or turns per-entity data into GPU data: Entities, Filter, ForEach, MeshPack, RayScene, ShaderBuffer. |
 | **L4** | Technique | A whole rendering/simulation technique as one node or Function: Bloom, SunShadows, Tonemap, XpbdStep. |
 
+**Since (2026-10-27):** Number, Vector, Component, ComponentValue, EntityTransform, DataBuffer and Linear are gone
+(Double, Vec2–4, Split, Entity, BufferBuilder and ColorConvert in their places), and of the proposals below these are
+built: Time `frame` (#1), Jitter (#2), LastFrame (#3), DeviceSupports (#4), ColorConvert (#8), the quaternions (#10),
+History (#17), ComputePass (#28), Readback (#30), Clear of depth and whole numbers (#34, without a mip or a layer of
+its own: that is kor's), DebugShapes (#36), `previousMatrix` (#40), Lights (#41), InstanceCull with HiZ (#42, #55),
+SceneBounds (#44), and TAA (#53); besides them ComponentBuffer, RenderTarget (#15 without aliasing, which kgraph's
+images do not have), WriteComponent, comparisons of vectors with Any and All, and Screen's `format` and `scale`. See
+kgraph.md.
+
 "Composite" means the node is made of other nodes (a `.kfunc` Function, a Repeat loop, a Bundle) or expands into
 several passes/objects at runtime. "Atomic" means it maps to one kor object, one command, or one CPU computation.
 

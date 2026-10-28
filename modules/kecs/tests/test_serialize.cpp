@@ -205,3 +205,43 @@ TEST(Serialize, AddsToWhatTheWorldHolds) {
     EXPECT_EQ(world.EntityCount(), 8u);
     EXPECT_EQ(world.Get<Named>(loaded.entities[1])->target, loaded.entities[2]) << "references are among what was loaded";
 }
+
+// A field whose type is named more narrowly than when it was saved — a mesh's "Mesh", saved as any "resource" — reads what
+// was saved when its codecs say it does; and is left at its default when they do not.
+TEST(Serialize, ATypeNamedMoreNarrowlyReadsWhatWasSavedWhenItSaysItDoes) {
+    kecs::Codecs codecs;
+    const kecs::Codec number {
+        .write = [](const void* v, const kecs::SaveContext&) { return std::format("{}", *static_cast<const float*>(v)); },
+        .read = [](void* v, const std::string_view json, const kecs::LoadContext&) { *static_cast<float*>(v) = std::stof(std::string(json)); return true; },
+    };
+    codecs.Register("number", number);
+    codecs.Register("distance", number);
+    const auto lens = [](World& world, const char* type) {
+        return world.Register([type] {
+            kecs::ComponentDescription d;
+            d.name = "lens";
+            d.size = 4;
+            d.alignment = 4;
+            d.fields = { { "focus", type, 0, 4 } };
+            return d;
+        }());
+    };
+    World world;
+    const float focus = 2.5f;
+    world.Add(world.Create(), lens(world, "number"), &focus);
+    const std::string json = kecs::Save(world, codecs).json;
+
+    World narrower;
+    const kecs::ComponentId now = lens(narrower, "distance");
+    const kecs::Loaded refused = kecs::Load(narrower, json, codecs);
+    ASSERT_TRUE(refused.ok) << refused.error;
+    EXPECT_EQ(*static_cast<const float*>(narrower.Get(refused.entities[0], now)), 0.f) << "not said: another type, its default";
+
+    codecs.Reads("distance", "number");
+    World reading;
+    const kecs::ComponentId again = lens(reading, "distance");
+    const kecs::Loaded read = kecs::Load(reading, json, codecs);
+    ASSERT_TRUE(read.ok) << read.error;
+    EXPECT_EQ(*static_cast<const float*>(reading.Get(read.entities[0], again)), 2.5f) << "said: what was saved";
+    EXPECT_TRUE(read.problems.empty());
+}

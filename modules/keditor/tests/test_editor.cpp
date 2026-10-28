@@ -56,10 +56,14 @@ namespace {
          * have all come — the interface is not built again for a dozen frames running.
          */
         void Settle() {
-            for (int frame = 0, still = 0; frame < 1000 && still < 12; ++frame) {
+            // Still for a dozen frames and for half a second: what the editor makes a few at a time (the nodes'
+            // pictures, one an eighth of a second) goes by the clock, and frames can be quicker than that.
+            auto since = std::chrono::steady_clock::now();
+            for (int frame = 0, still = 0; frame < 1000 && (still < 12 || std::chrono::steady_clock::now() - since < std::chrono::milliseconds(500)); ++frame) {
                 const auto before = Session().Version();
                 Frame();
-                still = Session().Version() == before ? still + 1 : 0;
+                if (Session().Version() == before) ++still;
+                else { still = 0; since = std::chrono::steady_clock::now(); }
             }
         }
         /** Whether the interface shows @p text anywhere, as the whole of something or part of it. */
@@ -75,6 +79,16 @@ namespace {
         [[nodiscard]] bool NothingIsWrong() {
             for (int i = 0; i < 4; ++i) Frame();
             return Session().Problems().empty();
+        }
+        /** Where something that shows @p text is on the screen — its box, top-left and bottom-right; none when it is shown nowhere. */
+        std::optional<std::pair<kor::Vec2, kor::Vec2>> Where(const std::string_view text) {
+            std::optional<std::pair<kor::Vec2, kor::Vec2>> found;
+            std::function<void(kui::RenderObject&)> visit = [&](kui::RenderObject& o) {
+                if (!found && o.DebugText() == text) found = std::pair { o.ToGlobal({ 0.f, 0.f }), o.ToGlobal(o.Size()) };
+                o.VisitChildren(visit);
+            };
+            if (auto* root = editor->Interface().RootRenderObject()) visit(*root);
+            return found;
         }
         void Click(const kor::Vec2 at) {
             auto& input = editor->SceneInput();
@@ -157,9 +171,9 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     EXPECT_TRUE(Shows("What its draws take from each entity is the component 'stamp'"));
     Session().Select(std::string("canvas"));
     EXPECT_TRUE(Shows("eRGBA8_UNORM")) << "an enumeration, by name";
-    EXPECT_TRUE(Shows("eColorAttachment")) << "flags, each to tick";
+    EXPECT_FALSE(Shows("eColorAttachment")) << "no usage to tick: an image is made for what uses it";
     EXPECT_TRUE(Shows("extent")) << "its size, on one line";
-    EXPECT_TRUE(Shows("mipLevels")) << "an image is made with its format, size and usage, and the rest is there as it starts";
+    EXPECT_TRUE(Shows("mipLevels")) << "an image is made with its format and size, and the rest is there as it starts";
     EXPECT_TRUE(Doc().Runtime().Ok());
     EXPECT_FALSE(Doc().Graph().Find("canvas")->inputs.contains("mipLevels")) << "nothing is given until it is set";
 
@@ -320,6 +334,23 @@ TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
     EXPECT_EQ(Session().EntryPoints("show"), (std::vector<std::string> { "vertexMain", "fragmentMain" }));
     EXPECT_EQ(Session().EntryPoints("stamp"), std::vector<std::string> { "computeMain" });
     EXPECT_TRUE(Session().EntryPoints("no such module").empty());
+    // Listed among the assets by entry, each of its module and stage.
+    {
+        const auto assets = Session().Assets();
+        const auto entry = [&](const std::string& id) { return std::ranges::find(assets, id, &keditor::Session::Asset::id); };
+        ASSERT_NE(entry("shader:show#vertexMain"), assets.end());
+        ASSERT_NE(entry("shader:show#fragmentMain"), assets.end());
+        ASSERT_NE(entry("shader:stamp#computeMain"), assets.end());
+        ASSERT_NE(entry("shader:show"), assets.end()) << "the module, its entries under it";
+        EXPECT_TRUE(entry("shader:show")->stage.empty());
+        EXPECT_EQ(entry("shader:show#vertexMain")->parent, "shader:show");
+        EXPECT_LT(entry("shader:show"), entry("shader:show#vertexMain")) << "the module first";
+        EXPECT_EQ(entry("shader:show#fragmentMain")->group, "show");
+        EXPECT_EQ(entry("shader:show#fragmentMain")->label, "fragmentMain");
+        EXPECT_EQ(entry("shader:show#fragmentMain")->stage, "fragment");
+        EXPECT_EQ(entry("shader:stamp#computeMain")->stage, "compute");
+        EXPECT_LT(entry("shader:show#vertexMain"), entry("shader:show#fragmentMain")) << "as the module declares them";
+    }
 
     EXPECT_FALSE(Session().OpenProject(directory / "nowhere"));
     EXPECT_TRUE(Shows("no project"));
@@ -377,7 +408,7 @@ TEST_F(EditorTest, ThePointerPicksMakesAndAdds) {
         for (int i = 0; i < 3; ++i) Frame();
     };
     type("run compute");
-    EXPECT_TRUE(Shows("Dispatch   ·   Passes")) << "found by other words for it";
+    EXPECT_TRUE(Shows("ComputePass   ·   Passes") && Shows("Dispatch   ·   Passes")) << "found by other words for them";
     EXPECT_FALSE(Shows("GenerateMipmaps") || Shows("Smoothstep")) << "and what does not fit is gone";
     Sheet("find");
     // Enter adds the first: it is on the graph where the click was, and the inspector is its.
@@ -387,10 +418,10 @@ TEST_F(EditorTest, ThePointerPicksMakesAndAdds) {
     editor->SceneInput().FeedKey(kor::Key::eEnter, false);
     for (int i = 0; i < 3; ++i) Frame();
     ASSERT_EQ(Doc().Graph().nodes.size(), nodes + 1);
-    EXPECT_EQ(Doc().Graph().nodes.back().type, "Dispatch");
-    EXPECT_EQ(Session().selectedNode, "dispatch");
+    EXPECT_EQ(Doc().Graph().nodes.back().type, "ComputePass") << "a pipeline and its dispatch, the first that fits";
+    EXPECT_EQ(Session().selectedNode, "computepass");
     EXPECT_FALSE(Shows("Add a node")) << "and the dialog is gone";
-    EXPECT_TRUE(Shows("dispatch: 'pipeline' needs a ComputePipeline wired in"));
+    EXPECT_TRUE(Shows("computepass")) << "the inspector is its";
 }
 
 TEST_F(EditorTest, TheMenusAndButtonsDoWhatTheySay) {
@@ -605,7 +636,7 @@ TEST_F(EditorTest, ANewNodeStartsAsSomethingThatWorksAndGivesWhatItIsMadeOf) {
     EXPECT_TRUE(Shows("eRGBA8_UNORM"));
 
     // Other kinds likewise: each is right as it comes.
-    for (const char* type : { "Sampler", "Buffer", "Primitive", "Number", "Vector", "Color" }) {
+    for (const char* type : { "Sampler", "Buffer", "Primitive", "Double", "Vec3", "Color" }) {
         const std::string id = Doc().AddNode(type, 0, 0);
         EXPECT_TRUE(Doc().Runtime().Status(id)->ok) << type << ": " << Doc().Runtime().Status(id)->error;
     }
@@ -987,6 +1018,43 @@ TEST_F(EditorTest, TheSceneViewShowsTheSceneOtherWaysAndAGrid) {
     Frame();
 }
 
+// The flow is of what comes before: a node set down on a later page than one that uses it — an Image made on the last
+// page and cleared on an earlier one — is no step back to that page, and a Switch is a step after what it chooses from,
+// wherever its node is. However the graph is wired, the flow has no way round.
+TEST_F(EditorTest, ThePassFlowHasNoWayRound) {
+    const auto project = scene::MakeProject("flow dag");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    keditor::AddLitScene(Doc());
+    ASSERT_TRUE(Doc().AddPass("other"));
+    ASSERT_EQ(Doc().AddNode("Image", 40, 40, "late picture", "other"), "late picture");
+    Doc().SetInput("late picture", "format", "eRGBA8_UNORM");
+    Doc().SetInput("late picture", "usage", kgraph::Value(kgraph::Value::List { "eTransferDst", "eSampled" }));
+    ASSERT_EQ(Doc().AddNode("Clear", 300, 600, "early clear", "scene"), "early clear");
+    ASSERT_TRUE(Doc().Connect("late picture", "out", "early clear", "image"));
+    for (int i = 0; i < 6; ++i) Frame();
+    const auto flow = Session().Flow();
+    EXPECT_FALSE(std::ranges::any_of(flow.links, [](const auto& link) { return link.from == "other" && link.to == "scene"; }))
+        << "nothing of the last page's is worked on before the scene page";
+    // Every link from a step before to one after, and so an order of them all: each step once all it takes from are.
+    std::map<std::string, int> waiting;
+    for (const auto& step : flow.steps) waiting[step.id] = 0;
+    for (const auto& link : flow.links) ++waiting[link.to];
+    std::vector<std::string> ready;
+    for (const auto& [id, count] : waiting) if (count == 0) ready.push_back(id);
+    std::size_t ordered = 0;
+    while (!ready.empty()) {
+        const std::string id = ready.back();
+        ready.pop_back();
+        ++ordered;
+        for (const auto& link : flow.links)
+            if (link.from == id && --waiting[link.to] == 0) ready.push_back(link.to);
+    }
+    EXPECT_EQ(ordered, waiting.size()) << "a step is in a cycle";
+}
+
 // The pages as a flow: each wired from the pages whose work it uses — the last before it to write what it reads — and a
 // Switch that chooses between two pages' pictures a step between them and what uses its choice.
 TEST_F(EditorTest, ThePagesAreAFlowAndASwitchChoosesABranch) {
@@ -1010,14 +1078,16 @@ TEST_F(EditorTest, ThePagesAreAFlowAndASwitchChoosesABranch) {
     EXPECT_FALSE(linked(flow, "scene", "show")) << "what show uses of the picture is what sky left";
     for (const auto& step : flow.steps) EXPECT_TRUE(step.ran) << step.id;
 
-    // A second picture, made on a page of its own, and a Switch on the show page between it and the first.
-    ASSERT_TRUE(Doc().AddPass("other"));
+    // A second picture, made on a page of its own before the show page, and a Switch on the show page between it and
+    // the first. (A page after show would be read as the frame before left it: no step of this frame's flow.)
+    const auto showAt = std::ranges::find(Doc().Passes(), std::string("show")) - Doc().Passes().begin();
+    ASSERT_TRUE(Doc().AddPass("other", static_cast<int>(showAt)));
     ASSERT_EQ(Doc().AddNode("Image", 40, 40, "other picture", "other"), "other picture");
     Doc().SetInput("other picture", "format", "eRGBA8_UNORM");
     Doc().SetInput("other picture", "usage", kgraph::Value(kgraph::Value::List { "eTransferDst", "eTransferSrc", "eSampled" }));
     ASSERT_EQ(Doc().AddNode("Clear", 300, 40, "paint other", "other"), "paint other");
     ASSERT_TRUE(Doc().Connect("other picture", "out", "paint other", "image"));
-    ASSERT_EQ(Doc().AddNode("Number", 40, 400, "branch", "show"), "branch");
+    ASSERT_EQ(Doc().AddNode("Int", 40, 400, "branch", "show"), "branch");
     ASSERT_EQ(Doc().AddNode("Switch", 200, 400, "which picture", "show"), "which picture");
     ASSERT_TRUE(Doc().Connect("branch", "out", "which picture", "index"));
     ASSERT_TRUE(Doc().Connect("color", "out", "which picture", "option[0]"));
@@ -1237,7 +1307,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     // The scene pass's framebuffer is among what this page can use, in its panel — and not on the page itself.
     EXPECT_EQ(std::ranges::count(kui::debug::Texts(editor->Interface()), std::string("scene target")), 1);
     EXPECT_TRUE(Shows("Image, from scene")) << "what it took from an earlier pass says where from";
-    EXPECT_TRUE(Shows("DataBuffer, from frame"));
+    EXPECT_TRUE(Shows("BufferBuilder, from frame"));
     Sheet("pass");
     Session().ShowEveryPass();
     EXPECT_TRUE(Shows("scene target"));
@@ -1250,6 +1320,20 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     EXPECT_FALSE(Doc().Graph().overview.empty());
     EXPECT_EQ(Doc().Graph().Find("draw sky")->x, skyX);
     Sheet("every pass arranged");
+
+    // Every page put in order, one after another, each as it is drawn: a node thrown far off comes back among the rest
+    // of its page's, and the page shown before is shown again.
+    Session().ShowPass("sky");
+    for (int i = 0; i < 3; ++i) Frame();
+    Doc().PlaceNodes({ { "draw sky", { 50000.0, 50000.0 } }, { "camera", { -40000.0, 40000.0 } } });
+    Session().ArrangeEveryPage();
+    EXPECT_EQ(Session().PagesToArrange().size(), Doc().Passes().size());
+    for (int i = 0; i < 200 && !Session().PagesToArrange().empty(); ++i) Frame();
+    EXPECT_TRUE(Session().PagesToArrange().empty());
+    EXPECT_LT(std::abs(Doc().Graph().Find("draw sky")->y - Doc().Graph().Find("sky target")->y), 3000.0) << "put among its page's";
+    EXPECT_LT(std::abs(Doc().Graph().Find("camera")->y - Doc().Graph().Find("eye")->y), 3000.0) << "on another page too, next to what it is wired to";
+    EXPECT_EQ(Session().Pass(), "sky") << "and the page it was on is shown";
+    EXPECT_TRUE(Shows("Every page's nodes are in the order they are wired in"));
 
     // Going to a node turns to its page.
     Session().ShowPass("frame");
@@ -1465,10 +1549,9 @@ TEST_F(EditorTest, AnImageIsLookedAtALevelAtATimeAndAViewIsSwizzled) {
     Doc().SetInput(heights, "extent.y", 64);
     ASSERT_TRUE(Doc().Runtime().Status(heights)->ok) << Doc().Runtime().Status(heights)->error;
     Session().Select(heights);
+    EXPECT_FALSE(Shows("Look at what it holds")) << "what it holds is the viewer's to show: no button for it here";
+    EXPECT_FALSE(Shows("eTransferSrc")) << "nor its usage: it is made for what uses it";
     Session().Look(heights);
-    EXPECT_TRUE(Shows("Level 0  ·  64 × 64")) << "which level is looked at";
-    EXPECT_TRUE(Shows("Filtering"));
-    Sheet("look-level");
     Session().lookMip = 2;
     for (int i = 0; i < 12; ++i) Frame();
     const auto peek = Doc().Runtime().Watched(heights);
@@ -1789,7 +1872,7 @@ TEST_F(EditorTest, AFunctionIsMadeOpenedAndClosedFromTheEditor) {
     ASSERT_TRUE(Session().NewProject(directory));
     ASSERT_TRUE(Doc().AddPass("main"));
     Session().ShowPass("main");
-    Doc().AddNode("Number", 0, 0, "n", "main");
+    Doc().AddNode("Double", 0, 0, "n", "main");
     Doc().SetInput("n", "value", 2);
     Doc().AddNode("Multiply", 300, 0, "times", "main");
     Doc().SetInput("times", "b", 3);
@@ -1918,7 +2001,8 @@ TEST_F(EditorTest, NodesAreFoundByWhatSomeoneWouldCallThem) {
     EXPECT_EQ(first("mix"), "Lerp");
     EXPECT_EQ(first("pipe"), "GraphicsPipeline") << "the start of a word inside its name";
     EXPECT_EQ(first("compute pipe"), "ComputePipeline") << "every word typed has to fit";
-    EXPECT_EQ(first("run compute"), "Dispatch");
+    EXPECT_EQ(first("run compute"), "ComputePass") << "a pipeline and its dispatch at once";
+    EXPECT_TRUE(finds("run compute", "Dispatch"));
     EXPECT_EQ(first("if"), "Select");
     EXPECT_EQ(first("mip"), "GenerateMipmaps");
     EXPECT_EQ(first("quad"), "Primitive");
@@ -2664,21 +2748,31 @@ TEST_F(EditorTest, TheGridsSettingsAreChangedInTheirPopup) {
     grid.shown = true;
     Session().SetGrid(grid);
 
-    Click({ 1009.f, 90.f });       // the grid's settings, beside the grid
+    // The grid's settings, beside the grid: after the button that says how the scene is shown — its name, its arrow
+    // (4 and 14 wide, and its padding of 4) — the grid's button (24, after a gap of 4), and a gap of 2.
+    const auto lit = Where("Lit");
+    ASSERT_TRUE(lit) << "the scene view's toolbar";
+    Click({ lit->second.x + 4.f + 14.f + 4.f + 4.f + 24.f + 2.f + 12.f, (lit->first.y + lit->second.y) * 0.5f });
     ASSERT_TRUE(Shows("Behind things"));
     for (int i = 0; i < 10; ++i) Frame();
     EXPECT_TRUE(Shows("Behind things")) << "open still, the editor built again under it";
     Sheet("grid settings");
 
-    Click({ 1164.f, 180.f });      // XY
+    const auto xy = Where("XY");
+    ASSERT_TRUE(xy);
+    Click((xy->first + xy->second) * 0.5f);
     EXPECT_EQ(Session().SceneGrid().plane, keditor::Grid::Plane::eXY);
     EXPECT_TRUE(Shows("Behind things")) << "a setting changed leaves it open";
+    // The cell's size, dragged: its field is after its label's 96.
+    const auto label = Where("Cell (m)");
+    ASSERT_TRUE(label);
+    const float from = label->first.x + 96.f + 20.f, row = (label->first.y + label->second.y) * 0.5f;
     const float cell = Session().SceneGrid().cell;
     auto& input = editor->SceneInput();
-    input.FeedMousePosition({ 1170.f, 215.f });
+    input.FeedMousePosition({ from, row });
     Frame();
     input.FeedMouseButton(kor::MouseButton::eLeft, true);
-    for (int x = 1170; x <= 1250; x += 10) { input.FeedMousePosition({ static_cast<float>(x), 215.f }); Frame(); }
+    for (int x = 0; x <= 80; x += 10) { input.FeedMousePosition({ from + static_cast<float>(x), row }); Frame(); }
     input.FeedMouseButton(kor::MouseButton::eLeft, false);
     for (int i = 0; i < 4; ++i) Frame();
     EXPECT_GT(Session().SceneGrid().cell, cell) << "dragged to the right, a bigger cell";
@@ -2819,9 +2913,175 @@ TEST_F(EditorTest, TheFrameIsALineForEachPassWithWhatItCosts) {
     Click({ 170.f, 768.f });    // by what they cost
     EXPECT_TRUE(Shows("tint backdrop"));
     Sheet("frame");
-    // On a timeline: the last frame measured, each pass from when it started on the GPU to when it ended.
+    // On a timeline: the CPU's threads and the GPU's queues, each pass where it was prepared, recorded and run.
     Click({ 240.f, 768.f });
-    EXPECT_TRUE(Shows("The last frame measured")) << "or the device times no pass";
+    EXPECT_TRUE(Shows("The newest frame the GPU has measured")) << "or the device times no pass";
     EXPECT_FALSE(Shows("SHARE")) << "no list of lines";
     Sheet("frame-timeline");
+}
+
+// An entity's mesh is offered meshes: the built-in ones and the project's, and of the graph only what makes a mesh — by the
+// type its field says it is, as the inspector asks, not a type typed here.
+TEST_F(EditorTest, AMeshFieldIsOfferedMeshesAndNothingElse) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "mesh-choices";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    kecs::World& world = Doc().World();
+    const auto& described = world.Describe(world.Find("Mesh"));
+    const auto field = std::ranges::find(described.fields, std::string("mesh"), &kecs::FieldDescription::name);
+    ASSERT_NE(field, described.fields.end());
+    EXPECT_EQ(field->type, "Mesh") << "a mesh, not any resource";
+    const auto choices = Session().FieldChoices("Mesh", field->type);
+    EXPECT_TRUE(std::ranges::contains(choices, kgraph::DefaultMeshId(kgraph::DefaultMeshNames().front()))) << "the built-in meshes";
+    for (const auto& choice : choices) {
+        const auto held = Doc().Runtime().ResourceOf(choice);
+        if (Doc().Graph().Find(choice)) EXPECT_TRUE(held && held->kind == "Mesh") << choice << " is in the graph and makes no mesh";
+    }
+    std::filesystem::remove_all(directory);
+}
+
+// The scene view's tools: what is under the pointer, seen straight on and along an axis, hidden and shown by itself,
+// picked in a box and more than one at once, bookmarked, split in two, and its numbers in a corner.
+TEST_F(EditorTest, TheSceneViewMeasuresHidesPicksInABoxAndSplits) {
+    const auto project = scene::MakeProject("viewtools");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    const kecs::Entity sphere = keditor::AddLitScene(Doc());
+    Session().Frame(sphere);
+    for (int i = 0; i < 8; ++i) Frame();
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    keditor::Overlay* over = Session().Play().Over();
+    ASSERT_NE(over, nullptr);
+
+    // What is under the middle of the picture: the sphere, on its surface, facing the view.
+    const auto probe = [&](const float u, const float v) {
+        std::optional<kgraph::Runtime::PickHit> found;
+        EXPECT_TRUE(over->PickAt(u, v, [&](const kgraph::Runtime::PickHit& hit) { found = hit; }));
+        for (int i = 0; i < 12 && !found; ++i) Frame();
+        return found;
+    };
+    const auto hit = probe(0.5f, 0.5f);
+    ASSERT_TRUE(hit);
+    EXPECT_EQ(hit->entity, sphere);
+    ASSERT_TRUE(hit->deep) << "the depth round the pixel is read with it";
+    // Where on it, worked out of the depth as the editor does: about its radius from its middle, facing out.
+    const kor::Mat4 inverse = kor::Inverse(hit->viewProjection);
+    const auto at = [&](const int dx, const int dy) {
+        const float depth = hit->depth[(dy + 1) * 3 + dx + 1];
+        const kor::Vec4 clip((static_cast<float>(hit->pixel.x + dx) + 0.5f) / static_cast<float>(hit->extent.x) * 2.f - 1.f,
+                             (static_cast<float>(hit->pixel.y + dy) + 0.5f) / static_cast<float>(hit->extent.y) * 2.f - 1.f, depth, 1.f);
+        const kor::Vec4 world = inverse * clip;
+        return kor::Vec3(world.x, world.y, world.z) / world.w;
+    };
+    const kor::Vec3 centre(kgraph::ToKor(Doc().World().WorldMatrix(sphere))[3]), surface = at(0, 0);
+    EXPECT_NEAR(kor::Length(surface - centre), 0.5f, 0.05f) << "on the surface of a sphere half a unit round";
+    const kor::Vec3 facing = kor::Normalize(kor::Cross(at(0, 1) - surface, at(1, 0) - surface));
+    EXPECT_GT(std::abs(kor::Dot(facing, kor::Normalize(surface - centre))), 0.9f) << "the surface faces out from the middle";
+    // Something dropped there is put on that surface: the point is found, then what places it runs.
+    bool placed = false;
+    Session().DropAt(0.5f, 0.5f, [&] { placed = true; });
+    for (int i = 0; i < 12 && !placed; ++i) Frame();
+    ASSERT_TRUE(placed);
+    ASSERT_TRUE(Session().placeAt);
+    EXPECT_NEAR(kor::Length(*Session().placeAt - centre), 0.5f, 0.05f) << "on the sphere";
+    Session().placeAt.reset();
+
+    // Seen straight on, from above: the view is a box, and the scene is drawn through it as before.
+    Session().LookAlong(keditor::Session::Axis::eTop);
+    EXPECT_TRUE(Session().camera.orthographic);
+    EXPECT_GT(Session().camera.View().orthographic, 0.f);
+    for (int i = 0; i < 6; ++i) Frame();
+    for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
+    const kor::Mat4 straight = Doc().Runtime().ViewProjection();
+    EXPECT_NEAR(straight[0][3], 0.f, 1e-6f) << "no perspective: w is 1 wherever a point is";
+    EXPECT_NEAR(straight[1][3], 0.f, 1e-6f);
+    EXPECT_NEAR(straight[2][3], 0.f, 1e-6f);
+    const auto above = probe(0.5f, 0.5f);
+    ASSERT_TRUE(above);
+    EXPECT_EQ(above->entity, sphere) << "picked from above, straight on";
+    Session().SetOrthographic(false);
+    Session().Frame(sphere);
+    for (int i = 0; i < 6; ++i) Frame();
+
+    // Hidden in the scene view: not drawn, not picked — and the scene is as it was.
+    Session().Select(sphere);
+    Session().HideSelected();
+    EXPECT_TRUE(Session().ViewHidden().contains(sphere));
+    for (int i = 0; i < 6; ++i) Frame();
+    const auto through = probe(0.5f, 0.5f);
+    ASSERT_TRUE(through);
+    EXPECT_NE(through->entity, sphere) << "hidden, it is not what is under the pointer";
+    EXPECT_FALSE(Doc().Dirty() && !Doc().IsEnabled(sphere, "Mesh")) << "the scene keeps it as it was";
+    Session().ShowAll();
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_EQ(probe(0.5f, 0.5f)->entity, sphere);
+    // By itself: everything else hidden; and back.
+    Session().Isolate();
+    EXPECT_TRUE(Session().Isolated());
+    EXPECT_FALSE(Session().ViewHidden().contains(sphere));
+    EXPECT_TRUE(Session().ViewHidden().contains(Doc().World().FindEntity("Sun")));
+    Session().ShowAll();
+    EXPECT_TRUE(Session().ViewHidden().empty());
+
+    // Picked in a box round the whole picture: the sphere is among them. With another added, two; one picked, one.
+    const kor::UVec2 size = Session().viewport->Size();
+    ASSERT_GT(size.x, 0u);
+    Session().SelectInBox({ 0.f, 0.f }, { static_cast<float>(size.x), static_cast<float>(size.y) }, false);
+    EXPECT_TRUE(std::ranges::contains(Session().Selection(), sphere));
+    const kecs::Entity sun = Doc().World().FindEntity("Sun");
+    Session().Select(sphere);
+    Session().SelectAlso(sun);
+    EXPECT_EQ(Session().Selection(), (std::vector<kecs::Entity> { sphere, sun }));
+    Session().SelectAlso(sphere);
+    EXPECT_EQ(Session().Selection(), std::vector<kecs::Entity> { sun }) << "pressed again, taken away";
+    Session().Select(sphere);
+    EXPECT_EQ(Session().Selection(), std::vector<kecs::Entity> { sphere });
+
+    // A bookmark of the view, gone back to.
+    const keditor::EditorCamera marked = Session().camera;
+    Session().SaveBookmark(2);
+    EXPECT_TRUE(Session().HasBookmark(2));
+    Session().camera.yaw += 90.f;
+    Session().camera.distance *= 3.f;
+    EXPECT_TRUE(Session().GoToBookmark(2));
+    EXPECT_FLOAT_EQ(Session().camera.yaw, marked.yaw);
+    EXPECT_FLOAT_EQ(Session().camera.distance, marked.distance);
+    EXPECT_FALSE(Session().GoToBookmark(5)) << "none there";
+
+    // Split: a second view of the scene, from its own place, drawn as the first is.
+    Session().SetSplit(true);
+    Session().secondCamera.yaw += 120.f;
+    for (int i = 0; i < 10; ++i) Frame();
+    ASSERT_NE(Session().SecondView(), nullptr);
+    ASSERT_NE(Session().SecondView()->Runtime(), nullptr);
+    EXPECT_EQ(Session().SecondView()->Runtime()->CurrentView().view, Session().secondCamera.View().view);
+    EXPECT_TRUE(Session().SecondView()->Runtime()->EditorView());
+    for (const auto& problem : Session().SecondView()->Runtime()->Problems()) ADD_FAILURE() << problem;
+    EXPECT_TRUE(Shows("Second view"));
+    Session().SetSplit(false);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Session().SecondView()->Shown());
+
+    // The frame's numbers, in a corner.
+    Session().statsShown = true;
+    Session().Select(sphere);   // (the interface built again)
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("passes")) << "the stats corner";
+    EXPECT_TRUE(Shows("entities"));
+    // For looking at: the tools, a ruler drawn, the icons, a box being dragged, and the view split.
+    Session().SetMeasure(keditor::Session::Measure::eRuler);
+    Session().ruler = { centre + kor::Vec3(-0.5f, 0.f, 0.f), centre + kor::Vec3(0.5f, 0.3f, 0.f) };
+    Session().SelectAlso(sun);
+    Session().camera.yaw = 34.f;
+    Session().camera.pitch = -22.f;
+    Session().camera.distance = 9.f;
+    Sheet("view-tools");
+    Session().SetSplit(true);
+    for (int i = 0; i < 6; ++i) Frame();
+    Sheet("view-split");
+    Session().SetSplit(false);
 }

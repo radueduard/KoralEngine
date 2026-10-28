@@ -573,9 +573,12 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         node("MatrixInverse", "unseen", 680, 380);
         wire("seen", "unseen", "a");
         first("sky values", "Sky", 460);
+        // A colour as picked, in the linear terms light adds up in: by the display's curve as the power 2.2.
         const auto linear = [&](const char* id, const std::string& from, const char* output, const double x, const double y) {
-            node("Linear", id, x, y);
-            wire(from, id, "a", output);
+            node("ColorConvert", id, x, y);
+            wire(from, id, "color", output);
+            set(id, "from", "eGamma22");
+            set(id, "to", "eLinear");
         };
         linear("zenith", "sky values", "field.zenith", 280, 420);
         linear("horizon", "sky values", "field.horizon", 280, 500);
@@ -599,22 +602,27 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
             wire(from, id + " color", "b", "field.intensity");
         };
         shining("sun", "sun", 280, 840);
-        node("DataBuffer", "frame data", 920, 340);     // FrameData, in engineCommon.slang
-        const auto field = [&](const int index, const char* from, const char* output, const char* type = nullptr) {
-            wire(from, "frame data", std::format("field[{}].value", index).c_str(), output);
-            if (type) set("frame data", std::format("field[{}].type", index).c_str(), type);
-        };
-        field(0, "seen", "out");
-        field(1, "unseen", "out");
-        field(2, "camera", "position", "eVec4");
-        field(3, "zenith", "out");                      // rgb, and in its fourth place:
-        field(4, "sky values", "field.ambient");        //   how much light the sky gives all round
-        field(5, "horizon", "out");
-        field(6, "sun cosine", "out");                  //   the cosine of the sun disc's radius
-        field(7, "ground", "out", "eVec4");
-        field(8, "towards the sun", "out");
-        field(9, "sun", "present");                     //   1 when there is a sun
-        field(10, "sun color", "out", "eVec4");
+        // FrameData, in engineCommon.slang: a float after a float3 is the float4's fourth, as a ConstantBuffer lays them out.
+        node("BufferBuilder", "frame data", 920, 340);
+        set("frame data", "usage", "eUniform");
+        Value::List layout;
+        for (const auto& [name, type] : { std::pair { "viewProjection", "eMat4" }, { "inverseViewProjection", "eMat4" }, { "cameraPosition", "eVec4" },
+                                          { "skyZenith", "eVec3" }, { "skyAmbient", "eFloat" }, { "skyHorizon", "eVec3" }, { "sunCosine", "eFloat" },
+                                          { "skyGround", "eVec4" }, { "sunDirection", "eVec3" }, { "sunPresent", "eFloat" }, { "sunColor", "eVec4" }, { "counts", "eUVec4" } })
+            layout.emplace_back(Value::Members { { "name", name }, { "type", type } });
+        set("frame data", "layout", Value(std::move(layout)));
+        const auto field = [&](const char* name, const char* from, const char* output) { wire(from, "frame data", std::format("field.{}", name).c_str(), output); };
+        field("viewProjection", "seen", "out");
+        field("inverseViewProjection", "unseen", "out");
+        field("cameraPosition", "camera", "position");
+        field("skyZenith", "zenith", "out");
+        field("skyAmbient", "sky values", "field.ambient");     // how much light the sky gives all round
+        field("skyHorizon", "horizon", "out");
+        field("sunCosine", "sun cosine", "out");                // the cosine of the sun disc's radius
+        field("skyGround", "ground", "out");
+        field("sunDirection", "towards the sun", "out");
+        field("sunPresent", "sun", "present");                  // 1 when there is a sun
+        field("sunColor", "sun color", "out");
 
         // Every light, a kind after another: where it is and how far it reaches, the way it shines and its kind, its
         // colour, and a spot's cone as the cosines of its angles.
@@ -658,7 +666,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
             if (!before.empty()) wire(before, data, "after");
             before = data;
         }
-        field(11, "light data", "count", "eUVec4");
+        field("counts", "light data", "count");
         node("Primitive", "shape", 280, 40);            // for how a default mesh's vertices are laid out
 
         // ---- scene: every entity with the lit shader's component and a Mesh, a draw each -----------------------------

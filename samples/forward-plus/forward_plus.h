@@ -236,8 +236,10 @@ namespace forwardplus
 
         first("sky values", "Sky", 1000);
         const auto linear = [&](const std::string& id, const std::string& from, const char* output, const double y) {
-            node("Linear", id, 220, y);
-            wire(from, id, "a", output);
+            node("ColorConvert", id, 220, y);
+            wire(from, id, "color", output);
+            set(id, "from", "eGamma22");
+            set(id, "to", "eLinear");
         };
         linear("zenith", "sky values", "field.zenith", 1000);
         linear("horizon", "sky values", "field.horizon", 1060);
@@ -1473,7 +1475,7 @@ namespace forwardplus
 
         // ---- which: a number, and whether each branch is not the one it says -------------------------------------------
         pass = "frame";
-        node("Number", "renderer", 40, 1900);
+        node("Int", "renderer", 40, 1900);
         set("renderer", "value", 0);
         for (int branch = 0; branch < 3; ++branch) {
             const std::string id = std::format("not {}", Renderers[branch]);

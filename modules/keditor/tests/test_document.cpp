@@ -375,7 +375,7 @@ TEST_F(DocumentTest, NodesMovedOrPastedToAnotherPassAreBroughtInAsPassesAre) {
     Running editing;
     keditor::Document& doc = editing.scene->Doc();
     for (const char* pass : { "first", "second", "third" }) ASSERT_TRUE(doc.AddPass(pass));
-    doc.AddNode("Number", 0, 0, "n", "first");
+    doc.AddNode("Double", 0, 0, "n", "first");
     doc.SetInput("n", "value", 2);
     doc.AddNode("Multiply", 0, 0, "double", "second");
     doc.SetInput("double", "b", 2);
@@ -441,7 +441,7 @@ TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {
         Running editing;
         keditor::Document& doc = editing.scene->Doc();
         doc.SetAssetDirectory(project.directory / "assets");
-        doc.AddNode("Number", 0, 0, "n");
+        doc.AddNode("Double", 0, 0, "n");
         doc.SetInput("n", "value", 2);
         doc.AddNode("Multiply", 300, 0, "double");
         doc.SetInput("double", "b", 2);
@@ -578,9 +578,9 @@ TEST_F(DocumentTest, EveryNodeAtOnceIsALayoutOfItsOwn) {
     Running editing;
     keditor::Document& doc = editing.scene->Doc();
     for (const char* pass : { "first", "second" }) ASSERT_TRUE(doc.AddPass(pass));
-    doc.AddNode("Number", 0, 0, "a", "first");
-    doc.AddNode("Number", 0, 100, "b", "first");
-    doc.AddNode("Number", 0, 0, "c", "second");
+    doc.AddNode("Double", 0, 0, "a", "first");
+    doc.AddNode("Double", 0, 100, "b", "first");
+    doc.AddNode("Double", 0, 0, "c", "second");
     ASSERT_TRUE(doc.Graph().overview.empty());
 
     // At first: each pass's page where it is, beside the one before — none over another.
@@ -602,7 +602,7 @@ TEST_F(DocumentTest, EveryNodeAtOnceIsALayoutOfItsOwn) {
 
     // Made where every node is seen: where it was put, there.
     doc.MakeInOverview(true);
-    doc.AddNode("Number", -400, -300, "d", "second");
+    doc.AddNode("Double", -400, -300, "d", "second");
     doc.MakeInOverview(false);
     EXPECT_EQ(doc.OverviewPlaces().at("d"), (std::pair<double, double> { -400., -300. }));
     EXPECT_EQ(doc.OverviewPlaces().at("c"), places.at("c")) << "what was there stays";
@@ -888,9 +888,9 @@ TEST_F(DocumentTest, AFunctionOpenedAndKeptLeavesItsCallWiredAsItWas) {
     Running editing;
     keditor::Document& doc = editing.scene->Doc();
     doc.SetAssetDirectory(project.directory / "assets");
-    doc.AddNode("Number", 0, 0, "n");
+    doc.AddNode("Double", 0, 0, "n");
     doc.SetInput("n", "value", 2);
-    doc.AddNode("Number", 0, 100, "m");
+    doc.AddNode("Double", 0, 100, "m");
     doc.SetInput("m", "value", 5);
     doc.AddNode("Multiply", 300, 0, "times");
     ASSERT_TRUE(doc.Connect("n", "out", "times", "a"));
@@ -916,4 +916,88 @@ TEST_F(DocumentTest, AFunctionOpenedAndKeptLeavesItsCallWiredAsItWas) {
         EXPECT_EQ(after.at(port).link.has_value(), input.link.has_value()) << port;
     }
     EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(11));
+}
+
+// What is set of an input is what the input takes, whatever the value given: an Int's a whole number, a UInt's none or more,
+// a Float's a float's, a vector's as many as it has — a Random's own `type` among them, and its kind followed when Auto.
+TEST_F(DocumentTest, WhatIsSetIsWhatTheInputTakes) {
+    using kgraph::Value;
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const auto given = [&](const char* node, const char* input) {
+        const kgraph::Node* found = doc.Graph().Find(node);
+        const auto it = found ? found->inputs.find(input) : decltype(found->inputs.end()) {};
+        return found && it != found->inputs.end() ? it->second.value : Value();
+    };
+    doc.AddNode("Int", 0, 0, "whole");
+    doc.SetInput("whole", "value", 2.6);
+    EXPECT_EQ(given("whole", "value"), Value(3.0));
+    doc.AddNode("UInt", 0, 0, "count");
+    doc.SetInput("count", "value", -4);
+    EXPECT_EQ(given("count", "value"), Value(0.0));
+    doc.AddNode("Float", 0, 0, "single");
+    doc.SetInput("single", "value", 0.1);
+    EXPECT_EQ(given("single", "value"), Value(static_cast<double>(0.1f)));
+    doc.AddNode("Double", 0, 0, "precise");
+    doc.SetInput("precise", "value", 0.1);
+    EXPECT_EQ(given("precise", "value"), Value(0.1));
+    doc.AddNode("Add", 0, 0, "any");
+    doc.SetInput("any", "a", 2.6);
+    EXPECT_EQ(given("any", "a"), Value(2.6)) << "what takes any kind, as it is given";
+
+    doc.AddNode("RandomUniform", 0, 0, "dice");
+    doc.SetInput("dice", "min", 1);
+    doc.SetInput("dice", "max", 6);
+    ASSERT_TRUE(doc.Connect("dice", "out", "count", "value"));
+    const Value rolled = doc.Runtime().ValueOf("dice");
+    ASSERT_TRUE(rolled.Number()) << rolled.ToJson();
+    EXPECT_EQ(*rolled.Number(), std::trunc(*rolled.Number())) << "of the UInt it is wired to: whole";
+}
+
+// The engine's Bloom opened in place: every node of its page as it runs in the call, none of them failing.
+TEST_F(DocumentTest, TheEnginesBloomOpenedInPlaceHasNothingWrong) {
+    using kgraph::Value;
+    const keditor::Project project = scene::MakeProject("bloom-opened");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    doc.SetAssetDirectory(project.directory / "assets");
+    doc.AddNode("Image", 0, 0, "picture");
+    doc.SetInput("picture", "format", "eRGBA16_SFLOAT");
+    doc.SetInput("picture", "extent", Value(Value::List { 64, 64, 1 }));
+    doc.AddNode("Clear", 300, 0, "paint");
+    doc.Connect("picture", "out", "paint", "image");
+    doc.SetInput("paint", "color", Value(Value::List { 4, 4, 4, 1 }));
+    doc.AddNode("Sampler", 0, 200, "linear");
+    doc.SetInput("linear", "minFilter", "eLinear");
+    doc.SetInput("linear", "magFilter", "eLinear");
+    const std::string call = doc.AddNode("Function", 600, 0, "bloom");
+    ASSERT_TRUE(doc.SetInput(call, "function", "Bloom"));
+    ASSERT_TRUE(doc.Connect("picture", "out", call, "picture"));
+    ASSERT_TRUE(doc.Connect("linear", "out", call, "sampler"));
+    for (int i = 0; i < 3; ++i) support::Frame();
+    for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << "called: " << problem;
+    std::string error;
+    const std::string page = doc.OpenFunction(call, &error);
+    ASSERT_FALSE(page.empty()) << error;
+    for (int i = 0; i < 3; ++i) support::Frame();
+    for (const auto& node : doc.Graph().nodes) {
+        if (node.pass != page) continue;
+        const auto* status = doc.Runtime().Status(node.id);
+        if (!status) { ADD_FAILURE() << node.id << " (" << node.type << "): no status"; continue; }
+        EXPECT_TRUE(status->ok) << node.id << " (" << node.type << "): " << status->error;
+        EXPECT_TRUE(status->note.empty()) << node.id << " (" << node.type << "): " << status->note;
+    }
+    for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << "open: " << problem;
+    // Kept, it is the function it was: its loops name their own nodes, not the call's.
+    ASSERT_TRUE(doc.CloseFunction(true, &error)) << error;
+    for (int i = 0; i < 3; ++i) support::Frame();
+    for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << "kept: " << problem;
+    const auto kept = doc.Graph().functions.at("Bloom");
+    ASSERT_NE(kept->Find("level above"), nullptr);
+    EXPECT_EQ(kept->Find("level above")->inputs.at("of").value, Value("down level"));
+    // Written out, its nodes are the graph's, and still work.
+    ASSERT_TRUE(doc.WriteOut(call, &error)) << error;
+    for (int i = 0; i < 3; ++i) support::Frame();
+    for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << "written out: " << problem;
+    EXPECT_EQ(doc.Graph().Find("bloom/level above")->inputs.at("of").value, Value("bloom/down level"));
 }

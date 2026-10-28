@@ -157,5 +157,7 @@ namespace kgraph
                 return true;
             } };
         for (const char* type : { "resource", "Image", "Buffer", "Sampler", "BufferView", "AccelerationStructure", "Mesh" }) codecs.Register(type, resource);
+        // A field of a kind of resource reads what was saved when it was any: a Mesh's mesh, saved as a "resource" before it said.
+        for (const char* type : { "Image", "Buffer", "Sampler", "BufferView", "AccelerationStructure", "Mesh" }) codecs.Reads(type, "resource");
     }
 }

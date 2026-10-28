@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <path opacity="0.2" d="M5.5,0.5 H18.5 Q23.5,0.5 23.5,5.5 V18.5 Q23.5,23.5 18.5,23.5 H5.5 Q0.5,23.5 0.5,18.5 V5.5 Q0.5,0.5 5.5,0.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.69,-6.9 L-8.19,6.1 L-6.81,6.9 L0.69,-6.1 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.8,-6.5 A0.8,0.8 0 1 0 0.8,-6.5 A0.8,0.8 0 1 0 -0.8,-6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-8.3,6.5 A0.8,0.8 0 1 0 -6.7,6.5 A0.8,0.8 0 1 0 -8.3,6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.8,-6.5 L-0.8,6.5 L0.8,6.5 L0.8,-6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.8,-6.5 A0.8,0.8 0 1 0 0.8,-6.5 A0.8,0.8 0 1 0 -0.8,-6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.8,6.5 A0.8,0.8 0 1 0 0.8,6.5 A0.8,0.8 0 1 0 -0.8,6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.69,-6.1 L6.81,6.9 L8.19,6.1 L0.69,-6.9 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M-0.8,-6.5 A0.8,0.8 0 1 0 0.8,-6.5 A0.8,0.8 0 1 0 -0.8,-6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.8" d="M6.7,6.5 A0.8,0.8 0 1 0 8.3,6.5 A0.8,0.8 0 1 0 6.7,6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-3,-6.5 A3,3 0 1 0 3,-6.5 A3,3 0 1 0 -3,-6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-9.8,6.5 A2.3,2.3 0 1 0 -5.2,6.5 A2.3,2.3 0 1 0 -9.8,6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-2.3,6.5 A2.3,2.3 0 1 0 2.3,6.5 A2.3,2.3 0 1 0 -2.3,6.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M5.2,6.5 A2.3,2.3 0 1 0 9.8,6.5 A2.3,2.3 0 1 0 5.2,6.5 Z"/>
+</svg>

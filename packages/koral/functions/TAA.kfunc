@@ -1,0 +1,271 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "Temporal antialiasing: the picture blended with what this made the frame before, where each pixel was then \u2014 worked out of `depth` and `viewProjection` (without the jitter) and the frame before's \u2014 held to the colours round it now, so that what moved leaves no trail. Draw with a Jitter's `jittered` projection for it to settle into a picture seen between the pixels. `blend` is how much of this frame goes in: 0.1, a tenth.",
+ "tags": [
+  "taa",
+  "temporal",
+  "antialiasing",
+  "anti-aliasing",
+  "history",
+  "reprojection",
+  "jitter",
+  "resolve"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     60
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     150
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "viewProjection",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     240
+    ],
+    "inputs": {
+     "name": "viewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "blend",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     330
+    ],
+    "inputs": {
+     "name": "blend",
+     "kind": "eValue",
+     "default": 0.1
+    }
+   },
+   {
+    "id": "resolved",
+    "type": "RenderTarget",
+    "at": [
+     260,
+     60
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "sizeOf": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "history",
+    "type": "History",
+    "at": [
+     260,
+     150
+    ],
+    "inputs": {
+     "of": {
+      "$link": [
+       "resolved",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "seen before",
+    "type": "LastFrame",
+    "at": [
+     260,
+     240
+    ],
+    "inputs": {
+     "value": {
+      "$link": [
+       "viewProjection",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "unseen",
+    "type": "MatrixInverse",
+    "at": [
+     520,
+     60
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "viewProjection",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "back to before",
+    "type": "MatrixMultiply",
+    "at": [
+     520,
+     150
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "seen before",
+       "out"
+      ]
+     },
+     "b": {
+      "$link": [
+       "unseen",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "both there",
+    "type": "And",
+    "at": [
+     520,
+     240
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "history",
+       "valid"
+      ]
+     },
+     "b": {
+      "$link": [
+       "seen before",
+       "valid"
+      ]
+     }
+    }
+   },
+   {
+    "id": "clamped",
+    "type": "Sampler",
+    "at": [
+     520,
+     330
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "resolve",
+    "type": "ComputePass",
+    "at": [
+     780,
+     60
+    ],
+    "inputs": {
+     "module": "koral_taa",
+     "entry": "resolve",
+     "param.current": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.history": {
+      "$link": [
+       "history",
+       "out"
+      ]
+     },
+     "param.history.sampler": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "resolved",
+       "out"
+      ]
+     },
+     "push.currentToPrevious": {
+      "$link": [
+       "back to before",
+       "out"
+      ]
+     },
+     "push.blend": {
+      "$link": [
+       "blend",
+       "out"
+      ]
+     },
+     "push.valid": {
+      "$link": [
+       "both there",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "picture out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     60
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "resolved",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -16,6 +16,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "value.h"
@@ -30,6 +31,41 @@ namespace kgraph
         eNode,      ///< On the node, a control in its row, while nothing is wired to it: a number, a colour, a box to tick.
         eWire,      ///< Wired only, never typed: from a node that sets it up (Port::companion), or from what works one out.
     };
+
+    /** @brief The kind of number a value is made of, as a shader or a builder takes it. */
+    enum class Scalar : std::uint8_t {
+        eNone,      ///< Not said: what a Math node takes, it takes of any kind.
+        eFloat,     ///< 32 bits, as a shader's float.
+        eDouble,
+        eInt,       ///< A whole number, as a 32-bit int.
+        eUInt,      ///< A whole number of none or more, as a 32-bit uint.
+        eBool,
+    };
+
+    /**
+     * @brief Exactly what a value is: the kind of its numbers, and how many — a Float's one, a Vec3's three, a shader's
+     *        float4 four. What an editor draws an input with (four drags of a float4, a whole number's dragged a unit at a
+     *        time) and makes what is set of (Conform), whatever the value it holds now is.
+     */
+    struct Shape {
+        Scalar scalar = Scalar::eNone;
+        std::uint8_t components = 1;    ///< 1 to 4.
+
+        [[nodiscard]] bool Known() const { return scalar != Scalar::eNone; }
+        [[nodiscard]] bool Whole() const { return scalar == Scalar::eInt || scalar == Scalar::eUInt; }
+        bool operator==(const Shape&) const = default;
+    };
+    /** @brief The shape a value node's type is, or a Random's `type` says: "Float", "UInt", "Vec3", "IVec2", "Bool"; none for another name. */
+    [[nodiscard]] Shape ShapeNamed(std::string_view name);
+    /** @brief What ShapeNamed takes for @p shape: "Float", "Vec3", "UVec4"; empty for one not known. */
+    [[nodiscard]] std::string ShapeName(Shape shape);
+    /**
+     * @brief @p value as @p shape is: each number made its kind — a float's to a float's precision, a whole one rounded to the
+     *        nearest and kept within what an int or a uint holds, a bool's 0 or 1 — and as many as it has, a number for every
+     *        component (a vector cut short or made up with zeros). What is not a number or a list of them, and any value
+     *        for a shape not known, is as it is.
+     */
+    [[nodiscard]] Value Conform(const Value& value, Shape shape);
 
     enum class PortKind : std::uint8_t {
         eValue,     ///< A Value: given on the node, or wired from a node that works one out.
@@ -71,6 +107,9 @@ namespace kgraph
         bool logarithmic = false;
         /// A whole number — a count, an index, a builder's integer, an Int's — dragged and typed a unit at a time.
         bool integer = false;
+        /// Exactly what it takes or gives, when that is said: a Float's, a shader's float4, a builder's uint. Not known for
+        /// what takes any kind (a Math node's `a`), for what is not numbers, and for a whole of parts (`extent`).
+        Shape shape {};
         /// The part of an editor's inspector it is in: "Indirect", "Depth", "rasterizationState", a Script node's
         /// resource. Empty: among the few that are always there, at the top.
         std::string group {};
@@ -153,6 +192,16 @@ namespace kgraph
      *        field's (`compareMask`). Unbounded, for one nothing is said of.
      */
     [[nodiscard]] NumberLimits LimitsOf(std::string_view structName, std::string_view field);
+
+    /**
+     * @brief How a field of a component of type @p fieldType (`f32`, `vec3`, `quat`...) is laid out in a buffer, as a
+     *        BufferBuilder's layout names it (`eFloat`, `eVec3`, `eVec4`...). Empty for what no buffer holds: a string, an asset.
+     */
+    [[nodiscard]] std::string_view LayoutTypeOf(std::string_view fieldType);
+    /** @brief Where an entity is, as a ComponentBuffer holds it besides its component's fields: each name, and its layout type. */
+    [[nodiscard]] const std::vector<std::pair<std::string_view, std::string_view>>& PlaceFields();
+    /** @brief Which of PlaceFields a ComponentBuffer told nothing of its `fields` holds: worldPosition, forward and matrix. */
+    [[nodiscard]] bool PlacedByDefault(std::string_view name);
 
     /** @brief Every node type. */
     [[nodiscard]] const std::vector<NodeType>& Catalog();

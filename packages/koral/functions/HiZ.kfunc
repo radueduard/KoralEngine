@@ -1,0 +1,236 @@
+{
+ "koral-function": 1,
+ "purpose": "Culling",
+ "description": "A depth pyramid: 9 levels from 512 by 256, each texel the farthest depth of the four of the level before, the first of what each of its texels covers of `depth`. A box whose nearest point is farther than what the level of its size says where it is, is behind what was drawn: what an occlusion cull tests. `reversed` 1 for a depth of 1 near and 0 far.",
+ "tags": [
+  "hiz",
+  "depth pyramid",
+  "occlusion",
+  "max depth",
+  "mip chain"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     60
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     0,
+     150
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "pyramid",
+    "type": "Image",
+    "at": [
+     260,
+     60
+    ],
+    "inputs": {
+     "format": "eR32_SFLOAT",
+     "extent": [
+      512,
+      256,
+      1
+     ],
+     "mipLevels": 9
+    }
+   },
+   {
+    "id": "first level",
+    "type": "ImageView",
+    "at": [
+     260,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     },
+     "baseMipLevel": 0,
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "make first level",
+    "type": "ComputePass",
+    "at": [
+     520,
+     60
+    ],
+    "inputs": {
+     "module": "koral_hiz",
+     "entry": "first",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "first level",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "levels",
+    "type": "Repeat",
+    "at": [
+     260,
+     240
+    ],
+    "inputs": {
+     "count": 8
+    }
+   },
+   {
+    "id": "level",
+    "type": "ImageView",
+    "at": [
+     520,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     },
+     "baseMipLevel": {
+      "$link": [
+       "level number",
+       "out"
+      ]
+     },
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "level number",
+    "type": "Add",
+    "at": [
+     260,
+     330
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "levels",
+       "index"
+      ]
+     },
+     "b": 1
+    }
+   },
+   {
+    "id": "level before",
+    "type": "Previous",
+    "at": [
+     520,
+     240
+    ],
+    "inputs": {
+     "of": "level",
+     "first": "first level"
+    }
+   },
+   {
+    "id": "make level",
+    "type": "ComputePass",
+    "at": [
+     780,
+     60
+    ],
+    "inputs": {
+     "module": "koral_hiz",
+     "entry": "reduce",
+     "param.source": {
+      "$link": [
+       "level before",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "level",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "whole pyramid",
+    "type": "ImageView",
+    "at": [
+     780,
+     150
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "pyramid",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "pyramid out",
+    "type": "FunctionOutput",
+    "at": [
+     1560,
+     60
+    ],
+    "inputs": {
+     "name": "pyramid",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "whole pyramid",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

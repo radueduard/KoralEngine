@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+  <path opacity="0.2" d="M5.5,0.5 H18.5 Q23.5,0.5 23.5,5.5 V18.5 Q23.5,23.5 18.5,23.5 H5.5 Q0.5,23.5 0.5,18.5 V5.5 Q0.5,0.5 5.5,0.5 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.38" d="M0,0 L9,0 L4.5,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.38" d="M0,0 L-4.5,7.27 L-9,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" opacity="0.38" d="M0,0 L-4.5,-7.27 L4.5,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M8.32,-0.42 L3.82,6.85 L5.18,7.7 L9.68,0.42 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M8.2,0 A0.8,0.8 0 1 0 9.8,0 A0.8,0.8 0 1 0 8.2,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.7,7.27 A0.8,0.8 0 1 0 5.3,7.27 A0.8,0.8 0 1 0 3.7,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M4.5,6.47 L-4.5,6.47 L-4.5,8.07 L4.5,8.07 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.7,7.27 A0.8,0.8 0 1 0 5.3,7.27 A0.8,0.8 0 1 0 3.7,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.3,7.27 A0.8,0.8 0 1 0 -3.7,7.27 A0.8,0.8 0 1 0 -5.3,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-3.82,6.85 L-8.32,-0.42 L-9.68,0.42 L-5.18,7.7 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.3,7.27 A0.8,0.8 0 1 0 -3.7,7.27 A0.8,0.8 0 1 0 -5.3,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-9.8,0 A0.8,0.8 0 1 0 -8.2,0 A0.8,0.8 0 1 0 -9.8,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-8.32,0.42 L-3.82,-6.85 L-5.18,-7.7 L-9.68,-0.42 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-9.8,0 A0.8,0.8 0 1 0 -8.2,0 A0.8,0.8 0 1 0 -9.8,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.3,-7.27 A0.8,0.8 0 1 0 -3.7,-7.27 A0.8,0.8 0 1 0 -5.3,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-4.5,-6.47 L4.5,-6.47 L4.5,-8.07 L-4.5,-8.07 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.3,-7.27 A0.8,0.8 0 1 0 -3.7,-7.27 A0.8,0.8 0 1 0 -5.3,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.7,-7.27 A0.8,0.8 0 1 0 5.3,-7.27 A0.8,0.8 0 1 0 3.7,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.82,-6.85 L8.32,0.42 L9.68,-0.42 L5.18,-7.7 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.7,-7.27 A0.8,0.8 0 1 0 5.3,-7.27 A0.8,0.8 0 1 0 3.7,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M8.2,0 A0.8,0.8 0 1 0 9.8,0 A0.8,0.8 0 1 0 8.2,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M9,-0.65 L-9,-0.65 L-9,0.65 L9,0.65 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M8.35,0 A0.65,0.65 0 1 0 9.65,0 A0.65,0.65 0 1 0 8.35,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-9.65,0 A0.65,0.65 0 1 0 -8.35,0 A0.65,0.65 0 1 0 -9.65,0 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M5.05,6.93 L-3.95,-7.62 L-5.05,-6.93 L3.95,7.62 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.85,7.27 A0.65,0.65 0 1 0 5.15,7.27 A0.65,0.65 0 1 0 3.85,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.15,-7.27 A0.65,0.65 0 1 0 -3.85,-7.27 A0.65,0.65 0 1 0 -5.15,-7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-3.95,7.62 L5.05,-6.93 L3.95,-7.62 L-5.05,6.93 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M-5.15,7.27 A0.65,0.65 0 1 0 -3.85,7.27 A0.65,0.65 0 1 0 -5.15,7.27 Z"/>
+  <path transform="translate(12 12) scale(0.88)" d="M3.85,-7.27 A0.65,0.65 0 1 0 5.15,-7.27 A0.65,0.65 0 1 0 3.85,-7.27 Z"/>
+</svg>

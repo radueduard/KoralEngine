@@ -778,3 +778,80 @@ TEST_F(ScaleTest, CascadesOfABatchedDrawAreEachCulledByTheirOwnMatrix) {
         runtime.Unwatch(std::string(turn) + "/commands");
     }
 }
+
+// The engine's InstanceCull: two draws of the same instances, the first of what was seen the frame before, the second of
+// what the first's depth does not hide and was not seen. A wall is in front of four cubes and beside two: once it has
+// settled, the first draw draws the wall and the two beside it, and the second nothing — the four behind are never drawn.
+// The wall taken away, the four are seen again.
+TEST_F(ScaleTest, InstanceCullDrawsNothingBehindWhatItDrewFirst) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+
+    kgraph::Graph graph;
+    graph.functions["InstanceCull"] = EngineFunction("InstanceCull");
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("depth", "Image").Set("format", "eD32_SFLOAT").Set("extent", Value::List { support::Size, support::Size });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("depth view", "ImageView").Wire("image", "depth");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view")
+        .Wire("depthStencil.view", "depth view").Set("depthStencil.which", "Depth").Set("depthStencil.name", "depth").Set("depthStencil.depth", 1);
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    for (const char* phase : { "early", "late" })
+        graph.Add(phase, "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups").Set("mode", "eGPU");
+    graph.Add("culled", "GraphicsPipeline").Set("vertex.module", "instancedCulled").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instancedCulled").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    const Value::List identity { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    graph.Add("cull", "Function").Set("function", "InstanceCull").Wire("instances", "draw early", "instances").Set("stride", 80).Set("matrixOffset", 0)
+        .Wire("ranges", "pack", "rangeBuffer").Wire("drawCount", "early", "drawCount").Set("viewProjection", identity)
+        .Wire("early", "early", "commands").Wire("earlyVisible", "early", "visible").Wire("late", "late", "commands").Wire("lateVisible", "late", "visible")
+        .Wire("depth", "depth").Set("count", 64);
+    graph.Add("draw early", "Draw").Wire("pipeline", "culled").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "cull", "early").Wire("drawCount", "early", "drawCount").Wire("param.visible", "cull", "earlyVisible");
+    graph.Add("draw late", "Draw").Wire("pipeline", "culled").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect").Set("load", true)
+        .Wire("indirect", "cull", "late").Wire("drawCount", "late", "drawCount").Wire("param.visible", "cull", "lateVisible");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+
+    // The matrices place them in the picture as they are: a wall across the middle, near; four small cubes behind it, far;
+    // two beside it, as far.
+    const auto place = [&](const kor::Vec3 at, const kor::Vec3 scale) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { at.x, at.y, at.z });
+        world.SetScale(entity, { scale.x, scale.y, scale.z });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        return entity;
+    };
+    const kecs::Entity wall = place({ 0.f, 0.f, 0.2f }, { 1.f, 1.f, 0.05f });
+    std::vector<kecs::Entity> entities { wall };
+    for (const float x : { -0.3f, -0.1f, 0.1f, 0.3f, -0.85f, 0.85f }) entities.push_back(place({ x, 0.f, 0.8f }, { 0.1f, 0.1f, 0.1f }));
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (const kecs::Entity entity : entities) support::Give(world, entity, "culled", { { "color", { 1, 0, 0, 1 } } });
+
+    runtime.Watch("early");
+    runtime.Watch("late");
+    const auto drawn = [&](const char* phase) {
+        const auto peek = runtime.Watched(phase);
+        if (!peek || peek->bytes.size() < 20) return -1;
+        std::uint32_t command[5];
+        std::memcpy(command, peek->bytes.data(), 20);
+        return static_cast<int>(command[1]);
+    };
+    for (int i = 0; i < 12; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(drawn("early"), 3) << "the wall and the two beside it: seen the frame before";
+    EXPECT_EQ(drawn("late"), 0) << "and nothing more: the four behind the wall are behind what was drawn first";
+
+    world.SetPosition(wall, { 5.f, 0.f, 0.2f });
+    for (int i = 0; i < 12; ++i) Frame();
+    EXPECT_EQ(drawn("early"), 6) << "the wall gone, the four are seen, and drawn first from the frame after";
+    EXPECT_EQ(drawn("late"), 0);
+}

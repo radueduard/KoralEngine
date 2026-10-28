@@ -73,6 +73,38 @@ TEST_F(FlowTest, CallsAreWiredToOneAnotherAndAnElementTakesATurnOfOne) {
     EXPECT_FALSE(runtime.Ok()) << "given an output its function has not";
 }
 
+// A Reference to a call, as the editor makes one to use a node of another page there: what is wired from it is wired
+// from what the call's outputs are, as a wire straight from the call would be — through a Reference of a Reference too.
+TEST_F(FlowTest, AReferenceToACallGivesWhatTheCallGives) {
+    auto& runtime = *scene->runtime;
+    auto tripled = std::make_shared<kgraph::Graph>();
+    tripled->Add("x", "FunctionInput").Set("name", "x").Set("kind", "eValue");
+    tripled->Add("times", "Multiply").Wire("a", "x").Set("b", 3);
+    tripled->Add("result", "FunctionOutput").Set("name", "result").Wire("value", "times");
+    kgraph::Graph graph;
+    graph.functions = { { "tripled", tripled } };
+    graph.Add("call", "Function").Set("function", "tripled").Set("x", 5);
+    graph.Add("call (in b)", "Reference").Set("node", "call");
+    graph.Add("call (in c)", "Reference").Set("node", "call (in b)");
+    graph.Add("plus", "Add").Wire("a", "call (in b)", "result").Set("b", 1);
+    graph.Add("again", "Add").Wire("a", "call (in c)", "result").Set("b", 2);
+    // A call given what a Reference to another call gives: written out with it, in the same round.
+    graph.Add("given", "Function").Set("function", "tripled").Wire("x", "call (in b)", "result");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ValueOf("plus"), Value(16));
+    EXPECT_EQ(runtime.ValueOf("again"), Value(17));
+    EXPECT_EQ(runtime.ValueOf("given", "result"), Value(45));
+    // The Reference itself, as the editor shows it: what the call gives, and how it fares.
+    EXPECT_EQ(runtime.ValueOf("call (in b)", "result"), Value(15));
+    EXPECT_EQ(runtime.ValueOf("call (in c)", "result"), Value(15));
+    ASSERT_NE(runtime.Status("call (in c)"), nullptr);
+    EXPECT_TRUE(runtime.Status("call (in c)")->ok);
+    ASSERT_EQ(runtime.OutputsOf("call (in b)").size(), 1u);
+    EXPECT_EQ(runtime.OutputsOf("call (in b)")[0].name, "result");
+}
+
 // A loop in a function: its Previous and its Elements name its nodes, and name them as the call has them written out.
 TEST_F(FlowTest, ALoopInAFunctionNamesItsOwnNodes) {
     auto& runtime = *scene->runtime;
@@ -102,7 +134,7 @@ TEST_F(FlowTest, ALoopIsWrittenOutATurnANode) {
     auto& runtime = *scene->runtime;
     kgraph::Graph graph;
     graph.Add("turns", "Repeat").Set("count", 3);
-    graph.Add("start", "Number").Set("value", 5);
+    graph.Add("start", "Double").Set("value", 5);
     graph.Add("tens", "Multiply").Wire("a", "turns", "index").Set("b", 10);
     graph.Add("before", "Previous").Set("of", "tens").Set("first", "start");
     graph.Add("sum", "Add").Wire("a", "tens").Wire("b", "before");

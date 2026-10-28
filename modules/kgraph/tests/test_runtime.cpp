@@ -25,6 +25,7 @@
 #include <log.h>
 
 #include <kgraph/runtime.h>
+#include <kgraph/random.h>
 #include <kmath/quaternion.h>
 #include <kmath/transform.h>
 
@@ -76,11 +77,10 @@ namespace {
             "param.target": { "$link": ["target", "out"] },
             "constant.level": 0.5 } },
         { "id": "size", "type": "ImageExtent", "inputs": { "image": { "$link": ["target", "out"] } } },
-        { "id": "width", "type": "Component", "inputs": { "vector": { "$link": ["size", "out"] }, "index": 0 } },
-        { "id": "height", "type": "Component", "inputs": { "vector": { "$link": ["size", "out"] }, "index": 1 } },
-        { "id": "per group", "type": "Number", "inputs": { "value": 8 } },
-        { "id": "x groups", "type": "Divide", "inputs": { "a": { "$link": ["width", "out"] }, "b": { "$link": ["per group", "out"] } } },
-        { "id": "y groups", "type": "Divide", "inputs": { "a": { "$link": ["height", "out"] }, "b": { "$link": ["per group", "out"] } } },
+        { "id": "sides", "type": "Split", "inputs": { "vector": { "$link": ["size", "out"] } } },
+        { "id": "per group", "type": "Double", "inputs": { "value": 8 } },
+        { "id": "x groups", "type": "Divide", "inputs": { "a": { "$link": ["sides", "x"] }, "b": { "$link": ["per group", "out"] } } },
+        { "id": "y groups", "type": "Divide", "inputs": { "a": { "$link": ["sides", "y"] }, "b": { "$link": ["per group", "out"] } } },
         { "id": "groups x", "type": "Ceil", "inputs": { "a": { "$link": ["x groups", "out"] } } },
         { "id": "groups y", "type": "Ceil", "inputs": { "a": { "$link": ["y groups", "out"] } } }
       ]
@@ -459,7 +459,7 @@ TEST_F(RuntimeTest, ValuesAreWorkedOutByNodes) {
     node("neither", "Not").Wire("a", "both");
     node("pick", "Select").Wire("condition", "less").Set("a", "yes").Set("b", "no");
     node("parts", "Split").Wire("vector", "cross");
-    node("again", "Vector").Wire("x", "parts", "z").Wire("y", "parts", "x");
+    node("again", "Vec2").Wire("x", "parts", "z").Wire("y", "parts", "x");
     node("colour", "Color").Set("color", Value::List { 1, 0.5, 0, 1 });
     node("half", "Multiply").Wire("a", "colour").Set("b", 0.5);
     node("degrees", "Degrees").Set("a", 3.14159265358979323846);
@@ -498,7 +498,7 @@ TEST_F(RuntimeTest, ValuesAreWorkedOutByNodes) {
     graph.Find("clamp")->inputs.erase("max");
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("cross")->error.find("do not go together"), std::string::npos) << runtime.Status("cross")->error;
-    EXPECT_NE(runtime.Status("less")->error.find("numbers"), std::string::npos) << runtime.Status("less")->error;
+    EXPECT_NE(runtime.Status("less")->error.find("'a' is a vector"), std::string::npos) << runtime.Status("less")->error;
     EXPECT_NE(runtime.Status("clamp")->error.find("'max' is not given"), std::string::npos) << runtime.Status("clamp")->error;
 
     // Numbers and vectors of a kind: as a shader's float, a double, an int and a uint hold them.
@@ -719,9 +719,8 @@ TEST_F(RuntimeTest, ANodeGivesWhatItIsMadeOfAsOutputs) {
     graph.Add("picture", "Image").Set("format", "eRGBA8_UNORM").Set("extent.x", 48).Set("extent.y", 24).Set("usage", Value::List { "eSampled", "eTransferDst" });
     // A second image, half the size of the first each way: sized from it, not by hand.
     graph.Add("half", "Divide").Wire("a", "picture", "size").Set("b", 2);
-    graph.Add("across", "Component").Wire("vector", "half").Set("index", 0);
-    graph.Add("down", "Component").Wire("vector", "half").Set("index", 1);
-    graph.Add("small", "Image").Set("format", "eRGBA8_UNORM").Wire("extent.x", "across").Wire("extent.y", "down").Set("usage", Value::List { "eSampled" });
+    graph.Add("sides", "Split").Wire("vector", "half");
+    graph.Add("small", "Image").Set("format", "eRGBA8_UNORM").Wire("extent.x", "sides", "x").Wire("extent.y", "sides", "y").Set("usage", Value::List { "eSampled" });
     graph.Add("data", "Buffer").Set("instanceCount", 96).Set("usage", Value::List { "eStorage" });
     graph.Add("shape", "Primitive").Set("shape", "eCube");
     graph.Add("clear", "Clear").Wire("image", "picture").Set("color", Value::List { 1, 0, 0, 1 });
@@ -1069,6 +1068,32 @@ TEST_F(RuntimeTest, AFixedPassRunsOnFramesWithAStepAndSetupRunsAgainWhenAsked) {
     EXPECT_EQ(loaded.fixed, graph.fixed);
     EXPECT_EQ(loaded.passes, graph.passes);
     EXPECT_NE(graph.ToJson().find("\"fixed\": [\"simulate\"]"), std::string::npos) << graph.ToJson();
+}
+
+// A Time node is how long the graph has run, frame by frame, whether a fixed step is taken or not: it goes up by each
+// frame's dt, and a frame held up counts a quarter of a second at most.
+TEST_F(RuntimeTest, TimeGoesOnFrameByFrame) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "frame" };
+    graph.Add("time", "Time").pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("clear", "Clear").Wire("image", "screen").Set("color", Value::List { 0, 0, 0, 1 }).pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    Frame();
+    const double began = *runtime.ValueOf("time", "seconds").Number();
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+    Frame();
+    const double dt = *runtime.ValueOf("time", "dt").Number();
+    EXPECT_GE(dt, 0.05) << "the frame took the time slept";
+    EXPECT_NEAR(*runtime.ValueOf("time", "seconds").Number(), began + dt, 1e-9);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    Frame();
+    EXPECT_DOUBLE_EQ(*runtime.ValueOf("time", "dt").Number(), 0.25) << "a frame held up counts a quarter of a second";
+    EXPECT_EQ(runtime.FixedSteps(), 0u) << "and no step was taken for any of it";
 }
 
 // A Keep on a page of the fixed step is the state as it was when the step began: what that step reads as before, while it
@@ -1579,4 +1604,371 @@ TEST_F(RuntimeTest, TheFrameIsItsPassesInTheOrderTheyRun) {
     const auto show = std::ranges::find(frame.passes, std::string("show"), &kgraph::Runtime::FrameReport::Pass::node);
     ASSERT_NE(show, frame.passes.end());
     EXPECT_TRUE(std::ranges::contains(show->uses, std::pair<std::string, char> { "the screen", 'w' }));
+}
+
+// A random number is a node of its distribution, uniform from 0 to 1 when nothing else is said: the same for the same seed, of the
+// kind its `type` says or — Auto — of what it is wired to; a whole kind's whole, a vector's components each by its own of a
+// vector's inputs.
+TEST_F(RuntimeTest, ARandomNumberIsANodeOfItsDistribution) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    const auto node = [&](const char* id, const char* type) -> kgraph::Node& { return graph.Add(id, type); };
+    node("plain", "RandomUniform");
+    node("again", "RandomUniform");
+    node("other seed", "RandomUniform").Set("seed", 1);
+    node("spread", "RandomUniform").Set("type", "Vec3").Set("min", Value::List { 0, 10, 20 }).Set("max", Value::List { 1, 11, 21 });
+    node("dice", "RandomUniform").Set("type", "IVec4").Set("min", 1).Set("max", 6).Set("seed", 3);
+    node("sure", "RandomNormal").Set("type", "UInt").Set("mean", 5).Set("stddev", 0);
+    node("counted", "RandomPoisson").Set("type", "Double").Set("lambda", 3);
+    node("coin", "RandomBernoulli").Set("type", "Int").Set("p", 1);
+    node("narrow", "RandomNormal").Set("stddev", -1);
+    node("too few", "RandomUniform").Set("type", "Vec3").Set("max", Value::List { 1, 2 });
+    // Auto: what it is wired to takes — a UInt's value, and through an Add, which takes any kind, what that is wired to.
+    node("whole", "RandomUniform").Set("min", 1).Set("max", 6);
+    node("as uint", "UInt").Wire("value", "whole");
+    node("through", "RandomUniform").Set("min", 10).Set("max", 20);
+    node("added", "Add").Wire("a", "through").Set("b", 0);
+    node("as int", "Int").Wire("value", "added");
+    runtime.Set(graph);
+    const auto number = [&](const char* id) { const Value value = runtime.ValueOf(id, "out"); const double* n = value.Number(); return n ? *n : -999.0; };
+    const auto items = [&](const char* id) { const Value value = runtime.ValueOf(id, "out"); return value.Items() ? *value.Items() : Value::List {}; };
+
+    for (const char* id : { "plain", "again", "other seed", "spread", "dice", "sure", "counted", "coin", "whole", "through" })
+        EXPECT_TRUE(runtime.Status(id)->ok) << id << ": " << runtime.Status(id)->error;
+    EXPECT_GE(number("plain"), 0.0);
+    EXPECT_LT(number("plain"), 1.0);
+    EXPECT_EQ(number("plain"), number("again")) << "the same seed";
+    EXPECT_NE(number("plain"), number("other seed"));
+    EXPECT_EQ(number("plain"), static_cast<double>(static_cast<float>(number("plain")))) << "wired to nothing, a Float";
+    const auto spread = items("spread");
+    ASSERT_EQ(spread.size(), 3u);
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_GE(*spread[i].Number(), 10.0 * static_cast<double>(i));
+        EXPECT_LT(*spread[i].Number(), 10.0 * static_cast<double>(i) + 1.0);
+    }
+    const auto dice = items("dice");
+    ASSERT_EQ(dice.size(), 4u);
+    for (const Value& face : dice) {
+        EXPECT_EQ(*face.Number(), std::trunc(*face.Number()));
+        EXPECT_GE(*face.Number(), 1.0);
+        EXPECT_LE(*face.Number(), 6.0);
+    }
+    EXPECT_EQ(number("sure"), 5.0);
+    EXPECT_EQ(number("counted"), std::trunc(number("counted")));
+    EXPECT_EQ(number("coin"), 1.0);
+    EXPECT_FALSE(runtime.Status("narrow")->ok);
+    EXPECT_NE(runtime.Status("narrow")->error.find("stddev"), std::string::npos) << runtime.Status("narrow")->error;
+    EXPECT_FALSE(runtime.Status("too few")->ok);
+    EXPECT_NE(runtime.Status("too few")->error.find("'max'"), std::string::npos) << runtime.Status("too few")->error;
+    EXPECT_EQ(number("whole"), std::trunc(number("whole"))) << "a UInt's, so whole";
+    EXPECT_GE(number("whole"), 1.0);
+    EXPECT_LE(number("whole"), 6.0);
+    EXPECT_EQ(number("through"), std::trunc(number("through"))) << "through the Add, an Int's";
+
+    // Each distribution is a node of its own, with its own inputs and no others.
+    const kgraph::NodeType* normal = kgraph::FindType("RandomNormal");
+    ASSERT_NE(normal, nullptr);
+    std::vector<std::string> names;
+    for (const auto& port : normal->inputs) names.push_back(port.name);
+    EXPECT_EQ(names, (std::vector<std::string> { "type", "seed", "mean", "stddev" }));
+    for (const std::string_view distribution : kgraph::random::DistributionNames())
+        EXPECT_NE(kgraph::FindType(kgraph::random::NodeOf(*kgraph::random::DistributionNamed(distribution))), nullptr) << distribution;
+}
+
+// A RandomDevice is a seed no one chose, kept while the graph runs — an edit elsewhere draws nothing new, nor changes the
+// random number it seeds — and drawn again when its `draw` changes.
+TEST_F(RuntimeTest, ARandomDeviceSeedIsKeptUntilItIsDrawnAgain) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("device", "RandomDevice");
+    graph.Add("random", "RandomUniform").Wire("seed", "device").Set("type", "Double");
+    graph.Add("elsewhere", "Float").Set("value", 1);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const double seed = *runtime.ValueOf("device", "out").Number();
+    const double drawn = *runtime.ValueOf("random", "out").Number();
+    EXPECT_EQ(seed, std::trunc(seed));
+    EXPECT_GE(seed, 0.0);
+    EXPECT_LE(seed, 4294967295.0);
+
+    graph.nodes.back().Set("value", 2);
+    runtime.Set(graph);
+    EXPECT_EQ(*runtime.ValueOf("device", "out").Number(), seed) << "kept, whatever else is edited";
+    EXPECT_EQ(*runtime.ValueOf("random", "out").Number(), drawn);
+
+    // Drawn again, for each new `draw`: three draws of 2^32 seeds that are all the same seed would be one in 2^64.
+    bool changed = false;
+    for (int draw = 1; draw <= 3 && !changed; ++draw) {
+        graph.nodes.front().Set("draw", draw);
+        runtime.Set(graph);
+        changed = *runtime.ValueOf("device", "out").Number() != seed;
+    }
+    EXPECT_TRUE(changed) << "a new draw, a new seed";
+}
+
+// Every value port says exactly what it takes: a value node's, a builder's argument, and what a pipeline's shaders declare.
+// Conform makes a value that shape.
+TEST(Shapes, EachValuePortSaysWhatItTakes) {
+    using kgraph::Scalar;
+    using kgraph::Shape;
+    using kgraph::Value;
+    const auto shape = [](const char* type, const char* port, const bool output = false) {
+        const kgraph::NodeType* found = kgraph::FindType(type);
+        if (!found) return Shape {};
+        const auto& ports = output ? found->outputs : found->inputs;
+        const auto it = std::ranges::find(ports, std::string_view(port), &kgraph::Port::name);
+        return it == ports.end() ? Shape {} : it->shape;
+    };
+    EXPECT_EQ(shape("Float", "value"), (Shape { Scalar::eFloat, 1 }));
+    EXPECT_EQ(shape("UInt", "value"), (Shape { Scalar::eUInt, 1 }));
+    EXPECT_EQ(shape("IVec3", "y"), (Shape { Scalar::eInt, 1 }));
+    EXPECT_EQ(shape("Vec4", "out", true), (Shape { Scalar::eFloat, 4 }));
+    EXPECT_EQ(shape("Color", "color"), (Shape { Scalar::eFloat, 4 }));
+    EXPECT_EQ(shape("Bool", "value"), (Shape { Scalar::eBool, 1 }));
+    EXPECT_EQ(shape("Image", "arrayLayers"), (Shape { Scalar::eUInt, 1 })) << "a builder's argument";
+    EXPECT_FALSE(shape("Add", "a").Known()) << "what takes any kind says none";
+
+    EXPECT_EQ(kgraph::Conform(Value(2.6), { Scalar::eInt, 1 }), Value(3.0));
+    EXPECT_EQ(kgraph::Conform(Value(-2.0), { Scalar::eUInt, 1 }), Value(0.0));
+    EXPECT_EQ(kgraph::Conform(Value(0.1), { Scalar::eFloat, 1 }), Value(static_cast<double>(0.1f)));
+    EXPECT_EQ(kgraph::Conform(Value(0.1), { Scalar::eDouble, 1 }), Value(0.1));
+    EXPECT_EQ(kgraph::Conform(Value(1.0), { Scalar::eBool, 1 }), Value(true));
+    EXPECT_EQ(kgraph::Conform(Value(2.0), { Scalar::eFloat, 3 }), (Value(Value::List { 2.0, 2.0, 2.0 }))) << "a number for every component";
+    EXPECT_EQ(kgraph::Conform(Value(Value::List { 1.4, 2.6 }), { Scalar::eUInt, 3 }), (Value(Value::List { 1.0, 3.0, 0.0 })));
+    EXPECT_EQ(kgraph::Conform(Value("text"), { Scalar::eFloat, 1 }), Value("text"));
+    EXPECT_EQ(kgraph::ShapeNamed("UVec3"), (Shape { Scalar::eUInt, 3 }));
+    EXPECT_EQ(kgraph::ShapeName({ Scalar::eInt, 2 }), "IVec2");
+}
+
+// Comparisons of vectors are a component at a time, and an Any or an All says them as one; a Select picks by each.
+// Colours are said one way and another, turns are quaternions, and a Jitter is a place within the pixel each frame.
+TEST_F(RuntimeTest, ColoursTurnsComparisonsAndJitterAreWorkedOut) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    const auto node = [&](const char* id, const char* type) -> kgraph::Node& { return graph.Add(id, type); };
+    node("less", "Less").Set("a", Value::List { 1, 5 }).Set("b", 3);
+    node("any", "Any").Wire("a", "less");
+    node("all", "All").Wire("a", "less");
+    node("pick", "Select").Wire("condition", "less").Set("a", Value::List { 10, 20 }).Set("b", Value::List { 30, 40 });
+    node("linear", "ColorConvert").Set("color", Value::List { 0.5, 0.5, 0.5, 0.25 });
+    node("gamma", "ColorConvert").Set("color", Value::List { 0.5, 0.5, 0.5 }).Set("from", "eGamma22");
+    node("back", "ColorConvert").Wire("color", "linear").Set("from", "eLinear").Set("to", "eSrgb");
+    node("red", "ColorConvert").Set("color", Value::List { 0, 1, 1 }).Set("from", "eHsv");
+    node("hue", "ColorConvert").Set("color", Value::List { 0, 1, 0 }).Set("to", "eHsv");
+    node("daylight", "ColorConvert").Set("color", 6500).Set("from", "eKelvin");
+    node("quarter", "QuatFromAxisAngle").Set("axis", Value::List { 0, 2, 0 }).Set("angle", 90);
+    node("euler", "QuatFromEuler").Set("rotation", Value::List { 0, 90, 0 });
+    node("turned", "QuatRotate").Wire("q", "quarter").Set("vector", Value::List { 1, 0, 0 });
+    node("half", "QuatMultiply").Wire("a", "quarter").Wire("b", "quarter");
+    node("back turn", "QuatInverse").Wire("q", "quarter");
+    node("eighth", "QuatSlerp").Set("a", Value::List { 0, 0, 0, 1 }).Wire("b", "quarter").Set("t", 0.5);
+    node("as matrix", "QuatToMatrix").Wire("q", "quarter");
+    node("rotated", "MatrixRotate").Set("rotation", Value::List { 0, 90, 0 });
+    node("angles", "QuatToEuler").Wire("q", "quarter");
+    node("jitter", "Jitter").Set("frame", 8).Set("size", Value::List { 100, 50 }).Set("projection", Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 });
+    node("mesh shaders", "DeviceSupports").Set("feature", "eMeshShader");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const auto numbers = [&](const char* id, const char* output = "out") {
+        std::vector<double> out;
+        const Value value = runtime.ValueOf(id, output);
+        if (const auto* items = value.Items()) for (const auto& item : *items) out.push_back(item.Number() ? *item.Number() : (item.Bool() ? (*item.Bool() ? 1.0 : 0.0) : -999.0));
+        else if (const double* n = value.Number()) out.push_back(*n);
+        return out;
+    };
+    const auto near = [](const std::vector<double>& a, const std::vector<double>& b, const double within = 1e-4) {
+        if (a.size() != b.size()) return false;
+        for (std::size_t i = 0; i < a.size(); ++i) if (std::abs(a[i] - b[i]) > within) return false;
+        return true;
+    };
+    EXPECT_EQ(runtime.ValueOf("less"), Value(Value::List { true, false })) << "a component at a time; a number goes with each";
+    EXPECT_EQ(runtime.ValueOf("any"), Value(true));
+    EXPECT_EQ(runtime.ValueOf("all"), Value(false));
+    EXPECT_EQ(numbers("pick"), (std::vector<double> { 10, 40 }));
+    EXPECT_TRUE(near(numbers("linear"), { 0.2140411, 0.2140411, 0.2140411, 0.25 })) << "by the sRGB curve; alpha as it was";
+    EXPECT_TRUE(near(numbers("gamma"), { std::pow(0.5, 2.2), std::pow(0.5, 2.2), std::pow(0.5, 2.2) })) << "by the power 2.2, as Linear had it";
+    EXPECT_TRUE(near(numbers("back"), { 0.5, 0.5, 0.5, 0.25 })) << "and back again";
+    EXPECT_NEAR(numbers("linear", "luminance")[0], 0.2140411, 1e-4);
+    EXPECT_TRUE(near(numbers("red"), { 1, 0, 0 }));
+    EXPECT_TRUE(near(numbers("hue"), { 1.0 / 3.0, 1, 1 })) << "green is a third of the way round";
+    const auto day = numbers("daylight");
+    ASSERT_EQ(day.size(), 3u);
+    EXPECT_NEAR(day[0], 1.0, 0.02) << "6500 K is near white";
+    EXPECT_GT(day[2], 0.85);
+
+    const double s = std::sqrt(0.5);
+    EXPECT_TRUE(near(numbers("quarter"), { 0, s, 0, s })) << "about an axis of any length";
+    EXPECT_TRUE(near(numbers("euler"), { 0, s, 0, s })) << "as an entity's rotation turns";
+    EXPECT_TRUE(near(numbers("turned"), { 0, 0, -1 })) << "x a quarter turn about y is -z";
+    EXPECT_TRUE(near(numbers("half"), { 0, 1, 0, 0 }));
+    EXPECT_TRUE(near(numbers("back turn"), { 0, -s, 0, s }));
+    EXPECT_TRUE(near(numbers("eighth"), { 0, std::sin(std::numbers::pi / 8), 0, std::cos(std::numbers::pi / 8) }));
+    EXPECT_TRUE(near(numbers("as matrix"), numbers("rotated"))) << "the matrix a rotation of the same is";
+    EXPECT_TRUE(near(numbers("angles"), { 0, 90, 0 }, 1e-3));
+
+    // Frame 8 of 8 places is the first again: (1/2, 1/3) of Halton's, from the pixel's middle.
+    EXPECT_TRUE(near(numbers("jitter", "pixels"), { 0, 1.0 / 3.0 - 0.5 }));
+    EXPECT_TRUE(near(numbers("jitter", "clip"), { 0, 2 * (1.0 / 3.0 - 0.5) / 50 }));
+    EXPECT_EQ(numbers("jitter", "index"), (std::vector<double> { 0 }));
+    const auto jittered = numbers("jitter", "jittered");
+    ASSERT_EQ(jittered.size(), 16u);
+    EXPECT_NEAR(jittered[13], 2 * (1.0 / 3.0 - 0.5) / 50, 1e-9) << "moved as much as w is, in clip space";
+    EXPECT_TRUE(runtime.ValueOf("mesh shaders").Bool()) << "whether it has them, true or false";
+}
+
+// A Time counts frames, and a LastFrame is what it was given the frame before: valid from the second frame on.
+TEST_F(RuntimeTest, ALastFrameIsWhatItWasGivenTheFrameBefore) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "frame" };
+    graph.Add("time", "Time").pass = "frame";
+    graph.Add("before", "LastFrame").Wire("value", "time", "frame").pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("clear", "Clear").Wire("image", "screen").Set("color", Value::List { 0, 0, 0, 1 }).pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("before", "valid"), Value(false)) << "no frame before the first";
+    Frame();
+    const double first = *runtime.ValueOf("time", "frame").Number();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(*runtime.ValueOf("time", "frame").Number(), first + 3) << "one more each frame";
+    EXPECT_EQ(*runtime.ValueOf("before").Number(), first + 2);
+    EXPECT_EQ(runtime.ValueOf("before", "valid"), Value(true));
+}
+
+// The shorthands: a ComputePass is a pipeline and its dispatch, a RenderTarget an image sized by another or the window,
+// and a History what a resource was when the frame before was over. A Readback brings numbers back; a Keep says when it
+// holds something; a Clear clears depth and whole numbers too.
+TEST_F(RuntimeTest, ShorthandsReadbacksAndClearsOfEveryKind) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "made", "frame" };
+    graph.setup = { "made" };
+    graph.Add("state", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 })
+        .Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).pass = "made";
+    graph.Add("clear", "Clear").Wire("image", "state").Set("color", Value::List { 1, 0, 0, 1 }).pass = "made";
+    graph.Add("halve", "ComputePass").Set("module", "fill").Set("entry", "computeMain").Wire("param.target", "state").Set("constant.level", 0.5)
+        .Set("cover", "target").pass = "made";
+    graph.Add("half size", "RenderTarget").Set("format", "eRGBA8_UNORM").Wire("sizeOf", "state").Set("scale", 0.5).Set("mipLevels", 0).pass = "frame";
+    graph.Add("window sized", "RenderTarget").Set("format", "eRGBA8_UNORM").pass = "frame";
+    graph.Add("paint", "Clear").Wire("image", "half size").pass = "frame";
+    graph.Add("paint window sized", "Clear").Wire("image", "window sized").pass = "frame";
+    // A count one more each frame, and what it was when the frame before was over.
+    graph.Add("count", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eStorage", "eTransferSrc" }).pass = "frame";
+    graph.Add("add one", "ComputePass").Set("module", "increment").Set("entry", "computeMain").Wire("param.counter", "count")
+        .Set("groups", Value::List { 1, 1, 1 }).pass = "frame";
+    graph.Add("before", "History").Wire("of", "count").pass = "frame";
+    graph.Add("read now", "Readback").Wire("buffer", "count").Set("type", "eUInt").pass = "frame";
+    graph.Add("read before", "Readback").Wire("buffer", "before").Set("type", "eUInt").pass = "frame";
+    graph.Add("kept", "Keep").Wire("of", "count").pass = "frame";
+    // A depth, and whole numbers.
+    graph.Add("depth", "Image").Set("format", "eD32_SFLOAT").Set("extent", Value::List { 4, 4 }).pass = "frame";
+    graph.Add("clear depth", "Clear").Wire("image", "depth").Set("depth", 0.25).pass = "frame";
+    graph.Add("read depth", "Readback").Wire("image", "depth").pass = "frame";
+    graph.Add("ids", "Image").Set("format", "eR32_UINT").Set("extent", Value::List { 4, 4 }).pass = "frame";
+    graph.Add("clear ids", "Clear").Wire("image", "ids").Set("color", Value::List { 7, 0, 0, 0 }).pass = "frame";
+    graph.Add("read ids", "Readback").Wire("image", "ids").pass = "frame";
+    graph.Add("numbers", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eStorage" }).pass = "frame";
+    graph.Add("zero", "ClearBuffer").Wire("buffer", "numbers").pass = "frame";
+    graph.Add("read numbers", "Readback").Wire("buffer", "numbers").Set("offset", 4).Set("type", "eUVec2").pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "state").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.ValueOf("kept", "valid"), Value(false)) << "nothing copied yet";
+    EXPECT_EQ(runtime.ValueOf("read now", "ready"), Value(false));
+    EXPECT_TRUE(std::ranges::contains(runtime.PortsOf("halve"), std::string("param.target"), &kgraph::Port::name)) << "its pipeline's parameters are its own";
+
+    for (int i = 0; i < 8; ++i) Frame();
+    EXPECT_NEAR(scene->Pixel(4, 4).x, 128, 2) << "halved once, on the setup page";
+    EXPECT_NEAR(scene->Pixel(4, 4).y, 128, 2) << "with the constant given";
+    const auto half = runtime.ImageOf("half size");
+    ASSERT_TRUE(half.Get());
+    EXPECT_EQ(half->Extent().x, 16u);
+    EXPECT_EQ(half->Extent().y, 16u);
+    EXPECT_EQ(half->MipLevels(), 5u) << "every mip down to a pixel, for 0";
+    EXPECT_EQ(runtime.ImageOf("window sized")->Extent().x, static_cast<kor::u32>(*runtime.ValueOf("screen", "width").Number())) << "as wide as the window";
+    EXPECT_EQ(runtime.ValueOf("half size", "extent"), Value(Value::List { 16, 16, 1 }));
+
+    EXPECT_EQ(runtime.ValueOf("read now", "ready"), Value(true));
+    const double now = *runtime.ValueOf("read now").Number(), before = *runtime.ValueOf("read before").Number();
+    EXPECT_EQ(now - before, 1) << "the frame before's count: " << now << " and " << before;
+    EXPECT_EQ(runtime.ValueOf("before", "valid"), Value(true));
+    EXPECT_EQ(runtime.ValueOf("kept", "valid"), Value(true));
+    EXPECT_EQ(runtime.ValueOf("read depth"), Value(0.25));
+    EXPECT_EQ(runtime.ValueOf("read ids"), Value(7)) << "a whole number, cleared as one";
+    EXPECT_EQ(runtime.ValueOf("read numbers"), Value(Value::List { 0, 0 }));
+}
+
+// The engine's HiZ: a depth pyramid whose every level is the farthest of what it covers — the least, of a reversed depth.
+// And its TAA: a picture that does not move comes out as it went in, once the history it blends with is there.
+TEST_F(RuntimeTest, TheEnginesHiZAndTAAWorkOnTheGpu) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "frame" };
+    for (const char* name : { "HiZ", "TAA" }) graph.functions[name] = EngineFunction(name);
+    graph.Add("depth", "Image").Set("format", "eR32_SFLOAT").Set("extent", Value::List { 64, 32 }).pass = "frame";
+    graph.Add("halves", "ComputePass").Set("module", "halves").Set("entry", "computeMain").Wire("param.target", "depth").Set("cover", "target").pass = "frame";
+    graph.Add("far", "Function").Set("function", "HiZ").Wire("depth", "depth").pass = "frame";
+    graph.Add("near", "Function").Set("function", "HiZ").Wire("depth", "depth").Set("reversed", 1).pass = "frame";
+    for (const char* id : { "far", "near" })
+        for (int x = 0; x < 2; ++x)
+            graph.Add(std::format("{} {}", id, x), "Readback").Wire("image", id, "pyramid").Set("mip", 8).Set("texel", Value::List { x, 0 }).pass = "frame";
+    graph.Add("whole", "Readback").Wire("image", "far", "pyramid").Set("texel", Value::List { 300, 100 }).pass = "frame";
+
+    graph.Add("picture", "Image").Set("format", "eRGBA16_SFLOAT").Set("extent", Value::List { 16, 16 }).pass = "frame";
+    graph.Add("paint", "Clear").Wire("image", "picture").Set("color", Value::List { 0.5, 0.25, 0, 1 }).pass = "frame";
+    graph.Add("flat", "Image").Set("format", "eR32_SFLOAT").Set("extent", Value::List { 16, 16 }).pass = "frame";
+    graph.Add("flatten", "Clear").Wire("image", "flat").Set("color", Value::List { 0.5, 0, 0, 0 }).pass = "frame";
+    graph.Add("taa", "Function").Set("function", "TAA").Wire("picture", "picture").Wire("depth", "flat")
+        .Set("viewProjection", Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 }).pass = "frame";
+    graph.Add("resolved", "Readback").Wire("image", "taa", "picture").Set("texel", Value::List { 3, 3 }).pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "taa", "picture").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    for (int i = 0; i < 8; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("far 0"), Value(0.25)) << "the left half, at the last level but one: two texels, each a half";
+    EXPECT_EQ(runtime.ValueOf("far 1"), Value(0.75));
+    EXPECT_EQ(runtime.ValueOf("near 0"), Value(0.25));
+    EXPECT_EQ(runtime.ValueOf("whole"), Value(0.75)) << "the first level: of what each of its texels covers";
+    const Value resolved = runtime.ValueOf("resolved");
+    ASSERT_TRUE(resolved.Items()) << resolved.ToJson();
+    EXPECT_NEAR(*(*resolved.Items())[0].Number(), 0.5, 1e-3);
+    EXPECT_NEAR(*(*resolved.Items())[1].Number(), 0.25, 1e-3);
+}
+
+// The engine's Bloom: what is brighter than its threshold bleeds round it, into the picture in place.
+TEST_F(RuntimeTest, TheEnginesBloomBleedsWhatIsBright) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    kgraph::Graph graph;
+    graph.passes = { "frame" };
+    graph.functions["Bloom"] = EngineFunction("Bloom");
+    graph.Add("picture", "Image").Set("format", "eRGBA16_SFLOAT").Set("extent", Value::List { 64, 64 }).pass = "frame";
+    graph.Add("paint", "Clear").Wire("image", "picture").Set("color", Value::List { 4, 4, 4, 1 }).pass = "frame";
+    graph.Add("linear", "Sampler").Set("minFilter", "eLinear").Set("magFilter", "eLinear").Set("addressModeU", "eClampToEdge").Set("addressModeV", "eClampToEdge").pass = "frame";
+    graph.Add("bloom", "Function").Set("function", "Bloom").Wire("picture", "picture").Wire("sampler", "linear").pass = "frame";
+    graph.Add("read", "Readback").Wire("image", "bloom", "picture").Set("texel", Value::List { 32, 32 }).pass = "frame";
+    graph.Add("screen", "Screen").pass = "frame";
+    graph.Add("show", "Blit").Wire("source", "bloom", "picture").Wire("destination", "screen").pass = "frame";
+    runtime.Set(graph);
+    for (int i = 0; i < 8; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (const auto& [id, turns] : std::map<std::string, int> {})
+        (void)id, (void)turns;
+    for (const char* id : { "bloom/bloom size", "bloom/bloom down", "bloom/bloom up", "bloom/source view", "bloom/down [0]", "bloom/run down [0]",
+                            "bloom/run up [0]", "bloom/run add bloom" })
+        if (const auto* status = runtime.Status(id); status && (!status->ok || !status->note.empty())) ADD_FAILURE() << id << ": " << status->error << status->note;
+    const Value read = runtime.ValueOf("read");
+    ASSERT_TRUE(read.Items()) << read.ToJson();
+    EXPECT_GT(*(*read.Items())[0].Number(), 4.0) << "brighter than it was: its own light bled back into it";
 }

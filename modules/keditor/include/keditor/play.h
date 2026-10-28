@@ -110,6 +110,15 @@ namespace keditor
         [[nodiscard]] bool Shown() const { return _shown; }
         /** @brief Its view of the graph; null until it has first been shown a frame. */
         [[nodiscard]] kgraph::Runtime* Runtime() { return _runtime.get(); }
+        /**
+         * @brief Seen from @p view rather than the scene's camera, as an editor's view is — its debug views, what it
+         *        hides — for a second view of the scene beside the editor's own. None, the scene's camera, as played.
+         */
+        void SetView(std::optional<kgraph::View> view, std::set<kecs::Entity> hidden = {})
+        {
+            _view = std::move(view);
+            _hidden = std::move(hidden);
+        }
 
     private:
         PlayScene& _play;
@@ -117,5 +126,7 @@ namespace keditor
         std::unique_ptr<kgraph::Runtime> _runtime, _before;     // (the one before, until the frame it was drawn in is done)
         std::uint64_t _seen = 0, _restarts = 0;
         bool _shown = false, _enabled = true;     // not drawn until whoever shows it says it is seen
+        std::optional<kgraph::View> _view;
+        std::set<kecs::Entity> _hidden;
     };
 }

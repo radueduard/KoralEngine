@@ -909,6 +909,11 @@ namespace keditor
         auto* node = graph.Find(id);
         if (!node) return false;
         OneWayOfGiving(*node, input);
+        // What is set is what the input takes: an Int's a whole number, a Float's a float's, a float4's four of them.
+        for (const auto& port : _runtime->PortsOf(id))
+            if (port.name == input) { value = kgraph::Conform(value, port.shape); break; }
+        // Another component's buffer holds what that one has: the fields ticked of the one before go with it.
+        if (node->type == "ComponentBuffer" && input == "component" && node->inputs.contains("component") && node->inputs.at("component").value != value) node->inputs.erase("fields");
         node->Set(std::string(input), std::move(value));
         Apply(std::move(graph));
         return true;
@@ -1552,6 +1557,21 @@ namespace keditor
             return text && !text->empty() ? text : nullptr;
         }
 
+        /**
+         * What of @p node names another node by its id, as text rather than a wire: a Reference's `node`, a Previous's and
+         * an Element's `of` and `first`. Each is renamed by @p rename, as the nodes are when a function is opened, closed
+         * or written out.
+         */
+        void RenameNamed(kgraph::Node& node, const std::function<std::optional<std::string>(const std::string&)>& rename)
+        {
+            std::vector<const char*> named;
+            if (node.type == "Reference") named = { "node" };
+            else if (node.type == "Previous" || node.type == "Element") named = { "of", "first" };
+            for (const char* input : named)
+                if (auto target = node.inputs.find(input); target != node.inputs.end() && !target->second.link && target->second.value.String() && !target->second.value.String()->empty())
+                    if (auto renamed = rename(*target->second.value.String())) target->second.value = kgraph::Value(std::move(*renamed));
+        }
+
         std::string Unique(const std::string& base, const std::function<bool(const std::string&)>& taken)
         {
             std::string name = base;
@@ -1821,9 +1841,7 @@ namespace keditor
             copy.pass = opened.pass;
             for (auto& input : copy.inputs | std::views::values)
                 if (input.link) input.link->node = opened.prefix + input.link->node;
-            if (copy.type == "Reference")
-                if (auto target = copy.inputs.find("node"); target != copy.inputs.end() && target->second.value.String())
-                    target->second.value = kgraph::Value(opened.prefix + *target->second.value.String());
+            RenameNamed(copy, [&](const std::string& id) { return std::optional(opened.prefix + id); });
             const std::string port = TextOf(inner, "name") ? *TextOf(inner, "name") : inner.id;
             // An input is given what the call was given there; an output is what was wired from the call.
             if (inner.type == "FunctionInput")
@@ -1908,9 +1926,7 @@ namespace keditor
                 call.inputs[name] = input;
                 input.link = kgraph::Link { id, "out" };
             }
-            if (copy.type == "Reference")
-                if (auto target = copy.inputs.find("node"); target != copy.inputs.end() && target->second.value.String() && page.contains(*target->second.value.String()))
-                    target->second.value = kgraph::Value(inFunction[*target->second.value.String()]);
+            RenameNamed(copy, [&](const std::string& id) { return page.contains(id) ? std::optional(inFunction[id]) : std::nullopt; });
             function.nodes.push_back(std::move(copy));
         }
         // What the rest takes of the page is what the call gives: at an output, or — taken straight — at one made for it.
@@ -1988,9 +2004,7 @@ namespace keditor
                 }
                 ++it;
             }
-            if (copy.type == "Reference")
-                if (auto target = copy.inputs.find("node"); target != copy.inputs.end() && target->second.value.String())
-                    target->second.value = kgraph::Value(prefix + *target->second.value.String());
+            RenameNamed(copy, [&](const std::string& id) { return std::optional(prefix + id); });
             written.insert(copy.id);
             graph.nodes.push_back(std::move(copy));
         }

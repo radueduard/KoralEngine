@@ -9,6 +9,7 @@
 
 #include <functional>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,7 @@ namespace kgraph
             std::vector<std::string> outputs;                               ///< A name for each FunctionOutput, top to bottom.
             std::map<std::string, Link, std::less<>> gives;                 ///< What each output is, written out: an inner node's.
             std::vector<std::string> nodes;                                 ///< The nodes it was written out into: `<call>/<node>`.
+            std::string called;                                             ///< The call's id: its own, or — of a Reference to it — the call's.
         };
         std::map<std::string, Call, std::less<>> calls;
         /// FunctionInput and FunctionOutput nodes of the graph itself — a function opened in place — and what each is.
@@ -55,6 +57,12 @@ namespace kgraph
      */
     using ElementOf = std::function<std::vector<std::pair<std::string, std::string>>(const Node&)>;
 
+    /**
+     * @brief The fields of a component a buffer holds, by its name, in the order it declares them: each field's name and its
+     *        type as a BufferBuilder's layout has it (LayoutTypeOf). Null when there is no such component. The runtime's to say.
+     */
+    using FieldsOf = std::function<std::optional<std::vector<std::pair<std::string, std::string>>>(std::string_view component)>;
+
     /** @brief Where a Bundle taken at input @p input of a node of type @p type goes: the prefix of the inputs it fills. Empty: none. */
     [[nodiscard]] std::string BundleTaken(std::string_view type, std::string_view input);
 
@@ -63,7 +71,7 @@ namespace kgraph
 
     /** @brief What a node of a loop is called on turn @p turn. */
     [[nodiscard]] std::string TurnId(std::string_view id, int turn);
-    [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {});
+    [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {}, const FieldsOf& fieldsOf = {});
     /**
      * @brief Why the Draw @p draw of @p graph (a graph as it runs: its calls and Bundles written out) cannot be written out
      *        as one indirect draw of every element — `batched` — or nothing when it can. @p each, when given, is the

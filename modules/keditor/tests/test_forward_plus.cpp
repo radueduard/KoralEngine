@@ -209,6 +209,9 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         EXPECT_GT(sky.z, 150) << "the sky is blue: " << int(sky.x) << " " << int(sky.y) << " " << int(sky.z);
         EXPECT_GT(int(floor.x) + int(floor.y) + int(floor.z), 150) << "the floor is lit";
 
+        // Taken once it has settled as the saved project will have: as many frames, the lamps' shadows all drawn and
+        // the antialiasing gathered over them.
+        for (int i = 16; i < 60; ++i) Frame();
         made = editing.Picture();
 
         // The other thing to look at: how many lights each pixel's cluster holds. Its pass runs only while it is shown.
@@ -286,6 +289,15 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
     const std::filesystem::path directory = KEDITOR_FORWARD_PLUS_PROJECT;
     if (!std::filesystem::exists(directory / "scenes" / "main.scene.json")) GTEST_SKIP() << "the project is made by the test before this one";
+    {
+        // Its textures are not what this is about: it is not asked, on opening, whether they are to be compressed —
+        // a dialog that would be in front of everything this goes on to press.
+        keditor::Project project;
+        std::string error;
+        ASSERT_TRUE(keditor::Project::Open(directory, project, error)) << error;
+        project.askToCompress = false;
+        ASSERT_TRUE(project.Save(error)) << error;
+    }
     auto* editor = support::App()->OpenOffscreen<keditor::EditorScene>({ .title = "editor", .extent = { 1500, 900 } }, directory);
     ASSERT_NE(editor, nullptr);
     for (int i = 0; i < 6; ++i) Frame();
@@ -327,16 +339,24 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         return has();
     };
     if (const char* page = std::getenv("FP_PAGE")) { editor->CurrentSession().ShowPass(page); wait(30, 3.5); support::App()->Close(*editor); Frame(); Frame(); return; }
-    editor->CurrentSession().Select(std::string("depth"));
-    EXPECT_TRUE(shows("Look at what it holds"));
+    // What it holds, copied out and said of — up to three seconds, a frame at a time.
+    const auto says = [&](const std::string_view text) {
+        const auto has = [&] {
+            const auto& session = editor->CurrentSession();
+            return session.LookSays().find(text) != std::string::npos
+                || std::ranges::any_of(session.LookLines(), [&](const std::string& line) { return line.find(text) != std::string::npos; });
+        };
+        wait(30, 0.35);
+        for (const auto start = std::chrono::steady_clock::now(); !has() && std::chrono::steady_clock::now() - start < std::chrono::seconds(3);) Frame();
+        return has();
+    };
     editor->CurrentSession().Look("depth");
-    EXPECT_TRUE(shows("eD32_SFLOAT, ")) << editor->CurrentSession().LookSays();
-    EXPECT_TRUE(shows("Its values run from 0.")) << "a depth is shown stretched: what it runs from and to is said";
+    EXPECT_TRUE(says("eD32_SFLOAT, ")) << editor->CurrentSession().LookSays();
+    EXPECT_TRUE(says("Its values run from 0.")) << "a depth is shown stretched: what it runs from and to is said";
     EXPECT_TRUE(editor->CurrentSession().LookPicture().Get() != nullptr);
-    editor->CurrentSession().Select(std::string("light data"));
     editor->CurrentSession().Look("light data");
-    EXPECT_TRUE(shows("96 elements of 32 each")) << editor->CurrentSession().LookSays();
-    EXPECT_TRUE(shows("[0]  position")) << "an element a line, each field by name";
+    EXPECT_TRUE(says("96 elements of 32 each")) << editor->CurrentSession().LookSays();
+    EXPECT_TRUE(says("[0]  position")) << "an element a line, each field by name";
     editor->CurrentSession().Look({});
 
     // The viewer: an image at any level, with its histogram and all there is to say of it; a buffer as a table, by
@@ -494,21 +514,39 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     keditor::Session& session = editor->CurrentSession();
     using Kind = keditor::Session::Asset::Kind;
     auto assets = session.Assets();
-    const auto forward = std::ranges::find(assets, "shader:forward", &keditor::Session::Asset::id);
+    // A shader is listed by its entry points, each with its module and its stage.
+    const auto forward = std::ranges::find(assets, "shader:forward#fragment", &keditor::Session::Asset::id);
     ASSERT_NE(forward, assets.end());
     EXPECT_EQ(forward->kind, Kind::eShader);
     EXPECT_EQ(forward->folder, "shaders");
+    EXPECT_EQ(forward->group, "forward");
+    EXPECT_EQ(forward->stage, "fragment");
+    const auto module = std::ranges::find(assets, "shader:forward", &keditor::Session::Asset::id);
+    ASSERT_NE(module, assets.end()) << "the module, and its entries under it";
+    EXPECT_EQ(forward->parent, "shader:forward");
+    const auto vertex = std::ranges::find(assets, "shader:forward#vertex", &keditor::Session::Asset::id);
+    ASSERT_NE(vertex, assets.end());
+    EXPECT_EQ(vertex->stage, "vertex");
+    EXPECT_LT(vertex, forward) << "as the module declares them";
     // The Assets panel shows the project's folders, and what is in the one gone into.
     EXPECT_TRUE(shows("shaders") && shows("scenes"));
     session.assetFolder = "shaders";
-    session.SelectAsset("shader:forward");
-    EXPECT_TRUE(shows("forward.slang")) << "in the Assets panel";
+    // The modules are listed, shut; opened, a module's entries are after it.
+    session.SelectAsset("shader:clusterHeat");
+    EXPECT_TRUE(shows("forward") && shows("clusterHeat")) << "in the Assets panel";
+    EXPECT_FALSE(shows("meshletMesh")) << "shut, its entries are not listed";
+    session.OpenAsset(*module);
+    EXPECT_TRUE(session.assetsOpened.contains("shader:forward"));
+    EXPECT_TRUE(shows("meshletMesh")) << "opened, they are";
+    session.OpenAsset(*module);
+    EXPECT_FALSE(session.assetsOpened.contains("shader:forward"));
+    session.SelectAsset("shader:forward#fragment");
     // Looked for, a thing is found wherever it is.
     session.assetFolder.clear();
     session.assetFilter = "heat";
-    session.SelectAsset("shader:clusterHeat");      // (the inspector names what is picked: not the one looked for as gone)
-    EXPECT_TRUE(shows("clusterHeat.slang"));
-    EXPECT_FALSE(shows("forward.slang"));
+    session.SelectAsset("shader:clusterHeat#computeMain");      // (the inspector names what is picked: not the one looked for as gone)
+    EXPECT_TRUE(shows("computeMain") && shows("clusterHeat"));
+    EXPECT_FALSE(shows("meshletMesh"));
     session.assetFilter.clear();
     // A folder is made in the one shown, and is among the folders.
     session.assetFolder = "assets";
@@ -534,9 +572,15 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     }
     std::filesystem::remove(directory / "assets" / "props");
     session.assetFolder.clear();
-    session.SelectAsset("shader:forward");
-    EXPECT_TRUE(shows("Entry points")) << "the inspector says what a picked asset is";
-    EXPECT_TRUE(shows("vertex, meshletTask, meshletMesh, fragment")) << "its vertex, task, mesh and fragment shaders";
+    session.SelectAsset("shader:forward#fragment");
+    EXPECT_TRUE(shows("Fragment shader") && shows("In its module")) << "the inspector says what a picked asset is";
+    {
+        // Its module's entries, as the module declares them: its vertex, task, mesh and fragment shaders.
+        std::string listed;
+        for (const auto& entry : session.EntryPoints("forward")) listed += (listed.empty() ? "" : ", ") + entry;
+        EXPECT_TRUE(listed.starts_with("vertex, meshletTask") && listed.ends_with("meshletMesh, fragment")) << listed;
+        EXPECT_TRUE(shows(listed.substr(0, 40))) << listed;
+    }
     std::string ran;
     keditor::Session::launch = [&](const std::string& command) { ran = command; return true; };
     EXPECT_TRUE(session.OpenInCode(forward->file));
@@ -544,6 +588,17 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     EXPECT_NE(ran.find("code \""), std::string::npos) << ran;
     EXPECT_NE(ran.find("--goto"), std::string::npos) << ran;
     EXPECT_NE(ran.find("forward.slang"), std::string::npos) << ran;
+    // An entry is opened where it is declared.
+    {
+        keditor::Session::launch = [&](const std::string& command) { ran = command; return true; };
+        session.OpenAsset(*forward);
+        keditor::Session::launch = {};
+        const auto entries = session.ShaderEntries("forward");
+        const auto fragment = std::ranges::find(entries, std::string("fragment"), &keditor::Session::ShaderEntry::name);
+        ASSERT_NE(fragment, entries.end());
+        EXPECT_EQ(fragment->stage, "fragment");
+        EXPECT_NE(ran.find(std::format("forward.slang:{}\"", fragment->line)), std::string::npos) << ran;
+    }
     EXPECT_TRUE(std::filesystem::exists(directory / ".vscode" / "settings.json"));
     EXPECT_TRUE(std::filesystem::exists(directory / ".vscode" / "extensions.json"));
     if (std::filesystem::exists(directory / "ForwardPlus.Scripts.csproj")) {
@@ -749,17 +804,21 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         wait(8, 0.3);
         EXPECT_TRUE(shows("differs")) << "the forward pass's is not the ray tracer's now";
         {
-            // Down the inspector to it: in a window this high, it is below the inspector's edge.
+            // Down the inspector to it: in a window this high, it is below the inspector's edge. The pointer goes over
+            // the inspector, wherever the panels are: above the pill, which is in it.
             auto& input = editor->SceneInput();
-            input.FeedMousePosition({ 1200.f, 400.f });
-            Frame();
-            for (int i = 0; i < 20; ++i) { input.FeedScroll({ 0.f, -3.f }); Frame(); }
-            wait(4, 0.1);
             std::optional<kor::Vec2> pill;
             std::function<void(kui::RenderObject&)> visit = [&](kui::RenderObject& o) {
                 if (!pill && o.DebugText() == "differs") pill = o.ToGlobal(o.Size() * 0.5f);
                 o.VisitChildren(visit);
             };
+            if (auto* root = editor->Interface().RootRenderObject()) visit(*root);
+            ASSERT_TRUE(pill);
+            input.FeedMousePosition({ pill->x, 400.f });
+            Frame();
+            for (int i = 0; i < 20; ++i) { input.FeedScroll({ 0.f, -3.f }); Frame(); }
+            wait(4, 0.1);
+            pill.reset();
             if (auto* root = editor->Interface().RootRenderObject()) visit(*root);
             ASSERT_TRUE(pill);
             ASSERT_LT(pill->y, 880.f) << "in sight";
@@ -958,13 +1017,13 @@ TEST(ForwardPlus, TheGraphIsWorkedOn) {
         // A shader dropped on the graph is a pipeline of it; a script that is no component yet says so; a shader is nothing an entity is given.
         session.ShowPass("show");
         const std::size_t nodesBefore = doc.Graph().nodes.size();
-        const std::string made = session.AssetToNode("shader:clusterHeat", 300, 200);
+        const std::string made = session.AssetToNode("shader:clusterHeat#computeMain", 300, 200);
         ASSERT_FALSE(made.empty()) << session.Status();
         EXPECT_EQ(doc.Graph().Find(made)->pass, "show");
-        EXPECT_TRUE(doc.Graph().Find(made)->type == "ComputePipeline" || doc.Graph().Find(made)->type == "GraphicsPipeline");
+        EXPECT_EQ(doc.Graph().Find(made)->type, "ComputePipeline");
         doc.RemoveNodes({ made });
         EXPECT_EQ(doc.Graph().nodes.size(), nodesBefore);
-        EXPECT_FALSE(session.GiveAsset("shader:forward", floor));
+        EXPECT_FALSE(session.GiveAsset("shader:forward#fragment", floor));
         EXPECT_TRUE(session.Failed());
 
         // The graph and the scene are side by side, and the panels say what each entity is.
@@ -981,7 +1040,7 @@ TEST(ForwardPlus, TheGraphIsWorkedOn) {
     // The Assets panel, for looking at: the project's folders, and one of them gone into.
     shot("assets-root");
     session.assetFolder = "shaders";
-    session.SelectAsset("shader:forward");
+    session.SelectAsset("shader:forward#fragment");
     for (int i = 0; i < 6; ++i) Frame();
     shot("assets-shaders");
     session.assetTileSize = 20.f;
@@ -1454,4 +1513,17 @@ TEST(ForwardPlus, ShadowsDrawnOnlyWhenChangedLookAsIfDrawnEveryFrame) {
         }
         EXPECT_LT(different, everyFrame[at].size() / 1000) << "picture " << at << ": still, the camera moved, a ball moved, a lamp moved";
     }
+}
+
+TEST(ForwardPlus, TemporaryClusterHeatOfTheUsersProject) {
+    if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
+    auto* editor = support::App()->OpenOffscreen<keditor::EditorScene>({ .title = "editor", .extent = { 1500, 900 } }, std::filesystem::path("/mnt/w/EngineProjects/forward-plus"));
+    ASSERT_NE(editor, nullptr);
+    for (int i = 0; i < 30; ++i) Frame();
+    keditor::Session& session = editor->CurrentSession();
+    for (const auto& choice : session.ViewModes()) std::printf("view: %s / %s\n", choice.group.c_str(), choice.name.c_str());
+    for (const auto& choice : session.ViewModes())
+        if (choice.name == "Cluster heat") { std::printf("choosing it\n"); session.SetViewMode(choice.mode); }
+    for (int i = 0; i < 60; ++i) Frame();
+    std::printf("survived\n");
 }

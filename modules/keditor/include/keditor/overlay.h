@@ -16,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -57,11 +58,15 @@ namespace keditor
         void SetView(std::optional<kgraph::View> view);
         /** @brief The entity a line is drawn round. */
         void SetSelected(kecs::Entity entity);
+        /** @brief Entities neither drawn for picking nor picked: hidden in the editor's view, or being dragged onto a surface. */
+        void SetHidden(std::set<kecs::Entity> hidden);
         /**
          * @brief Asks which entity is drawn at a place in the picture, @p u across and @p v down, each from 0 to 1.
          *        @p then hears a few frames on: it, or NullEntity. False when the passes could not be made.
          */
         bool Pick(float u, float v, std::function<void(kecs::Entity)> then);
+        /** @brief Pick, with the depth round the pixel: where on the surface there it is (SurfaceOf). */
+        bool PickAt(float u, float v, std::function<void(const kgraph::Runtime::PickHit&)> then);
 
         /** @brief What goes over the scene's picture: the line round what is picked and the editor's shapes, on nothing. */
         [[nodiscard]] kor::ResourceRef<const kor::Image> Picture() const;

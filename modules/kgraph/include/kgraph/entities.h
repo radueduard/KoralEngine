@@ -110,5 +110,6 @@ template <> struct kecs::Name<kor::Mat4> { static constexpr std::string_view val
 template <> struct kecs::Name<kor::Quat> { static constexpr std::string_view value = "quat"; };
 
 template <> struct kecs::Fields<kgraph::Mesh> {
-    static void Describe(kecs::FieldList<kgraph::Mesh>& list) { list.Field("mesh", &kgraph::Mesh::mesh); }
+    // A mesh, not any resource: what an editor offers it is meshes.
+    static void Describe(kecs::FieldList<kgraph::Mesh>& list) { list.Field("mesh", &kgraph::Mesh::mesh, "Mesh"); }
 };

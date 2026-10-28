@@ -21,6 +21,7 @@
 
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -59,11 +60,19 @@ namespace kecs
         Codecs();
         void Register(std::string type, Codec codec);
         [[nodiscard]] const Codec* Find(std::string_view type) const;
+        /**
+         * @brief A field of @p type reads what was saved as one of @p was: a type named more narrowly than it used to be —
+         *        a mesh's "Mesh" where it was any "resource" — loads what was saved before, rather than its default.
+         */
+        void Reads(std::string type, std::string was);
+        /** @brief Whether a field of @p type reads what was saved as @p was: the same type, or one it Reads. */
+        [[nodiscard]] bool ReadsAs(std::string_view type, std::string_view was) const;
         /** @brief The ones Save and Load use unless given others. */
         static Codecs& Default();
 
     private:
         std::map<std::string, Codec, std::less<>> _codecs;
+        std::set<std::pair<std::string, std::string>, std::less<>> _reads;     // (type, was)
     };
 
     /** @brief A world saved. */

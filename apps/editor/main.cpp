@@ -1,7 +1,9 @@
-// The Koral Engine editor: `koral-editor [project folder] [--frames N] [--no-vsync] [--validate]`. With no project it opens the one
+// The Koral Engine editor: `koral-editor [project folder] [--frames N] [--no-vsync] [--validate] [--arrange]`. With no project it opens the one
 // this user said to start with (Project, Open at startup), or else the engine's own: Forward+, made with nodes (forward-plus, in the projects folder).
 // A project with scripts is opened by their runner instead, which runs them: before this opens any window, in a
 // process forked for it — and when one is opened from the File menu, this closes its window and does the same.
+// --arrange puts every page of the project's scene in order, as the Graph menu's Arrange every page does, saves the
+// scene and exits: a graph a script wrote, laid out as the editor would.
 
 #include <chrono>
 #include <cstdio>
@@ -51,11 +53,13 @@ int main(const int argc, char** argv)
     // --validate: Vulkan's validation layer checks every call, as a debug build of the framework asks it to when the
     // layer is installed. It costs a fifth of a frame and more in a scene of many draws, so it is for whoever asks.
     bool validate = false;
+    bool arrange = false;
     kor::WindowPlatform platform = kor::WindowPlatform::eAuto;     // --platform x11 | wayland
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
         else if (std::strcmp(argv[i], "--no-vsync") == 0) { vsync = false; flags.emplace_back(argv[i]); }
         else if (std::strcmp(argv[i], "--validate") == 0) { validate = true; flags.emplace_back(argv[i]); }
+        else if (std::strcmp(argv[i], "--arrange") == 0) arrange = true;
         else if (std::strcmp(argv[i], "--platform") == 0 && i + 1 < argc) {
             flags.emplace_back(argv[i]);
             flags.emplace_back(argv[i + 1]);
@@ -71,7 +75,7 @@ int main(const int argc, char** argv)
 
     // A project with scripts is the editor run by their runner, which runs them: known before any window is opened,
     // and started in a process of its own, this one waiting for it. (Not when that runner is what started this.)
-    if (!project.empty() && frames <= 0)
+    if (!project.empty() && frames <= 0 && !arrange)
         if (const auto exited = ThroughScripts(project)) return *exited;
 
 #ifdef _WIN32
@@ -81,12 +85,25 @@ int main(const int argc, char** argv)
 #endif
 #ifndef _WIN32
     // Another project with scripts opened from the File menu: the window closes, and this goes to its runner as above.
-    keditor::Session::handOverOnExit = frames <= 0;
+    keditor::Session::handOverOnExit = frames <= 0 && !arrange;
 #endif
     int code = 0;
     {
         kor::App app(kor::AppSettings { .platform = platform });
-        app.Open("Editor", std::make_unique<keditor::EditorScene>(project, true), { .title = "Koral Engine", .extent = { 1600, 950 }, .vsync = vsync });
+        auto scene = std::make_unique<keditor::EditorScene>(project, true);
+        keditor::EditorScene* editor = scene.get();
+        app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = { 1600, 950 }, .vsync = vsync });
+        if (arrange) {
+            // Drawn a few times first, so that each node is as big as it comes out; then each page in turn, then saved.
+            for (int i = 0; i < 30; ++i) app.Frame();
+            keditor::Session& session = editor->CurrentSession();
+            session.ArrangeEveryPage();
+            for (int i = 0; i < 100000 && !session.PagesToArrange().empty(); ++i) app.Frame();
+            for (int i = 0; i < 5; ++i) app.Frame();
+            if (!session.Save()) { std::fprintf(stderr, "koral-editor: %s\n", session.Status().c_str()); return 1; }
+            std::printf("koral-editor: every page of %s is in order, and saved\n", project.string().c_str());
+            return 0;
+        }
         if (frames > 0) {
             for (long i = 0; i < frames; ++i) app.Frame();
             return 0;

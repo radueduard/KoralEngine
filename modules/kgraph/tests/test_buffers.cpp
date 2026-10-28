@@ -284,3 +284,129 @@ TEST_F(BufferTest, ABundleFillsTheFieldsOfItsNames) {
     ASSERT_FALSE(runtime.Status("view data")->ok);
     EXPECT_NE(runtime.Status("view data")->error.find("takes a Bundle"), std::string::npos) << runtime.Status("view data")->error;
 }
+
+// A shader's inputs as it declares them: a Dispatch's `push.` inputs are of the shader's kind and size, start as its
+// defaults — what runs when they are given nothing — and are kept and drawn as koral_inspector's attributes say. A random
+// number wired to one is of its kind: four of a float4.
+TEST_F(BufferTest, AShadersInputsAreAsItDeclaresThem) {
+    using kgraph::Scalar;
+    using kgraph::Shape;
+    using kgraph::Value;
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("target", "Buffer").Set("instanceCount", 64).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("pipeline", "ComputePipeline").Set("compute.module", "inspected").Set("compute.entry", "computeMain").Wire("param.target", "target");
+    graph.Add("run", "Dispatch").Wire("pipeline", "pipeline").Set("push.plain", 7);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+
+    const auto ports = runtime.PortsOf("run");
+    const auto port = [&](const char* name) {
+        const auto it = std::ranges::find(ports, std::string_view(name), &kgraph::Port::name);
+        EXPECT_NE(it, ports.end()) << name;
+        return it == ports.end() ? kgraph::Port {} : *it;
+    };
+    const auto speed = port("push.speed");
+    EXPECT_EQ(speed.shape, (Shape { Scalar::eFloat, 1 }));
+    EXPECT_EQ(speed.initial, Value(10.0));
+    EXPECT_EQ(speed.min, 0.f);
+    EXPECT_EQ(speed.max, 50.f);
+    const auto tint = port("push.tint");
+    EXPECT_EQ(tint.shape, (Shape { Scalar::eFloat, 4 }));
+    EXPECT_EQ(tint.initial, (Value(Value::List { 1.0, 0.5, 0.0, 1.0 }))) << "a vector's default, read from the source";
+    EXPECT_EQ(tint.editor, "color");
+    const auto steps = port("push.steps");
+    EXPECT_EQ(steps.shape, (Shape { Scalar::eInt, 1 }));
+    EXPECT_TRUE(steps.integer);
+    EXPECT_EQ(steps.min, 0.f);
+    EXPECT_EQ(steps.initial, Value(3.0));
+    const auto length = port("push.wave.length");
+    EXPECT_EQ(length.initial, Value(2.5));
+    EXPECT_EQ(length.min, 1.f) << "a field's attribute, FieldRange";
+    EXPECT_EQ(length.max, 4.f);
+    EXPECT_TRUE(port("push.plain").initial.IsNull()) << "declared with no default";
+
+    // Given nothing, each runs as its default.
+    Frame();
+    Frame();
+    auto written = Floats("target");
+    ASSERT_GE(written.size(), 8u);
+    EXPECT_FLOAT_EQ(written[0], 10.f);
+    EXPECT_FLOAT_EQ(written[1], 1.f);
+    EXPECT_FLOAT_EQ(written[2], 0.5f);
+    EXPECT_FLOAT_EQ(written[4], 1.f);
+    EXPECT_FLOAT_EQ(written[5], 3.f);
+    EXPECT_FLOAT_EQ(written[6], 2.5f);
+    EXPECT_FLOAT_EQ(written[7], 7.f) << "what is given, as it is";
+
+    // A random number wired to the float4 is four numbers, each drawn by itself.
+    graph.Add("random tint", "RandomUniform").Set("min", 0.25).Set("max", 0.75).Set("seed", 9);
+    graph.Find("run")->Wire("push.tint", "random tint");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    const Value drawn = runtime.ValueOf("random tint", "out");
+    ASSERT_TRUE(drawn.Items()) << drawn.ToJson();
+    ASSERT_EQ(drawn.Items()->size(), 4u);
+    Frame();
+    Frame();
+    written = Floats("target");
+    for (std::size_t i = 0; i < 4; ++i) {
+        const double n = *(*drawn.Items())[i].Number();
+        EXPECT_GE(n, 0.25);
+        EXPECT_LT(n, 0.75);
+        EXPECT_FLOAT_EQ(written[1 + i], static_cast<float>(n));
+    }
+}
+
+// A ComponentBuffer is a component's entities as a buffer, laid out as the component has them: every field of it and
+// where each entity is, or only the fields ticked. One wired by itself takes its wire.
+TEST_F(BufferTest, AComponentBufferHoldsTheFieldsOfItsComponent) {
+    kecs::World& world = scene->world;
+    for (const float range : { 2.f, 3.f }) {
+        const kecs::Entity spot = world.Create();
+        support::Give(world, spot, "SpotLight", { { "color", { 1, 0.5f, 0.25f } }, { "intensity", { 4 } }, { "range", { range } } });
+        world.SetPosition(spot, { range, 0, 0 });
+    }
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("spots", "ComponentBuffer").Set("component", "SpotLight");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("spots", "count"), Value(2));
+    EXPECT_EQ(runtime.ValueOf("spots", "stride"), Value(128)) << "color, intensity, range, innerAngle, outerAngle; worldPosition, forward and matrix each on sixteen";
+    std::vector<float> floats = Floats("spots");
+    ASSERT_GE(floats.size(), 64u);
+    EXPECT_EQ(floats[1], 0.5f);
+    EXPECT_EQ(floats[3], 4.f) << "intensity";
+    EXPECT_EQ(floats[4], 2.f) << "range";
+    EXPECT_EQ(floats[8], 2.f) << "where the first is";
+    EXPECT_EQ(floats[32 + 8], 3.f) << "and the second";
+    EXPECT_TRUE(std::ranges::contains(runtime.PortsOf("spots"), std::string("field.range"), &kgraph::Port::name)) << "each field there to be wired";
+
+    // Only those ticked, in the order the component has them whatever order they are ticked in; one wired by itself takes its wire.
+    graph.Find("spots")->Set("fields", Value::List { "range", "color" });
+    graph.Add("far", "Float").Set("value", 9);
+    graph.Find("spots")->Wire("field.range", "far");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("spots", "stride"), Value(16)) << "a float3 and a float";
+    floats = Floats("spots");
+    ASSERT_GE(floats.size(), 8u);
+    EXPECT_EQ(floats[0], 1.f);
+    EXPECT_EQ(floats[3], 9.f);
+    EXPECT_EQ(floats[4 + 3], 9.f);
+
+    // What the component has not is said; none ticked, or no component, is no buffer.
+    graph.Find("spots")->Set("fields", Value::List { "color", "fov" });
+    runtime.Set(graph);
+    EXPECT_TRUE(runtime.Status("spots")->ok) << runtime.Status("spots")->error;
+    EXPECT_NE(runtime.Status("spots")->note.find("'fov'"), std::string::npos) << runtime.Status("spots")->note;
+    graph.Find("spots")->Set("fields", Value::List {});
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("spots")->error.find("holds no field"), std::string::npos) << runtime.Status("spots")->error;
+    graph.Find("spots")->Set("fields", Value::List { "color" }).Set("component", "Nothing");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("spots")->error.find("no component 'Nothing'"), std::string::npos) << runtime.Status("spots")->error;
+}

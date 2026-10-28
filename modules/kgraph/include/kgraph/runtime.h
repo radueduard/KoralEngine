@@ -380,6 +380,12 @@ namespace kgraph
          */
         void SetView(std::optional<View> view);
         /**
+         * @brief Entities left out of what is drawn, in this runtime alone: an editor's view hiding some, or showing
+         *        some by themselves. Each list of entities with a Mesh leaves them out; what lights them, and the
+         *        world, are as they were. Empty (the default), none.
+         */
+        void SetHidden(std::set<kecs::Entity> hidden);
+        /**
          * @brief Of a runtime that follows another: the Buffer nodes, by id, whose buffer is the source's own rather than
          *        one of its own — those something outside the graph writes into (a graphics script), so that what it
          *        writes reaches both. Taken again whenever the source builds another. Nothing for one that follows none.
@@ -455,9 +461,15 @@ namespace kgraph
                 bool async = false;         ///< On the async compute queue.
                 double gpuMs = 0.0, recordMs = 0.0;
                 bool gpuMeasured = false;
-                /// The last frame measured, as it was: when it started on the GPU, in ms after that frame's first pass did,
-                /// and how long it took. -1 when it is not known. A timeline of one frame.
+                /// The newest frame the GPU has measured, as it was: a timeline of one frame. Each start is in ms after the
+                /// frame started on the CPU, -1 when it is not known: when it was prepared on the main thread, recorded
+                /// (recordThread: 0 the main thread, then one number for each other), and ran on the GPU — on the CPU's
+                /// clock when gpuOnCpuClock, else from that frame's first pass on the GPU. kor::FrameGraph::PassTiming
+                double cpuPrepareStartMs = -1.0, cpuPrepareMs = 0.0, cpuRecordStartMs = -1.0, cpuRecordMs = 0.0;
+                int recordThread = -1;
                 double gpuStartMs = -1.0, gpuLastMs = 0.0;
+                bool gpuOnCpuClock = false;
+                std::uint8_t work = 0;      ///< What it did on the GPU, as kor::TimerWork bits: drew, dispatched, traced rays, copied.
                 /// What it uses, by the node that made each (or the entities' set it is): 'r' read, 'w' written, 'b' both.
                 std::vector<std::pair<std::string, char>> uses;
             };
@@ -483,6 +495,8 @@ namespace kgraph
         void RunSetupAgain();
         /** @brief How big the scene's window is, each frame: what a Screen node gives as its extent. Sized by it, an image follows the window. */
         void SetScreenExtent(kor::UVec2 extent);
+        /** @brief What the scene's window presents in (`eBGRA8_UNORM`...) and how many of its pixels a point is: a Screen node's `format` and `scale`. */
+        void SetScreenLook(std::string format, float scale);
         /** @brief Where a DebugDraw node's shapes come from: the scene's. Null, the default, draws none. */
         void SetDebugDraw(kor::DebugDraw* debug);
         /**
@@ -498,6 +512,19 @@ namespace kgraph
          *        the graph has no Pick node that is built.
          */
         bool Pick(float u, float v, std::function<void(kecs::Entity)> then);
+        /** @brief What is at a pixel: the entity drawn there, and — the Pick wired a `depth` — the depth round it. */
+        struct PickHit {
+            kecs::Entity entity = kecs::NullEntity;
+            bool deep = false;              ///< Whether `depth` was read: the Pick has a depth image.
+            /// The depth at the pixel and round it, rows top to bottom, as the depth image holds it: [4] is the pixel's.
+            /// Where the picture is at an edge, the nearest pixel inside it stands for those past it.
+            float depth[9] {};
+            kor::IVec2 pixel { 0, 0 };      ///< Which pixel: across and down.
+            kor::UVec2 extent { 0, 0 };     ///< Of the picture it is in.
+            kor::Mat4 viewProjection { 1.f };   ///< As the frame that drew it saw the scene.
+        };
+        /** @brief Pick, with the depth round the pixel when the Pick node has it: what a click on a surface is to place, or measure. */
+        bool PickAt(float u, float v, std::function<void(const PickHit&)> then);
 
         /** @brief How node @p id fared, or null when there is none. */
         [[nodiscard]] const NodeStatus* Status(std::string_view id) const;

@@ -2,6 +2,7 @@
 #include <keditor/viewer.h>
 
 #include "physics.h"
+#include "shader_icons.h"
 
 #include <algorithm>
 #include <numeric>
@@ -60,6 +61,27 @@ namespace keditor
     namespace kb = kor::builders;
 
     // ---- the session ------------------------------------------------------------------------------------------
+
+    void Session::ArrangeEveryPage()
+    {
+        if (!_toArrange.empty()) return;
+        const kgraph::Graph& graph = Doc().Graph();
+        for (const auto& pages : { graph.setup, graph.fixed, graph.passes })
+            for (const auto& page : pages)
+                if (std::ranges::find(_toArrange, page) == _toArrange.end()) _toArrange.push_back(page);
+        if (_toArrange.empty()) return;
+        _arrangedFrom = _everyPass ? std::string() : _pass;
+        ShowPass(_toArrange.front());
+    }
+
+    void Session::ArrangedPage()
+    {
+        if (_toArrange.empty()) return;
+        _toArrange.erase(_toArrange.begin());
+        if (!_toArrange.empty()) { ShowPass(_toArrange.front()); return; }
+        if (_arrangedFrom.empty()) ShowEveryPass(); else ShowPass(_arrangedFrom);
+        Say("Every page's nodes are in the order they are wired in. Ctrl+Z puts each back.");
+    }
 
     void Session::Say(std::string status, const bool failed)
     {
@@ -638,6 +660,11 @@ namespace keditor
         view.fieldOfView = fieldOfView * Radians;
         view.near = near;
         view.far = far;
+        if (orthographic) {
+            // As much of the scene as the perspective showed at the target, and what is behind where it is seen from too.
+            view.orthographic = 2.f * distance * std::tan(fieldOfView * Radians / 2.f);
+            view.near = -far;
+        }
         return view;
     }
 
@@ -676,6 +703,272 @@ namespace keditor
         ++_changes;
     }
 
+    void Session::LookAlong(const Axis axis, const bool perspective, EditorCamera* view)
+    {
+        EditorCamera& turned = view ? *view : camera;
+        // Just short of straight up or down: a view looks at its target with the world's up as its own.
+        switch (axis) {
+        case Axis::eTop: turned.yaw = 0.f; turned.pitch = -89.9f; break;
+        case Axis::eBottom: turned.yaw = 0.f; turned.pitch = 89.9f; break;
+        case Axis::eFront: turned.yaw = 0.f; turned.pitch = 0.f; break;
+        case Axis::eBack: turned.yaw = 180.f; turned.pitch = 0.f; break;
+        case Axis::eRight: turned.yaw = 90.f; turned.pitch = 0.f; break;
+        case Axis::eLeft: turned.yaw = -90.f; turned.pitch = 0.f; break;
+        }
+        turned.orthographic = !perspective;
+        if (!view) lookThroughCamera = false;
+        ++_changes;
+    }
+
+    void Session::SetOrthographic(const bool orthographic)
+    {
+        camera.orthographic = orthographic;
+        lookThroughCamera = false;
+        ++_changes;
+    }
+
+    std::vector<kecs::Entity> Session::Selection() const
+    {
+        const kecs::World& world = _play.Doc().World();
+        std::vector<kecs::Entity> all;
+        if (world.Alive(selectedEntity)) all.push_back(selectedEntity);
+        for (const kecs::Entity entity : alsoSelected)
+            if (world.Alive(entity) && !std::ranges::contains(all, entity)) all.push_back(entity);
+        return all;
+    }
+
+    void Session::SetSplit(const bool split)
+    {
+        if (split && !splitView) secondCamera = camera;     // from where the first is: then turned away from it
+        splitView = split;
+        ++_changes;
+    }
+
+    void Session::SelectAlso(const kecs::Entity entity)
+    {
+        if (!Doc().World().Alive(entity)) return;
+        if (!Doc().World().Alive(selectedEntity)) { Select(entity); return; }
+        if (entity == selectedEntity) {
+            // The first let go of: the next is the first.
+            selectedEntity = alsoSelected.empty() ? kecs::NullEntity : alsoSelected.front();
+            if (!alsoSelected.empty()) alsoSelected.erase(alsoSelected.begin());
+        } else if (const auto it = std::ranges::find(alsoSelected, entity); it != alsoSelected.end()) {
+            alsoSelected.erase(it);
+        } else {
+            alsoSelected.push_back(entity);
+        }
+        selectedNode.clear();
+        selectedAsset.clear();
+        ++_changes;
+    }
+
+    namespace {
+        /** The box an entity's mesh is in, in its own space; none when it has no mesh, or one of no known box. */
+        std::optional<std::pair<kor::Vec3, kor::Vec3>> MeshBox(Document& doc, const kecs::Entity entity)
+        {
+            const kgraph::Value mesh = doc.Field(entity, "Mesh", "mesh");
+            const std::string* id = mesh.String();
+            if (!id) return std::nullopt;
+            const auto held = doc.Runtime().ResourceOf(*id);
+            if (!held || !held->bounded) return std::nullopt;
+            return std::pair { kor::Vec3(held->bounds[0], held->bounds[1], held->bounds[2]), kor::Vec3(held->bounds[3], held->bounds[4], held->bounds[5]) };
+        }
+
+        /** Where a point is in the view's picture, in its pixels; none behind where it is seen from. */
+        std::optional<kor::Vec2> OnScreen(const kor::Mat4& viewProjection, const kor::Vec3 point, const kor::UVec2 size)
+        {
+            const kor::Vec4 clip = viewProjection * kor::Vec4(point, 1.f);
+            if (clip.w <= 1e-6f) return std::nullopt;
+            return kor::Vec2((clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(size.x), (clip.y / clip.w * 0.5f + 0.5f) * static_cast<float>(size.y));
+        }
+
+        /** What a pixel of the picture is in the scene, at a depth as the depth image holds it. */
+        kor::Vec3 InScene(const kor::Mat4& inverse, const float x, const float y, const kor::UVec2 size, const float depth)
+        {
+            const kor::Vec4 clip((x + 0.5f) / static_cast<float>(size.x) * 2.f - 1.f, (y + 0.5f) / static_cast<float>(size.y) * 2.f - 1.f, depth, 1.f);
+            const kor::Vec4 world = inverse * clip;
+            return kor::Vec3(world.x, world.y, world.z) / world.w;
+        }
+    }
+
+    void Session::SelectInBox(const kor::Vec2 from, const kor::Vec2 to, const bool adding)
+    {
+        Document& doc = Doc();
+        kecs::World& world = doc.World();
+        Overlay* const over = _play.Over();
+        const kor::Mat4 viewProjection = over ? over->ViewProjection() : doc.Runtime().ViewProjection();
+        const kor::UVec2 size = viewport->Size();
+        const kor::Vec2 low(std::min(from.x, to.x), std::min(from.y, to.y)), high(std::max(from.x, to.x), std::max(from.y, to.y));
+        const kecs::ComponentId meshes = world.Find("Mesh");
+        if (!adding) { selectedEntity = kecs::NullEntity; alsoSelected.clear(); }
+        // What is drawn and seen, whose box's middle is inside the one dragged.
+        world.EachEntity([&](const kecs::Entity entity) {
+            if (meshes == kecs::NoComponent || !world.Has(entity, meshes) || !world.IsEnabled(entity, meshes) || _viewHidden.contains(entity)) return;
+            const kor::Mat4 matrix = kgraph::ToKor(world.WorldMatrix(entity));
+            const auto box = MeshBox(doc, entity);
+            const kor::Vec3 middle = box ? (box->first + box->second) * 0.5f : kor::Vec3(0.f);
+            const auto at = OnScreen(viewProjection, kor::Vec3(matrix * kor::Vec4(middle, 1.f)), size);
+            if (!at || at->x < low.x || at->y < low.y || at->x > high.x || at->y > high.y) return;
+            if (!world.Alive(selectedEntity)) selectedEntity = entity;
+            else if (entity != selectedEntity && !std::ranges::contains(alsoSelected, entity)) alsoSelected.push_back(entity);
+        });
+        selectedNode.clear();
+        selectedAsset.clear();
+        const std::size_t picked = Selection().size();
+        Say(picked == 0 ? std::string("Nothing drawn is in the box.") : std::format("Picked {} {}.", picked, picked == 1 ? "entity" : "entities"));
+        ++_changes;
+    }
+
+    // ---- bookmarks of the view ------------------------------------------------------------------------------------
+
+    namespace {
+        /** Where a scene's bookmarks are kept: the editor's own, not the project's (a view is whoever looks's). */
+        std::filesystem::path BookmarksFile(const std::string& scene)
+        {
+            std::string name;
+            for (const char c : scene) name += std::isalnum(static_cast<unsigned char>(c)) ? c : '_';
+            return ConfigDirectory() / "bookmarks" / name;
+        }
+    }
+
+    void Session::ReadBookmarks()
+    {
+        const std::string scene = _hasProject ? (_project.directory / _scene).generic_string() : std::string();
+        if (scene == _bookmarksOf) return;
+        _bookmarksOf = scene;
+        _bookmarks = {};
+        if (scene.empty() || std::getenv("KORAL_ENGINE_NO_LAYOUT")) return;
+        std::ifstream in(BookmarksFile(scene));
+        int slot = 0;
+        EditorCamera seen;
+        int orthographic = 0;
+        while (in >> slot >> seen.target.x >> seen.target.y >> seen.target.z >> seen.yaw >> seen.pitch >> seen.distance >> orthographic)
+            if (slot >= 0 && slot < 9) { seen.orthographic = orthographic != 0; _bookmarks[slot] = seen; }
+    }
+
+    void Session::SaveBookmark(const int slot)
+    {
+        if (slot < 0 || slot >= 9) return;
+        ReadBookmarks();
+        _bookmarks[slot] = camera;
+        Say(std::format("The view is bookmark {}: {} goes back to it.", slot + 1, slot + 1));
+        if (_bookmarksOf.empty() || std::getenv("KORAL_ENGINE_NO_LAYOUT")) return;
+        std::error_code ignored;
+        std::filesystem::create_directories(BookmarksFile(_bookmarksOf).parent_path(), ignored);
+        std::ofstream out(BookmarksFile(_bookmarksOf), std::ios::trunc);
+        for (int i = 0; i < 9; ++i)
+            if (const auto& mark = _bookmarks[i])
+                out << i << ' ' << mark->target.x << ' ' << mark->target.y << ' ' << mark->target.z << ' ' << mark->yaw << ' ' << mark->pitch << ' '
+                    << mark->distance << ' ' << (mark->orthographic ? 1 : 0) << '\n';
+    }
+
+    bool Session::GoToBookmark(const int slot)
+    {
+        ReadBookmarks();
+        if (slot < 0 || slot >= 9 || !_bookmarks[slot]) return false;
+        const EditorCamera& mark = *_bookmarks[slot];
+        camera.target = mark.target;
+        camera.yaw = mark.yaw;
+        camera.pitch = mark.pitch;
+        camera.distance = mark.distance;
+        camera.orthographic = mark.orthographic;
+        lookThroughCamera = false;
+        ++_changes;
+        return true;
+    }
+
+    bool Session::HasBookmark(const int slot) const { return slot >= 0 && slot < 9 && _bookmarks[slot].has_value(); }
+
+    // ---- hidden in the scene view ---------------------------------------------------------------------------------
+
+    void Session::DropAt(const float u, const float v, std::function<void()> then)
+    {
+        placeAt.reset();
+        Overlay* const over = _play.Over();
+        if (!over || ThroughSceneCamera() || !over->PickAt(u, v, [this, then](const kgraph::Runtime::PickHit& hit) {
+                Probed(hit);
+                if (_probe.hit) placeAt = _probe.position;
+                then();
+            }))
+            then();
+    }
+
+    void Session::HideSelected()
+    {
+        const auto picked = Selection();
+        if (picked.empty()) return;
+        // What is under each goes with it, as the outliner's eye does.
+        const kecs::World& world = Doc().World();
+        const std::function<void(kecs::Entity)> hide = [&](const kecs::Entity entity) {
+            _viewHidden.insert(entity);
+            for (const kecs::Entity child : world.ChildrenOf(entity)) hide(child);
+        };
+        for (const kecs::Entity entity : picked) hide(entity);
+        Say(std::format("Hidden in the scene view: {}. Alt+H shows everything again.", picked.size() == 1 ? Doc().NameOf(picked.front()) : std::format("{} entities", picked.size())));
+        ++_changes;
+    }
+
+    void Session::Isolate()
+    {
+        const auto picked = Selection();
+        if (picked.empty()) return;
+        const kecs::World& world = Doc().World();
+        std::set<kecs::Entity> kept;
+        const std::function<void(kecs::Entity)> keep = [&](const kecs::Entity entity) {
+            kept.insert(entity);
+            for (const kecs::Entity child : world.ChildrenOf(entity)) keep(child);
+        };
+        for (const kecs::Entity entity : picked) keep(entity);
+        _viewHidden.clear();
+        Doc().World().EachEntity([&](const kecs::Entity entity) { if (!kept.contains(entity)) _viewHidden.insert(entity); });
+        _isolated = true;
+        Say("Shown by itself in the scene view. Alt+H shows everything again.");
+        ++_changes;
+    }
+
+    void Session::ShowAll()
+    {
+        if (_viewHidden.empty() && !_isolated) return;
+        _viewHidden.clear();
+        _isolated = false;
+        ++_changes;
+    }
+
+    void Session::Steer(EditorCamera& view, kgui::ViewportState& port, std::optional<kor::MouseButton>& drag, const kor::Input& input, const kor::Vec2 delta,
+                        const float seconds)
+    {
+        const kor::UVec2 size = port.Size();
+        if (drag && !input.IsMouseButtonHeld(*drag) && !input.IsMouseButtonPressed(*drag)) drag.reset();
+        if (!drag && port.Hovered())
+            for (const kor::MouseButton button : { kor::MouseButton::eRight, kor::MouseButton::eMiddle })
+                if (input.IsMouseButtonPressed(button)) { drag = button; break; }
+        if (drag == kor::MouseButton::eRight) {
+            // Looked round from where it is, and flown with the keys while the button is held — as a scene's own
+            // FlyCamera is: W A S D along and across the way it looks, E and Q up and down, Shift faster.
+            const kor::Vec3 eye = view.Position();
+            view.Orbit(delta.x, delta.y);
+            view.target += eye - view.Position();
+            const auto key = [&](const kor::Key held) { return !input.InterfaceWantsKeyboard() && input.IsKeyHeld(held) ? 1.f : 0.f; };
+            const float along = key(kor::Key::eW) - key(kor::Key::eS), across = key(kor::Key::eD) - key(kor::Key::eA), up = key(kor::Key::eE) - key(kor::Key::eQ);
+            if (along != 0.f || across != 0.f || up != 0.f) {
+                const kor::Vec3 forward = kor::Normalize(view.target - view.Position());
+                const kor::Vec3 right = kor::Normalize(kor::Cross(forward, kor::Vec3(0.f, 1.f, 0.f)));
+                const float step = std::max(view.distance, 2.f) * 1.2f * seconds * flySpeed * (key(kor::Key::eLeftShift) > 0.f ? 4.f : 1.f);
+                // Nothing the panels show is where the view is: moving it is no change for them to be made again for.
+                view.target += (forward * along + right * across + kor::Vec3(0.f, up, 0.f)) * step;
+            }
+        }
+        else if (drag == kor::MouseButton::eMiddle) view.Pan(delta.x, delta.y, static_cast<float>(std::max(size.y, 1u)));
+        // The wheel zooms — or, flying, makes the flight faster or slower.
+        if (port.Hovered())
+            if (const float wheel = input.MouseScrollDelta().y; wheel != 0.f) {
+                if (drag == kor::MouseButton::eRight) {
+                    flySpeed = std::clamp(flySpeed * std::pow(1.25f, wheel), 0.05f, 50.f);
+                    Say(std::format("Flying at {:.2f}x", flySpeed));
+                } else view.Zoom(wheel);
+            }
+    }
+
     void Session::Tick(const kor::Input& input, const float seconds)
     {
         Document& doc = Doc();
@@ -696,10 +989,39 @@ namespace keditor
         }
 
         const kecs::Entity selected = world.Alive(selectedEntity) ? selectedEntity : kecs::NullEntity;
+        std::erase_if(alsoSelected, [&](const kecs::Entity entity) { return !world.Alive(entity) || entity == selected; });
         runtime.SetSelected(selected);
         // Picking, the line round what is picked and the gizmo are the editor's own passes: no part of the scene's graph.
         Overlay* const over = _play.Over();
         if (over) over->SetSelected(selected);
+        // Hidden in this view only — not in the Game panel's, not in the scene saved. While what is picked is dragged
+        // onto a surface, the editor's own picking does not see it: the surface under it is what is found.
+        std::erase_if(_viewHidden, [&](const kecs::Entity entity) { return !world.Alive(entity); });
+        runtime.SetHidden(_viewHidden);
+        if (over) {
+            std::set<kecs::Entity> unseen = _viewHidden;
+            if (surfaceSnap && _gizmoMoved && gizmo == kor::GizmoMode::eTranslate && viewport->Dragging())
+                for (const kecs::Entity entity : Selection()) unseen.insert(entity);
+            over->SetHidden(std::move(unseen));
+        }
+        ReadBookmarks();
+
+        // The scene view's keys, while it is what was last clicked and nothing is typed into: a digit goes to a
+        // bookmark of the view (Ctrl and one saves it); H hides what is picked, Shift+H shows it by itself, Alt+H all.
+        if ((viewport->Focused() || viewport->Hovered()) && !input.InterfaceWantsKeyboard() && !_viewDrag) {
+            const bool ctrl = input.IsKeyHeld(kor::Key::eLeftControl) || input.IsKeyHeld(kor::Key::eRightControl);
+            const bool shift = input.IsKeyHeld(kor::Key::eLeftShift), alt = input.IsKeyHeld(kor::Key::eLeftAlt);
+            for (int slot = 0; slot < 9; ++slot)
+                if (input.IsKeyPressed(static_cast<kor::Key>(static_cast<int>(kor::Key::eNum1) + slot))) {
+                    if (ctrl) SaveBookmark(slot);
+                    else if (!GoToBookmark(slot)) Say(std::format("There is no bookmark {}: Ctrl+{} saves the view as it.", slot + 1, slot + 1));
+                }
+            if (input.IsKeyPressed(kor::Key::eH)) {
+                if (alt) ShowAll();
+                else if (shift) Isolate();
+                else HideSelected();
+            }
+        }
         // Its picture is made again when the panel is another size: the interface is told, to show the one there is now.
         // The meshes the Assets panel lists are drawn small, a few frames each, until each has its picture: what shows
         // one is built again by itself (MeshPicturesMade), not the whole interface.
@@ -774,34 +1096,19 @@ namespace keditor
         _lastMouse = mouse;
         const auto pointer = viewport->PointerPosition();
         const kor::UVec2 size = viewport->Size();
+        // The second view, split beside the first: steered the same way, and drawn as the first is.
+        if (GameScene* second = _second) {
+            if (splitView) Steer(secondCamera, *secondViewport, _secondDrag, input, delta, seconds);
+            else _secondDrag.reset();
+            second->SetShown(splitView);
+            second->SetView(splitView ? std::optional(secondCamera.View()) : std::nullopt, _viewHidden);
+        }
         if (ThroughSceneCamera()) {
             _viewDrag.reset();
             runtime.SetView(std::nullopt);
             if (over) over->SetView(std::nullopt);
         } else {
-            if (_viewDrag && !input.IsMouseButtonHeld(*_viewDrag) && !input.IsMouseButtonPressed(*_viewDrag)) _viewDrag.reset();
-            if (!_viewDrag && viewport->Hovered())
-                for (const kor::MouseButton button : { kor::MouseButton::eRight, kor::MouseButton::eMiddle })
-                    if (input.IsMouseButtonPressed(button)) { _viewDrag = button; break; }
-            if (_viewDrag == kor::MouseButton::eRight) {
-                // Looked round from where it is, and flown with the keys while the button is held — as a scene's own
-                // FlyCamera is: W A S D along and across the way it looks, E and Q up and down, Shift faster.
-                const kor::Vec3 eye = camera.Position();
-                camera.Orbit(delta.x, delta.y);
-                camera.target += eye - camera.Position();
-                const auto key = [&](const kor::Key held) { return !input.InterfaceWantsKeyboard() && input.IsKeyHeld(held) ? 1.f : 0.f; };
-                const float along = key(kor::Key::eW) - key(kor::Key::eS), across = key(kor::Key::eD) - key(kor::Key::eA), up = key(kor::Key::eE) - key(kor::Key::eQ);
-                if (along != 0.f || across != 0.f || up != 0.f) {
-                    const kor::Vec3 forward = kor::Normalize(camera.target - camera.Position());
-                    const kor::Vec3 right = kor::Normalize(kor::Cross(forward, kor::Vec3(0.f, 1.f, 0.f)));
-                    const float step = std::max(camera.distance, 2.f) * 1.2f * seconds * (key(kor::Key::eLeftShift) > 0.f ? 4.f : 1.f);
-                    // Nothing the panels show is where the view is: moving it is no change for them to be made again for.
-                    camera.target += (forward * along + right * across + kor::Vec3(0.f, up, 0.f)) * step;
-                }
-            }
-            else if (_viewDrag == kor::MouseButton::eMiddle) camera.Pan(delta.x, delta.y, static_cast<float>(std::max(size.y, 1u)));
-            if (viewport->Hovered())
-                if (const float wheel = input.MouseScrollDelta().y; wheel != 0.f) camera.Zoom(wheel);
+            Steer(camera, *viewport, _viewDrag, input, delta, seconds);
             runtime.SetView(camera.View());
             if (over) over->SetView(camera.View());
 
@@ -826,6 +1133,59 @@ namespace keditor
                         break;
                     }
             });
+            // An icon where each light, camera and entity that draws nothing is, the same size whatever its distance:
+            // a click on one picks it (what draws nothing the picking pass cannot find).
+            _icons.clear();
+            if (iconsShown) {
+                const kecs::ComponentId meshes = world.Find("Mesh");
+                const kgraph::View seen = camera.View();
+                const kor::Vec3 eye = camera.Position(), forward = kor::Normalize(camera.target - eye);
+                world.EachEntity([&](const kecs::Entity entity) {
+                    if (_viewHidden.contains(entity)) return;
+                    if (meshes != kecs::NoComponent && world.Has(entity, meshes) && world.IsEnabled(entity, meshes)) return;
+                    enum class Kind { eLight, eCamera, eEmpty } kind = Kind::eEmpty;
+                    for (const kecs::ComponentId id : world.ComponentsOf(entity)) {
+                        if (!world.IsEnabled(entity, id)) continue;
+                        if (number(entity, id, "fieldOfView")) { kind = Kind::eCamera; break; }
+                        if (number(entity, id, "intensity")) kind = Kind::eLight;
+                    }
+                    // An entity of nothing but a place is shown only when it has nothing under it to show where it is.
+                    if (kind == Kind::eEmpty && !world.ChildrenOf(entity).empty()) return;
+                    const kecs::Mat4 matrix = world.WorldMatrix(entity);
+                    const kor::Vec3 at(matrix.At(3, 0), matrix.At(3, 1), matrix.At(3, 2));
+                    const float far = seen.orthographic > 0.f ? seen.orthographic : std::max(kor::Dot(at - eye, forward), 0.05f) * 2.f * std::tan(seen.fieldOfView / 2.f);
+                    const float size = far * 0.022f;
+                    const kor::Vec3 facing = seen.orthographic > 0.f ? -forward : kor::Normalize(eye - at);
+                    const bool picked = std::ranges::contains(Selection(), entity);
+                    kor::DebugDraw::Style style;
+                    style.onTop = true;
+                    style.color = picked ? kor::Vec4(1.f, 0.55f, 0.15f, 1.f) : kind == Kind::eLight ? kor::Vec4(1.f, 0.85f, 0.35f, 1.f)
+                                : kind == Kind::eCamera ? kor::Vec4(0.55f, 0.8f, 1.f, 1.f) : kor::Vec4(0.75f, 0.75f, 0.8f, 1.f);
+                    style.fill = kor::Vec4(style.color.x, style.color.y, style.color.z, 0.35f);
+                    const kor::Vec3 right = kor::Normalize(kor::Cross(facing, std::abs(facing.y) > 0.99f ? kor::Vec3(0.f, 0.f, 1.f) : kor::Vec3(0.f, 1.f, 0.f)));
+                    const kor::Vec3 up = kor::Cross(right, facing);
+                    if (kind == Kind::eLight) {
+                        // A sun: a disc and its rays.
+                        debug.Circle(at, facing, size * 0.45f, style, 16);
+                        kor::DebugDraw::Style ray = style;
+                        ray.fill = kor::Vec4(0.f);
+                        for (int i = 0; i < 8; ++i) {
+                            const float a = static_cast<float>(i) * 0.785398f;
+                            const kor::Vec3 way = right * std::cos(a) + up * std::sin(a);
+                            debug.Line(at + way * (size * 0.65f), at + way * size, ray);
+                        }
+                    } else if (kind == Kind::eCamera) {
+                        // A box and its lens.
+                        debug.Quad(at - right * size * 0.6f - up * size * 0.4f, at + right * size * 0.3f - up * size * 0.4f,
+                                   at + right * size * 0.3f + up * size * 0.4f, at - right * size * 0.6f + up * size * 0.4f, style);
+                        debug.Triangle(at + right * size * 0.3f, at + right * size * 0.75f - up * size * 0.35f, at + right * size * 0.75f + up * size * 0.35f, style);
+                    } else {
+                        // A diamond: a place, and nothing more.
+                        debug.Quad(at + up * size * 0.5f, at + right * size * 0.5f, at - up * size * 0.5f, at - right * size * 0.5f, style);
+                    }
+                    _icons.emplace_back(entity, at);
+                });
+            }
             if (!selected.IsNull()) {
                 kor::Vec3 position, scale;
                 kor::Quat rotation;
@@ -848,34 +1208,179 @@ namespace keditor
         const bool sizingCollider = colliderPicked && colliderEditing && ColliderResizable(doc, selected);
         if (sizingCollider && size.x > 0 && size.y > 0) {
             if (EditCollider(debug, doc, selected, over ? over->ViewProjection() : runtime.ViewProjection(), hand)) _gizmoMoved = true;
-        } else if (!selected.IsNull() && gizmoEnabled && size.x > 0 && size.y > 0) {
-            kor::Mat4 transform = kgraph::ToKor(world.WorldMatrix(selected));
+        } else if (!selected.IsNull() && gizmoEnabled && size.x > 0 && size.y > 0 && !_boxFrom) {
+            const kor::Mat4 before = kgraph::ToKor(world.WorldMatrix(selected));
+            kor::Mat4 transform = before;
             kor::GizmoOptions options;
-            options.space = kor::GizmoSpace::eLocal;
+            options.space = gizmoWorld ? kor::GizmoSpace::eWorld : kor::GizmoSpace::eLocal;
+            // Snapped as it is set, or the other way while Ctrl is held.
+            const bool ctrl = input.IsKeyHeld(kor::Key::eLeftControl) || input.IsKeyHeld(kor::Key::eRightControl);
+            if (snap.on != ctrl) options.snap = gizmo == kor::GizmoMode::eTranslate ? snap.move : gizmo == kor::GizmoMode::eRotate ? snap.turn : snap.scale;
+            const char* what = gizmo == kor::GizmoMode::eTranslate ? "position" : gizmo == kor::GizmoMode::eRotate ? "rotation" : "scale";
             if (debug.Gizmo(gizmo, transform, over ? over->ViewProjection() : runtime.ViewProjection(), hand, options)) {
                 _gizmoMoved = true;
+                // Put on the surface under the pointer, its box's foot on it, rather than where the axis took it.
+                if (surfaceSnap && gizmo == kor::GizmoMode::eTranslate && _probe.hit) {
+                    const auto box = MeshBox(doc, selected);
+                    const kor::Vec3 up = kor::Normalize(_probe.normal);
+                    float lift = 0.f;
+                    if (box) {
+                        // How far below its origin its box reaches, along the surface's up, as it is turned and scaled now.
+                        lift = std::numeric_limits<float>::max();
+                        for (int corner = 0; corner < 8; ++corner) {
+                            const kor::Vec3 local((corner & 1) ? box->second.x : box->first.x, (corner & 2) ? box->second.y : box->first.y, (corner & 4) ? box->second.z : box->first.z);
+                            const kor::Vec3 offset = kor::Vec3(before * kor::Vec4(local, 1.f)) - kor::Vec3(before[3]);
+                            lift = std::min(lift, kor::Dot(offset, up));
+                        }
+                        lift = -lift;
+                    }
+                    transform = before;
+                    const kor::Vec3 to = _probe.position + up * lift;
+                    transform[3] = kor::Vec4(to, 1.f);
+                }
                 // Only what this gizmo moves: taking the rest back out of the matrix would round it off a little each frame.
                 world.SetWorldMatrix(selected, kgraph::ToKecs(transform), gizmo == kor::GizmoMode::eTranslate, gizmo == kor::GizmoMode::eRotate,
                                      gizmo == kor::GizmoMode::eScale);
                 // Not the interface built again for it (each frame of the drag): what shows where it is follows it (LiveValue).
-                doc.Moved(selected, gizmo == kor::GizmoMode::eTranslate ? "position" : gizmo == kor::GizmoMode::eRotate ? "rotation" : "scale");
+                doc.Moved(selected, what);
+                // The rest of what is picked, moved as the first was: turned and scaled round it.
+                const kor::Mat4 change = transform * kor::Inverse(before);
+                for (const kecs::Entity other : Selection()) {
+                    if (other == selected) continue;
+                    const kor::Mat4 moved = change * kgraph::ToKor(world.WorldMatrix(other));
+                    world.SetWorldMatrix(other, kgraph::ToKecs(moved), true, gizmo != kor::GizmoMode::eTranslate, gizmo == kor::GizmoMode::eScale);
+                    doc.Moved(other, what);
+                }
+            }
+        }
+        // What else is picked shows by a box round it: the line round the first is the picking pass's own.
+        for (const kecs::Entity other : Selection()) {
+            if (other == selected) continue;
+            kor::DebugDraw::Style style;
+            style.color = kor::Vec4(1.f, 0.55f, 0.15f, 0.9f);
+            const kor::Mat4 matrix = kgraph::ToKor(world.WorldMatrix(other));
+            if (const auto box = MeshBox(doc, other)) {
+                const kor::Vec3 middle = (box->first + box->second) * 0.5f, half = (box->second - box->first) * 0.5f;
+                debug.Box(matrix * kor::Translate(kor::Mat4(1.f), middle) * kor::Scale(kor::Mat4(1.f), half * 2.f), style);
+            } else {
+                debug.Point(kor::Vec3(matrix[3]), 0.1f, style);
             }
         }
 
-        // A click on the picture — the button let go where it went down, the gizmo not dragged — picks what is under it.
+        // What is under the pointer, asked for every other frame while it is wanted: what the probe says, the ruler's
+        // ends, a surface to put what is dragged on. The answer comes a few frames on.
+        const bool probing = measure != Measure::eOff || (surfaceSnap && gizmo == kor::GizmoMode::eTranslate && viewport->Dragging());
+        if (probing && over && pointer && size.x > 0 && size.y > 0 && ++_probing >= 2) {
+            _probing = 0;
+            over->PickAt(pointer->x / static_cast<float>(size.x), pointer->y / static_cast<float>(size.y), [this](const kgraph::Runtime::PickHit& hit) { Probed(hit); });
+        }
+        if (!probing && _probe.hit) { _probe = {}; ++_changes; }
+
+        // A click on the picture — the button let go where it went down, the gizmo not dragged — picks what is under it:
+        // an icon, nearest first, before what is drawn. With Ctrl or Shift, it is picked as well as what is; measuring,
+        // it is a ruler's end. Dragged from where nothing moves, it is a box round what is to be picked.
         const bool down = hand.down;
+        const bool adding = input.IsKeyHeld(kor::Key::eLeftControl) || input.IsKeyHeld(kor::Key::eRightControl) || input.IsKeyHeld(kor::Key::eLeftShift);
         if (down && !_wasDown) { _pressAt = pointer; _gizmoMoved = false; }
+        if (down && _pressAt && pointer && !_gizmoMoved && !_boxFrom && measure == Measure::eOff && kor::Length(*pointer - *_pressAt) >= 6.f) _boxFrom = _pressAt;
+        if (_boxFrom && pointer) {
+            // Drawn on the near plane, where it is in the picture.
+            const kor::Mat4 inverse = kor::Inverse(over ? over->ViewProjection() : runtime.ViewProjection());
+            const kor::Vec2 a = *_boxFrom, b = *pointer;
+            const float depth = camera.orthographic ? 0.5f : 0.001f;
+            const kor::Vec3 p0 = InScene(inverse, a.x, a.y, size, depth), p1 = InScene(inverse, b.x, a.y, size, depth),
+                            p2 = InScene(inverse, b.x, b.y, size, depth), p3 = InScene(inverse, a.x, b.y, size, depth);
+            kor::DebugDraw::Style style;
+            style.onTop = true;
+            style.color = kor::Vec4(1.f, 0.55f, 0.15f, 1.f);
+            style.fill = kor::Vec4(1.f, 0.55f, 0.15f, 0.12f);
+            debug.Quad(p0, p1, p2, p3, style);
+        }
         if (!down && _wasDown) {
-            if (_pressAt && pointer && !_gizmoMoved && kor::Length(*pointer - *_pressAt) < 4.f && size.x > 0 && size.y > 0) {
-                // The answer comes a few frames on: by then something else may have been picked, and that, being later, stands.
-                const kecs::Entity before = selectedEntity;
-                const auto picked = [this, before](const kecs::Entity entity) { if (selectedEntity == before) Select(entity); };
-                if (over) over->Pick(pointer->x / static_cast<float>(size.x), pointer->y / static_cast<float>(size.y), picked);
-                else runtime.Pick(pointer->x / static_cast<float>(size.x), pointer->y / static_cast<float>(size.y), picked);
+            if (_boxFrom && pointer) {
+                SelectInBox(*_boxFrom, *pointer, adding);
+            } else if (_pressAt && pointer && !_gizmoMoved && kor::Length(*pointer - *_pressAt) < 4.f && size.x > 0 && size.y > 0) {
+                const float u = pointer->x / static_cast<float>(size.x), v = pointer->y / static_cast<float>(size.y);
+                const kor::Mat4 viewProjection = over ? over->ViewProjection() : runtime.ViewProjection();
+                // An icon within a few pixels of the click, the nearest.
+                std::optional<std::pair<float, kecs::Entity>> icon;
+                for (const auto& [entity, at] : _icons)
+                    if (const auto there = OnScreen(viewProjection, at, size))
+                        if (const float off = kor::Length(*there - *pointer); off < 12.f && (!icon || off < icon->first)) icon = std::pair { off, entity };
+                if (measure == Measure::eRuler) {
+                    // A ruler's end where the surface is: its second end, then a new ruler.
+                    if (over) over->PickAt(u, v, [this](const kgraph::Runtime::PickHit& hit) {
+                        Probed(hit);
+                        if (!_probe.hit) { Say("Nothing is there to measure from: click on a surface.", true); return; }
+                        if (ruler.size() >= 2) ruler.clear();
+                        ruler.push_back(_probe.position);
+                        if (ruler.size() == 2) Say(std::format("{:.3f} m", kor::Length(ruler[1] - ruler[0])));
+                        ++_changes;
+                    });
+                } else if (icon) {
+                    if (adding) SelectAlso(icon->second);
+                    else Select(icon->second);
+                } else {
+                    // The answer comes a few frames on: by then something else may have been picked, and that, being later, stands.
+                    const kecs::Entity before = selectedEntity;
+                    const auto picked = [this, before, adding](const kecs::Entity entity) {
+                        if (selectedEntity != before) return;
+                        if (adding) { if (!entity.IsNull()) SelectAlso(entity); }
+                        else Select(entity);
+                    };
+                    if (over) over->Pick(u, v, picked);
+                    else runtime.Pick(u, v, picked);
+                }
             }
             _pressAt.reset();
+            _boxFrom.reset();
         }
         _wasDown = down;
+
+        // The ruler, and where the probe is.
+        kor::DebugDraw::Style measured;
+        measured.onTop = true;
+        measured.color = kor::Vec4(0.35f, 0.9f, 1.f, 1.f);
+        if (measure == Measure::eRuler) {
+            for (const kor::Vec3& end : ruler) debug.Point(end, 0.06f, measured);
+            if (ruler.size() == 2) debug.Line(ruler[0], ruler[1], measured);
+            else if (ruler.size() == 1 && _probe.hit) debug.Line(ruler[0], _probe.position, measured);
+        }
+        if (measure != Measure::eOff && _probe.hit) {
+            const float reach = std::max(_probe.distance * 0.05f, 0.02f);
+            debug.Circle(_probe.position, _probe.normal, reach * 0.4f, measured, 20);
+            debug.Arrow(_probe.position, _probe.position + kor::Normalize(_probe.normal) * reach, measured);
+        }
+    }
+
+    void Session::Probed(const kgraph::Runtime::PickHit& hit)
+    {
+        Probe probe;
+        probe.entity = hit.entity;
+        // A depth of the far plane (1, or 0 reversed) is nothing there.
+        const float depth = hit.depth[4];
+        if (hit.deep && hit.extent.x > 0 && depth > 0.f && depth < 1.f) {
+            const kor::Mat4 inverse = kor::Inverse(hit.viewProjection);
+            const auto at = [&](const int dx, const int dy) {
+                return InScene(inverse, static_cast<float>(hit.pixel.x + dx), static_cast<float>(hit.pixel.y + dy), hit.extent, hit.depth[(dy + 1) * 3 + (dx + 1)]);
+            };
+            probe.hit = true;
+            probe.position = at(0, 0);
+            // Which way it faces: across the pixels beside it, each way the nearer side (an edge is not a slope).
+            const kor::Vec3 left = at(-1, 0), right = at(1, 0), above = at(0, -1), below = at(0, 1);
+            const kor::Vec3 across = kor::Length(right - probe.position) < kor::Length(probe.position - left) ? right - probe.position : probe.position - left;
+            const kor::Vec3 down = kor::Length(below - probe.position) < kor::Length(probe.position - above) ? below - probe.position : probe.position - above;
+            kor::Vec3 normal = kor::Cross(down, across);
+            const kor::Vec3 eye = camera.Position();
+            if (kor::Length(normal) > 1e-12f) {
+                normal = kor::Normalize(normal);
+                if (kor::Dot(normal, eye - probe.position) < 0.f) normal = -normal;    // facing the view
+                probe.normal = normal;
+            }
+            probe.distance = kor::Length(eye - probe.position);
+        }
+        // (What shows it follows it, a live line: not the interface built again each time the pointer moves.)
+        _probe = probe;
     }
 
     // ---- a prefab, opened ---------------------------------------------------------------------------------------
@@ -1169,6 +1674,8 @@ namespace keditor
         std::string error;
         const kecs::Entity made = Doc().Instantiate(_project.directory / "prefabs" / id.substr(7), parent, &error);
         if (made.IsNull()) { Say(error, true); return made; }
+        if (parent.IsNull())
+            if (const auto at = std::exchange(placeAt, std::nullopt)) Doc().SetPosition(made, { at->x, at->y, at->z });
         if (!parent.IsNull()) Fold(parent, false);
         Select(made);
         Say(std::format("Made {}, an instance of {}.", Doc().NameOf(made), id.substr(7)));
@@ -1693,7 +2200,7 @@ class $NAME : ResourceScript() {
                 const auto target = driver->inputs.find("node");
                 driver = target != driver->inputs.end() && target->second.value.String() ? graph.Find(*target->second.value.String()) : nullptr;
             }
-            if (!driver || (driver->type != "Number" && driver->type != "Int" && driver->type != "UInt" && driver->type != "Bool")) continue;
+            if (!driver || (driver->type != "Int" && driver->type != "UInt" && driver->type != "Bool")) continue;
             if (std::ranges::find(choices, driver->id, &Choice::driver) != choices.end()) continue;
             Choice choice;
             choice.driver = driver->id;
@@ -1747,16 +2254,19 @@ class $NAME : ResourceScript() {
             const kgraph::Node* node = graph.Find(id);
             return node ? node->pass : std::string();
         };
+        const auto at = [&](const std::string& page) { return static_cast<int>(std::ranges::find(graph.passes, page) - graph.passes.begin()); };
         // Whose work a page reading @p source (its @p output) has: the last page before it to write it — not the one it
-        // was made on, when another drew into it since.
+        // was made on, when another drew into it since. When none before it did, the page it is made on, if that is
+        // before it too; else nobody's: what it reads is as the frame before left it, or a node set down on a later page
+        // that nothing has worked on yet. The flow is of what comes before, so that it has no way round.
         const auto producer = [&](const std::string& source, const std::string& output, const std::string& readerPage) {
             std::string from = stepOf(source);
             if (switches.contains(source)) return from;
-            const auto at = [&](const std::string& page) { return static_cast<int>(std::ranges::find(graph.passes, page) - graph.passes.begin()); };
             const int reader = at(readerPage);
             int latest = -1;
             for (const auto& use : _play.Doc().Runtime().UsesOf(source, output))
                 if (use.write && at(use.pass) < reader && at(use.pass) > latest) { latest = at(use.pass); from = use.pass; }
+            if (latest < 0 && at(from) >= reader) return std::string();
             return from;
         };
         for (const auto& page : graph.passes) {
@@ -1807,6 +2317,11 @@ class $NAME : ResourceScript() {
                 if (wired == node->inputs.end() || !wired->second.link) break;
                 step.options.push_back(producer(origin(wired->second.link->node), wired->second.link->output, node->pass));
             }
+            // A Switch chooses once what it chooses between is there: just after the last of its options' pages, wherever
+            // the node itself was set down — a page after one that reads what it chooses, as often as not.
+            int last = -1;
+            for (const auto& option : step.options) if (!option.empty()) last = std::max(last, at(option));
+            if (last >= 0) step.order = last;
             if (const kgraph::Node* driver = graph.Find(step.driver))
                 if (const auto value = driver->inputs.find("value"); value != driver->inputs.end())
                     step.chosen = value->second.value.Bool() ? (*value->second.value.Bool() ? 1 : 0) : value->second.value.Number() ? static_cast<int>(*value->second.value.Number()) : 0;
@@ -1828,8 +2343,16 @@ class $NAME : ResourceScript() {
                 carried[{ from, to, option }].insert(source);
             }
         }
+        // Only from what comes before: a page by its place, a Switch just after the last page it chooses from. What is
+        // left is a flow with no way round, whatever else the graph wires.
+        const auto rank = [&](const std::string& id) {
+            const auto step = std::ranges::find(flow.steps, id, &PassFlow::Step::id);
+            if (step == flow.steps.end()) return static_cast<double>(at(id));
+            return static_cast<double>(step->order) + (step->isSwitch ? 0.5 : 0.0);
+        };
         for (auto& [key, sources] : carried)
-            flow.links.push_back({ std::get<0>(key), std::get<1>(key), std::vector<std::string>(sources.begin(), sources.end()), std::get<2>(key) });
+            if (rank(std::get<0>(key)) < rank(std::get<1>(key)))
+                flow.links.push_back({ std::get<0>(key), std::get<1>(key), std::vector<std::string>(sources.begin(), sources.end()), std::get<2>(key) });
         // What ran in the last frame, and what it cost: a pass of the frame is a node of the graph — a call's by its call,
         // a loop's turn by its node.
         for (const auto& pass : _play.Doc().Runtime().Frame().passes) {
@@ -2313,9 +2836,28 @@ class $NAME : ResourceScript() {
                     if (!entry.is_regular_file(ignored) || !endings.contains(ending(entry.path()))) continue;
                     Asset asset;
                     asset.kind = kind;
-                    asset.id = std::string(prefix) + (kind == Asset::Kind::eShader ? entry.path().stem().string() : entry.path().filename().string());
                     asset.file = entry.path();
-                    asset.label = entry.path().filename().string();
+                    if (kind == Asset::Kind::eShader) {
+                        // A shader module, and after it its entry points, each of it: opened, the panel shows them under it.
+                        const std::string module = entry.path().stem().string();
+                        asset.group = module;
+                        asset.id = prefix + module;
+                        asset.label = module;
+                        for (const auto& [name, stage, line] : ShaderEntries(module)) {
+                            Asset point = asset;
+                            point.id = std::format("{}{}#{}", prefix, module, name);
+                            point.label = name;
+                            point.stage = stage;
+                            point.parent = asset.id;
+                            assets.push_back(std::move(point));
+                        }
+                        // (The module first of them: the sort keeps a module's assets in the order they are listed.)
+                        assets.insert(assets.end() - static_cast<std::ptrdiff_t>(std::ranges::count(assets, asset.id, &Asset::parent)), asset);
+                        continue;
+                    } else {
+                        asset.id = prefix + entry.path().filename().string();
+                        asset.label = entry.path().filename().string();
+                    }
                     assets.push_back(std::move(asset));
                 }
             };
@@ -2370,7 +2912,9 @@ class $NAME : ResourceScript() {
             // In a folder, a thing is called what its file is.
             if (asset.kind == Asset::Kind::eTexture || (asset.kind == Asset::Kind::eModel && !asset.file.empty())) asset.label = asset.file.filename().string();
         }
-        std::ranges::stable_sort(assets, [](const Asset& a, const Asset& b) { return std::tuple(a.kind, a.group, a.label) < std::tuple(b.kind, b.group, b.label); });
+        std::ranges::stable_sort(assets, [](const Asset& a, const Asset& b) { // A shader's entries as its module declares them.
+            const auto label = [](const Asset& asset) -> const std::string& { static const std::string none; return asset.kind == Asset::Kind::eShader ? none : asset.label; };
+            return std::tuple(a.kind, a.group, label(a)) < std::tuple(b.kind, b.group, label(b)); });
         return assets;
     }
 
@@ -2663,18 +3207,27 @@ class $NAME : ResourceScript() {
             made = doc.AddNode("ImageFile", x, y, asset->file.stem().string(), pass);
             if (!made.empty()) doc.SetInput(made, "file", kgraph::Value(id.substr(1)));
         } else if (asset->kind == Asset::Kind::eShader) {
-            const std::string module = asset->file.stem().string();
-            const auto entries = EntryPoints(module);
-            const auto entry = [&](const std::string_view wanted) { return std::ranges::find_if(entries, [&](const std::string& e) { return e.starts_with(wanted); }); };
+            const std::string& module = asset->group;
+            const auto entries = ShaderEntries(module);
             if (entries.empty()) { Say(std::format("{} has no entry point: it is a module others import, and no pipeline's.", asset->label), true); return {}; }
-            if (const auto compute = entry("compute"); compute != entries.end()) {
+            // The entry dropped is its stage's; the module's first of each other stage the pipeline has, beside it.
+            const auto entry = [&](const std::string_view stage) -> const std::string* {
+                if (asset->stage == stage) return &asset->label;
+                const auto found = std::ranges::find(entries, stage, &ShaderEntry::stage);
+                return found == entries.end() ? nullptr : &found->name;
+            };
+            // A module dropped is a pipeline of its entries: a compute one when it draws nothing, of its first compute entry.
+            const auto compute = std::ranges::find(entries, std::string("compute"), &ShaderEntry::stage);
+            const bool draws = entry("vertex") || entry("fragment");
+            if (asset->stage == "compute" || (asset->stage.empty() && !draws && compute != entries.end())) {
+                const std::string& name = asset->stage.empty() ? compute->name : asset->label;
                 made = doc.AddNode("ComputePipeline", x, y, module, pass);
-                if (!made.empty()) { doc.SetInput(made, "compute.module", kgraph::Value(module)); doc.SetInput(made, "compute.entry", kgraph::Value(*compute)); }
+                if (!made.empty()) { doc.SetInput(made, "compute.module", kgraph::Value(module)); doc.SetInput(made, "compute.entry", kgraph::Value(name)); }
             } else {
                 made = doc.AddNode("GraphicsPipeline", x, y, module, pass);
                 if (!made.empty())
                     for (const char* stage : { "vertex", "fragment" })
-                        if (const auto found = entry(stage); found != entries.end()) {
+                        if (const std::string* found = entry(stage)) {
                             doc.SetInput(made, std::string(stage) + ".module", kgraph::Value(module));
                             doc.SetInput(made, std::string(stage) + ".entry", kgraph::Value(*found));
                         }
@@ -2813,7 +3366,18 @@ class $NAME : ResourceScript() {
     void Session::OpenAsset(const Asset& asset)
     {
         switch (asset.kind) {
-        case Asset::Kind::eShader:
+        case Asset::Kind::eShader: {
+            // A module of entries shows them under it, and hides them; one of none, and an entry, open where they are written.
+            const auto entries = ShaderEntries(asset.group);
+            if (asset.stage.empty() && !entries.empty()) {
+                if (!assetsOpened.erase(asset.id)) assetsOpened.insert(asset.id);
+                ++_changes;
+                break;
+            }
+            const auto entry = std::ranges::find(entries, asset.label, &ShaderEntry::name);
+            OpenInCode(asset.file, asset.stage.empty() || entry == entries.end() ? 0 : entry->line);
+            break;
+        }
         case Asset::Kind::eScript: OpenInCode(asset.file); break;
         case Asset::Kind::eModel:
             if (!assetsOpened.erase(asset.id)) assetsOpened.insert(asset.id);
@@ -2971,7 +3535,7 @@ class $NAME : ResourceScript() {
         return it == _assetsHeld.end() ? nullptr : it->second;
     }
 
-    bool Session::OpenInCode(const std::filesystem::path& file)
+    bool Session::OpenInCode(const std::filesystem::path& file, const int line)
     {
         if (!_hasProject) { Say("There is a folder to open once there is a project: File, New project.", true); return false; }
         WriteEditorSetup(_project.directory, _project.name);
@@ -2982,7 +3546,7 @@ class $NAME : ResourceScript() {
         if (hasKotlin) { WriteKotlinBuild(_project.directory, _project.name); }
         const char* said = std::getenv("KORAL_ENGINE_CODE");
         std::string command = std::format("{} \"{}\"", said && *said ? said : "code", _project.directory.string());
-        if (!file.empty()) command += std::format(" --goto \"{}\"", file.string());
+        if (!file.empty()) command += line > 0 ? std::format(" --goto \"{}:{}\"", file.string(), line) : std::format(" --goto \"{}\"", file.string());
         // The shell's, and not waited for: the editor of code is a program of its own.
         const bool started = launch ? launch(command) : std::system((command + " >/dev/null 2>&1 &").c_str()) == 0;
         if (started) Say(file.empty() ? std::string("Opened the project in the editor of code.") : std::format("Opened {} in the editor of code.", file.filename().string()));
@@ -3096,6 +3660,7 @@ class $NAME : ResourceScript() {
         std::string error;
         const kecs::Entity root = Doc().ImportModel(file, &error);
         if (root.IsNull()) { Say(error, true); return false; }
+        if (const auto at = std::exchange(placeAt, std::nullopt)) Doc().SetPosition(root, { at->x, at->y, at->z });
         Select(root);
         Say(std::format("Imported {}.", file.filename().string()));
         return true;
@@ -3440,13 +4005,23 @@ class $NAME : ResourceScript() {
     std::vector<std::string> Session::EntryPoints(const std::string& module) const
     {
         std::vector<std::string> entries;
+        for (auto& entry : ShaderEntries(module)) entries.push_back(std::move(entry.name));
+        return entries;
+    }
+
+    std::vector<Session::ShaderEntry> Session::ShaderEntries(const std::string& module) const
+    {
+        std::vector<ShaderEntry> entries;
         if (!_hasProject) return entries;
         std::ifstream in(_project.ShaderDirectory() / (module + ".slang"));
         if (!in) return entries;
         const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         // [shader("stage")], whatever other attributes follow it, a return type, and the function's name.
-        static const std::regex declared(R"re(\[\s*shader\s*\(\s*"\w+"\s*\)\s*\]\s*(?:\[[^\]]*\]\s*)*[\w:<>,\s]+?\s+(\w+)\s*\()re");
-        for (std::sregex_iterator it(text.begin(), text.end(), declared), end; it != end; ++it) entries.push_back((*it)[1].str());
+        static const std::regex declared(R"re(\[\s*shader\s*\(\s*"(\w+)"\s*\)\s*\]\s*(?:\[[^\]]*\]\s*)*[\w:<>,\s]+?\s+(\w+)\s*\()re");
+        for (std::sregex_iterator it(text.begin(), text.end(), declared), end; it != end; ++it) {
+            const auto name = text.begin() + (*it).position(2);
+            entries.push_back({ (*it)[2].str(), (*it)[1].str(), 1 + static_cast<int>(std::count(text.begin(), name, '\n')) });
+        }
         return entries;
     }
 
@@ -3504,8 +4079,8 @@ class $NAME : ResourceScript() {
                 if (name == word) best = 100;
                 else if (name.starts_with(word)) best = 60;
                 else if (startsAWord(type.name, word)) best = 45;
-                else if (name.find(word) != std::string::npos) best = 30;
                 else if (startsAWord(type.keywords, word)) best = 25;
+                else if (name.find(word) != std::string::npos) best = 20;     // inside a word of it: "if" in RandomUniform is no if
                 else if (category.starts_with(word)) best = 10;
                 else if (doc.find(word) != std::string::npos) best = 5;
                 if (best == 0) { all = false; break; }
@@ -3522,7 +4097,7 @@ class $NAME : ResourceScript() {
 
     std::vector<std::string> NodeListSections(const std::map<std::string, std::size_t>& counts, const kgraph::PassRate rate)
     {
-        static const std::vector<std::string> scene { "Components", "Scene", "Values", "Math", "Vectors", "Cameras", "Logic", "Flow" };
+        static const std::vector<std::string> scene { "Components", "Scene", "Values", "Math", "Random", "Vectors", "Cameras", "Logic", "Flow" };
         static const std::vector<std::string> vulkan { "Resources", "Pipelines", "Passes" };
         // What is neither is what a function is for: those first, by name, the functions that say nothing last — and on a
         // page of the fixed step, what simulates before the rest.
@@ -3657,18 +4232,125 @@ class $NAME : ResourceScript() {
          * How a number is dragged, wherever it is: within @p limits; a unit every few pixels when it is @p whole, and shown
          * so; by so much of what it is when it is logarithmic, about twice as much every seventy pixels.
          */
-        kui::DragValueOptions Dragging(const kgraph::NumberLimits& limits, const bool whole)
+        kui::DragValueOptions Dragging(const kgraph::NumberLimits& limits, const kui::NumberType type)
         {
-            return kui::DragValueOptions {}.SetRange(limits.min, limits.max).SetLogarithmic(limits.logarithmic)
+            const bool whole = type == kui::NumberType::eInt || type == kui::NumberType::eUInt;
+            return kui::DragValueOptions {}.SetRange(limits.min, limits.max).SetLogarithmic(limits.logarithmic).SetType(type)
                 .SetSpeed(limits.logarithmic || !whole ? 0.01f : 0.1f).SetDecimals(whole ? 0 : limits.logarithmic ? 3 : 2);
         }
-        /** The same for a few numbers side by side: each of a vector, a box. */
-        kui::Widget DragNumbers(std::vector<float> numbers, std::function<void(std::vector<float>)> set, const kgraph::NumberLimits& limits, const bool whole)
+        /**
+         * A few controls that are one thing's — a vector's numbers — side by side where they fit, and where they do not, a
+         * line each, or for four two a line. As narrow as the widest of them: an inspector with a float4 in it can be narrow.
+         */
+        kui::Widget Fitted(std::vector<kui::Widget> parts)
         {
-            const auto options = Dragging(limits, whole);
-            return kgui::DragFloats(std::move(numbers), std::move(set), options.speed, options.decimals, options.min, options.max, options.logarithmic);
+            if (parts.size() == 1) return std::move(parts.front());
+            const std::size_t count = parts.size();
+            return kui::CustomLayout([count](kui::LayoutContext& context, const kui::BoxConstraints& given) {
+                constexpr float Gap = 4.f, Unbounded = std::numeric_limits<float>::infinity();
+                std::vector<float> natural(count);
+                for (std::size_t i = 0; i < count; ++i) natural[i] = context.measure(i, kui::BoxConstraints { 0.f, Unbounded, 0.f, Unbounded }).x;
+                const auto across = [&](const std::size_t each) {     // the width that many a line needs
+                    float widest = 0.f;
+                    for (std::size_t first = 0; first < count; first += each) {
+                        float line = Gap * static_cast<float>(std::min(each, count - first) - 1);
+                        for (std::size_t i = first; i < std::min(first + each, count); ++i) line += natural[i];
+                        widest = std::max(widest, line);
+                    }
+                    return widest;
+                };
+                const float width = given.HasBoundedWidth() ? given.maxWidth : across(count);
+                const std::size_t each = width >= across(count) ? count : count == 4 && width >= across(2) ? 2 : 1;
+                const float cell = std::max((width - Gap * static_cast<float>(each - 1)) / static_cast<float>(each), 0.f);
+                float y = 0.f;
+                for (std::size_t first = 0; first < count; first += each) {
+                    float tallest = 0.f;
+                    for (std::size_t i = first; i < std::min(first + each, count); ++i) {
+                        tallest = std::max(tallest, context.measure(i, kui::BoxConstraints { cell, cell, 0.f, Unbounded }).y);
+                        context.place(i, { static_cast<float>(i - first) * (cell + Gap), y });
+                    }
+                    y += tallest + (first + each < count ? Gap : 0.f);
+                }
+                return kor::Vec2 { width, y };
+            }, std::move(parts));
+        }
+
+        /** The same for a few numbers: each of a vector, a box, labelled X, Y, Z, W — side by side where they fit (Fitted). */
+        kui::Widget DragNumbers(std::vector<float> numbers, std::function<void(std::vector<float>)> set, const kgraph::NumberLimits& limits, const kui::NumberType type)
+        {
+            static constexpr const char* axes[] { "X", "Y", "Z", "W" };
+            std::vector<kui::Widget> parts;
+            for (std::size_t i = 0; i < numbers.size(); ++i) {
+                auto options = Dragging(limits, type).SetWidth(48.f);
+                if (numbers.size() > 1 && i < 4) options.SetLabel(axes[i]);
+                parts.push_back(kui::DragValue(numbers[i], [numbers, set, i](const double v) {
+                    auto changed = numbers;
+                    changed[i] = static_cast<float>(v);
+                    if (set) set(changed);
+                }, options));
+            }
+            return Fitted(std::move(parts));
         }
         kgraph::NumberLimits LimitsOfPort(const kgraph::Port& port) { return { port.min, port.max, port.logarithmic }; }
+
+        /** The kind of number a drag gives, for a value of @p scalar's: a float's, unless it is said to be another. */
+        kui::NumberType NumberTypeOf(const kgraph::Scalar scalar)
+        {
+            switch (scalar) {
+                case kgraph::Scalar::eDouble: return kui::NumberType::eDouble;
+                case kgraph::Scalar::eInt: return kui::NumberType::eInt;
+                case kgraph::Scalar::eUInt: case kgraph::Scalar::eBool: return kui::NumberType::eUInt;
+                default: return kui::NumberType::eFloat;
+            }
+        }
+        /** For a number of a builder's type: of an array's, its element's. */
+        kui::NumberType NumberTypeOf(const kb::Type& type)
+        {
+            const kb::Type& number = type.kind == kb::Kind::eArray && type.element ? *type.element : type;
+            switch (number.kind) {
+                case kb::Kind::eInt: return kui::NumberType::eInt;
+                case kb::Kind::eUInt: return kui::NumberType::eUInt;
+                case kb::Kind::eFloat: return number.bits == 64 ? kui::NumberType::eDouble : kui::NumberType::eFloat;
+                default: return kui::NumberType::eFloat;
+            }
+        }
+        /**
+         * For an input: of exactly what it takes (Port::shape), or its builder argument's kind, or — a count, an index — a
+         * whole number, of none or more when it is never less.
+         */
+        kui::NumberType NumberTypeOf(const kgraph::Port& port)
+        {
+            if (port.shape.Known()) return NumberTypeOf(port.shape.scalar);
+            if (port.builder) return NumberTypeOf(*port.builder);
+            if (port.integer) return port.min >= 0.f ? kui::NumberType::eUInt : kui::NumberType::eInt;
+            return kui::NumberType::eFloat;
+        }
+        /** For a field of a component, by its type's name: "int", "uvec3", "double", "vec4". */
+        kui::NumberType NumberTypeOfField(const std::string_view type)
+        {
+            if (type.starts_with("i")) return kui::NumberType::eInt;
+            if (type.starts_with("u") || type.starts_with("b")) return kui::NumberType::eUInt;
+            if (type.starts_with("d")) return kui::NumberType::eDouble;
+            return kui::NumberType::eFloat;
+        }
+
+        /** The numbers of a value as @p shape has them: as many as it has, what the value holds or zeros. */
+        std::vector<float> NumbersOfShape(const Value& value, const kgraph::Shape shape)
+        {
+            const Value made = kgraph::Conform(value.IsNull() ? Value(0.0) : value, shape);
+            std::vector<float> numbers;
+            if (const auto* items = made.Items())
+                for (const Value& each : *items) numbers.push_back(each.Number() ? static_cast<float>(*each.Number()) : each.Bool() && *each.Bool() ? 1.f : 0.f);
+            else numbers.push_back(made.Number() ? static_cast<float>(*made.Number()) : made.Bool() && *made.Bool() ? 1.f : 0.f);
+            numbers.resize(shape.components, 0.f);
+            return numbers;
+        }
+        /** What numbers dragged are, as @p shape takes them: one, or a vector of them, each of its kind. */
+        Value ValueOfShape(const std::vector<float>& numbers, const kgraph::Shape shape)
+        {
+            if (numbers.size() == 1) return kgraph::Conform(Value(numbers.front()), shape);
+            return kgraph::Conform(Value(Value::List(numbers.begin(), numbers.end())), shape);
+        }
 
         /**
          * An editor for a value of a builder's type, whatever it is: what a node's inspector is made of. A number of it —
@@ -3685,9 +4367,8 @@ class $NAME : ResourceScript() {
                 return kui::Checkbox(value.Bool() && *value.Bool(), [set](const bool on) { set(Value(on)); });
             case Kind::eInt:
             case Kind::eUInt:
-                return kui::DragValue(NumberOf(value), [set](const float v) { set(Value(std::round(v))); }, Dragging(limits, true));
             case Kind::eFloat:
-                return kui::DragValue(NumberOf(value), [set](const float v) { set(Value(v)); }, Dragging(limits, false));
+                return kui::DragValue(NumberOf(value), [set](const double v) { set(Value(v)); }, Dragging(limits, NumberTypeOf(type)));
             case Kind::eString: {
                 const std::string text = value.String() ? *value.String() : std::string();
                 return kui::TextField(kui::TextFieldOptions { .text = text, .onSubmitted = [set](const std::string& typed) { set(Value(typed)); } }).Key(key + "=" + text);
@@ -3765,7 +4446,7 @@ class $NAME : ResourceScript() {
                 if (const auto* items = value.Items())
                     for (std::size_t i = 0; i < numbers.size() && i < items->size(); ++i) numbers[i] = NumberOf((*items)[i]);
                 return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); },
-                                   limits, type.element->kind != Kind::eFloat);
+                                   limits, NumberTypeOf(type));
             }
             case Kind::eStruct: {
                 // A colour an attachment is cleared to: picked, and given as the four floats it is.
@@ -3820,13 +4501,13 @@ class $NAME : ResourceScript() {
 
         /**
          * An editor for an input of one of the engine's own nodes, which says only what its type is called; a number kept
-         * within @p limits, whole when @p whole.
+         * within @p limits, of the kind @p number says.
          */
         kui::Widget NamedEditor(const std::string& type, const Value& value, const std::function<void(Value)>& set, const std::string& key,
-                                const kgraph::NumberLimits& limits = {}, const bool whole = false)
+                                const kgraph::NumberLimits& limits = {}, const kui::NumberType number = kui::NumberType::eFloat)
         {
             if (type == "number")
-                return kui::DragValue(NumberOf(value), [set, whole](const float v) { set(Value(whole ? std::round(v) : v)); }, Dragging(limits, whole));
+                return kui::DragValue(NumberOf(value), [set](const double v) { set(Value(v)); }, Dragging(limits, number));
             if (type == "bool") return kui::Checkbox(value.Bool() && *value.Bool(), [set](const bool on) { set(Value(on)); });
             if (type == "string") {
                 const std::string text = value.String() ? *value.String() : std::string();
@@ -4016,8 +4697,8 @@ class $NAME : ResourceScript() {
                         kui::Expanded(TextEdit(Value(a.semantic), [set, attributes, i](Value v) { auto now = attributes; now[i].semantic = v.String() ? *v.String() : std::string(); set(ValueOf(now)); },
                                                std::format("{}[{}]", key, i), "SEMANTIC")),
                         Choice(types, Value(a.type), [set, attributes, i](Value v) { auto now = attributes; if (v.String()) now[i].type = *v.String(); set(ValueOf(now)); }).Width(100.f),
-                        kui::DragValue(static_cast<float>(a.count), [set, attributes, i](const float v) { auto now = attributes; now[i].count = std::clamp(static_cast<int>(std::round(v)), 1, 4); set(ValueOf(now)); },
-                                       kui::DragValueOptions {}.SetSpeed(0.1f).SetDecimals(0).SetRange(1.f, 4.f).SetWidth(44.f)),
+                        kui::DragValue(a.count, [set, attributes, i](const double v) { auto now = attributes; now[i].count = static_cast<int>(v); set(ValueOf(now)); },
+                                       kui::DragValueOptions {}.SetSpeed(0.1f).SetRange(1.f, 4.f).SetType(kui::NumberType::eUInt).SetWidth(44.f)),
                         kui::Tooltip("Which buffer it is in", kui::Dropdown(bufferNames, a.buffer, [set, attributes, i](const int b) {
                             auto now = attributes;
                             now[i].buffer = b;
@@ -4059,8 +4740,8 @@ class $NAME : ResourceScript() {
                 rows.push_back(kui::Row({
                     kui::Expanded(TextEdit(name ? *name : Value {}, [with](Value v) { with("name", std::move(v)); }, std::format("{}[{}]", key, i), "position")),
                     Choice(types, type ? *type : Value("eFloat"), [with](Value v) { with("type", std::move(v)); }).Width(96.f),
-                    kui::DragValue(count ? NumberOf(*count) : 1.f, [with](const float v) { with("count", Value(std::round(v))); },
-                                   kui::DragValueOptions {}.SetSpeed(1.f).SetDecimals(0).SetRange(1.f, 256.f).SetWidth(48.f)),
+                    kui::DragValue(count ? NumberOf(*count) : 1.f, [with](const double v) { with("count", Value(v)); },
+                                   kui::DragValueOptions {}.SetSpeed(1.f).SetRange(1.f, 256.f).SetType(kui::NumberType::eUInt).SetWidth(48.f)),
                     kui::Tooltip("Take it out", SmallIcon("close", [set, items, i] { auto list = items; list.erase(list.begin() + static_cast<std::ptrdiff_t>(i)); set(Value(std::move(list))); })),
                 }, kui::FlexOptions {}.SetGap(4.f)));
             }
@@ -4235,6 +4916,8 @@ class $NAME : ResourceScript() {
             };
             for (const auto& port : runtime.PortsOf(node.id)) {
                 if (givenWhole(port.name)) { listed.insert(port.name); continue; }
+                // An Image or a Buffer is made for what uses it: its usage is not the inspector's to tick.
+                if ((node.type == "Image" || node.type == "Buffer") && port.name == "usage") { listed.insert(port.name); continue; }
                 const auto at = port.name.find("[]");
                 // What a shader declares is the node's to be given, whatever else is: a pipeline's parameter, or a
                 // field of a ShaderBuffer's struct, is never hidden.
@@ -4265,6 +4948,11 @@ class $NAME : ResourceScript() {
             if (shown.port.kind == kgraph::PortKind::eResource) return true;
             // A field of a shader's struct is there to be wired to, from an entity's: a port from the start.
             if ((node.type == "ShaderBuffer" || node.type == "BufferBuilder") && shown.port.name.starts_with("field.")) return true;
+            // A component's buffer fills its fields from the entities: one is a port only once something else is wired to it.
+            if (node.type == "ComponentBuffer" && shown.port.name.starts_with("field.")) {
+                const auto input = node.inputs.find(shown.port.name);
+                return input != node.inputs.end() && input->second.link;
+            }
             // One set on the node is a port with its control; one wired only, a port to wire.
             if (kgraph::PlacementOf(shown.port, node) != kgraph::Placement::eInspector) return true;
             const auto input = node.inputs.find(shown.port.name);
@@ -4326,7 +5014,7 @@ class $NAME : ResourceScript() {
             }
             if (type == "bool" || type == "Bool") return kui::Color::Hex(0xD86A6A);
             if (type == "bundle") return kui::Color::Hex(0xD46FA8);
-            if (type == "number" || type == "Number" || type == "Float" || type == "Double" || type == "Int" || type == "UInt") return kui::Color::Hex(0x5B9BD5);
+            if (type == "number" || type == "Float" || type == "Double" || type == "Int" || type == "UInt") return kui::Color::Hex(0x5B9BD5);
             if (type == "string" || type == "String") return kui::Color::Hex(0xC9A0DC);
             if (type == "vector" || type == "Color") return kui::Color::Hex(0x62C3E8);
             return kui::Color::Hex(0x8FA3B8);
@@ -4363,7 +5051,7 @@ class $NAME : ResourceScript() {
             // A colour a kind: what is made on the device warm, what is worked out cool, what the scene holds green.
             static const std::map<std::string, std::uint32_t, std::less<>> colors {
                 { "Pipelines", 0x7A4BC2 }, { "Passes", 0xC2643B }, { "Resources", 0xB0892F }, { "Values", 0x3B7FC2 }, { "Math", 0x2F8FA8 },
-                { "Vectors", 0x4C6FCF }, { "Logic", 0x8A5BA8 }, { "Cameras", 0x5A8F3A }, { "Scene", 0x3B9C7A }, { "Components", 0x4E9E4E }, { "Flow", 0x6B7685 },
+                { "Vectors", 0x4C6FCF }, { "Random", 0x3F9C8F }, { "Logic", 0x8A5BA8 }, { "Cameras", 0x5A8F3A }, { "Scene", 0x3B9C7A }, { "Components", 0x4E9E4E }, { "Flow", 0x6B7685 },
                 { "Functions", 0x3E9FA8 } };
             const auto it = colors.find(category);
             return kui::Color::Hex(it == colors.end() ? 0x3E9FA8 : it->second);   // none of these: what a function is for
@@ -4526,6 +5214,124 @@ class $NAME : ResourceScript() {
         private:
             std::shared_ptr<Session> _session;
             int _shown = 0;
+        };
+
+        /** A line or a few of text that follows what @p text says, asked a few times a second: built again only itself, when it changes. */
+        class LiveText final : public kui::StatefulWidget {
+        public:
+            LiveText(std::function<std::string()> text, std::string tip = {}, const int perSecond = 10)
+                : _text(std::move(text)), _tip(std::move(tip)), _every(1.f / static_cast<float>(std::max(perSecond, 1))) {}
+
+            void InitState() override
+            {
+                _shown = _text();
+                Animate([this](const float dt) {
+                    _since += dt;
+                    if (_since < _every) return true;
+                    _since = 0.f;
+                    if (std::string now = _text(); now != _shown) SetState([&] { _shown = std::move(now); });
+                    return true;
+                });
+            }
+            void DidUpdateWidget(const kui::StatefulWidget& newer) override
+            {
+                const auto& given = static_cast<const LiveText&>(newer);
+                _text = given._text;
+                _tip = given._tip;
+                _every = given._every;
+                _shown = _text();
+            }
+            kui::Widget Build() override
+            {
+                std::vector<kui::Widget> lines;
+                const kui::TextStyle style = kui::TextStyle {}.SetColor(kui::Color::Hex(0xE0E0E0)).SetSize(12.f);
+                for (std::size_t at = 0; at <= _shown.size();) {
+                    const auto end = std::min(_shown.find('\n', at), _shown.size());
+                    lines.push_back(kui::Text(_shown.substr(at, end - at), style));
+                    at = end + 1;
+                }
+                kui::Widget body = kui::Padding(kui::EdgeInsets::Symmetric(4.f, 0.f), kui::Column(std::move(lines), kui::FlexOptions {}.SetGap(2.f).SetMainAxisSize(kui::MainAxisSize::eMin)
+                                                                                                                    .SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)));
+                return _tip.empty() ? body : kui::Tooltip(_tip, std::move(body));
+            }
+
+        private:
+            std::function<std::string()> _text;
+            std::string _tip, _shown;
+            float _every = 0.1f, _since = 0.f;
+        };
+
+        /**
+         * Which way the view looks, as the world's axes are seen from it: each end of each a disc — X red, Y green, Z
+         * blue, the far ones faint — that, pressed, looks along it straight on; the middle, perspective or straight on.
+         * Built again by itself as the view turns.
+         */
+        class ViewCube final : public kui::StatefulWidget {
+        public:
+            explicit ViewCube(std::shared_ptr<Session> session, const bool second = false) : _session(std::move(session)), _second(second) {}
+
+            void InitState() override
+            {
+                _seen = Seen();
+                Animate([this](float) {
+                    if (const kor::Vec3 now = Seen(); kor::Length(now - _seen) > 0.25f) SetState([&] { _seen = now; });
+                    return true;
+                });
+            }
+            kui::Widget Build() override
+            {
+                constexpr float Size = 84.f, Reach = 30.f, Disc = 18.f;
+                constexpr float Radians = 3.14159265358979323846f / 180.f;
+                const float yaw = _seen.x * Radians, pitch = _seen.y * Radians;
+                // The view's own right, up and forward, as EditorCamera::Position has it looking at its target.
+                const kor::Vec3 back(std::cos(pitch) * std::sin(yaw), -std::sin(pitch), std::cos(pitch) * std::cos(yaw));
+                const kor::Vec3 right(std::cos(yaw), 0.f, -std::sin(yaw));
+                const kor::Vec3 up = kor::Cross(back, right);
+                using Axis = Session::Axis;
+                struct End { kor::Vec3 way; const char* label; std::uint32_t colour; Axis axis; };
+                std::vector<End> ends {
+                    { { 1.f, 0.f, 0.f }, "X", 0xE0605A, Axis::eRight }, { { -1.f, 0.f, 0.f }, "", 0xE0605A, Axis::eLeft },
+                    { { 0.f, 1.f, 0.f }, "Y", 0x7DBB4B, Axis::eTop }, { { 0.f, -1.f, 0.f }, "", 0x7DBB4B, Axis::eBottom },
+                    { { 0.f, 0.f, 1.f }, "Z", 0x5B9BD5, Axis::eFront }, { { 0.f, 0.f, -1.f }, "", 0x5B9BD5, Axis::eBack },
+                };
+                // The far ones first: the near ones over them.
+                std::ranges::sort(ends, [&](const End& a, const End& b) { return kor::Dot(a.way, back) < kor::Dot(b.way, back); });
+                std::vector<kui::Widget> layers;
+                layers.push_back(kui::Container(kui::ContainerOptions {}.SetSize(Size, Size)
+                                                    .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.55f)).SetRadius(Size * 0.5f))));
+                for (const End& end : ends) {
+                    const float x = Size * 0.5f + kor::Dot(end.way, right) * Reach - Disc * 0.5f, y = Size * 0.5f - kor::Dot(end.way, up) * Reach - Disc * 0.5f;
+                    const bool near = kor::Dot(end.way, back) >= -0.05f;
+                    const kui::Color colour = kui::Color::Hex(end.colour).WithAlpha(near ? 1.f : 0.45f);
+                    kui::Widget disc = kui::Container(kui::ContainerOptions {}.SetSize(Disc, Disc).SetAlignment(kui::Alignment::Center())
+                                                          .SetDecoration(kui::Decoration {}.SetColor(*end.label ? colour : colour.WithAlpha(near ? 0.55f : 0.3f)).SetRadius(Disc * 0.5f)),
+                                                      kui::Text(end.label, kui::TextStyle {}.SetSize(11.f).SetColor(kui::Color::Hex(0x101012))));
+                    const char* names[] { "above", "below", "the front (+Z)", "the back (-Z)", "the right (+X)", "the left (-X)" };
+                    layers.push_back(kui::Positioned(kui::PositionedOptions { .left = x, .top = y },
+                        kui::Tooltip(std::format("Look from {}, straight on", names[static_cast<int>(end.axis)]),
+                                     kui::Button(std::move(disc), [this, axis = end.axis] { _session->LookAlong(axis, false, _second ? &_session->secondCamera : nullptr); },
+                                                 kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)))));
+                }
+                // The middle: perspective, or straight on.
+                const bool straight = _seen.z > 0.5f;
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = Size * 0.5f - 12.f, .top = Size * 0.5f - 12.f },
+                    kui::Tooltip(straight ? "Seen straight on: press for perspective" : "In perspective: press to see it straight on",
+                                 kui::Button(kui::Container(kui::ContainerOptions {}.SetSize(24.f, 24.f).SetAlignment(kui::Alignment::Center())
+                                                                .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x2A2A2E).WithAlpha(0.9f)).SetRadius(12.f)),
+                                                            kui::Text(straight ? "ORT" : "PER", kui::TextStyle {}.SetSize(8.f).SetColor(kui::Color::Hex(0xE0E0E0)))),
+                                             [this, straight] { View().orthographic = !straight; _session->SetOrthographic(_session->camera.orthographic); },
+                                             kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)))));
+                return kui::SizedBox(Size, Size, kui::Stack(std::move(layers)));
+            }
+
+        private:
+            EditorCamera& View() { return _second ? _session->secondCamera : _session->camera; }
+            /** Its yaw, its pitch, and whether it is straight on: what it is built again for. */
+            kor::Vec3 Seen() { const EditorCamera& view = View(); return { view.yaw, view.pitch, view.orthographic ? 1.f : 0.f }; }
+
+            std::shared_ptr<Session> _session;
+            bool _second = false;
+            kor::Vec3 _seen { 0.f };
         };
 
         /**
@@ -4797,6 +5603,16 @@ class $NAME : ResourceScript() {
                     if (_session->TakeAskForNodes()) AskForNode(NewNodeAt());
                     if (_session->TakeAskForNewShader()) SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; });
                     if (_session->TakeAskToArrange()) Arrange();
+                    // Every page put in order: each once it has been drawn as it is shown, its nodes measured — a frame on.
+                    if (const auto& pages = _session->PagesToArrange(); !pages.empty()) {
+                        if (ShownPass() != pages.front() || _placedPage != pages.front()) _arrangeWait = 0;
+                        else if (++_arrangeWait > 2) {
+                            _arrangeWait = 0;
+                            Arrange();
+                            _session->ArrangedPage();
+                        }
+                        SetState();
+                    }
                     // A scene read with pictures that are not compressed: asked, once, whether to compress them.
                     if (_session->TakeAskToCompress() && _dialog == Dialog::eNone) OpenCompressTextures(true);
                     // A node gone to — found, or pressed among the problems — is brought into the graph's view.
@@ -4973,11 +5789,15 @@ class $NAME : ResourceScript() {
             kui::DockPanel ScenePanelDocked()
             {
                 // A model dropped on the scene from the Assets panel is imported into it.
+                // Each is put on the surface it is dropped on, where there is one.
                 kui::Widget scene = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([this](const kui::DragData& dragged, kor::Vec2) {
                     const auto* id = dragged.As<std::string>();
                     const auto asset = id ? AssetOf(*id) : std::nullopt;
-                    if (asset && asset->kind == Session::Asset::Kind::eModel) AskToImport(asset->file);
-                    else if (asset && asset->kind == Session::Asset::Kind::ePrefab) _session->PlacePrefab(asset->id);
+                    const auto pointer = _session->viewport->PointerPosition();
+                    const kor::UVec2 size = _session->viewport->Size();
+                    const float u = pointer && size.x > 0 ? pointer->x / static_cast<float>(size.x) : 0.5f, v = pointer && size.y > 0 ? pointer->y / static_cast<float>(size.y) : 0.5f;
+                    if (asset && asset->kind == Session::Asset::Kind::eModel) _session->DropAt(u, v, [this, file = asset->file] { AskToImport(file); });
+                    else if (asset && asset->kind == Session::Asset::Kind::ePrefab) _session->DropAt(u, v, [session = _session, id = asset->id] { session->PlacePrefab(id); });
                     else _session->Say("A model dropped on the scene is imported and a prefab placed; a mesh, a texture, a material or a script is dropped on the entity that is to have it.", true);
                 }), ScenePanel());
                 kui::DockPanel panel { "scene", "Scene", std::move(scene), false };
@@ -5038,21 +5858,50 @@ class $NAME : ResourceScript() {
 
             /**
              * The scene as it runs, filling its panel: over it what the editor draws of its own — the line round what
-             * is picked, the gizmo — and, in a corner, the gizmo's tools on a backing that reads over whatever the scene
-             * shows behind it.
+             * is picked, the gizmo, the icons, a ruler — and in its corners its tools on a backing that reads over
+             * whatever the scene shows behind it: what is picked and how it is moved at the top left, how it is seen at
+             * the top right; its numbers at the foot, what is measured, and which way the view looks. Split, a second
+             * view of it beside the first.
              */
             kui::Widget ScenePanel()
             {
                 const kecs::Entity selected = _session->selectedEntity;
+                const bool some = !_session->Selection().empty();
+                const auto backing = [](kui::Widget content) {
+                    return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(5.f, 4.f))
+                                              .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.69f)).SetRadius(6.f)),
+                                          std::move(content));
+                };
+                const auto row = [](std::vector<kui::Widget> tools) {
+                    return kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
+                };
+
+                // ---- what is picked, and how it is moved
                 std::vector<kui::Widget> tools;
-                tools.push_back(Tool("near_me", "Select only: no gizmo", !_session->gizmoEnabled, [this] { _session->SetGizmo(false, _session->gizmo); }));
+                tools.push_back(Tool("near_me", "Select only: no gizmo. A drag from where nothing is picks what is in its box; Ctrl or Shift adds", !_session->gizmoEnabled,
+                                     [this] { _session->SetGizmo(false, _session->gizmo); }));
                 for (const auto& [mode, icon, what] : { std::tuple { kor::GizmoMode::eTranslate, "open_with", "Move what is picked" },
                                                         std::tuple { kor::GizmoMode::eRotate, "3d_rotation", "Rotate what is picked" },
                                                         std::tuple { kor::GizmoMode::eScale, "open_in_full", "Scale what is picked" } })
                     tools.push_back(Tool(icon, what, _session->gizmoEnabled && _session->gizmo == mode, [this, mode] { _session->SetGizmo(true, mode); }));
+                tools.push_back(Tool(_session->gizmoWorld ? "public" : "my_location", _session->gizmoWorld ? "Along the world's axes: press for its own" : "Along its own axes: press for the world's",
+                                     _session->gizmoWorld, [this] { _session->gizmoWorld = !_session->gizmoWorld; SetState(); }));
+                tools.push_back(SnapTool());
+                tools.push_back(Tool("vertical_align_bottom", "Moved, put on the surface under the pointer", _session->surfaceSnap,
+                                     [this] { _session->surfaceSnap = !_session->surfaceSnap; SetState(); }));
                 tools.push_back(ToolSeparator());
                 tools.push_back(Tool("center_focus_strong", "Frame what is picked (the view: right-drag turns, middle-drag moves, the wheel zooms)", false,
                                      [this, selected] { _session->Frame(selected); }, !selected.IsNull()));
+                tools.push_back(Tool("visibility_off", "Hide what is picked in this view (H)", false, [this] { _session->HideSelected(); }, some));
+                tools.push_back(Tool("filter_center_focus", "Show what is picked by itself (Shift+H)", _session->Isolated(), [this] { _session->Isolate(); }, some));
+                if (!_session->ViewHidden().empty())
+                    tools.push_back(Tool("visibility", std::format("Show the {} hidden again (Alt+H)", _session->ViewHidden().size()), true, [this] { _session->ShowAll(); }));
+                tools.push_back(ToolSeparator());
+                const auto measure = _session->measure;
+                tools.push_back(Tool("straighten", "A ruler: click two points on a surface", measure == Session::Measure::eRuler, [this, measure] {
+                    _session->SetMeasure(measure == Session::Measure::eRuler ? Session::Measure::eOff : Session::Measure::eRuler); }));
+                tools.push_back(Tool("colorize", "What is under the pointer: the entity, where and which way its surface faces", measure == Session::Measure::eProbe, [this, measure] {
+                    _session->SetMeasure(measure == Session::Measure::eProbe ? Session::Measure::eOff : Session::Measure::eProbe); }));
                 tools.push_back(ToolSeparator());
                 tools.push_back(ViewModeTool());
                 tools.push_back(GridTool());
@@ -5066,6 +5915,17 @@ class $NAME : ResourceScript() {
                                                                                           [this, driver = choice.driver](const int index) { _session->Choose(driver, index); }))));
                 }
 
+                // ---- how it is seen
+                std::vector<kui::Widget> seen;
+                seen.push_back(kui::Make<LiveText>([session = _session] { return std::format("{:.2g}x", session->flySpeed); }, "How fast the view flies: the wheel while the right button is held"));
+                seen.push_back(ViewsTool());
+                seen.push_back(Tool("lightbulb", "Icons for the lights, cameras and what draws nothing: a click on one picks it", _session->iconsShown,
+                                    [this] { _session->iconsShown = !_session->iconsShown; SetState(); }));
+                seen.push_back(Tool("query_stats", "The frame's numbers: what was drawn, computed, traced, and what it took", _session->statsShown,
+                                    [this] { _session->statsShown = !_session->statsShown; SetState(); }));
+                seen.push_back(Tool("vertical_split", _session->splitView ? "One view" : "Two views side by side", _session->splitView,
+                                    [this] { _session->SetSplit(!_session->splitView); }));
+
                 std::vector<kui::Widget> layers;
                 layers.push_back(kgui::SceneView(_session->Play(), _session->viewport));
                 // Over the scene's picture: a DebugView's in its place, when one is chosen; the grid; and the overlay.
@@ -5078,12 +5938,154 @@ class $NAME : ResourceScript() {
                 if (_session->Play().Over())
                     if (const auto picture = _session->OverPicture(); picture.Get())
                         layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 0.f, .top = 0.f, .right = 0.f, .bottom = 0.f }, kui::IgnorePointer(kui::Image(picture, kui::ImageFit::eFill))));
-                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f },
-                    kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(5.f, 4.f))
-                                       .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.69f)).SetRadius(6.f)),
-                                   kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)))));
-                return kui::Stack(std::move(layers));
+                // The two toolbars along the top, the second after the first where there is room and under it where
+                // not; the first's tools a line after another where the panel is narrower than they are.
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f, .right = 8.f },
+                    kui::Wrap({ backing(kui::Wrap(std::move(tools), 4.f, 4.f)), backing(row(std::move(seen))) }, 8.f, 6.f)));
+                // At the foot, on the left: what is measured, over the frame's numbers.
+                std::vector<kui::Widget> foot;
+                if (measure != Session::Measure::eOff) foot.push_back(backing(kui::Make<LiveText>([this] { return MeasureText(); }, std::string(), 15)));
+                if (_session->statsShown) foot.push_back(backing(kui::Make<LiveText>([this] { return StatsText(); }, std::string(), 4)));
+                if (!foot.empty())
+                    layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 8.f, .bottom = 8.f },
+                        kui::Column(std::move(foot), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin))));
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .right = 8.f, .bottom = 8.f }, kui::Make<ViewCube>(_session)));
+                kui::Widget first = kui::Stack(std::move(layers));
+                if (!_session->splitView || !_session->SecondView()) return first;
+                // The second view: the scene as the first draws it, from its own place, and nothing of the editor's over it.
+                kui::Widget second = kui::Stack({
+                    kgui::SceneView(*_session->SecondView(), _session->secondViewport),
+                    kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f }, backing(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f),
+                        kui::Text("Second view", kui::TextStyle {}.SetSize(12.f).SetColor(kui::Color::Hex(0xE0E0E0)))))),
+                    kui::Positioned(kui::PositionedOptions { .right = 8.f, .bottom = 8.f }, kui::Make<ViewCube>(_session, true)),
+                });
+                return kui::Row({ kui::Expanded(std::move(first)), kui::SizedBox(2.f, -1.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x303034))))),
+                                  kui::Expanded(std::move(second)) }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
             }
+
+            /** The frame's numbers, as the Scene panel's corner shows them. */
+            std::string StatsText()
+            {
+                const auto report = Doc().Runtime().Frame();
+                int run = 0, draws = 0, dispatches = 0, rays = 0, copies = 0;
+                double gpu = 0.0;
+                for (const auto& pass : report.passes) {
+                    ++run;
+                    if (pass.work & kor::TimerWork::Draw) ++draws;
+                    if (pass.work & kor::TimerWork::Dispatch) ++dispatches;
+                    if (pass.work & kor::TimerWork::Rays) ++rays;
+                    if (pass.work & kor::TimerWork::Transfer) ++copies;
+                    if (pass.gpuMeasured) gpu += pass.gpuMs;
+                }
+                const kecs::World& world = Doc().World();
+                const kecs::ComponentId meshes = world.Find("Mesh");
+                std::size_t entities = 0, drawn = 0;
+                world.EachEntity([&](const kecs::Entity entity) {
+                    ++entities;
+                    if (meshes != kecs::NoComponent && world.Has(entity, meshes) && world.IsEnabled(entity, meshes) && !_session->ViewHidden().contains(entity)) ++drawn;
+                });
+                std::string text = std::format("{} fps   {:.2f} ms a frame\nGPU {:.2f} ms over {} passes ({} left out)\n{} drawing   {} computing   {} tracing   {} copying\n"
+                                               "{} entities, {} drawn",
+                                               _session->Fps(), _session->FrameMs(), gpu, run, report.leftOut.size(), draws, dispatches, rays, copies, entities, drawn);
+                if (!_session->ViewHidden().empty()) text += std::format(" ({} hidden here)", _session->ViewHidden().size());
+                text += std::format("\n{:.0f} MB the frame made itself", static_cast<double>(report.bytes) / (1024.0 * 1024.0));
+                return text;
+            }
+
+            /** What is measured: the ruler's length, or what is under the pointer. */
+            std::string MeasureText()
+            {
+                const auto& probe = _session->Probed();
+                if (_session->measure == Session::Measure::eRuler) {
+                    const auto& ends = _session->ruler;
+                    if (ends.size() == 2) {
+                        const kor::Vec3 d = ends[1] - ends[0];
+                        return std::format("{:.3f} m    x {:.3f}   y {:.3f}   z {:.3f}", kor::Length(d), d.x, d.y, d.z);
+                    }
+                    if (ends.size() == 1) return probe.hit ? std::format("{:.3f} m to the pointer: click the other end", kor::Length(probe.position - ends[0])) : std::string("Click the other end on a surface");
+                    return "Click one end of what is measured, on a surface";
+                }
+                if (!probe.hit) return "Nothing under the pointer";
+                const std::string name = Doc().World().Alive(probe.entity) ? Doc().NameOf(probe.entity) : std::string("(nothing picked)");
+                return std::format("{}    at {:.3f}, {:.3f}, {:.3f}    facing {:.2f}, {:.2f}, {:.2f}    {:.2f} m away", name, probe.position.x, probe.position.y, probe.position.z,
+                                   probe.normal.x, probe.normal.y, probe.normal.z, probe.distance);
+            }
+
+            /** How the gizmo snaps: on or off, and its settings beside it — how far a step moves, turns and scales. */
+            kui::Widget SnapTool()
+            {
+                const Session::Snap snap = _session->snap;
+                const auto change = [this](std::function<void(Session::Snap&)> how) { how(_session->snap); SetState(); };
+                const auto line = [](const char* label, kui::Widget control) {
+                    return kui::Padding(kui::EdgeInsets::Symmetric(8.f, 3.f), kui::Row({ kui::SizedBox(96.f, 22.f, kui::Align(kui::Alignment::CenterLeft(), kui::Text(label, kui::TextStyle {}.SetSize(12.f)))),
+                                                                                         kui::Expanded(std::move(control)) }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                };
+                std::vector<kui::Widget> lines;
+                lines.push_back(PopupHeading("Snap: Ctrl held does the other"));
+                lines.push_back(line("Snapped", kui::Switch(snap.on, [change](const bool on) { change([&](Session::Snap& s) { s.on = on; }); })));
+                lines.push_back(line("Move (m)", kui::DragValue(snap.move, [change](const double v) { change([&](Session::Snap& s) { s.move = static_cast<float>(v); }); },
+                                                                kui::DragValueOptions {}.SetRange(0.001f, 100.f).SetLogarithmic(true).SetDecimals(3))));
+                lines.push_back(line("Turn (°)", kui::DragValue(snap.turn, [change](const double v) { change([&](Session::Snap& s) { s.turn = static_cast<float>(v); }); },
+                                                                kui::DragValueOptions {}.SetRange(0.1f, 180.f).SetSpeed(0.5f).SetDecimals(1))));
+                lines.push_back(line("Scale by", kui::DragValue(snap.scale, [change](const double v) { change([&](Session::Snap& s) { s.scale = static_cast<float>(v); }); },
+                                                                kui::DragValueOptions {}.SetRange(0.001f, 10.f).SetLogarithmic(true).SetDecimals(3))));
+                return kui::Row({
+                    Tool("grid_4x4", snap.on ? "Snapped (Ctrl held: free)" : "Free (Ctrl held: snapped)", snap.on, [change] { change([](Session::Snap& s) { s.on = !s.on; }); }),
+                    kui::Column({
+                        Tool("expand_more", "How far a step snaps", _snapOpen, [this] { SetState([&] { const bool open = !_snapOpen; ClosePopups(); _snapOpen = open; }); }),
+                        kui::PopupAnchor(_snapOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 240.f),
+                                         [this] { SetState([&] { _snapOpen = false; }); }, { 0.f, 4.f }),
+                    }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin)),
+                }, kui::FlexOptions {}.SetGap(0.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
+            }
+
+            /** Which way the view looks — along an axis, in perspective or straight on — and its bookmarks. */
+            kui::Widget ViewsTool()
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const auto button = [&](const std::string& label, const std::string& tip, const bool on, std::function<void()> pressed, const bool enabled = true, const float width = 60.f) {
+                    return kui::Tooltip(tip, kui::Button(
+                        kui::Container(kui::ContainerOptions {}.SetSize(width, 22.f).SetAlignment(kui::Alignment::Center())
+                                           .SetDecoration(kui::Decoration {}.SetColor(on ? t.primary.WithAlpha(0.35f) : t.surfaceHover).SetRadius(4.f)),
+                                       kui::Text(label, kui::TextStyle {}.SetSize(12.f).SetColor(enabled ? t.text : t.textMuted))),
+                        [this, pressed = std::move(pressed)] { pressed(); SetState([&] { _viewsOpen = false; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain).SetEnabled(enabled)));
+                };
+                const auto line = [](std::vector<kui::Widget> items) {
+                    return kui::Padding(kui::EdgeInsets::Symmetric(8.f, 3.f), kui::Row(std::move(items), kui::FlexOptions {}.SetGap(4.f).SetMainAxisSize(kui::MainAxisSize::eMin)));
+                };
+                using Axis = Session::Axis;
+                std::vector<kui::Widget> lines;
+                lines.push_back(PopupHeading("Look along"));
+                lines.push_back(line({ button("Top", "From above, straight on", false, [this] { _session->LookAlong(Axis::eTop); }),
+                                       button("Front", "From the front (+Z), straight on", false, [this] { _session->LookAlong(Axis::eFront); }),
+                                       button("Right", "From the right (+X), straight on", false, [this] { _session->LookAlong(Axis::eRight); }) }));
+                lines.push_back(line({ button("Bottom", "From below, straight on", false, [this] { _session->LookAlong(Axis::eBottom); }),
+                                       button("Back", "From the back (-Z), straight on", false, [this] { _session->LookAlong(Axis::eBack); }),
+                                       button("Left", "From the left (-X), straight on", false, [this] { _session->LookAlong(Axis::eLeft); }) }));
+                lines.push_back(PopupHeading("Projection"));
+                const bool straight = _session->camera.orthographic;
+                lines.push_back(line({ button("Perspective", "Nearer things bigger", !straight, [this] { _session->SetOrthographic(false); }, true, 92.f),
+                                       button("Orthographic", "Seen straight on: a plan, an elevation", straight, [this] { _session->SetOrthographic(true); }, true, 92.f) }));
+                lines.push_back(PopupHeading("Bookmarks: a digit goes to one, Ctrl and a digit saves it"));
+                std::vector<kui::Widget> go, save;
+                for (int slot = 0; slot < 9; ++slot) {
+                    const bool has = _session->HasBookmark(slot);
+                    go.push_back(button(std::to_string(slot + 1), has ? std::format("Go to bookmark {}", slot + 1) : "None here yet", false,
+                                        [this, slot] { _session->GoToBookmark(slot); }, has, 22.f));
+                    save.push_back(button("+", std::format("Save the view as bookmark {}", slot + 1), false, [this, slot] { _session->SaveBookmark(slot); }, true, 22.f));
+                }
+                lines.push_back(line(std::move(go)));
+                lines.push_back(line(std::move(save)));
+                return kui::Column({
+                    Tool(straight ? "crop_square" : "visibility", straight ? "Seen straight on: which way the view looks, and its bookmarks" : "Which way the view looks, and its bookmarks",
+                         _viewsOpen, [this] { SetState([&] { const bool open = !_viewsOpen; ClosePopups(); _viewsOpen = open; }); }),
+                    kui::PopupAnchor(_viewsOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 300.f),
+                                     [this] { SetState([&] { _viewsOpen = false; }); }, { 0.f, 4.f }),
+                }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
+            }
+
+            /** Every one of the Scene panel's popups shut: one is open at a time. */
+            void ClosePopups() { _viewModesOpen = _gridOpen = _snapOpen = _viewsOpen = false; }
 
             /** A heading over a group of lines in one of the Scene panel's popups. */
             static kui::Widget PopupHeading(const std::string& text)
@@ -5135,13 +6137,14 @@ class $NAME : ResourceScript() {
                             [&] { std::string all; for (const auto& id : without) all += (all.empty() ? "" : ", ") + id; return all; }()),
                             kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted))));
                 const kui::Color ink = kui::Color::Hex(0xE0E0E0);
-                kui::Widget face = kui::Container(kui::ContainerOptions {}.SetHeight(24.f).SetPadding(kui::EdgeInsets::Symmetric(4.f, 0.f)).SetAlignment(kui::Alignment::Center())
+                // (As wide as what it says: centred in a box of no width, it would be as wide as the line it is in.)
+                kui::Widget face = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(4.f, 4.f))
                                                       .SetDecoration(kui::Decoration {}.SetColor(_viewModesOpen ? kui::Theme::Current().primary.WithAlpha(0.35f) : kui::colors::Transparent).SetRadius(3.f)),
                     kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("layers", kui::IconStyle::eFilled, ink)), kui::Text(name, kui::TextStyle {}.SetSize(12.f).SetColor(ink)),
                                kui::SizedBox(14.f, 14.f, kui::Icon("expand_more", kui::IconStyle::eFilled, ink)) },
                              kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
                 return kui::Column({
-                    kui::Tooltip("How the scene is shown here: lit, a channel of its materials, or a debug view", kui::Button(std::move(face), [this] { SetState([&] { _viewModesOpen = !_viewModesOpen; _gridOpen = false; }); },
+                    kui::Tooltip("How the scene is shown here: lit, a channel of its materials, or a debug view", kui::Button(std::move(face), [this] { SetState([&] { const bool open = !_viewModesOpen; ClosePopups(); _viewModesOpen = open; }); },
                                                                                                                     kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))),
                     kui::PopupAnchor(_viewModesOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 220.f), [this] { SetState([&] { _viewModesOpen = false; }); }, { 0.f, 4.f }),
                 }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
@@ -5171,18 +6174,18 @@ class $NAME : ResourceScript() {
                         [change, plane] { change([&](Grid& g) { g.plane = plane; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))));
                 }
                 lines.push_back(row("Plane", kui::Row(std::move(planes), kui::FlexOptions {}.SetGap(4.f).SetMainAxisSize(kui::MainAxisSize::eMin))));
-                lines.push_back(row("Cell (m)", kui::DragValue(grid.cell, [change](const float v) { change([&](Grid& g) { g.cell = v; }); },
+                lines.push_back(row("Cell (m)", kui::DragValue(grid.cell, [change](const double v) { change([&](Grid& g) { g.cell = static_cast<float>(v); }); },
                                                                 kui::DragValueOptions {}.SetRange(0.001f, 1000.f).SetLogarithmic(true))));
-                lines.push_back(row("Major every", kui::DragValue(grid.major, [change](const float v) { change([&](Grid& g) { g.major = std::round(v); }); },
-                                                                   kui::DragValueOptions {}.SetRange(1.f, 100.f))));
-                lines.push_back(row("Fades at (m)", kui::DragValue(grid.fade, [change](const float v) { change([&](Grid& g) { g.fade = v; }); },
+                lines.push_back(row("Major every", kui::DragValue(grid.major, [change](const double v) { change([&](Grid& g) { g.major = static_cast<float>(v); }); },
+                                                                   kui::DragValueOptions {}.SetRange(1.f, 100.f).SetSpeed(0.1f).SetType(kui::NumberType::eUInt))));
+                lines.push_back(row("Fades at (m)", kui::DragValue(grid.fade, [change](const double v) { change([&](Grid& g) { g.fade = static_cast<float>(v); }); },
                                                                     kui::DragValueOptions {}.SetRange(1.f, 10000.f).SetLogarithmic(true))));
                 lines.push_back(row("Opacity", kui::Slider(grid.opacity, [change](const float v) { change([&](Grid& g) { g.opacity = v; }); })));
                 lines.push_back(row("Behind things", kui::Checkbox(grid.depthTested, [change](const bool on) { change([&](Grid& g) { g.depthTested = on; }); })));
                 return kui::Row({
                     Tool("grid_on", grid.shown ? "Hide the grid" : "Show the grid", grid.shown, [change] { change([](Grid& g) { g.shown = !g.shown; }); }),
                     kui::Column({
-                        Tool("tune", "The grid's settings", _gridOpen, [this] { SetState([&] { _gridOpen = !_gridOpen; _viewModesOpen = false; }); }),
+                        Tool("tune", "The grid's settings", _gridOpen, [this] { SetState([&] { const bool open = !_gridOpen; ClosePopups(); _gridOpen = open; }); }),
                         kui::PopupAnchor(_gridOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 250.f), [this] { SetState([&] { _gridOpen = false; }); }, { 0.f, 4.f }),
                     }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin)),
                 }, kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
@@ -5261,6 +6264,7 @@ class $NAME : ResourceScript() {
                         { "Paste   Ctrl+V", [this] { const kor::Vec2 at = NewNodeAt(); _session->PasteNodes(at.x, at.y); }, _session->HasCopiedNodes() },
                         { "Duplicate   Ctrl+D", [this] { if (!_session->selectedNode.empty()) _session->DuplicateNodes({ _session->selectedNode }); }, !_session->selectedNode.empty() },
                         { "Arrange this page", [this] { Arrange(); } },
+                        { "Arrange every page", [this] { _session->ArrangeEveryPage(); } },
                         { "Frame everything   F", [this] { _view->Frame(); SetState(); } },
                     } },
                     { "Settings", {
@@ -5618,8 +6622,18 @@ class $NAME : ResourceScript() {
                     }
                 const auto where = ArrangeNodes(placed, _wires, aspect);
                 if (where.empty()) return;
-                if (_overview) Doc().PlaceInOverview(where);
-                else Doc().PlaceNodes(where);
+                // Another page's node shown here is where it is on this page only — the editor's, not the document's: kept
+                // as this page has it, where it was dragged to from there forgotten.
+                std::map<std::string, std::pair<double, double>> own;
+                for (const auto& [id, at] : where)
+                    if (_placedOutside.contains(id)) {
+                        _outsideArranged[_placedPage][id] = kor::Vec2(static_cast<float>(at.first), static_cast<float>(at.second));
+                        _outsideMoved[_placedPage].erase(id);
+                    } else {
+                        own.emplace(id, at);
+                    }
+                if (_overview) Doc().PlaceInOverview(own);
+                else Doc().PlaceNodes(own);
                 _view->Frame();
                 _session->Say("The page's nodes are in the order they are wired in. Ctrl+Z puts them back.");
                 SetState();
@@ -6208,6 +7222,8 @@ class $NAME : ResourceScript() {
                 };
                 _placed.clear();
                 _wires.clear();
+                _placedOutside.clear();
+                _placedPage = page;
                 std::set<std::string> visible;
                 // The loops: each Repeat, and with it every node that is there once a turn because of it. And each ForEach,
                 // with what is worked out once an element of it.
@@ -6304,22 +7320,7 @@ class $NAME : ResourceScript() {
                         bodyHeight = 12.f + 16.f * std::ceil((wide(words, 6.6f) + 1.f) / 220.f);
                     } else {
                         std::vector<kui::Widget> said;
-                        // What it holds is looked at from the node itself: an eye on it, and while it is on, the picture.
-                        const auto held = runtime.ResourceOf(node.id);
-                        const bool looks = held && (runtime.ImageOf(node.id).Get() || held->kind == "Buffer" || held->kind == "BufferView");
-                        const bool looking = looks && _session->IsLooking(node.id);
-                        if (looks) {
-                            said.push_back(kui::Row({ kui::Expanded(kgui::Muted(kind, 11.f)),
-                                                      Tool(looking ? "visibility" : "visibility_off",
-                                                           looking ? "Stop looking at it closely" : runtime.ImageOf(node.id).Get() ? "Look at it closely: its picture made again every few frames, and the inspector's controls for how it is shown" : "Look at what it holds",
-                                                           looking,
-                                                           [this, id = node.id, looking] { if (looking) _session->Unlook(id); else _session->Look(id); }) },
-                                                    kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
-                            bodyWidth += 36.f;
-                            bodyHeight = 28.f;
-                        } else {
-                            said.push_back(kgui::Muted(kind, 11.f));
-                        }
+                        said.push_back(kgui::Muted(kind, 11.f));
                         // A vertex layout is drawn: its buffers, and the attributes along each.
                         if (node.type == "VertexLayout") {
                             const auto attributes = node.inputs.find("attributes");
@@ -6395,15 +7396,14 @@ class $NAME : ResourceScript() {
                             bodyWidth = std::max(bodyWidth, wide(UsedHere(use), 6.f) + wide(WrittenBefore(use), 6.f) + 40.f);
                             bodyHeight += 21.f;
                         }
-                        // An image is always seen on its node: as it is now while it is looked at, or as it was when its
-                        // turn last came to be copied out — a Reference's, as its page begins.
-                        const bool image = node.type != "Screen" && runtime.ImageOf(node.id).Get();
-                        if (looking || image) {
-                            const auto picture = looking ? _session->LookPictureOf(node.id) : _session->ThumbnailOf(node.id);
-                            const std::string& says = looking ? _session->LookSaysOf(node.id) : _session->ThumbnailSaysOf(node.id);
+                        // An image is always seen on its node: as it was when its turn last came to be copied out — a
+                        // Reference's, as its page begins.
+                        if (node.type != "Screen" && runtime.ImageOf(node.id).Get()) {
+                            const auto picture = _session->ThumbnailOf(node.id);
+                            const std::string& says = _session->ThumbnailSaysOf(node.id);
                             // As big from the first, its picture there or not: a card that grew once it came would lie over
                             // what the page was put in order round it.
-                            if (picture.Get()) said.push_back(kui::Make<NodePicture>(_session, node.id, looking));
+                            if (picture.Get()) said.push_back(kui::Make<NodePicture>(_session, node.id, false));
                             else said.push_back(kui::SizedBox(240.f, 146.f, kui::Align(kui::Alignment::Center(),
                                                     kgui::Muted(says.empty() ? std::string("Its picture is on its way.") : says, 11.f))));
                             bodyWidth = std::max(bodyWidth, 256.f);
@@ -6434,14 +7434,19 @@ class $NAME : ResourceScript() {
                         kui::GraphNode card;
                         card.id = id;
                         card.title = node.title.empty() ? id : node.title;
-                        // Beside what it is wired to — and wherever it was dragged to from there, on this page.
+                        // Beside what it is wired to — or where the page was last put in order with it — and wherever it
+                        // was dragged to from there, on this page.
+                        const auto arranged = _outsideArranged[page].find(id);
                         const kor::Vec2 dragged = _outsideMoved[page][id];
-                        card.position = at + dragged;
+                        card.position = (arranged != _outsideArranged[page].end() ? arranged->second : at) + dragged;
                         card.accent = kui::Color::Hex(0x5A6472);
                         card.icon = "link";
                         outputsOf(node, target ? *target : node, card);
-                        card.body = kui::Padding(kui::EdgeInsets::Symmetric(0.f, 0.f),
-                                                 kgui::Muted(node.pass.empty() ? std::format("{}, in no pass", node.type) : std::format("{}, in {}", node.type, node.pass), 11.f));
+                        const std::string where = node.pass.empty() ? std::format("{}, in no pass", node.type) : std::format("{}, in {}", node.type, node.pass);
+                        card.body = kui::Padding(kui::EdgeInsets::Symmetric(0.f, 0.f), kgui::Muted(where, 11.f));
+                        // Put in order with the page's own: it is on the page as much as they are.
+                        _placed.push_back(measured(card, wide(where, 6.f) + 16.f, 18.f));
+                        _placedOutside.insert(id);
                         shown.nodes.push_back(std::move(card));
                     }
                 }
@@ -6631,9 +7636,8 @@ class $NAME : ResourceScript() {
                 }
                 if (node->type == "Function") { _session->OpenFunction(id); return; }
                 if (const auto shader = _session->ShaderOf(id); !shader.empty()) { _session->OpenInCode(shader); return; }
-                if (const auto held = Doc().Runtime().ResourceOf(id); held && (Doc().Runtime().ImageOf(id).Get() || held->kind == "Buffer" || held->kind == "BufferView")) {
-                    if (_session->IsLooking(id)) _session->Unlook(id); else _session->Look(id);
-                }
+                if (const auto held = Doc().Runtime().ResourceOf(id); held && (Doc().Runtime().ImageOf(id).Get() || held->kind == "Buffer" || held->kind == "BufferView"))
+                    _session->View(id);
             }
 
             static kui::MenuItem MenuLine() { return { {}, {}, true, true }; }
@@ -6659,10 +7663,6 @@ class $NAME : ResourceScript() {
                     const std::string id = picked.front();
                     const kgraph::Node* node = Doc().Graph().Find(id);
                     if (!node) return items;
-                    if (const auto held = Doc().Runtime().ResourceOf(id); held && (Doc().Runtime().ImageOf(id).Get() || held->kind == "Buffer" || held->kind == "BufferView")) {
-                        const bool looking = _session->IsLooking(id);
-                        items.push_back({ looking ? "Stop looking at what it holds" : "Look at what it holds", [this, id, looking] { if (looking) _session->Unlook(id); else _session->Look(id); } });
-                    }
                     if (const auto held = Doc().Runtime().ResourceOf(id); held && (Doc().Runtime().ImageOf(id).Get() || held->kind == "Buffer" || held->kind == "BufferView" || held->kind == "Mesh"))
                         items.push_back({ "Open in the viewer", [this, id] { _session->View(id); } });
                     if (const auto shader = _session->ShaderOf(id); !shader.empty())
@@ -7014,13 +8014,61 @@ class $NAME : ResourceScript() {
                 }
             }
 
+            /** A shader's entry by its stage: an icon and a colour each, the stages of a kind near in hue. */
+            struct StageLook {
+                const char* icon;           ///< Its icons' name: `vert` is shader_vert.svg, and shader_vert-small.svg in a list.
+                std::uint32_t colour;
+                const char* name;
+            };
+            static StageLook StageOf(const std::string_view stage)
+            {
+                static const std::map<std::string_view, StageLook> looks {
+                    { "vertex", { "vert", 0xD86A6A, "Vertex shader" } },
+                    { "hull", { "tesc", 0xE08A4F, "Hull shader" } },
+                    { "domain", { "tese", 0xD9B44A, "Domain shader" } },
+                    { "geometry", { "geom", 0xA9C25A, "Geometry shader" } },
+                    { "amplification", { "task", 0x5B9BD5, "Task shader" } },
+                    { "task", { "task", 0x5B9BD5, "Task shader" } },
+                    { "mesh", { "mesh", 0x9273E0, "Mesh shader" } },
+                    { "fragment", { "frag", 0x5DB37A, "Fragment shader" } },
+                    { "pixel", { "frag", 0x5DB37A, "Fragment shader" } },
+                    { "compute", { "comp", 0xC76B98, "Compute shader" } },
+                    { "raygeneration", { "rgen", 0x62C3E8, "Ray generation shader" } },
+                    { "closesthit", { "rchit", 0x3FB8AF, "Closest-hit shader" } },
+                    { "anyhit", { "rahit", 0x6FD3B5, "Any-hit shader" } },
+                    { "miss", { "rmiss", 0x8FA3B8, "Miss shader" } },
+                    { "intersection", { "rint", 0x7C8FE6, "Intersection shader" } },
+                    { "callable", { "rcall", 0xC9A0DC, "Callable shader" } },
+                };
+                const auto it = looks.find(stage);
+                return it != looks.end() ? it->second : StageLook { "lib", 0x9AA4B0, stage.empty() ? "Shader module" : "Shader" };
+            }
+
+            /** A stage's icon at @p size, in its colour: on its page with its name, or by itself where that is too small to read. */
+            static kui::Widget StageIcon(const std::string_view stage, const float size)
+            {
+                // Read once each, from the SVGs the library has of them.
+                static std::map<std::string, std::shared_ptr<const kui::VectorImage>, std::less<>> read;
+                const StageLook look = StageOf(stage);
+                const std::string name = std::format("shader_{}{}", look.icon, size > 28.f ? "" : "-small");
+                auto it = read.find(name);
+                if (it == read.end()) {
+                    const auto svg = std::ranges::find(detail::ShaderIcons, std::string_view(name), &std::pair<std::string_view, std::string_view>::first);
+                    it = read.emplace(name, std::make_shared<const kui::VectorImage>(kui::VectorImage::FromSvg(svg == std::end(detail::ShaderIcons) ? std::string_view() : svg->second))).first;
+                }
+                return kui::SizedBox(size, size, kui::Icon(it->second, kui::Color::Hex(look.colour)));
+            }
+
             /** An asset by what kind of thing it is, as an icon of its colour: faint for one not loaded. */
             static kui::Widget KindIcon(const Session::Asset& asset, const float size)
             {
+                if (asset.kind == Session::Asset::Kind::eShader) {
+                    return StageIcon(asset.stage, size);
+                }
                 const char* icon = asset.kind == Session::Asset::Kind::eModel ? "category" : asset.kind == Session::Asset::Kind::eMesh ? "view_in_ar"
-                                 : asset.kind == Session::Asset::Kind::eTexture ? "image" : asset.kind == Session::Asset::Kind::eShader ? "code"
+                                 : asset.kind == Session::Asset::Kind::eTexture ? "image"
                                  : asset.kind == Session::Asset::Kind::eScene ? "landscape" : asset.kind == Session::Asset::Kind::ePrefab ? "widgets" : "description";
-                const kui::Color tint = asset.kind == Session::Asset::Kind::eShader ? kui::Color::Hex(0x9C6ADE) : asset.kind == Session::Asset::Kind::eScript ? kui::Color::Hex(0x5B9BD5)
+                const kui::Color tint = asset.kind == Session::Asset::Kind::eScript ? kui::Color::Hex(0x5B9BD5)
                                       : asset.kind == Session::Asset::Kind::eModel ? kui::Color::Hex(0x7DBB4B) : asset.kind == Session::Asset::Kind::eMesh ? kui::Color::Hex(0x6FA87A)
                                       : asset.kind == Session::Asset::Kind::eScene ? kui::Color::Hex(0xD9A441) : asset.kind == Session::Asset::Kind::ePrefab ? kui::Color::Hex(0x4FB3BF)
                                       : kui::Theme::Current().textMuted;
@@ -7081,19 +8129,30 @@ class $NAME : ResourceScript() {
 
             /** One thing of the Assets panel: its picture over its name — or, at the smallest size, a line of a list. */
             kui::Widget Tile(const std::string& key, kui::Widget preview, const std::string& label, const bool picked, const bool faint, const float size,
-                             std::function<void()> pressed, std::vector<kui::MenuItem> menu, const float lineWidth = 260.f)
+                             std::function<void()> pressed, std::vector<kui::MenuItem> menu, const float lineWidth = 260.f, const std::string& under = {})
             {
                 const kui::Theme& t = kui::Theme::Current();
                 const kui::Color ink = picked ? t.text : faint ? t.textMuted : t.text.WithAlpha(0.9f);
                 const kui::Decoration back = kui::Decoration {}.SetColor(picked ? t.primary.WithAlpha(0.32f) : kui::colors::Transparent).SetRadius(4.f);
                 kui::Widget face;
                 if (size <= ListSize) {
+                    // What it is of, after its name and fainter: a shader entry's module.
+                    kui::Widget name = kui::Text(label, kui::TextStyle {}.SetSize(13.f).SetColor(ink), kui::TextAlign::eStart, false, 1, true);
+                    if (!under.empty())
+                        name = kui::Row({ kui::Flexible(std::move(name)), kui::Text(under, kui::TextStyle {}.SetSize(12.f).SetColor(t.textMuted), kui::TextAlign::eStart, false, 1, true) },
+                                        kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
                     face = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(6.f, 2.f)).SetDecoration(back),
-                        kui::Row({ std::move(preview), kui::SizedBox(lineWidth, -1.f, kui::Text(label, kui::TextStyle {}.SetSize(13.f).SetColor(ink), kui::TextAlign::eStart, false, 1, true)) },
+                        kui::Row({ std::move(preview), kui::SizedBox(lineWidth, -1.f, std::move(name)) },
                                  kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
                 } else {
+                    // Its name over what it is of, a line each; or its name on two.
+                    kui::Widget name = under.empty()
+                        ? kui::Text(label, kui::TextStyle {}.SetSize(11.f).SetColor(ink), kui::TextAlign::eCenter, true, 2, true)
+                        : kui::Column({ kui::Text(label, kui::TextStyle {}.SetSize(11.f).SetColor(ink), kui::TextAlign::eCenter, false, 1, true),
+                                        kui::Text(under, kui::TextStyle {}.SetSize(10.f).SetColor(t.textMuted), kui::TextAlign::eCenter, false, 1, true) },
+                                      kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
                     face = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(4.f)).SetDecoration(back),
-                        kui::Column({ std::move(preview), kui::SizedBox(size + 8.f, 28.f, kui::Text(label, kui::TextStyle {}.SetSize(11.f).SetColor(ink), kui::TextAlign::eCenter, true, 2, true)) },
+                        kui::Column({ std::move(preview), kui::SizedBox(size + 8.f, 28.f, std::move(name)) },
                                     kui::FlexOptions {}.SetGap(3.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
                 }
                 kui::Widget tile = kui::Button(std::move(face), std::move(pressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain));
@@ -7163,7 +8222,11 @@ class $NAME : ResourceScript() {
                     std::string label = asset.label;
                     if (asset.pending) label += " (reading)";
                     std::vector<kui::MenuItem> menu;
-                    if (code) menu.push_back({ "Open in Visual Studio Code", [this, file = asset.file] { _session->OpenInCode(file); } });
+                    // (A module of entries, opened, shows them: its file is opened from here.)
+                    const bool module = asset.kind == Kind::eShader && asset.stage.empty();
+                    const bool entries = module && std::ranges::contains(assets, asset.id, &Session::Asset::parent);
+                    if (code) menu.push_back({ "Open in Visual Studio Code", [this, asset, module] { if (module) _session->OpenInCode(asset.file); else _session->OpenAsset(asset); } });
+                    if (entries) menu.push_back({ _session->assetsOpened.contains(asset.id) ? "Hide its entries" : "Show its entries", [this, asset] { _session->OpenAsset(asset); } });
                     if (asset.kind == Kind::eModel) {
                         menu.push_back({ "Import into the scene...", [this, file = asset.file] { AskToImport(file); } });
                     if (asset.kind == Kind::ePrefab) {
@@ -7173,13 +8236,18 @@ class $NAME : ResourceScript() {
                         menu.push_back({ _session->assetsOpened.contains(asset.id) ? "Hide its meshes" : "Show its meshes", [this, asset] { _session->OpenAsset(asset); }, asset.loaded });
                     }
                     if (asset.kind != Kind::eMesh && !asset.builtIn) for (auto& item : FileMenu(asset.file, ofProject)) menu.push_back(std::move(item));
+                    // A shader entry is named with its module: the one it is of, unless it is that module, of none.
+                    const std::string under = asset.kind == Kind::eShader && !asset.stage.empty() ? asset.group : std::string();
                     kui::Widget tile = Tile("asset " + asset.id, AssetPreview(asset, preview, pictured), label, asset.id == _session->selectedAsset, !asset.loaded && !code && asset.kind != Kind::eScene, size,
-                                            [this, asset] { Pressed("asset " + asset.id, [&] { _folderPicked.clear(); _session->SelectAsset(asset.id); }, [&] { _session->OpenAsset(asset); }); }, std::move(menu));
+                                            [this, asset] { Pressed("asset " + asset.id, [&] { _folderPicked.clear(); _session->SelectAsset(asset.id); }, [&] { _session->OpenAsset(asset); }); }, std::move(menu),
+                                            260.f, under);
                     // A model that is in the scene has its meshes: an arrow on it shows them after it, and hides them.
-                    if (asset.kind == Kind::eModel && asset.loaded && !searching) {
+                    // A shader module of entries, the same: its entries after it.
+                    if (((asset.kind == Kind::eModel && asset.loaded) || entries) && !searching) {
                         const bool open = _session->assetsOpened.contains(asset.id);
+                        const char* what = entries ? (open ? "Hide its entries" : "Show its entries") : (open ? "Hide its meshes" : "Show its meshes");
                         tile = kui::Stack({ std::move(tile), kui::Positioned(kui::PositionedOptions { .top = size <= ListSize ? 0.f : size * 0.5f - 8.f, .right = 0.f },
-                                                                             Tool(open ? "chevron_left" : "chevron_right", open ? "Hide its meshes" : "Show its meshes", open, [this, asset] { _session->OpenAsset(asset); })) });
+                                                                             Tool(open ? "chevron_left" : "chevron_right", what, open, [this, asset] { _session->OpenAsset(asset); })) });
                     }
                     // A mesh or a texture is carried to the field that is to hold it, by the name it is found by.
                     // (And a model to the scene or the outliner, to be imported; a script to an entity; a texture or a shader to the graph.)
@@ -7208,13 +8276,16 @@ class $NAME : ResourceScript() {
                                              std::move(menu)));
                     }
                     // By name, as a folder is read; a model that is open has its meshes after it.
-                    std::ranges::stable_sort(assets, [&](const Session::Asset& a, const Session::Asset& b) { return lower(a.label) < lower(b.label); });
+                    // A shader's entries by their module's name, as it declares them.
+                    const auto named = [&](const Session::Asset& asset) { return lower(asset.kind == Kind::eShader ? asset.group : asset.label); };
+                    std::ranges::stable_sort(assets, [&](const Session::Asset& a, const Session::Asset& b) { return named(a) < named(b); });
                     for (const auto& asset : assets) {
-                        if (asset.folder != shown || (asset.kind == Kind::eMesh && !asset.builtIn)) continue;
+                        if (asset.folder != shown || (asset.kind == Kind::eMesh && !asset.builtIn) || (asset.kind == Kind::eShader && !asset.parent.empty())) continue;
                         tileOf(asset);
-                        if (asset.kind == Kind::eModel && _session->assetsOpened.contains(asset.id))
-                            for (const auto& mesh : assets)
-                                if (mesh.kind == Kind::eMesh && mesh.parent == asset.id) tileOf(mesh);
+                        // A model's meshes, a module's entries: after it, when it is open.
+                        if ((asset.kind == Kind::eModel || asset.kind == Kind::eShader) && _session->assetsOpened.contains(asset.id))
+                            for (const auto& inner : assets)
+                                if (inner.kind != Kind::eModel && inner.parent == asset.id) tileOf(inner);
                     }
                 }
                 kui::Widget content = tiles.empty()
@@ -7776,7 +8847,8 @@ class $NAME : ResourceScript() {
                         close();
                         _session->ImportModel(file);
                     }),
-                    kui::Button("Cancel", close, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
+                    // (Not imported: where it was dropped is nothing to put the next thing placed at.)
+                    kui::Button("Cancel", [this, close] { _session->placeAt.reset(); close(); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
                 }, kui::FlexOptions {}.SetGap(8.f)));
                 return kui::Padding(kui::EdgeInsets::All(16.f), kui::ScrollView(Rows(std::move(rows), 8.f)).Width(620.f));
             }
@@ -7786,7 +8858,7 @@ class $NAME : ResourceScript() {
                 std::vector<kui::Widget> rows;
                 rows.push_back(Heading(asset.label));
                 rows.push_back(kgui::Muted(asset.kind == Session::Asset::Kind::eModel ? "Model" : asset.kind == Session::Asset::Kind::eMesh ? "Mesh"
-                                           : asset.kind == Session::Asset::Kind::eTexture ? "Texture" : asset.kind == Session::Asset::Kind::eShader ? "Shader"
+                                           : asset.kind == Session::Asset::Kind::eTexture ? "Texture" : asset.kind == Session::Asset::Kind::eShader ? StageOf(asset.stage).name
                                            : asset.kind == Session::Asset::Kind::eScene ? "Scene" : asset.kind == Session::Asset::Kind::ePrefab ? "Prefab"
                                            : asset.kind == Session::Asset::Kind::eMaterial ? "Material" : "Script"));
                 if (asset.builtIn) rows.push_back(kgui::Labeled("File", kgui::Muted("none: the editor's own, in every project"), LabelWidth));
@@ -7850,12 +8922,18 @@ class $NAME : ResourceScript() {
                     for (auto& row : MeshImportRows(asset)) rows.push_back(std::move(row));
                     break;
                 case Session::Asset::Kind::eShader: {
-                    const auto entries = _session->EntryPoints(asset.file.stem().string());
+                    const auto entries = _session->EntryPoints(asset.group);
                     std::string list;
                     for (const auto& entry : entries) list += (list.empty() ? "" : ", ") + entry;
-                    rows.push_back(kgui::Labeled("Module", kgui::Line(asset.file.stem().string()), LabelWidth));
-                    rows.push_back(kgui::Labeled("Entry points", kgui::Line(list.empty() ? std::string("none: a module others import") : list), LabelWidth));
-                    rows.push_back(Small("Open in Visual Studio Code", [this, file = asset.file] { _session->OpenInCode(file); }));
+                    rows.push_back(kgui::Labeled("Module", kgui::Line(asset.group), LabelWidth));
+                    if (!asset.stage.empty()) {
+                        const StageLook look = StageOf(asset.stage);
+                        rows.push_back(kgui::Labeled("Entry", kgui::Line(asset.label), LabelWidth));
+                        rows.push_back(kgui::Labeled("Stage", kui::Row({ StageIcon(asset.stage, 16.f), kgui::Line(look.name) },
+                                                                       kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)), LabelWidth));
+                    }
+                    rows.push_back(kgui::Labeled(asset.stage.empty() ? "Entry points" : "In its module", kgui::Line(list.empty() ? std::string("none: a module others import") : list), LabelWidth));
+                    rows.push_back(Small("Open in Visual Studio Code", [this, asset] { if (asset.stage.empty()) _session->OpenInCode(asset.file); else _session->OpenAsset(asset); }));
                     break;
                 }
                 case Session::Asset::Kind::eMaterial:
@@ -7914,9 +8992,9 @@ class $NAME : ResourceScript() {
             {
                 const std::string id = node.id, name = port.name;
                 const auto set = [this, id, name](Value changed) { Doc().SetInput(id, name, std::move(changed)); };
-                const bool whole = port.integer || (port.builder && (port.builder->kind == kb::Kind::eInt || port.builder->kind == kb::Kind::eUInt));
-                const auto drag = [&](const float number, std::function<void(float)> changed, const float width) {
-                    return kui::DragValue(number, std::move(changed), Dragging(LimitsOfPort(port), whole).SetWidth(width));
+                const kui::NumberType number = NumberTypeOf(port);
+                const auto drag = [&](const float value, std::function<void(double)> changed, const float width) {
+                    return kui::DragValue(value, std::move(changed), Dragging(LimitsOfPort(port), number).SetWidth(width));
                 };
                 if (!port.choices.empty()) {
                     const std::string* chosen = value.String();
@@ -7931,6 +9009,21 @@ class $NAME : ResourceScript() {
                     const bool alpha = !items || items->size() != 3;
                     return kui::SizedBox(40.f, 18.f, ColorOf(value, set, alpha));
                 }
+                // Exactly what it takes, whatever it holds now: a whole number's dragged a unit at a time, a float4's four drags.
+                if (port.shape.Known() && !port.builder && !(port.shape.scalar == kgraph::Scalar::eBool && port.shape.components == 1)) {
+                    const kgraph::Shape shape = port.shape;
+                    const auto numbers = NumbersOfShape(value, shape);
+                    if (numbers.size() == 1)
+                        return drag(numbers.front(), [set, shape](const double changed) { set(kgraph::Conform(Value(changed), shape)); }, 64.f);
+                    std::vector<kui::Widget> drags;
+                    for (std::size_t i = 0; i < numbers.size(); ++i)
+                        drags.push_back(drag(numbers[i], [set, shape, numbers, i](const double changed) {
+                            auto now = numbers;
+                            now[i] = static_cast<float>(changed);
+                            set(ValueOfShape(now, shape));
+                        }, 44.f));
+                    return kui::Row(std::move(drags), kui::FlexOptions {}.SetGap(2.f));
+                }
                 if (const bool* flag = value.Bool(); flag || port.type == "bool")
                     return kui::Checkbox(flag && *flag, [set](const bool on) { set(Value(on)); });
                 if (const std::string* text = value.String(); text || port.type == "string")
@@ -7939,7 +9032,7 @@ class $NAME : ResourceScript() {
                 if (const auto* items = value.Items(); items && !items->empty() && items->size() <= 4) {
                     std::vector<kui::Widget> numbers;
                     for (std::size_t i = 0; i < items->size(); ++i)
-                        numbers.push_back(drag(NumberOf((*items)[i]), [set, list = *items, i](const float changed) {
+                        numbers.push_back(drag(NumberOf((*items)[i]), [set, list = *items, i](const double changed) {
                             auto now = list;
                             now[i] = Value(changed);
                             set(Value(std::move(now)));
@@ -7947,7 +9040,7 @@ class $NAME : ResourceScript() {
                     return kui::Row(std::move(numbers), kui::FlexOptions {}.SetGap(2.f));
                 }
                 // A number, or nothing yet: a number.
-                return drag(value.Number() ? static_cast<float>(*value.Number()) : 0.f, [set, whole](const float changed) { set(Value(whole ? std::round(changed) : changed)); }, 64.f);
+                return drag(value.Number() ? static_cast<float>(*value.Number()) : 0.f, [set](const double changed) { set(Value(changed)); }, 64.f);
             }
 
             /** The control an input is set with: by what kind of thing it is, then by its type. */
@@ -7955,6 +9048,14 @@ class $NAME : ResourceScript() {
             {
                 if (!port.choices.empty()) return Choice(port.choices, value, set, port.choices.front());
                 if (port.editor == "color") return ColorOf(value, set);
+                // Exactly what it takes, whatever it holds now: a box to tick, or a drag for each of its numbers, of its kind.
+                if (port.shape.Known() && !port.builder) {
+                    const Value shown = value.IsNull() ? port.initial : value;
+                    if (port.shape.scalar == kgraph::Scalar::eBool && port.shape.components == 1)
+                        return kui::Checkbox(shown.Bool() && *shown.Bool(), [set](const bool on) { set(Value(on)); });
+                    return DragNumbers(NumbersOfShape(shown, port.shape), [set, shape = port.shape](const std::vector<float>& changed) { set(ValueOfShape(changed, shape)); },
+                                       LimitsOfPort(port), NumberTypeOf(port));
+                }
                 if (port.editor == "function") {
                     const auto functions = Doc().Functions();
                     return functions.empty() ? TextEdit(value, set, key, "a function's name") : Choice(functions, value, set, "a function");
@@ -7985,18 +9086,6 @@ class $NAME : ResourceScript() {
                         }
                     return Choice(std::move(ids), value, set, ids.empty() ? "no node it can be" : "a node");
                 }
-                if (port.name == "usage" && (node.type == "Image" || node.type == "Buffer") && port.builder && port.builder->kind == kb::Kind::eFlags) {
-                    // What is ticked is what it has besides what uses it: that, it is made for whether ticked or not.
-                    std::set<std::string> ticked;
-                    if (const auto* items = value.Items()) for (const auto& item : *items) if (item.String()) ticked.insert(*item.String());
-                    std::string besides;
-                    for (const auto& made : Doc().Runtime().UsageOf(node.id))
-                        if (!ticked.contains(made)) besides += (besides.empty() ? "" : ", ") + made;
-                    auto ticks = TypeEditor(*port.builder, value, set, key);
-                    if (besides.empty()) return ticks;
-                    return kui::Column({ std::move(ticks), kgui::Muted("and, for what uses it: " + besides) },
-                                       kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(4.f));
-                }
                 if (port.name == "format" && node.type == "Image" && port.builder && port.builder->enumeration) {
                     // The formats an image of its use can have: one drawn into as depth, the depth formats; one drawn
                     // into or written by a shader, none that is depth or packed.
@@ -8019,6 +9108,23 @@ class $NAME : ResourceScript() {
                 }
                 if (port.editor == "components") return Ticks(Doc().ComponentNames(), value, set);
                 if (port.editor == "component") return Choice(Doc().ComponentNames(), value, set, "a component");
+                if (port.editor == "componentFields") {
+                    // The fields of the component named beside it that a buffer holds, and where the entity is: ticked,
+                    // when nothing is said, as many as it holds then.
+                    const auto beside = node.inputs.find("component");
+                    const std::string* component = beside == node.inputs.end() ? nullptr : beside->second.value.String();
+                    const kecs::ComponentId id = component ? Doc().World().Find(*component) : kecs::NoComponent;
+                    if (id == kecs::NoComponent) return kgui::Muted("name a component first");
+                    std::vector<std::string> names, unticked;
+                    for (const auto& field : Doc().World().Describe(id).fields)
+                        if (!kgraph::LayoutTypeOf(field.type).empty()) names.push_back(field.name);
+                    for (const auto& [place, type] : kgraph::PlaceFields())
+                        if (!std::ranges::contains(names, place)) (kgraph::PlacedByDefault(place) ? names : unticked).emplace_back(place);
+                    Value ticked = value;
+                    if (!value.Items()) ticked = Value(Value::List(names.begin(), names.end()));
+                    names.insert(names.end(), unticked.begin(), unticked.end());
+                    return Ticks(std::move(names), ticked, set);
+                }
                 if (port.editor == "script") {
                     // The project's scripts that fill a resource: what this node can run.
                     std::vector<std::string> names;
@@ -8039,9 +9145,12 @@ class $NAME : ResourceScript() {
                 if (port.editor == "parameter") {
                     // The image parameters of the pipeline this pass runs.
                     std::vector<std::string> names;
-                    if (const auto pipeline = node.inputs.find("pipeline"); pipeline != node.inputs.end() && pipeline->second.link)
-                        for (const auto& each : Doc().Runtime().PortsOf(pipeline->second.link->node))
-                            if (each.name.starts_with("param.") && each.type == "Image" && !each.name.ends_with(".sampler")) names.push_back(each.name.substr(6));
+                    // A ComputePass is its pipeline as well: its own parameters.
+                    std::string pipelineId = node.type == "ComputePass" ? node.id : std::string();
+                    if (const auto pipeline = node.inputs.find("pipeline"); pipeline != node.inputs.end() && pipeline->second.link) pipelineId = pipeline->second.link->node;
+                    if (!pipelineId.empty())
+                        for (const auto& each : Doc().Runtime().PortsOf(pipelineId))
+                            if (each.name.starts_with("param.") && each.type == "Image" && !each.name.ends_with(".sampler") && !std::ranges::contains(names, each.name.substr(6))) names.push_back(each.name.substr(6));
                     return Choice(std::move(names), value, set, "an image parameter");
                 }
                 if (port.editor == "attributes") return Attributes(value, set, key);
@@ -8053,9 +9162,9 @@ class $NAME : ResourceScript() {
                     if (const auto* items = value.Items())
                         for (std::size_t i = 0; i < numbers.size() && i < items->size(); ++i) numbers[i] = NumberOf((*items)[i]);
                     return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); },
-                                       LimitsOfPort(port), port.name != "depthBias");
+                                       LimitsOfPort(port), port.name == "depthBias" ? kui::NumberType::eFloat : kui::NumberType::eInt);
                 }
-                return port.builder ? TypeEditor(*port.builder, value, set, key, LimitsOfPort(port)) : NamedEditor(port.type, value, set, key, LimitsOfPort(port), port.integer);
+                return port.builder ? TypeEditor(*port.builder, value, set, key, LimitsOfPort(port)) : NamedEditor(port.type, value, set, key, LimitsOfPort(port), NumberTypeOf(port));
             }
 
             kui::Widget NodeInspector(const kgraph::Node& node)
@@ -8205,9 +9314,6 @@ class $NAME : ResourceScript() {
                     const auto input = node.inputs.find(shown.port.name);
                     return input == node.inputs.end() || (!input->second.link && !input->second.value.IsNull());
                 };
-                const auto whole = [](const kgraph::Port& port) {
-                    return port.integer || (port.builder && (port.builder->kind == kb::Kind::eInt || port.builder->kind == kb::Kind::eUInt));
-                };
 
                 // Each in its part of the inspector: those of no part first, then each part under a heading of its own, in the
                 // order its first input comes — closed until something in it is given, or it is opened.
@@ -8247,10 +9353,10 @@ class $NAME : ResourceScript() {
                                 const auto listed = std::ranges::find_if(inputs, [&](const Shown& other) { return other.port.name == part; });
                                 numbers.push_back(each != node.inputs.end() ? NumberOf(each->second.value) : listed != inputs.end() ? NumberOf(listed->port.initial) : 0.f);
                             }
-                            auto editor = DragNumbers(numbers, [this, id, parts, numbers, round = whole(port)](const std::vector<float>& changed) {
+                            auto editor = DragNumbers(numbers, [this, id, parts, numbers](const std::vector<float>& changed) {
                                 for (std::size_t i = 0; i < parts.size(); ++i)
-                                    if (changed[i] != numbers[i]) Doc().SetInput(id, parts[i], Value(round ? std::round(changed[i]) : changed[i]));
-                            }, LimitsOfPort(port), whole(port));
+                                    if (changed[i] != numbers[i]) Doc().SetInput(id, parts[i], Value(changed[i]));
+                            }, LimitsOfPort(port), NumberTypeOf(port));
                             std::vector<kui::Widget> line { kui::Expanded(std::move(editor)) };
                             // Given whole instead: a port for a vector worked out elsewhere, on one wire.
                             const std::string whole = prefix.substr(0, prefix.size() - 1);
@@ -8437,61 +9543,6 @@ class $NAME : ResourceScript() {
                 if (const auto held = runtime.ResourceOf(id); held && (runtime.ImageOf(id).Get() || held->kind == "Buffer" || held->kind == "BufferView")) {
                     rows.push_back(kui::Separator());
                     rows.push_back(Small("Open in the viewer: every level, its histogram, a table", [this, id] { _session->View(id); }));
-                    if (!_session->IsLooking(id)) {
-                        rows.push_back(Small("Look at what it holds", [this, id] { _session->Look(id); }));
-                    } else {
-                        if (_session->Looking() != id) _session->Look(id);     // (the controls here are this node's)
-                        rows.push_back(Small("Stop looking", [this, id] { _session->Unlook(id); }));
-                        // Of a node that makes several — a Script node's — which.
-                        std::vector<std::string> outputs;
-                        for (const auto& output : runtime.OutputsOf(id))
-                            if (const auto held = output.kind == kgraph::PortKind::eResource ? runtime.ResourceOf(id, output.name) : nullptr;
-                                held && (runtime.ImageOf(id, output.name).Get() || held->kind == "Buffer" || held->kind == "BufferView"))
-                                outputs.push_back(output.name);
-                        if (outputs.size() > 1) {
-                            const auto at = std::ranges::find(outputs, runtime.ShownOutput(id));
-                            rows.push_back(kgui::Labeled("Of", kui::Dropdown(outputs, at == outputs.end() ? -1 : static_cast<int>(at - outputs.begin()), [this, id, outputs](const int index) {
-                                Doc().Runtime().WatchOutput(id, outputs[static_cast<std::size_t>(index)]);
-                                _session->lookMip = _session->lookLayer = _session->lookSlice = 0;
-                                _session->Say(std::format("Looking at its {}.", outputs[static_cast<std::size_t>(index)]));
-                            }), LabelWidth));
-                        }
-                        if (const auto image = runtime.ImageOf(id); image.Get()) {
-                            rows.push_back(kgui::Labeled("Shown", kui::Dropdown(LookModeNames(), static_cast<int>(_session->lookMode), [this](const int index) {
-                                _session->lookMode = static_cast<LookMode>(index);
-                                _session->Say("Looking at it another way.");
-                            }), LabelWidth));
-                            // Which level and layer: an octave's worth of a height map at a time.
-                            if (const kor::u32 levels = image->MipLevels(); levels > 1) {
-                                std::vector<std::string> names;
-                                for (kor::u32 m = 0; m < levels; ++m)
-                                    names.push_back(std::format("Level {}  ·  {} × {}", m, std::max(image->Extent().x >> m, 1u), std::max(image->Extent().y >> m, 1u)));
-                                rows.push_back(kgui::Labeled("Level", kui::Dropdown(names, static_cast<int>(std::min(_session->lookMip, levels - 1)), [this](const int index) {
-                                    _session->lookMip = static_cast<std::uint32_t>(index);
-                                    _session->Say(std::format("Looking at level {}.", index));
-                                }), LabelWidth));
-                            }
-                            if (const kor::u32 layers = image->ArrayLayers(); layers > 1) {
-                                std::vector<std::string> names;
-                                for (kor::u32 l = 0; l < std::min(layers, 256u); ++l) names.push_back(std::format("Layer {}", l));
-                                rows.push_back(kgui::Labeled("Layer", kui::Dropdown(names, static_cast<int>(std::min(_session->lookLayer, 255u)), [this](const int index) {
-                                    _session->lookLayer = static_cast<std::uint32_t>(index);
-                                    _session->Say(std::format("Looking at layer {}.", index));
-                                }), LabelWidth));
-                            }
-                            rows.push_back(kgui::Labeled("Filtering", kui::Dropdown({ "Linear", "Nearest" }, _session->lookFilter == kui::ImageFilter::eNearest ? 1 : 0, [this](const int index) {
-                                _session->lookFilter = index == 1 ? kui::ImageFilter::eNearest : kui::ImageFilter::eLinear;
-                                _session->Say(index == 1 ? "Its picture is drawn a texel a square." : "Its picture is drawn blended.");
-                            }), LabelWidth));
-                            if (const auto depth = runtime.ImageOf(id)->Extent().z; depth > 1)
-                                rows.push_back(kgui::Labeled("Slice", kgui::DragFloats({ static_cast<float>(_session->lookSlice) }, [this, depth](const std::vector<float>& changed) {
-                                    _session->lookSlice = static_cast<std::uint32_t>(std::clamp(std::round(changed[0]), 0.f, static_cast<float>(depth - 1)));
-                                }, 1.f, 0, 0.f, static_cast<float>(depth - 1)), LabelWidth));
-                            rows.push_back(kgui::Muted("It is shown on the node."));
-                        }
-                        if (!_session->LookSays().empty()) rows.push_back(kgui::Muted(_session->LookSays()));
-                        for (const auto& line : _session->LookLines()) rows.push_back(kgui::Muted(line, 11.f));
-                    }
                 }
                 rows.push_back(kui::Separator());
                 rows.push_back(Small("Remove the node", [this, id] { Doc().RemoveNodes({ id }); _session->Select(std::string()); }));
@@ -8625,19 +9676,19 @@ class $NAME : ResourceScript() {
                         for (std::size_t i = 0; i < 3; ++i) now[i] = NumberOf(value.Items()->at(i));
                         std::vector<kui::Widget> parts;
                         for (std::size_t i = 0; i < 3; ++i)
-                            parts.push_back(kui::Expanded(kui::DragValue(now[i], [this, entity, set, now, i](const float v) {
+                            parts.push_back(kui::DragValue(now[i], [this, entity, set, now, i](const double v) {
                                 auto changed = now;
-                                changed[i] = v;
+                                changed[i] = static_cast<float>(v);
                                 (Doc().*set)(entity, kecs::Vec3 { changed[0], changed[1], changed[2] });
-                            }, kui::DragValueOptions(options).SetLabel(axes[i]).SetWidth(48.f))));
-                        return kui::Row(std::move(parts), kui::FlexOptions {}.SetGap(4.f));
+                            }, kui::DragValueOptions(options).SetLabel(axes[i]).SetWidth(48.f)));
+                        return Fitted(std::move(parts));
                     };
                     rows.push_back(kui::Tooltip(what, kgui::Labeled(label, kui::Make<LiveValue>(_session, std::move(read), std::move(build)), LabelWidth)));
                 };
                 three("Position", &kecs::World::PositionOf, kui::DragValueOptions {}.SetSpeed(0.01f).SetDecimals(2), "Where it is, relative to what it is under.", &Document::SetPosition);
                 three("Rotation", &kecs::World::RotationOf, kui::DragValueOptions {}.SetSpeed(0.5f).SetDecimals(2).SetRange(-180.f, 180.f).SetWrap(true),
                       "How it is turned, in degrees: about X, about Y, about Z. Turned past half a turn, it comes round the other way.", &Document::SetRotation);
-                three("Scale", &kecs::World::ScaleOf, Dragging({ -kui::Infinity, kui::Infinity, true }, false),
+                three("Scale", &kecs::World::ScaleOf, Dragging({ -kui::Infinity, kui::Infinity, true }, kui::NumberType::eFloat),
                       "How big it is, each way: dragged by so much of its size. Less than nothing is mirrored.", &Document::SetScale);
 
                 const auto has = doc.ComponentsOf(entity);
@@ -8715,9 +9766,8 @@ class $NAME : ResourceScript() {
                         editor = ColorOf(value, set, field.type == "vec4");
                     } else {
                         // A box to tick, numbers to drag: followed as it plays (LiveValue), the control alone built again.
-                        const bool wholes = field.type.starts_with("i") || field.type.starts_with("u") || field.type.starts_with("b");
-                        const bool whole = field.type.starts_with("i") || field.type.starts_with("u");
-                        auto build = [set, limits, whole, wholes, choices = field.choices](const Value& now) -> kui::Widget {
+                        const kui::NumberType number = NumberTypeOfField(field.type);
+                        auto build = [set, limits, number, choices = field.choices](const Value& now) -> kui::Widget {
                             if (now.Bool()) return kui::Checkbox(*now.Bool(), [set](const bool on) { set(Value(on)); });
                             if (!choices.empty() && now.Number()) {
                                 // One of so many things: by its name. A number that is none of them is shown as it is.
@@ -8733,9 +9783,9 @@ class $NAME : ResourceScript() {
                             if (const auto* items = now.Items()) {
                                 std::vector<float> numbers;
                                 for (const auto& item : *items) numbers.push_back(NumberOf(item));
-                                return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, limits, wholes);
+                                return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, limits, number);
                             }
-                            return kui::DragValue(NumberOf(now), [set, whole](const float v) { set(Value(whole ? std::round(v) : v)); }, Dragging(limits, whole));
+                            return kui::DragValue(NumberOf(now), [set](const double v) { set(Value(v)); }, Dragging(limits, number));
                         };
                         editor = kui::Make<LiveValue>(_session, [this, entity, component, fieldName] { return Doc().Field(entity, component, fieldName); }, std::move(build));
                     }
@@ -8963,6 +10013,15 @@ class $NAME : ResourceScript() {
                 }, [this](const Value& seen) { return seen.IsNull() ? kui::SizedBox(0.f, 0.f) : FlowGraph(); });
             }
 
+            /** The flow laid out again: every card where the flow puts it, none where it was dragged, and all of it in sight. */
+            void ArrangeFlow()
+            {
+                _flowMoved.clear();
+                _flowFramed.clear();
+                _session->Say("The flow is laid out again, by what each page uses.");
+                SetState();
+            }
+
             kui::Widget FlowGraph()
             {
                 const auto flow = _session->Flow();
@@ -9021,6 +10080,19 @@ class $NAME : ResourceScript() {
                 return kui::NodeEditor(std::move(graph), kui::NodeEditorOptions {}
                     .CanConnect([](const kui::NodePort&, const kui::NodePort&) { return false; })
                     .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { SetState([&] { for (const auto& id : nodes) _flowMoved[id] = _flowMoved[id] + by; }); })
+                    // Laid out again: what was dragged put back where the flow has it, and all of it in sight.
+                    .Menu([this](const std::vector<std::string>& picked, kor::Vec2) {
+                        std::vector<kui::MenuItem> items;
+                        if (!picked.empty()) {
+                            items.push_back({ "Put back", [this, picked] { SetState([&] { for (const auto& id : picked) _flowMoved.erase(id); }); } });
+                            if (std::ranges::find(Doc().Passes(), picked.front()) != Doc().Passes().end())
+                                items.push_back({ "Show this page", [this, page = picked.front()] { _session->ShowPass(page); _layout->Activate("graph"); } });
+                            items.push_back(MenuLine());
+                        }
+                        items.push_back({ "Arrange the flow", [this] { ArrangeFlow(); } });
+                        items.push_back({ "Frame everything", [this] { _flowView->Frame(); SetState(); } });
+                        return items;
+                    })
                     .OnActivate([this](const std::string& id) {
                         if (std::ranges::find(Doc().Passes(), id) == Doc().Passes().end()) return;
                         _session->ShowPass(id);
@@ -9028,10 +10100,16 @@ class $NAME : ResourceScript() {
                     })
                     .SetView(_flowView));
             }
+            int _arrangeWait = 0;                                           // frames the page to be put in order has been drawn
             std::map<std::string, kor::Vec2> _flowMoved;                    // where the flow's cards were dragged to, from where they are laid out
             std::string _flowFramed;                                        // the pages the flow was last framed with
             // Where a node of another page, shown on a page it is wired to straight, was dragged to there: by page, by node.
             std::map<std::string, std::map<std::string, kor::Vec2>> _outsideMoved;
+            // And where it was put when the page was last put in order, by page: its place there, from then on. Which of
+            // the nodes laid out were such, and of which page.
+            std::map<std::string, std::map<std::string, kor::Vec2>> _outsideArranged;
+            std::set<std::string> _placedOutside;
+            std::string _placedPage;
             std::shared_ptr<kui::NodeEditorView> _flowView = std::make_shared<kui::NodeEditorView>();
 
             kui::Widget FramePanel()
@@ -9277,104 +10355,199 @@ class $NAME : ResourceScript() {
             }
 
             /**
-             * One frame on the GPU: a lane for each queue, and each pass a block from when it started to when it ended,
-             * so that what runs beside what on the async queue, and where the GPU waits, are seen. The last frame measured,
-             * not an average: paused, it is the one paused on. Under the pointer a block is said; pressed, its node is gone to.
+             * One frame as a profiler draws it: the CPU's threads above — the main thread preparing each pass, the threads
+             * that record them — and the GPU's queues below, on one time from when the frame started on the CPU (where the
+             * device can line its clock up with the CPU's), each piece of work coloured by what it is: drawing, compute,
+             * rays, copies. The newest frame the GPU has measured, not an average; paused, the one paused on. The wheel
+             * zooms about the pointer and a drag moves along; under the pointer a block is said, and pressed, its node is
+             * gone to.
              */
             kui::Widget Timeline(const kgraph::Runtime::FrameReport& frame, const std::string& wanted,
                                  const std::function<std::string(std::string)>& onGraph, const std::function<std::string(std::string)>& said)
             {
-                struct Block { std::string node, name; double start, ms; bool async, editors; };
-                auto blocks = std::make_shared<std::vector<Block>>();
-                double end = 0.0;
-                bool async = false;
+                const kui::Theme& t = kui::Theme::Current();
+                // What a block is, and its colour: the GPU's by what its commands did, the CPU's by what it was doing.
+                enum Kind { eDraw, eCompute, eRays, eTransfer, eNothing, ePrepare, eRecord, eEditor, Kinds };
+                static const kui::Color colours[Kinds] { kui::Color::Hex(0x4C8DF6), kui::Color::Hex(0x3FB27F), kui::Color::Hex(0xA970FF), kui::Color::Hex(0xE0A33A),
+                                                         kui::Color::Hex(0x5A5A5A), kui::Color::Hex(0x8A94A6), kui::Color::Hex(0x2BB3C0), kui::Color::Hex(0x6E6E6E) };
+                static const char* kinds[Kinds] { "draws", "compute", "rays", "copies and clears", "records nothing", "prepare", "record", "the editor's" };
+                const auto kindOf = [](const std::uint8_t work) {
+                    if (work & kor::TimerWork::Rays) return eRays;
+                    if (work & kor::TimerWork::Dispatch) return eCompute;
+                    if (work & kor::TimerWork::Draw) return eDraw;
+                    if (work & kor::TimerWork::Transfer) return eTransfer;
+                    return eNothing;
+                };
+                const auto workSaid = [](const std::uint8_t work) {
+                    std::string text;
+                    const std::pair<std::uint8_t, const char*> named[] { { kor::TimerWork::Draw, "draws" }, { kor::TimerWork::Dispatch, "dispatches" },
+                                                                         { kor::TimerWork::Rays, "traces rays" }, { kor::TimerWork::Transfer, "copies or clears" } };
+                    for (const auto& [bit, name] : named)
+                        if (work & bit) text += std::format("{}{}", text.empty() ? "" : ", ", name);
+                    return text.empty() ? std::string("records nothing") : text;
+                };
+
+                // The lanes: the CPU's threads that did something, then the GPU's queues.
+                std::set<int> threads { 0 };
+                bool async = false, gpu = false, oneClock = true;
                 for (const auto& pass : frame.passes) {
-                    if (pass.gpuStartMs < 0.0) continue;
+                    if (pass.recordThread >= 0 && pass.cpuRecordStartMs >= 0.0) threads.insert(pass.recordThread);
+                    if (pass.gpuStartMs >= 0.0) { gpu = true; async = async || pass.async; oneClock = oneClock && pass.gpuOnCpuClock; }
+                }
+                std::vector<std::string> lanes;
+                std::map<int, int> laneOfThread;
+                for (const int thread : threads) {
+                    laneOfThread[thread] = static_cast<int>(lanes.size());
+                    lanes.push_back(thread == 0 ? std::string("Main thread") : std::format("Worker {}", lanes.size()));     // numbered as they are shown
+                }
+                const int cpuLanes = static_cast<int>(lanes.size());
+                const int graphicsLane = static_cast<int>(lanes.size());
+                if (gpu) lanes.push_back("Graphics");
+                const int asyncLane = async ? static_cast<int>(lanes.size()) : graphicsLane;
+                if (gpu && async) lanes.push_back("Async compute");
+
+                struct Block { std::string node, name, said; int lane; double start, ms; Kind kind; bool dimmed; };
+                auto blocks = std::make_shared<std::vector<Block>>();
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                double from = 0.0, to = 0.0;
+                for (const auto& pass : frame.passes) {
                     const bool editors = pass.node.starts_with('$');
                     std::string name = editors ? "editor: " + pass.node.substr(pass.node.find(' ') + 1) : said(pass.node);
                     if (pass.name.contains('\n')) name += " (" + pass.name.substr(pass.name.find('\n') + 1) + ")";
-                    blocks->push_back({ pass.node, std::move(name), pass.gpuStartMs, pass.gpuLastMs, pass.async, editors });
-                    end = std::max(end, pass.gpuStartMs + pass.gpuLastMs);
-                    async = async || pass.async;
+                    const bool dimmed = !wanted.empty() && lower(name).find(wanted) == std::string::npos;
+                    const auto add = [&](const int lane, const double start, const double ms, const Kind kind, std::string what) {
+                        blocks->push_back({ pass.node, name, std::move(what), lane, start, ms, editors && kind < ePrepare ? eEditor : kind, dimmed });
+                        from = std::min(from, start);
+                        to = std::max(to, start + ms);
+                    };
+                    if (pass.cpuPrepareStartMs >= 0.0) add(laneOfThread[0], pass.cpuPrepareStartMs, pass.cpuPrepareMs, ePrepare, "prepared, on the main thread");
+                    if (pass.cpuRecordStartMs >= 0.0 && laneOfThread.contains(pass.recordThread))
+                        add(laneOfThread[pass.recordThread], pass.cpuRecordStartMs, pass.cpuRecordMs, eRecord, std::format("recorded, on {}", lanes[laneOfThread[pass.recordThread]]));
+                    if (pass.gpuStartMs >= 0.0)
+                        add(pass.async ? asyncLane : graphicsLane, pass.gpuStartMs, pass.gpuLastMs, kindOf(pass.work),
+                            std::format("on the {} queue: {}", pass.async ? "async compute" : "graphics", workSaid(pass.work)));
                 }
-                if (blocks->empty() || end <= 0.0) return kgui::Muted("No pass has been timed on the GPU yet: this device may not time them.");
-                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
-                std::vector<char> dimmed;
-                for (const auto& block : *blocks) dimmed.push_back(!wanted.empty() && lower(block.name).find(wanted) == std::string::npos);
-                constexpr float Label = 104.f, Lane = 30.f, Axis = 18.f;
-                const int lanes = async ? 2 : 1;
-                const float height = Axis + Lane * static_cast<float>(lanes);
-                // Where each block was last drawn, for what is under the pointer.
-                auto drawn = std::make_shared<std::vector<kui::Rect>>(blocks->size());
+                if (blocks->empty() || to <= from) return kgui::Muted("Nothing of a frame has been timed yet.");
+
+                constexpr float Label = 112.f, Lane = 22.f, Axis = 18.f, Section = 18.f;
+                const float height = Axis + Section + Lane * static_cast<float>(cpuLanes) + (gpu ? Section + Lane * static_cast<float>(lanes.size() - cpuLanes) : 0.f);
+                const auto laneTop = [cpuLanes](const int lane) {
+                    return Axis + Section + Lane * static_cast<float>(lane) + (lane >= cpuLanes ? Section : 0.f);
+                };
+                // What of the frame is in view, as shares of it: zoomed and moved along by the wheel and a drag.
+                const double v0 = _timelineFrom, v1 = std::min(1.0, _timelineFrom + 1.0 / _timelineZoom);
+                auto seen = std::make_shared<kor::Vec2>();      // the canvas's size, as last painted: what the pointer is measured against
                 const std::string picked = _session->selectedNode;
-                const std::string hover = _timelineHover;
-                kui::Widget canvas = kui::CustomPaint([blocks, drawn, dimmed, end, lanes, picked, hover, onGraph](kui::Canvas& c, const kor::Vec2 size) {
-                    const kui::Theme& t = kui::Theme::Current();
-                    const float span = std::max(size.x - Label - 8.f, 1.f);
-                    const auto x = [&](const double ms) { return Label + static_cast<float>(ms / end) * span; };
-                    // The queues' names, their lanes, and the time along the top.
-                    const char* names[] { "Graphics", "Async compute" };
-                    for (int lane = 0; lane < lanes; ++lane) {
-                        const float top = Axis + Lane * static_cast<float>(lane);
-                        c.DrawRRect({ kui::Rect::LTRB(Label, top + 2.f, size.x, top + Lane - 2.f), kui::Radii(4.f) }, kui::Paint::Fill(t.text.WithAlpha(0.04f)));
-                        c.DrawText(names[lane], { 0.f, top + 8.f }, kui::TextStyle {}.SetSize(11.5f).SetColor(t.textMuted));
+                const int hovered = _timelineHover;
+                kui::Widget canvas = kui::CustomPaint([=](kui::Canvas& c, const kor::Vec2 size) {
+                    *seen = size;
+                    const float span = std::max(size.x - Label - 4.f, 1.f);
+                    const auto x = [&](const double ms) { return Label + static_cast<float>(((ms - from) / (to - from) - v0) / (v1 - v0)) * span; };
+                    // The sections and their lanes, named down the left.
+                    c.DrawText("CPU", { 0.f, Axis + 2.f }, kui::TextStyle {}.SetSize(10.5f).SetColor(t.textMuted));
+                    if (gpu) c.DrawText(oneClock ? "GPU" : "GPU  (its own clock)", { 0.f, laneTop(cpuLanes) - Section + 2.f }, kui::TextStyle {}.SetSize(10.5f).SetColor(t.textMuted));
+                    for (int lane = 0; lane < static_cast<int>(lanes.size()); ++lane) {
+                        const float top = laneTop(lane);
+                        c.DrawRect(kui::Rect::LTRB(Label, top + 1.f, size.x, top + Lane - 1.f), kui::Paint::Fill(t.text.WithAlpha(lane % 2 ? 0.025f : 0.045f)));
+                        c.DrawText(lanes[lane], { 8.f, top + 4.f }, kui::TextStyle {}.SetSize(11.5f).SetColor(t.text));
                     }
-                    for (int tick = 0; tick <= 4; ++tick) {
-                        const double ms = end * tick / 4.0;
+                    // The time along the top, as fine as the part in view is short.
+                    const double shownMs = (to - from) * (v1 - v0);
+                    const int decimals = std::clamp(static_cast<int>(std::ceil(-std::log10(shownMs / 5.0))) + 1, 1, 6);     // enough that no two ticks read alike
+                    c.Save();
+                    c.ClipRect(kui::Rect::LTRB(Label, 0.f, size.x, size.y));
+                    for (int tick = 0; tick <= 5; ++tick) {
+                        const double ms = from + (to - from) * (v0 + (v1 - v0) * tick / 5.0);
                         const float at = x(ms);
-                        c.DrawLine({ at, Axis - 3.f }, { at, Axis + Lane * static_cast<float>(lanes) }, kui::Paint::Stroked(t.text.WithAlpha(0.08f), 1.f));
-                        const std::string text = std::format("{:.{}f} ms", ms, end < 0.1 ? 3 : end < 10.0 ? 2 : 1);   // as fine as the frame is short
-                        c.DrawText(text, { tick == 4 ? at - 7.f * static_cast<float>(text.size()) : tick == 0 ? at : at - 3.5f * static_cast<float>(text.size()), 0.f },
+                        c.DrawLine({ at, Axis - 3.f }, { at, size.y }, kui::Paint::Stroked(t.text.WithAlpha(0.07f), 1.f));
+                        const std::string text = std::format("{:.{}f} ms", ms, decimals);
+                        c.DrawText(text, { tick == 5 ? at - 6.5f * static_cast<float>(text.size()) : tick == 0 ? at + 2.f : at - 3.2f * static_cast<float>(text.size()), 0.f },
                                    kui::TextStyle {}.SetSize(10.5f).SetColor(t.textMuted));
                     }
+                    // When the frame started on the CPU: what every time is from.
+                    if (oneClock && from < 0.0) c.DrawLine({ x(0.0), Axis }, { x(0.0), size.y }, kui::Paint::Stroked(t.text.WithAlpha(0.3f), 1.f));
                     for (std::size_t i = 0; i < blocks->size(); ++i) {
-                        const auto& block = (*blocks)[i];
-                        const float top = Axis + (block.async && lanes > 1 ? Lane : 0.f);
-                        const kui::Rect rect = kui::Rect::LTRB(x(block.start), top + 4.f, std::max(x(block.start + block.ms), x(block.start) + 2.f), top + Lane - 4.f);
-                        (*drawn)[i] = rect;
-                        const bool lit = !block.editors && onGraph(block.node) == picked, over = block.node == hover;
-                        kui::Color fill = block.editors ? t.textMuted.WithAlpha(0.35f) : t.primary.WithAlpha(lit ? 0.95f : 0.6f);
-                        if (dimmed[i]) fill = fill.WithAlpha(0.15f);
-                        c.DrawRRect({ rect, kui::Radii(3.f) }, kui::Paint::Fill(fill));
-                        if (over || lit) c.DrawRRect({ rect, kui::Radii(3.f) }, kui::Paint::Stroked(t.text, 1.f));
-                        // Its name, where it fits.
-                        if (rect.Width() > 28.f) {
+                        const Block& block = (*blocks)[i];
+                        const float top = laneTop(block.lane);
+                        const float left = x(block.start), right = std::max(x(block.start + block.ms), left + 1.5f);
+                        if (right < Label || left > size.x) continue;
+                        const kui::Rect rect = kui::Rect::LTRB(left, top + 3.f, right, top + Lane - 3.f);
+                        const bool lit = block.kind != eEditor && onGraph(block.node) == picked;
+                        kui::Color fill = colours[block.kind];
+                        if (block.dimmed) fill = fill.WithAlpha(0.2f);
+                        c.DrawRRect({ rect, kui::Radii(2.f) }, kui::Paint::Fill(fill));
+                        if (static_cast<int>(i) == hovered || lit) c.DrawRRect({ rect, kui::Radii(2.f) }, kui::Paint::Stroked(t.text, lit ? 1.5f : 1.f));
+                        if (rect.Width() > 30.f) {
                             c.Save();
-                            c.ClipRect(kui::Rect::LTRB(rect.left + 4.f, rect.top, rect.right - 3.f, rect.bottom));
-                            c.DrawText(block.name, { rect.left + 5.f, rect.top + 4.f }, kui::TextStyle {}.SetSize(11.f).SetColor(dimmed[i] ? t.textMuted : t.text));
+                            c.ClipRect(kui::Rect::LTRB(std::max(rect.left, Label) + 3.f, rect.top, rect.right - 2.f, rect.bottom));
+                            c.DrawText(block.name, { std::max(rect.left, Label) + 4.f, rect.top + 2.f }, kui::TextStyle {}.SetSize(10.5f).SetColor(kui::colors::White.WithAlpha(block.dimmed ? 0.4f : 0.95f)));
                             c.Restore();
                         }
                     }
+                    c.Restore();
                 }, { -1.f, height });
-                const auto under = [blocks, drawn](const kor::Vec2 at) -> const Block* {
-                    for (std::size_t i = 0; i < drawn->size(); ++i)
-                        if ((*drawn)[i].Contains(at)) return &(*blocks)[i];
-                    return nullptr;
+                // The block under the pointer: the last drawn of those there, as it is the one on top.
+                const auto under = [=](const kor::Vec2 at) -> int {
+                    const float span = std::max(seen->x - Label - 4.f, 1.f);
+                    for (int i = static_cast<int>(blocks->size()) - 1; i >= 0; --i) {
+                        const Block& block = (*blocks)[i];
+                        const float top = laneTop(block.lane);
+                        const float left = Label + static_cast<float>(((block.start - from) / (to - from) - v0) / (v1 - v0)) * span;
+                        const float right = std::max(Label + static_cast<float>(((block.start + block.ms - from) / (to - from) - v0) / (v1 - v0)) * span, left + 3.f);
+                        if (at.x >= std::max(left, Label) && at.x <= right && at.y >= top && at.y < top + Lane) return i;
+                    }
+                    return -1;
                 };
                 canvas = kui::GestureDetector(kui::GestureOptions {}
                     .OnHover([this, under](const kor::Vec2 at) {
-                        const Block* block = under(at);
-                        if (const std::string node = block ? block->node : std::string(); node != _timelineHover) SetState([&] { _timelineHover = node; });
+                        _timelineAt = at.x;     // where the pointer is, for the wheel to zoom about
+                        if (const int i = under(at); i != _timelineHover) SetState([&] { _timelineHover = i; });
                     })
-                    .OnExit([this] { if (!_timelineHover.empty()) SetState([&] { _timelineHover.clear(); }); })
-                    .OnTapDown([this, under, onGraph](const kor::Vec2 at) {
-                        if (const Block* block = under(at); block && !block->editors) _session->GoTo(onGraph(block->node));
-                    }), std::move(canvas));
-                // What is under the pointer, said under it; else how to read it.
-                std::string said_;
-                for (const auto& block : *blocks)
-                    if (block.node == _timelineHover) {
-                        said_ = std::format("{}  ·  {} queue  ·  starts at {:.3f} ms, takes {:.3f} ms", block.name, block.async ? "async compute" : "graphics", block.start, block.ms);
-                        break;
-                    }
-                const double busy = std::accumulate(blocks->begin(), blocks->end(), 0.0, [](const double sum, const Block& block) { return block.async ? sum : sum + block.ms; });
+                    .OnExit([this] { if (_timelineHover >= 0) SetState([&] { _timelineHover = -1; }); })
+                    .OnTap([this, blocks, onGraph] {
+                        if (_timelineHover < 0 || _timelineHover >= static_cast<int>(blocks->size())) return;
+                        if (const Block& block = (*blocks)[_timelineHover]; block.kind != eEditor && !block.node.starts_with('$')) _session->GoTo(onGraph(block.node));
+                    })
+                    // The wheel zooms about the pointer, up to a thousand times; a drag moves along what is zoomed in on.
+                    .OnScroll([this, seen](const kor::Vec2 delta) {
+                        const double span = std::max(seen->x - Label - 4.f, 1.f);
+                        const double at = std::clamp((static_cast<double>(_timelineAt) - Label) / span, 0.0, 1.0);
+                        const double width = 1.0 / _timelineZoom, pointed = _timelineFrom + at * width;
+                        const double zoom = std::clamp(_timelineZoom * std::pow(1.2, delta.y), 1.0, 1000.0);
+                        SetState([&] { _timelineZoom = zoom; _timelineFrom = std::clamp(pointed - at / zoom, 0.0, 1.0 - 1.0 / zoom); });
+                        return true;
+                    })
+                    .OnPanUpdate([this, seen](const kor::Vec2 delta, const kor::Vec2 at) {
+                        _timelineAt = at.x;
+                        if (_timelineZoom <= 1.0) return;
+                        const double span = std::max(seen->x - Label - 4.f, 1.f);
+                        SetState([&] { _timelineFrom = std::clamp(_timelineFrom - delta.x / span / _timelineZoom, 0.0, 1.0 - 1.0 / _timelineZoom); });
+                    }), canvas);
+
+                // Under it: the block under the pointer, said; and what each colour is.
+                std::string told;
+                if (hovered >= 0 && hovered < static_cast<int>(blocks->size())) {
+                    const Block& block = (*blocks)[hovered];
+                    told = std::format("{}  ·  {}  ·  starts at {:.3f} ms, takes {:.3f} ms", block.name, block.said, block.start, block.ms);
+                }
+                std::set<int> present;
+                for (const auto& block : *blocks) present.insert(block.kind);
+                std::vector<kui::Widget> legend;
+                for (const int kind : present)
+                    legend.push_back(kui::Row({
+                        kui::Container(kui::ContainerOptions {}.SetWidth(10.f).SetHeight(10.f).SetDecoration(kui::Decoration {}.SetColor(colours[kind]).SetRadius(2.f))),
+                        kgui::Muted(kinds[kind], 11.f) }, kui::FlexOptions {}.SetGap(5.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                legend.push_back(kui::Expanded(kui::SizedBox(0.f, 0.f)));
+                if (_timelineZoom > 1.0)
+                    legend.push_back(Chip(std::format("Fit  ·  {:.0f}×", _timelineZoom), [this] { SetState([&] { _timelineZoom = 1.0; _timelineFrom = 0.0; }); }));
                 return Rows({
                     std::move(canvas),
-                    said_.empty()
-                        ? kgui::Muted(std::format("The last frame measured: {:.2f} ms from its first pass starting to its last ending, the graphics queue busy {:.0f}% of it. "
-                                                  "A gap is the GPU waiting — for the CPU, a barrier or the other queue. Point at a pass to see it; press it to go to it.",
-                                                  end, 100.0 * busy / end), 11.f)
-                        : kui::Text(said_, kui::TextStyle {}.SetSize(12.f)),
+                    kui::Row(std::move(legend), kui::FlexOptions {}.SetGap(14.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                    told.empty()
+                        ? kgui::Muted(std::format("The newest frame the GPU has measured, {:.2f} ms from its first pass being prepared to its last ending{}. "
+                                                  "The wheel zooms, a drag moves along; point at a block to see it, press it to go to its node.",
+                                                  to - std::min(from, 0.0), oneClock ? "" : ". This device cannot line its clock up with the CPU's: the GPU's lanes start at its first pass"), 11.f)
+                        : kui::Text(told, kui::TextStyle {}.SetSize(12.f)),
                 }, 6.f);
             }
 
@@ -9386,7 +10559,9 @@ class $NAME : ResourceScript() {
             // The frame as it was last read — paused, as it was when it was — and what is under the pointer on its timeline.
             struct FrameShot { kgraph::Runtime::FrameReport frame; kgraph::Runtime::FrameTimes times; double frameMs = 0.0, prepareMs = 0.0; int fps = 0; };
             FrameShot _frameShot;
-            std::string _timelineHover;
+            int _timelineHover = -1;                    // the block of the timeline under the pointer
+            double _timelineZoom = 1.0, _timelineFrom = 0.0;   // how far in it is zoomed, and where what is in view starts, as a share of the frame
+            float _timelineAt = 0.f;                    // where the pointer is across it, for the wheel to zoom about
             std::string _frameFilter;
             std::set<std::string> _frameOpen;
             Value _frameSeen;
@@ -9420,6 +10595,7 @@ class $NAME : ResourceScript() {
             std::chrono::steady_clock::time_point _problemsAt {};
             Dialog _dialog = Dialog::eNone;
             bool _viewModesOpen = false, _gridOpen = false;     // the Scene panel's popups: how it shows the scene, the grid's settings
+            bool _snapOpen = false, _viewsOpen = false;         // how the gizmo snaps; which way the view looks, and its bookmarks
             kor::Vec2 _addAt {};
             std::string _filter, _newId;
             std::string _menuCategory;      // the node menu's: the category shown, empty for all of them
@@ -10062,6 +11238,9 @@ class $NAME : ResourceScript() {
         // What it looks like played, seen from its own camera: another view of the same graph, in a panel of its own.
         _game = kor::App::Current().OpenOffscreen<GameScene>({ .title = "Game", .extent = { 640, 360 } }, *_play);
         _session->SetGame(_game);
+        // The Scene panel's second view, split beside the first: another view of the graph, seen from its own place.
+        _second = kor::App::Current().OpenOffscreen<GameScene>({ .title = "Scene 2", .extent = { 640, 360 } }, *_play);
+        _session->SetSecondView(_second);
         _session->LoadObjects();
         // The editor's view, its gizmo and its picking, as the scene updates: in the frame being made.
         _play->EditAs();                    // picked from and drawn over, whatever its graph is
@@ -10126,6 +11305,8 @@ class $NAME : ResourceScript() {
         _ui.reset();
         _session.reset();
         Document::Alias(&Graph(), nullptr);
+        if (_second) kor::App::Current().Close(*_second);
+        _second = nullptr;
         if (_game) kor::App::Current().Close(*_game);     // it follows the play scene's: it goes first
         _game = nullptr;
         if (_play) kor::App::Current().Close(*_play);

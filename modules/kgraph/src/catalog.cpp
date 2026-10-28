@@ -5,8 +5,10 @@
 #include <kgraph/meshes.h>
 #include <kgraph/catalog.h>
 #include <kgraph/graph.h>
+#include <kgraph/random.h>
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <map>
 #include <set>
@@ -103,7 +105,6 @@ namespace kgraph
                 // How many times, and which of them.
                 { { "Repeat", "count" }, { 1.f, 256.f } }, { { "ForEach", "repeat" }, { 1.f, 256.f } },
                 { { "Element", "index" }, { none, any } }, { { "Switch", "index" }, { none, any } }, { { "CubeFace", "face" }, { none, 5.f } },
-                { { "Component", "index" }, { none, 3.f } },
                 { { "PointShadows", "most" }, { 1.f, any } }, { { "PointShadows", "each" }, { none, any } }, { { "PointShadows", "near" }, { 0.001f, any, log } },
                 // What is drawn and run: none or more of it; a group, of one or more.
                 { { "Draw", "vertexCount" }, { none, any, log } }, { { "Draw", "firstVertex" }, { none, any } }, { { "Draw", "vertexOffset" }, { -any, any } }, { { "Draw", "instances" }, { none, any, log } },
@@ -163,9 +164,45 @@ namespace kgraph
          * How abstract a type is: by its category, but for those whose category says what they make rather than what
          * they are about — a pack of the scene's meshes is a resource, and about the scene.
          */
+        /**
+         * Exactly what each of a type's values is, where that is said: a number node's and a vector's, its parts' and what it
+         * gives; a builder's argument of a number's kind. Not what takes any kind, nor a whole of parts.
+         */
+        void Shaped(NodeType& type)
+        {
+            const auto set = [](Port& port, const Shape shape) { if (!port.shape.Known()) port.shape = shape; };
+            for (auto& port : type.inputs)
+                if (port.kind == PortKind::eValue && port.builder) {
+                    using kor::builders::Kind;
+                    switch (port.builder->kind) {
+                        case Kind::eBool: set(port, { Scalar::eBool, 1 }); break;
+                        case Kind::eInt: set(port, { Scalar::eInt, 1 }); break;
+                        case Kind::eUInt: set(port, { Scalar::eUInt, 1 }); break;
+                        case Kind::eFloat: set(port, { port.builder->bits == 64 ? Scalar::eDouble : Scalar::eFloat, 1 }); break;
+                        default: break;
+                    }
+                }
+            const Shape whole = ShapeNamed(type.name);
+            if (whole.Known() && type.category == "Values") {
+                // Its parts, of its kind; a number node's value is the number.
+                for (auto& port : type.inputs)
+                    if (port.kind == PortKind::eValue && port.type == "number") set(port, { whole.scalar, 1 });
+                for (auto& port : type.outputs)
+                    if (port.name == "out") set(port, whole);
+            }
+            if (type.name == "Bool") {
+                for (auto& port : type.inputs) set(port, { Scalar::eBool, 1 });
+                for (auto& port : type.outputs) set(port, { Scalar::eBool, 1 });
+            }
+            if (type.name == "Color") {
+                for (auto& port : type.inputs) set(port, { Scalar::eFloat, 4 });
+                for (auto& port : type.outputs) set(port, { Scalar::eFloat, 4 });
+            }
+        }
+
         Level LevelOf(const NodeType& type)
         {
-            static const std::set<std::string_view> scene { "MeshPack", "IndirectDraws", "Meshlets", "RayScene", "ShaderBuffer", "BufferBuilder" };
+            static const std::set<std::string_view> scene { "MeshPack", "IndirectDraws", "Meshlets", "RayScene", "ShaderBuffer", "BufferBuilder", "ComponentBuffer" };
             if (scene.contains(type.name) || type.category == "Scene") return Level::eScene;
             if (type.category == "Functions") return type.name == "Function" ? Level::eTechnique : Level::eValue;   // its inputs and outputs are a function's ends
             if (type.category == "Passes") return Level::eCommand;
@@ -298,14 +335,12 @@ namespace kgraph
                     { "depthStencilState", M { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLess" }, { "minDepth", 0 }, { "maxDepth", 1 } } },
                     { "colorBlendState", M { { "enableLogicOp", false }, { "logicOp", "eCopy" }, { "attachments", L {} }, { "blendConstants", L { 0, 0, 0, 0 } } } } } },
                 { "RayTracingPipeline", { { "maxRecursionDepth", 1 } } },
-                { "Number", { { "value", 0 } } }, { "Bool", { { "value", false } } }, { "String", { { "value", "" } } },
-                { "Vector", { { "x", 0 }, { "y", 0 }, { "z", 0 }, { "w", 1 } } },
+                { "Bool", { { "value", false } } }, { "String", { { "value", "" } } },
                 { "Float", { { "value", 0 } } }, { "Double", { { "value", 0 } } }, { "Int", { { "value", 0 } } }, { "UInt", { { "value", 0 } } },
                 { "Vec2", { { "x", 0 }, { "y", 0 } } }, { "Vec3", { { "x", 0 }, { "y", 0 }, { "z", 0 } } }, { "Vec4", { { "x", 0 }, { "y", 0 }, { "z", 0 }, { "w", 0 } } },
                 { "IVec2", { { "x", 0 }, { "y", 0 } } }, { "IVec3", { { "x", 0 }, { "y", 0 }, { "z", 0 } } }, { "IVec4", { { "x", 0 }, { "y", 0 }, { "z", 0 }, { "w", 0 } } },
                 { "UVec2", { { "x", 0 }, { "y", 0 } } }, { "UVec3", { { "x", 0 }, { "y", 0 }, { "z", 0 } } }, { "UVec4", { { "x", 0 }, { "y", 0 }, { "z", 0 }, { "w", 0 } } },
                 { "Color", { { "color", L { 1, 1, 1, 1 } } } },
-                { "Component", { { "index", 0 } } },
                 // What is worked out starts as something it can work out: an Add of nothing is 0 + 0, shown on the node.
                 { "Add", { { "a", 0 }, { "b", 0 } } }, { "Subtract", { { "a", 0 }, { "b", 0 } } }, { "Multiply", { { "a", 1 }, { "b", 1 } } },
                 { "Divide", { { "a", 1 }, { "b", 1 } } }, { "Min", { { "a", 0 }, { "b", 0 } } }, { "Max", { { "a", 0 }, { "b", 0 } } }, { "Mod", { { "a", 0 }, { "b", 1 } } },
@@ -317,12 +352,11 @@ namespace kgraph
                 { "Atan2", { { "y", 0 }, { "x", 1 } } },
                 { "Length", { { "a", L { 1, 0, 0 } } } }, { "Normalize", { { "a", L { 1, 0, 0 } } } }, { "Dot", { { "a", L { 1, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
                 { "Cross", { { "a", L { 1, 0, 0 } }, { "b", L { 0, 1, 0 } } } }, { "Distance", { { "a", L { 0, 0, 0 } }, { "b", L { 1, 0, 0 } } } },
-                { "Linear", { { "a", L { 1, 1, 1 } } } }, { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } }, { "Slice", { { "of", L { 0, 0, 0 } }, { "first", 0 }, { "count", 1 } } },
+                { "Append", { { "a", L { 0, 0, 0 } }, { "b", 1 } } }, { "Slice", { { "of", L { 0, 0, 0 } }, { "first", 0 }, { "count", 1 } } },
                 { "Less", { { "a", 0 }, { "b", 0 } } }, { "LessOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Greater", { { "a", 0 }, { "b", 0 } } },
                 { "GreaterOrEqual", { { "a", 0 }, { "b", 0 } } }, { "Equal", { { "a", 0 }, { "b", 0 } } }, { "NotEqual", { { "a", 0 }, { "b", 0 } } },
                 { "Not", { { "a", false } } }, { "And", { { "a", false }, { "b", false } } }, { "Or", { { "a", false }, { "b", false } } }, { "Xor", { { "a", false }, { "b", false } } },
                 { "Select", { { "condition", true }, { "a", 0 }, { "b", 0 } } }, { "Split", { { "vector", L { 0, 0, 0, 0 } } } },
-                { "Component", { { "vector", L { 0, 0, 0, 0 } }, { "index", 0 } } },
                 { "Primitive", { { "shape", "eCube" } } },
                 { "VertexLayout", { { "attributes", L { M { { "semantic", "POSITION" }, { "type", "eFloat" }, { "count", 3 } } } } } },
                 { "Clear", { { "color", L { 0, 0, 0, 1 } } } },
@@ -358,12 +392,28 @@ namespace kgraph
                 { "Dispatch", "run compute execute kernel indirect" },
                 { "Draw", "render rasterize mesh entities triangle fullscreen indirect instanced viewport scissor mesh tasks" },
                 { "TraceRays", "ray tracing raygen rtx path trace" },
-                                { "ComponentValue", "field script entity read get value" },
-                { "EntityTransform", "position rotation scale matrix world entity" }, { "DataBuffer", "uniform block struct pack values constant buffer frame" },
+                                
+                
                 { "Entities", "all every world entity list each scene query" }, { "Entity", "one first single named camera sky sun component get find" }, { "Filter", "with without components tags keep query select entities meshes group groupby sort batch instances" },
-                { "Selected", "picked selection outline entity id editor" }, { "FixedStep", "fixed step physics simulation time delta dt tick rate" }, { "WriteBack", "read back readback entities transforms physics results gpu to cpu write" },
+                { "Selected", "picked selection outline entity id editor" }, { "FixedStep", "fixed step physics simulation time delta dt tick rate" }, { "Time", "time seconds elapsed clock delta dt animate" }, { "WriteBack", "read back readback entities transforms physics results gpu to cpu write" },
                 { "ForEach", "each every all loop iterate list component lights ecs world query scene entities instances" },
                 { "BufferBuilder", "ssbo struct storage structured uniform constant buffer layout fields instances array lights cameras pack" },
+                { "ComponentBuffer", "ssbo struct storage structured buffer component fields entities lights cameras instances array pack" },
+                { "ColorConvert", "colour color gamma srgb linear convert hsv hue saturation kelvin temperature luminance" },
+                { "Any", "or reduce some components bool vector" }, { "All", "and reduce every components bool vector" },
+                { "Jitter", "taa halton subpixel offset antialiasing temporal projection fsr dlss" }, { "LastFrame", "previous frame before history temporal value reprojection" },
+                { "DeviceSupports", "feature capability mesh shader ray tracing fallback device gpu supports" },
+                { "SceneBounds", "aabb box bounds extent size scene all entities min max radius" },
+                { "WriteComponent", "set write field entity component value script" },
+                { "DebugShapes", "debug draw lines box sphere frustum axes gizmo visualize cascades" },
+                { "History", "previous last frame temporal taa feedback ping pong" },
+                { "Readback", "read back gpu cpu value counter download async" },
+                { "ComputePass", "compute shader kernel pipeline dispatch pass run" },
+                { "RenderTarget", "image texture target render screen sized transient attachment" },
+                { "QuatFromEuler", "quaternion rotation euler degrees" }, { "QuatFromAxisAngle", "quaternion rotation axis angle" },
+                { "QuatToEuler", "quaternion rotation euler degrees" }, { "QuatToMatrix", "quaternion rotation matrix mat4" },
+                { "QuatMultiply", "quaternion compose combine rotation" }, { "QuatInverse", "quaternion invert conjugate rotation" },
+                { "QuatSlerp", "quaternion interpolate blend rotation spherical" }, { "QuatRotate", "quaternion rotate vector turn" },
                 { "MeshPack", "pack merge combine batch meshes one mesh geometry indirect gpu driven bindless vertices indices" },
                 { "Meshlets", "meshlet cluster mesh shader task shader amplification cull cone bounds nanite" },
                 { "RayScene", "ray tracing raytracing tlas blas acceleration structure scene instances bvh rtx" },
@@ -377,7 +427,7 @@ namespace kgraph
                 { "Oblique", "near plane clip mirror water reflection portal projection" },
                 { "Paraboloid", "dual paraboloid hemisphere environment shadow point light projection" },
                 { "CubeFace", "cube map face direction point light shadow environment probe six" },
-                { "Linear", "colour color gamma srgb linear convert" }, { "Collect", "gather list array all elements foreach values" },
+                { "Collect", "gather list array all elements foreach values" },
                 { "Bundle", "bundle struct record make pack group named values camera" }, { "Unbundle", "unbundle split unpack struct members fields" },
                 { "ShadowCascades", "csm cascaded shadow map sun directional light matrices" },
                 { "PointShadows", "cube map omnidirectional shadow point light lamp six faces matrices" },
@@ -390,8 +440,8 @@ namespace kgraph
                 { "DebugDraw", "gizmo lines helpers debug overlay" }, { "Resolve", "multisample msaa antialias samples" },
                 { "ClearBuffer", "zero fill buffer reset" }, { "CopyBufferToImage", "upload texels buffer image transfer" },
                 { "CopyImageToBuffer", "download read back texels image buffer transfer" },
-                { "Number", "float scalar constant value" }, { "Bool", "boolean flag true false constant" }, { "String", "text name constant" },
-                { "Vector", "vec2 vec3 vec4 combine compose make" }, { "Color", "colour rgba picker constant" },
+                { "Bool", "boolean flag true false constant" }, { "String", "text name constant" },
+                { "Color", "colour rgba picker constant" },
                 { "Float", "number scalar constant value single real decimal f32" }, { "Double", "number scalar constant value real decimal f64 precise" },
                 { "Int", "number integer whole constant value signed i32 count" }, { "UInt", "number integer whole unsigned constant value u32 count index" },
                 { "Vec2", "vector float2 combine compose make uv size" }, { "Vec3", "vector float3 combine compose make position direction colour" },
@@ -400,7 +450,7 @@ namespace kgraph
                 { "IVec4", "vector int4 integer whole combine compose make" },
                 { "UVec2", "vector uint2 unsigned integer whole combine compose make size extent" }, { "UVec3", "vector uint3 unsigned integer whole combine compose make extent groups" },
                 { "UVec4", "vector uint4 unsigned integer whole combine compose make" },
-                { "Component", "element index get swizzle" }, { "Split", "break separate components xyz swizzle" },
+                { "Split", "break separate components xyz swizzle" },
                 { "ImageExtent", "size width height resolution dimensions get" }, { "VertexLayout", "vertex format attributes input" },
                 { "Add", "plus sum +" }, { "Subtract", "minus difference -" }, { "Multiply", "times product scale *" }, { "Divide", "over quotient /" },
                 { "Mod", "modulo remainder wrap %" }, { "Pow", "power exponent" }, { "Sqrt", "square root" }, { "Lerp", "mix interpolate blend" },
@@ -435,33 +485,37 @@ namespace kgraph
                 { "Image", "image" }, { "ImageView", "crop" }, { "Buffer", "storage" }, { "BufferView", "view_list" }, { "Sampler", "texture" },
                 { "Framebuffer", "layers" }, { "Mesh", "category" }, { "Shader", "code" }, { "AccelerationStructure", "account_tree" },
                 { "Primitive", "view_in_ar" }, { "ImageFile", "insert_photo" }, { "Script", "code" }, { "Screen", "monitor" }, { "Reference", "link" },
-                { "VertexLayout", "reorder" }, { "DataBuffer", "dns" }, { "ShaderBuffer", "table_chart" }, { "BufferBuilder", "view_module" }, { "MeshPack", "inventory_2" }, { "Meshlets", "grid_view" }, { "RayScene", "flare" }, { "Function", "functions" }, { "FunctionInput", "login" }, { "FunctionOutput", "logout" }, { "IndirectDraws", "format_list_numbered" },
+                { "VertexLayout", "reorder" }, { "ShaderBuffer", "table_chart" }, { "BufferBuilder", "view_module" }, { "RenderTarget", "wallpaper" }, { "ComponentBuffer", "dataset" }, { "MeshPack", "inventory_2" }, { "Meshlets", "grid_view" }, { "RayScene", "flare" }, { "Function", "functions" }, { "FunctionInput", "login" }, { "FunctionOutput", "logout" }, { "IndirectDraws", "format_list_numbered" },
                 { "ComputePipeline", "memory" }, { "GraphicsPipeline", "brush" }, { "RayTracingPipeline", "flare" },
                 // What is run.
                 { "Clear", "format_color_reset" }, { "Blit", "open_in_full" }, { "Resolve", "blur_on" }, { "Copy", "content_copy" },
                 { "CopyBuffer", "file_copy" }, { "Keep", "history" }, { "MeshBuffers", "data_array" }, { "ClearBuffer", "clear_all" }, { "CopyBufferToImage", "upload" }, { "CopyImageToBuffer", "download" },
                 { "GenerateMipmaps", "photo_size_select_small" }, { "Dispatch", "play_arrow" }, { "TraceRays", "flare" }, { "Draw", "draw" },
-                { "Pick", "touch_app" }, { "DebugDraw", "bug_report" },
+                { "Pick", "touch_app" }, { "DebugDraw", "bug_report" }, { "History", "history_toggle_off" }, { "Readback", "download_for_offline" },
+                { "ComputePass", "memory" }, { "DebugShapes", "pentagon" },
                 // Values.
-                { "Number", "pin" }, { "Bool", "toggle_on" }, { "String", "text_fields" }, { "Vector", "north_east" }, { "Color", "palette" },
+                { "Bool", "toggle_on" }, { "String", "text_fields" }, { "Color", "palette" },
                 { "Float", "pin" }, { "Double", "pin" }, { "Int", "tag" }, { "UInt", "tag" },
                 { "Vec2", "north_east" }, { "Vec3", "north_east" }, { "Vec4", "north_east" }, { "IVec2", "grid_4x4" }, { "IVec3", "grid_4x4" }, { "IVec4", "grid_4x4" },
                 { "UVec2", "grid_4x4" }, { "UVec3", "grid_4x4" }, { "UVec4", "grid_4x4" },
-                { "Constant", "tag" }, { "Component", "looks_one" }, { "Split", "call_split" }, { "Append", "playlist_add" }, { "Slice", "content_cut" },
-                { "ImageExtent", "aspect_ratio" }, { "Linear", "gradient" }, { "Select", "alt_route" },
+                { "Constant", "tag" }, { "RandomDevice", "shuffle" }, { "ColorConvert", "palette" }, { "DeviceSupports", "developer_board" },
+                { "Jitter", "grain" }, { "LastFrame", "skip_previous" }, { "Any", "rule" }, { "All", "rule" }, { "Split", "call_split" }, { "Append", "playlist_add" }, { "Slice", "content_cut" },
+                { "ImageExtent", "aspect_ratio" }, { "Select", "alt_route" },
                 // Cameras.
                 { "View", "visibility" }, { "Perspective", "videocam" }, { "Orthographic", "crop_square" }, { "Frustum", "change_history" },
                 { "Oblique", "flip" }, { "Paraboloid", "panorama_fish_eye" }, { "CubeFace", "view_in_ar" }, { "ShadowCascades", "wb_sunny" },
                 { "PointShadows", "lightbulb" },
                 // The world.
-                { "Entities", "public" }, { "Filter", "filter_alt" }, { "ForEach", "loop" }, { "Entity", "place" }, { "ComponentValue", "input" },
-                { "EntityTransform", "3d_rotation" }, { "Selected", "near_me" }, { "FixedStep", "timer" }, { "WriteBack", "move_down" }, { "Collect", "collections" }, { "Bundle", "inventory_2" }, { "Unbundle", "unarchive" },
+                { "Entities", "public" }, { "Filter", "filter_alt" }, { "ForEach", "loop" }, { "Entity", "place" }, 
+                { "Selected", "near_me" }, { "FixedStep", "timer" }, { "Time", "schedule" }, { "WriteBack", "move_down" }, { "Collect", "collections" }, { "SceneBounds", "fit_screen" }, { "WriteComponent", "edit" }, { "Bundle", "inventory_2" }, { "Unbundle", "unarchive" },
                 // What is done more than once, and one of several ways.
                 { "Repeat", "repeat" }, { "Previous", "skip_previous" }, { "Element", "format_list_numbered" }, { "Switch", "call_split" }, { "DebugView", "visibility" },
                 { "Note", "sticky_note_2" },
             };
             if (const auto it = icons.find(type); it != icons.end()) return std::string(it->second);
             if (type.starts_with("Matrix") || type.starts_with("Transform")) return "grid_on";
+            if (type.starts_with("Random")) return "casino";
+            if (type.starts_with("Quat")) return "3d_rotation";
             static const std::map<std::string_view, std::string_view> kinds {
                 { "Math", "calculate" }, { "Vectors", "north_east" }, { "Logic", "rule" }, { "Cameras", "videocam" }, { "Values", "tune" },
                 { "Passes", "play_arrow" }, { "Resources", "inventory_2" }, { "Pipelines", "memory" }, { "Scene", "public" }, { "Flow", "repeat" } };
@@ -528,14 +582,12 @@ namespace kgraph
             const auto value = [&](std::string name, std::vector<Port> inputs, std::string out, std::string doc) {
                 types.push_back({ std::move(name), "Values", std::move(inputs), { { "out", PortKind::eValue, std::move(out), false, {}, nullptr } }, std::move(doc), nullptr });
             };
-            value("Number", { Number("value") }, "number", "A number, as it is given: what Float, Double, Int and UInt are, said of what kind it is.");
             value("Float", { Number("value") }, "number", "A number as a shader's float has it: 32 bits, about seven digits.");
             value("Double", { Number("value") }, "number", "A number as a double has it: 64 bits, as it is given.");
             value("Int", { Number("value") }, "number", "A whole number, as a 32-bit int has it: what is given rounded toward zero, kept within what an int holds.");
             value("UInt", { Number("value") }, "number", "A whole number of none or more, as a 32-bit uint has it: what is given rounded toward zero, kept within what a uint holds.");
             value("Bool", { { "value", PortKind::eValue, "bool", false, {}, nullptr } }, "bool", "True or false.");
             value("String", { { "value", PortKind::eValue, "string", false, {}, nullptr } }, "string", "Text.");
-            value("Vector", { Number("x"), Number("y"), optional(Number("z")), optional(Number("w")) }, "vector", "As many numbers as are given, x first.");
             // Vectors of a size and a kind, as a shader declares them: float2 to float4, int2 to int4, uint2 to uint4.
             for (const auto& [kind, what] : { std::pair { "Vec", "floats" }, { "IVec", "whole numbers, as ints" }, { "UVec", "whole numbers of none or more, as uints" } })
                 for (int size = 2; size <= 4; ++size) {
@@ -568,7 +620,8 @@ namespace kgraph
             value("Cross", { Any("a"), Any("b") }, "vector", "The cross product of two vectors of 3.");
             value("Distance", { Any("a"), Any("b") }, "number", "How far apart two points are.");
             for (const char* name : { "Less", "LessOrEqual", "Greater", "GreaterOrEqual" })
-                value(name, { Number("a"), Number("b") }, "bool", "True or false: how the number a stands to the number b.");
+                value(name, { Any("a"), Any("b") }, "value", "True or false: how a stands to b. Of two vectors, or a vector and a number, a component at a time: "
+                                                              "true or false for each, which an Any or an All says as one, and a Select picks by.");
             value("Equal", { Any("a"), Any("b") }, "bool", "Whether a and b are the same.");
             value("NotEqual", { Any("a"), Any("b") }, "bool", "Whether a and b differ.");
             const Port flag { "a", PortKind::eValue, "bool", false, {}, nullptr };
@@ -578,10 +631,12 @@ namespace kgraph
             value("And", { flag, other }, "bool", "True when both are.");
             value("Or", { flag, other }, "bool", "True when either is.");
             value("Xor", { flag, other }, "bool", "True when one is and the other is not.");
-            value("Select", { { "condition", PortKind::eValue, "bool", false, {}, nullptr }, Any("a"), Any("b") }, "value", "a when the condition is true, b when it is not.");
+            value("Any", { Any("a") }, "bool", "True when any of a is: of the components a comparison of vectors gives, one at least.");
+            value("All", { Any("a") }, "bool", "True when all of a is: of the components a comparison of vectors gives, every one.");
+            value("Select", { Any("condition"), Any("a"), Any("b") }, "value", "a when the condition is true, b when it is not. "
+                                                                             "Of a condition for each component — a comparison of vectors — a component at a time.");
             value("Split", { { "vector", PortKind::eValue, "vector", false, {}, nullptr } }, "vector", "A vector's components, each an output of its own: x, y, z, w.");
             for (const char* part : { "x", "y", "z", "w" }) types.back().outputs.push_back({ part, PortKind::eValue, "number", false, {}, nullptr });
-            value("Component", { { "vector", PortKind::eValue, "vector", false, {}, nullptr }, Number("index") }, "number", "One component of a vector: 0 the first.");
             value("ImageExtent", { ResourcePort("image", "Image") }, "vector", "An image's width, height and depth.");
             value("Append", { Any("a"), Any("b") }, "vector", "The numbers of a, then those of b: a colour and its alpha as one vector of four.");
             value("Slice", { Any("of"), Number("first"), Number("count") }, "vector", "count of the numbers of a list, from the first-th (0 the first): of a ShadowCascades' matrices, sixteen from 16 times a cascade's number is its matrix.");
@@ -606,6 +661,46 @@ namespace kgraph
             value("Constant", { chosen({ "value", PortKind::eValue, "string", false, "ePi, eTau (two pi), eE, eSqrt2, ePhi (the golden ratio).", nullptr },
                                        { "ePi", "eTau", "eE", "eSqrt2", "ePhi" }) }, "number", "A number with a name.");
             types.back().inputs.front().initial = Value("ePi");
+            {
+                // ---- random numbers: a node for each distribution, of the kind of what it is wired to ---------------------
+                std::vector<std::string> kinds { "Auto", "Float", "Double", "Int", "UInt", "Vec2", "Vec3", "Vec4", "IVec2", "IVec3", "IVec4", "UVec2", "UVec3", "UVec4" };
+                for (const std::string_view name : random::DistributionNames()) {
+                    const random::Distribution distribution = *random::DistributionNamed(name);
+                    Port kind = chosen({ "type", PortKind::eValue, "string", false, "What kind of number it gives. Auto: what the input it is wired to takes "
+                                         "(a shader's float4, an Int), and a Float when that says nothing. A vector's components are drawn each by "
+                                         "itself; a whole kind's are whole: a uniform one each from min to max, any other rounded to the nearest.", nullptr },
+                                       kinds);
+                    kind.initial = Value("Auto");
+                    Port seed = Number("seed", "Where the numbers start: the same seed gives the same numbers, on every machine. A RandomDevice's, for "
+                                               "numbers no one chose.");
+                    seed.initial = Value(0);
+                    seed.integer = true;
+                    seed.min = 0.f;
+                    seed.shape = { Scalar::eUInt, 1 };
+                    std::vector<Port> inputs { std::move(kind), std::move(seed) };
+                    for (const auto& input : random::InputsOf(distribution)) {
+                        Port port = Any(std::string(input.name), std::string(input.doc) + " A number, or a vector of one for each component.");
+                        port.initial = Value(input.initial);
+                        if (input.name == "trials") port.integer = true;
+                        if (input.name == "trials" || input.name == "successes") port.min = 0.f;
+                        inputs.push_back(std::move(port));
+                    }
+                    types.push_back({ std::string(random::NodeOf(distribution)), "Random", std::move(inputs),
+                                      { { "out", PortKind::eValue, "value", false, "A number, or a vector of them, of the kind it gives.", nullptr } },
+                                      std::string(random::DocOf(distribution)) + " Drawn once, when it is built: the same seed gives the same numbers, here and on any machine.",
+                                      nullptr });
+                    types.back().keywords = std::format("random rng noise seed chance distribution {}", random::KeywordsOf(distribution));
+                }
+                Port draw = Number("draw", "Changed to draw a new seed. It is kept while the graph runs otherwise, whatever else is edited.");
+                draw.initial = Value(0);
+                draw.integer = true;
+                draw.optional = true;
+                types.push_back({ "RandomDevice", "Random", { std::move(draw) },
+                                  { { "out", PortKind::eValue, "number", false, "The seed: a UInt.", nullptr } },
+                                  "A seed no one chose, as std::random_device draws one: for a Random's seed. A new one each time the graph is opened; kept while it runs.", nullptr });
+                types.back().outputs.front().shape = { Scalar::eUInt, 1 };
+                types.back().keywords = "random device seed entropy true hardware nondeterministic unpredictable";
+            }
             value("MatrixTranspose", { Any("a") }, "matrix", "A matrix of four by four with its rows made its columns.");
             value("MatrixDeterminant", { Any("a") }, "number", "A matrix of four by four's determinant: how much it scales a volume by, negative when it mirrors.");
             value("MatrixTranslate", { Any("offset") }, "matrix", "A matrix that moves a point by offset.");
@@ -706,7 +801,6 @@ namespace kgraph
                                     { "up", PortKind::eValue, "vector", false, "Up, as the face is seen.", nullptr } },
                                   "One face of a cube round a point, as a cube map has it: a View's target is the point and the direction added, its up the face's up, "
                                   "and a Perspective of 90 degrees, square, sees the face.", nullptr });
-                value("Linear", { Any("a") }, "vector", "A colour as it was picked — as the display shows it — in the linear terms light adds up in: each of red, green and blue to the power 2.2. Its alpha is as it was.");
 
                 Port direction { "direction", PortKind::eValue, "vector", false, "The way the light travels: a directional light's entity's `forward`.", nullptr };
                 types.push_back({ "ShadowCascades", "Cameras",
@@ -752,7 +846,9 @@ namespace kgraph
                 types.push_back({ "Screen", "Resources", {},
                                   { ResourcePort("out", "Image"), given("extent", "vector", "How big the window is: its width, its height, and 1. An image sized by it follows the window."),
                                     given("size", "vector", "The window's width and height."), given("width", "number", "How many pixels across the window is."),
-                                    given("height", "number", "How many pixels down."), given("aspect", "number", "Its width over its height: a lens's `aspect`.") },
+                                    given("height", "number", "How many pixels down."), given("aspect", "number", "Its width over its height: a lens's `aspect`."),
+                                    given("format", "string", "What a pixel of it is: eBGRA8_SRGB, or whatever the window was given."),
+                                    given("scale", "number", "How many of its pixels a point of the desktop is: 2 on a screen of twice the density. What a user interface is scaled by.") },
                                   "The scene's window: what a pass writes to show something.", nullptr });
 // What a scene's own components hold, as values: read from the world every frame, to be worked on by
                 // other nodes and packed into the buffers shaders read.
@@ -767,23 +863,6 @@ namespace kgraph
                     port.editor = std::move(editor);
                     return port;
                 };
-                const Port entity = in("entity", "string", "Which entity, by name: the first that has the component, when not given.", "entity");
-                types.push_back({ "ComponentValue", "Scene",
-                                  { hinted({ "component", PortKind::eValue, "string", false, "The component's name: a script's, a pipeline's, one of the scene's own.", nullptr }, "component"),
-                                    { "field", PortKind::eValue, "string", false, "The name of one of its fields.", nullptr }, entity },
-                                  { out("out", "value", "The field: a number, or a vector.", true), out("present", "number", "1 when there is such an entity, 0 when not.") },
-                                  "One field of a component, read from an entity every frame: what a script counts, or a camera's far plane, as a value to wire.", nullptr });
-                Port named = entity;
-                named.optional = false;
-                named.doc = "Which entity, by name.";
-                types.push_back({ "EntityTransform", "Scene", { named },
-                                  { out("matrix", "matrix", "Where it is in the world: its own transform under those of everything above it.", true),
-                                    out("worldPosition", "vector", "Where it is in the world."), out("forward", "vector", "The way it faces."),
-                                    out("up", "vector", "Its up: +y, turned as it is."), out("right", "vector", "Its right: +x, turned as it is."),
-                                    out("position", "vector", "Where it is, relative to what it is under."), out("rotation", "vector", "How it is turned, in degrees."),
-                                    out("orientation", "vector", "How it is turned, as a quaternion: x, y, z, w — relative to what it is under, as a WriteBack's `rotation` is written."),
-                                    out("scale", "vector", {}), out("present", "number", "1 when there is such an entity.") },
-                                  "An entity's place in the world, as values.", nullptr });
                 types.push_back({ "Selected", "Scene", {},
                                   { out("entityId", "number", "Which entity is picked, from 1: 0 for none. What a ForEach's `entityId` is compared with.", true),
                                     out("present", "number", "1 when one is picked."),
@@ -811,6 +890,11 @@ namespace kgraph
                                       "components — when what is read back changes: a simulation's bodies, moved. One moved by something else (the gizmo, a script) "
                                       "makes setup run again, from the world as it is.", nullptr });
                 }
+                types.push_back({ "Time", "Scene", {},
+                                  { out("seconds", "number", "How long the graph has run, in seconds: what moves by itself, a cloud on the wind, goes by. It goes on whether the scene plays or not.", true),
+                                    out("dt", "number", "How long the last frame took, in seconds: at most a quarter of one, so that a frame held up — a breakpoint, a window dragged — does not jump."),
+                                    out("frame", "number", "Which frame this is, from 0: one more each frame the graph runs. What a Jitter takes.") },
+                                  "The time, as numbers: how long the graph has run, and how long a frame takes. Frame by frame, not on the fixed step.", nullptr });
                 types.push_back({ "FixedStep", "Scene", {},
                                   { out("dt", "number", "How long a fixed step is, in seconds: what a simulation on a fixed page moves by each time it runs.", true),
                                     out("steps", "number", "How many fixed steps this frame has in it: its fixed pages run when it is 1 or more, and rest when 0."),
@@ -841,6 +925,8 @@ namespace kgraph
                         out("entityId", "number", "Which entity it is, from 1: what a pipeline's `entityId` is given."),
                         out("matrix", "matrix", "Where it is in the world: its own transform under those of everything above it. A Draw's `push.model`."),
                         out("normalMatrix", "matrix", "The matrix's inverse, transposed: what turns a normal as the matrix turns a surface."),
+                        out("previousMatrix", "matrix", "Where it was the frame before: the matrix it had then — its own, the first frame it is seen. "
+                                                        "What a shader works out how it moved from, for motion vectors."),
                         out("worldPosition", "vector", "Where it is in the world."), out("forward", "vector", "The way it faces."),
                         out("up", "vector", "Its up: +y, turned as it is."), out("right", "vector", "Its right: +x, turned as it is."),
                         out("position", "vector", "Where it is, relative to what it is under."), out("rotation", "vector", "How it is turned, in degrees."),
@@ -858,7 +944,8 @@ namespace kgraph
                         if (port.name != "index" && port.name != "count" && port.name != "turn" && port.name != "entityIndex" && port.name != "entities") one.push_back(port);
                     one.back().doc = "1 when there is such an entity: whether it was found.";
                     Port first = component;
-                    first.doc = "The component it has: a camera, a sky, a script's.";
+                    first.doc = "The component it has: a camera, a sky, a script's. Not given, it is the entity `entity` names, whatever it has: where it is.";
+                    first.optional = true;
                     types.push_back({ "Entity", "Scene", { std::move(first), with, named }, one,
                                       "One entity: the first that has a component, or the one named — the camera, the sky, the sun. Each field of its component "
                                       "and of `with`'s, where it is and which it is. What is wired from it is that one's: it is no loop.", nullptr });
@@ -902,19 +989,30 @@ namespace kgraph
                                         out("stride", "number", "The size of one element, in bytes.") },
                                       "A buffer a shader declares, laid out as the shader lays it out: an input for each field of its struct, by name. With fields wired from "
                                       "a ForEach it holds an element for each entity; with none, one element.", nullptr });
+
+                    // A buffer of a component, laid out as it is: a ForEach of it and a BufferBuilder of its fields, as one node.
+                    Port whose = component;
+                    whose.doc = "The component every entity of it has: an element for each, its fields laid out as the component has them.";
+                    Port ticked = hinted({ "fields", PortKind::eValue, "list", false, "Which of its fields it holds, by name, and which of where the entity is "
+                                        "(worldPosition, forward, up, right, position, rotation, scale, orientation, matrix, normalMatrix, previousMatrix, entityId). "
+                                        "Laid out in that order whatever order they are given in: the component's first, as it declares them. "
+                                        "Not given: every field of it, and worldPosition, forward and matrix.", nullptr }, "componentFields");
+                    ticked.optional = true;
+                    Port laidOut { "usage", PortKind::eValue, "string", false, "eStorage: a StructuredBuffer, laid out as std430 has it. eUniform: a ConstantBuffer, laid out as std140 has it.", nullptr };
+                    laidOut.optional = true;
+                    laidOut.choices = { "eStorage", "eUniform" };
+                    laidOut.initial = Value("eStorage");
+                    Port most { "count", PortKind::eValue, "number", false, "How many elements it has room for: the first that many entities. One for each when not given.", nullptr };
+                    most.optional = true;
+                    Port before = ResourcePort("after", "Buffer", "Another buffer of the same layout, whose elements come first in this one: several kinds of entity in one buffer.");
+                    before.optional = true;
+                    types.push_back({ "ComponentBuffer", "Resources", { std::move(whose), std::move(ticked), with, without, where, std::move(laidOut), std::move(most), std::move(before) },
+                                      { ResourcePort("out", "Buffer"), out("count", "number", "How many elements it holds: what the shader loops to.", true),
+                                        out("stride", "number", "The size of one element, in bytes."), out("bytes", "number", "The size of the whole buffer, in bytes.") },
+                                      "Every entity that has a component, as a buffer: an element for each, of the fields ticked. "
+                                      "A field wired by itself, `field.<name>`, takes its wire instead of the entity's.", nullptr });
                 }
 
-                Port usage { "usage", PortKind::eValue, "string", false, "eUniform: a block of values a shader declares as a ConstantBuffer. eStorage: an array it declares as a StructuredBuffer.", nullptr };
-                usage.optional = true;
-                usage.choices = { "eUniform", "eStorage" };
-                usage.initial = Value("eUniform");
-                Port fieldValue { "field[].value", PortKind::eValue, "value", true, "A value of the block, in the order the shader declares them: a number, a vector, a matrix, or a long list of numbers.", nullptr };
-                Port fieldType { "field[].type", PortKind::eValue, "string", true, "What it is in the shader, when its size does not say: an int or a uint, a uint4 of which only the first is given. eAuto goes by how many numbers there are.", nullptr };
-                fieldType.optional = true;
-                fieldType.choices = { "eAuto", "eFloat", "eInt", "eUInt", "eVec2", "eVec3", "eVec4", "eIVec4", "eUVec4", "eMat4", "eFloats" };
-                types.push_back({ "DataBuffer", "Resources", { std::move(usage), std::move(fieldValue), std::move(fieldType) },
-                                  { ResourcePort("out", "Buffer") },
-                                  "A buffer made of values: each field after the last, laid out as a shader's block is, and written again every frame a value wired to it changes.", nullptr });
 
                 // A buffer whose element is laid out on the node: its fields, by name and type, and as many elements as it is told.
                 {
@@ -941,6 +1039,27 @@ namespace kgraph
                                       "Wired from a ForEach, an element for each of its elements; from values of no ForEach, one.", nullptr });
                 }
                         }
+            {
+                // An image sized by the window, or by another image: the Screen, the scale and the rounding written out for it.
+                Port format { "format", PortKind::eValue, "string", false, "What a pixel of it is: eRGBA16_SFLOAT, eD32_SFLOAT...", nullptr };
+                format.editor = "format";
+                format.initial = Value("eRGBA16_SFLOAT");
+                Port scale { "scale", PortKind::eValue, "value", false, "How big, of what it is sized by: 1 as big, 0.5 half as big each way. A vector for each way.", nullptr };
+                scale.optional = true;
+                scale.initial = Value(1);
+                Port sizeOf = ResourcePort("sizeOf", "Image", "The image it is sized by: the window's, when not wired.");
+                sizeOf.optional = true;
+                Port extent { "extent", PortKind::eValue, "vector", false, "Its size in pixels, given: instead of being sized by something.", nullptr };
+                extent.optional = true;
+                Port mips = Number("mipLevels", "How many mip levels: 1 when not given; 0 for as many as there are down to a pixel.");
+                mips.optional = true;
+                Port layers = Number("arrayLayers", "How many layers: 1 when not given.");
+                layers.optional = true;
+                types.push_back({ "RenderTarget", "Resources", { std::move(format), std::move(scale), std::move(sizeOf), std::move(extent), std::move(mips), std::move(layers) },
+                                  { ResourcePort("out", "Image"), { "extent", PortKind::eValue, "vector", false, "How big it is: width, height and 1.", nullptr } },
+                                  "An image a pass draws into, sized by the window — or by another image — times a scale: made again when that changes size. "
+                                  "Its usage is what it is used as, as an Image's is.", nullptr });
+            }
             types.push_back({ "MeshBuffers", "Resources", { ResourcePort("mesh", "Mesh", "A mesh: a Primitive's, a default one, a model's, a script's.") },
                               { ResourcePort("vertices", "Buffer", "The vertex buffer its positions are in (eStorage): what a compute shader reads them from."),
                                 ResourcePort("indices", "Buffer", "Its indices, 32 bits each (eStorage); none for a mesh that has none."),
@@ -1154,8 +1273,11 @@ namespace kgraph
                 ports.push_back(optional(Number(name + ".y")));
                 ports.push_back(optional(Number(name + ".z")));
             };
-            types.push_back({ "Clear", "Passes", { ResourcePort("image", "Image"), hinted({ "color", PortKind::eValue, "vector", false, "Red, green, blue, alpha.", nullptr }, "color") }, {},
-                              "Fills an image with one colour.", nullptr });
+            types.push_back({ "Clear", "Passes", { ResourcePort("image", "Image"), hinted({ "color", PortKind::eValue, "vector", false, "Red, green, blue, alpha. Of an image of whole "
+                                                                                                    "numbers (UINT, SINT), each the whole number it is.", nullptr }, "color"),
+                                                   optional(Number("depth", "Of a depth image, the depth: 1 when not given — 0 for reversed depth.")),
+                                                   optional(Number("stencil", "Of one with a stencil, its value: 0 to 255.")) }, {},
+                              "Fills an image with one colour — every mip and layer of it — or a depth image with one depth.", nullptr });
             {
                 std::vector<Port> ports { ResourcePort("source", "Image"), ResourcePort("destination", "Image"),
                                           optional(Choice("filter", { "eNearest", "eLinear" }, "How it is scaled: eNearest takes the one nearest texel, eLinear blends its neighbours.")) };
@@ -1178,9 +1300,45 @@ namespace kgraph
                                 optional(Number("sourceOffset", "The byte of the source it starts at.")), optional(Number("destinationOffset", "The byte of the destination it starts at.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) }, {},
                               "Copies a buffer's bytes into another: as many as the smaller of the two holds.", nullptr });
             types.push_back({ "Keep", "Passes", { ResourcePort("of", "Resource", "A buffer or an image (with eTransferSrc): what is kept a copy of."), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) },
-                              { ResourcePort("out", "Resource", "The copy: a buffer or an image like it, as it was when this pass ran.") },
+                              { ResourcePort("out", "Resource", "The copy: a buffer or an image like it, as it was when this pass ran."),
+                                { "valid", PortKind::eValue, "bool", false, "False until it has been copied into once, and again after it is made anew: what a "
+                                  "temporal pass blends nothing of while it is false.", nullptr } },
                               "A copy of a buffer or an image as it is when this pass runs, made where it is among the passes: what those after it "
                               "read as it was before, while they write the original — the last step's state, on a page of the fixed step.", nullptr });
+            // The frame before: a copy of what it is given made when every pass of the frame has run, read this frame.
+            types.push_back({ "History", "Passes", { ResourcePort("of", "Resource", "A buffer or an image (with eTransferSrc): what is had of the frame before.") },
+                              { ResourcePort("out", "Resource", "It as it was at the end of the frame before."),
+                                { "valid", PortKind::eValue, "bool", false, "False on the first frame, and after it is made anew (another size): when there is no frame before to read.", nullptr } },
+                              "A buffer or an image as it was when the frame before was over: what a temporal pass — antialiasing, an exposure, a "
+                              "simulation — reads of the last frame while it writes this one. A Keep copied when the frame begins, before every page.", nullptr });
+            {
+                std::vector<Port> ports { optional(ResourcePort("buffer", "Buffer", "The buffer read: with eTransferSrc.")),
+                                          optional(ResourcePort("image", "Image", "Or an image: one texel of it.")),
+                                          optional(Number("offset", "Of a buffer, the byte it starts at.")),
+                                          optional(hinted({ "texel", PortKind::eValue, "vector", false, "Of an image, which texel: x, y, and z or a layer.", nullptr }, "numbers")),
+                                          optional(Number("mip", "Of an image, which mip.")),
+                                          optional(Choice("type", { "eFloat", "eInt", "eUInt", "eVec2", "eVec3", "eVec4", "eIVec2", "eIVec4", "eUVec2", "eUVec4" },
+                                                          "Of a buffer, what is there: eFloat when not given. An image's is its format's.")) };
+                ports[5].initial = Value("eFloat");
+                types.push_back({ "Readback", "Passes", std::move(ports),
+                                  { { "out", PortKind::eValue, "value", false, "What was there: a number or a vector, as it was a frame or two before.", nullptr },
+                                    { "ready", PortKind::eValue, "bool", false, "Whether anything has come back yet: false the first frames.", nullptr } },
+                                  "A few numbers of a buffer, or a texel of an image, back on the CPU as a value: a count the GPU worked out, the light of a "
+                                  "picture for its exposure. Copied where this pass runs, and read when the copy is done — a frame or two late.", nullptr });
+            }
+            {
+                Port module = hinted({ "module", PortKind::eValue, "string", false, "The shader module: a .slang file among the project's shaders, by its name without the ending.", nullptr }, "module");
+                Port entry = hinted({ "entry", PortKind::eValue, "string", false, "The function of it that is run: its [numthreads] entry point.", nullptr }, "entry");
+                std::vector<Port> ports { std::move(module), std::move(entry),
+                                          optional(Number("groups.x", "How many groups to run, each way.")), optional(Number("groups.y")), optional(Number("groups.z")),
+                                          optional(hinted({ "cover", PortKind::eValue, "string", false, "One of its image parameters, by name: as many groups as cover it. Instead of groups.", nullptr }, "parameter")),
+                                          optional(ResourcePort("indirect", "Buffer", "A buffer that says how many groups: three numbers of 32 bits. Instead of groups.")),
+                                          optional(Number("indirectOffset", "The byte of the indirect buffer the three numbers are at.")),
+                                          optional(Number("idle", "While not zero (or true), it records nothing this frame.")) };
+                types.push_back({ "ComputePass", "Passes", std::move(ports), {},
+                                  "A compute shader run: a ComputePipeline and a Dispatch of it as one node. Its shader's parameters are inputs, `param.<name>`, and "
+                                  "its push constants, `push.<name>`, and its specialization constants, `constant.<name>`, as they would be on the two.", nullptr });
+            }
             types.push_back({ "ClearBuffer", "Passes",
                               { ResourcePort("buffer", "Buffer"), optional(Number("offset", "The byte it starts at.")), optional(Number("bytes", "How many bytes: to the buffer's end, when not given.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) }, {},
                               "Fills a buffer, or a part of it, with zeroes.", nullptr });
@@ -1199,7 +1357,8 @@ namespace kgraph
             }
             types.push_back({ "GenerateMipmaps", "Passes", { ResourcePort("image", "Image") }, {},
                               "Fills an image's smaller mip levels from its largest.", nullptr });
-            types.push_back({ "Pick", "Passes", { ResourcePort("ids", "Image", "An image of which entity is where: one a pipeline draws its `entityId` push constant into, as a number of 32 bits.") }, {},
+            types.push_back({ "Pick", "Passes", { ResourcePort("ids", "Image", "An image of which entity is where: one a pipeline draws its `entityId` push constant into, as a number of 32 bits."),
+                                          optional(ResourcePort("depth", "Image", "The depth drawn with the ids, read round the same pixel: where in the scene it is, and which way the surface there faces.")) }, {},
                               "Lets a click on the picture pick an entity: reads back the pixel asked about. It costs nothing in a frame nobody asks.", nullptr });
             types.push_back({ "DebugDraw", "Passes",
                               { ResourcePort("image", "Image", "The picture they are drawn over."),
@@ -1293,24 +1452,120 @@ namespace kgraph
                                   "unwired as `param.<name>` and `push.<name>`, a model matrix among them: wired from a ForEach, a draw for each of its elements; "
                                   "otherwise, one draw.", nullptr });
             }
+            // ---- colour, turns, the frame before, and what the device can do ------------------------------------------
+            {
+                const std::vector<std::string> spaces { "eSrgb", "eLinear", "eGamma22", "eHsv", "eKelvin" };
+                Port color = hinted(Any("color", "A colour: red, green, blue and, if given, alpha, which is passed on as it is. Of eKelvin, a temperature: 6500 is daylight."), "color");
+                Port from = chosen({ "from", PortKind::eValue, "string", false, "What the colour is: eSrgb as a display shows it (a picked colour), eLinear in the terms light adds "
+                                     "up in, eGamma22 the display's curve as the power 2.2, eHsv hue (0 to 1), saturation and value of an sRGB colour, eKelvin a temperature.", nullptr }, spaces);
+                from.initial = Value("eSrgb");
+                Port to = chosen({ "to", PortKind::eValue, "string", false, "What it is made: any of from's but eKelvin.", nullptr }, { "eLinear", "eSrgb", "eGamma22", "eHsv" });
+                to.initial = Value("eLinear");
+                types.push_back({ "ColorConvert", "Values", { std::move(color), std::move(from), std::move(to) },
+                                  { { "out", PortKind::eValue, "vector", false, "The colour, as `to` says.", nullptr },
+                                    { "luminance", PortKind::eValue, "number", false, "How bright it is, in linear terms (Rec. 709): what an exposure is worked out of.", nullptr } },
+                                  "A colour from one way of saying it to another: a picked colour into the linear terms a shader adds light up in — by the sRGB curve, "
+                                  "or by the power 2.2 — or back; to and from hue, saturation and value; and a temperature as the colour it glows.", nullptr });
+
+                // Turns as quaternions: x, y, z and w, as an entity's `orientation` is.
+                const auto quaternion = [&](std::string name) { return Port { std::move(name), PortKind::eValue, "vector", false, "A turn as a quaternion: x, y, z, w.", nullptr }; };
+                value("QuatFromEuler", { Any("rotation", "x, y and z in degrees: about X, then Y, then Z, as an entity's rotation is.") }, "vector", "A turn of three angles in degrees as a quaternion.");
+                value("QuatFromAxisAngle", { Any("axis", "The axis it turns about."), Number("angle", "How far, in degrees.") }, "vector", "A turn about an axis as a quaternion.");
+                value("QuatToEuler", { quaternion("q") }, "vector", "A quaternion as x, y and z in degrees: what an entity's rotation would be.");
+                value("QuatToMatrix", { quaternion("q") }, "matrix", "A quaternion as the matrix that turns as it does.");
+                value("QuatMultiply", { quaternion("a"), quaternion("b") }, "vector", "a after b: the turn b, then a.");
+                value("QuatInverse", { quaternion("q") }, "vector", "The turn back.");
+                value("QuatSlerp", { quaternion("a"), quaternion("b"), Number("t") }, "vector", "From a to b by the shortest way: a at t 0, b at t 1, and turning evenly between.");
+                value("QuatRotate", { quaternion("q"), Any("vector", "A vector of three.") }, "vector", "A vector turned by the quaternion.");
+
+                Port size { "size", PortKind::eValue, "vector", false, "How big, in pixels, the picture it is for is: a Screen's `size`.", nullptr };
+                Port phases = Number("phases", "How many places within a pixel it goes through before it starts again: 8 when not given.");
+                phases.optional = true;
+                phases.initial = Value(8);
+                Port projection { "projection", PortKind::eValue, "matrix", false, "A projection to move by it: a Perspective's. `jittered` is it moved.", nullptr };
+                projection.optional = true;
+                types.push_back({ "Jitter", "Cameras", { Number("frame", "Which frame: a Time's `frame`."), std::move(phases), std::move(size), std::move(projection) },
+                                  { { "pixels", PortKind::eValue, "vector", false, "Where in the pixel this frame looks, from its middle: x and y, each -0.5 to 0.5.", nullptr },
+                                    { "clip", PortKind::eValue, "vector", false, "The same, in clip space: what a projection is moved by, 2 * pixels / size.", nullptr },
+                                    { "jittered", PortKind::eValue, "matrix", false, "`projection`, moved by it: what a temporal antialiasing draws with.", nullptr },
+                                    { "index", PortKind::eValue, "number", false, "Which of the places it is, from 0.", nullptr } },
+                                  "A place within a pixel for each frame, from a Halton (2, 3) sequence: what moves the projection a little every frame, so that the frames "
+                                  "a temporal antialiasing blends see between the pixels.", nullptr });
+
+                Port last = Any("value", "What it is given: a number, a vector, a matrix.");
+                types.push_back({ "LastFrame", "Flow", { std::move(last) },
+                                  { { "out", PortKind::eValue, "value", false, "What it was given the frame before. The first frame, what it is given now.", nullptr },
+                                    { "valid", PortKind::eValue, "bool", false, "False the first frame, when there is no frame before.", nullptr } },
+                                  "A value as it was the frame before: last frame's viewProjection, for what moved since.", nullptr });
+
+                std::vector<std::string> features;
+                for (const char* feature : { "eMeshShader", "eRayTracing", "eShaderFloat64", "eShaderInt64", "eShaderInt16", "eShaderFloat16", "eInt64Atomics",
+                                             "eAtomicFloat32", "eAtomicFloat64", "eMultiDrawIndirect", "eDrawIndirectCount", "eGeometryShader", "eTessellationShader",
+                                             "eFillModeNonSolid", "eWideLines", "eSamplerAnisotropy", "eAsyncCompute" })
+                    features.emplace_back(feature);
+                types.push_back({ "DeviceSupports", "Values", { chosen({ "feature", PortKind::eValue, "string", false, "What is asked of the device.", nullptr }, std::move(features)) },
+                                  { { "out", PortKind::eValue, "bool", false, "Whether it has it.", nullptr } },
+                                  "Whether the device can do something — mesh shaders, ray tracing — as a value: what a Switch takes, to go another way where it cannot.", nullptr });
+                types.back().inputs.front().initial = Value("eMeshShader");
+            }
+            // ---- what is read of the entities as a whole, written into them, and drawn to see them ---------------------
+            {
+                Port of { "entities", PortKind::eValue, "entities", false, "The entities: an Entities node's, a Filter's.", nullptr };
+                types.push_back({ "SceneBounds", "Scene", { of },
+                                  { { "min", PortKind::eValue, "vector", false, "The least corner of the box round all of them: each one's mesh where it is, or where it is when it has none.", nullptr },
+                                    { "max", PortKind::eValue, "vector", false, "Its greatest corner.", nullptr },
+                                    { "center", PortKind::eValue, "vector", false, "Its middle.", nullptr },
+                                    { "radius", PortKind::eValue, "number", false, "Half its diagonal: the sphere round it.", nullptr },
+                                    { "count", PortKind::eValue, "number", false, "How many there are.", nullptr } },
+                                  "The box round entities, as values: what a ShadowCascades' bounds are, and how far away a camera is to see all of them.", nullptr });
+                Port component = hinted({ "component", PortKind::eValue, "string", false, "The component written.", nullptr }, "component");
+                Port field { "field", PortKind::eValue, "string", false, "Its field, by name: a number, a vector, a matrix, true or false.", nullptr };
+                Port entity = hinted({ "entity", PortKind::eValue, "string", false, "Which entity, by its name: the first that has the component, when not given.", nullptr }, "entity");
+                entity.optional = true;
+                types.push_back({ "WriteComponent", "Scene", { std::move(component), std::move(field), std::move(entity), Any("value", "What it is made to hold.") },
+                                  { { "written", PortKind::eValue, "bool", false, "Whether there was such an entity to write.", nullptr } },
+                                  "Writes a value into a component's field of an entity, when it is not what it holds already: what the graph worked out, handed "
+                                  "to a script or shown in the inspector — an exposure, a count read back.", nullptr });
+
+                Port kind = chosen({ "kind", PortKind::eValue, "string", false, "What is drawn: eLine and eArrow from `from` to `to`, eBox from `min` to `max`, eSphere round "
+                                     "`center` of `radius`, eFrustum what `matrix` (a viewProjection) sees, eAxes of `matrix` (a transform) `size` long, eTransformedBox the unit cube "
+                                     "(-1 to 1) turned by `matrix`.", nullptr }, { "eLine", "eArrow", "eBox", "eSphere", "eFrustum", "eAxes", "eTransformedBox" });
+                kind.initial = Value("eFrustum");
+                const auto given = [&](std::string name, std::string type, std::string doc) {
+                    Port port { std::move(name), PortKind::eValue, std::move(type), false, std::move(doc), nullptr };
+                    port.optional = true;
+                    return port;
+                };
+                Port color = hinted(given("color", "vector", "Its colour: red, green, blue, alpha."), "color");
+                color.initial = Value(Value::List { 1, 1, 0, 1 });
+                types.push_back({ "DebugShapes", "Flow",
+                                  { std::move(kind), given("from", "vector", "Where a line starts: three numbers for each, as many as there are lines."),
+                                    given("to", "vector", "Where it ends."), given("min", "vector", "A box's least corner: three numbers for each."), given("max", "vector", "Its greatest."),
+                                    given("center", "vector", "A sphere's middle: three numbers for each."), given("radius", "value", "How far it reaches: one for all, or one for each."),
+                                    given("matrix", "matrix", "A matrix: sixteen numbers for each — ShadowCascades' four matrices are four frusta."),
+                                    given("size", "number", "How long axes are: 1 when not given."), std::move(color) },
+                                  {},
+                                  "Lines in the scene where values say, every frame: a cascade's frustum, a light's reach, a box of bounds. A DebugDraw pass draws them, "
+                                  "with the rest of the scene's debug shapes.", nullptr });
+            }
             // What is worked out of values, by what kind of working out it is: a list of them all is too long to look down.
-            static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance", "Linear", "Reflect", "Refract", "Project" };
-            static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select" };
-            static const std::set<std::string_view> plain { "Number", "Bool", "String", "Vector", "Color", "Constant", "Component", "Split", "ImageExtent", "VertexLayout", "Append", "Slice",
+            static const std::set<std::string_view> vectors { "Length", "Normalize", "Dot", "Cross", "Distance", "Reflect", "Refract", "Project", "ColorConvert" };
+            static const std::set<std::string_view> logic { "Less", "LessOrEqual", "Greater", "GreaterOrEqual", "Equal", "NotEqual", "Not", "And", "Or", "Xor", "Select", "Any", "All" };
+            static const std::set<std::string_view> plain { "Bool", "String", "Color", "Constant", "DeviceSupports", "Split", "ImageExtent", "VertexLayout", "Append", "Slice",
                                                             "Float", "Double", "Int", "UInt", "Vec2", "Vec3", "Vec4", "IVec2", "IVec3", "IVec4", "UVec2", "UVec3", "UVec4" };
             static const std::set<std::string_view> matrices { "MatrixMultiply", "MatrixInverse", "MatrixTranspose", "MatrixDeterminant", "MatrixTranslate", "MatrixRotate",
-                                                               "MatrixAxisAngle", "MatrixScale", "MatrixCompose", "TransformPoint", "TransformDirection", "TransformPlane" };
+                                                               "MatrixAxisAngle", "MatrixScale", "MatrixCompose", "TransformPoint", "TransformDirection", "TransformPlane",
+                                                               "QuatFromEuler", "QuatFromAxisAngle", "QuatToEuler", "QuatToMatrix", "QuatMultiply", "QuatInverse", "QuatSlerp", "QuatRotate" };
             for (auto& type : types) {
                 if (type.category == "Values" && !plain.contains(type.name))
                     type.category = vectors.contains(type.name) || matrices.contains(type.name) ? "Vectors" : logic.contains(type.name) ? "Logic" : "Math";
-                type.keywords = Keywords(type.name);
+                if (type.keywords.empty()) type.keywords = Keywords(type.name);
                 type.icon = IconOf(type.name, type.category);
                 type.level = LevelOf(type);
                 type.composite = type.name == "Function";
                 for (auto& port : type.inputs) Limit(type.name, port);
+                Shaped(type);
                 Group(type);
-                // A number or a vector said of no kind: kept, for the graphs made with it, and offered as the kinds there are.
-                if (type.name == "Number" || type.name == "Vector") type.listed = false;
                 if (type.category == "Passes") {
                     Port enabled { "enabled", PortKind::eValue, "bool", false, "False to leave the pass out: it is not run, and nothing waits for it.", nullptr };
                     enabled.optional = true;
@@ -1339,7 +1594,7 @@ namespace kgraph
                 // Where each input is set. A number, a truth, a vector or a colour of what works values out is set on the
                 // node, where it is read; so is a pass's being on, a loop's count. What only a node can make —
                 // a struct, a matrix, a vertex layout — is wired, from the node that sets it up. The rest is the inspector's.
-                static const std::set<std::string_view> worked { "Values", "Math", "Vectors", "Logic", "Cameras" };
+                static const std::set<std::string_view> worked { "Values", "Math", "Vectors", "Logic", "Cameras", "Random" };
                 static const std::set<std::string_view> lenses { "ShadowCascades", "PointShadows" };
                 for (auto& port : type.inputs) {
                     if (port.kind != PortKind::eValue) continue;
@@ -1424,6 +1679,61 @@ namespace kgraph
         return type == "Dispatch" || type == "CopyBuffer" || type == "ClearBuffer" || type == "Copy" || type == "CopyBufferToImage" || type == "CopyImageToBuffer";
     }
 
+    Shape ShapeNamed(const std::string_view name)
+    {
+        if (name == "Float") return { Scalar::eFloat, 1 };
+        if (name == "Double") return { Scalar::eDouble, 1 };
+        if (name == "Int") return { Scalar::eInt, 1 };
+        if (name == "UInt") return { Scalar::eUInt, 1 };
+        if (name == "Bool") return { Scalar::eBool, 1 };
+        const auto vector = [&](const std::string_view prefix, const Scalar scalar) -> Shape {
+            if (name.size() != prefix.size() + 1 || !name.starts_with(prefix) || name.back() < '2' || name.back() > '4') return {};
+            return { scalar, static_cast<std::uint8_t>(name.back() - '0') };
+        };
+        for (const auto& [prefix, scalar] : { std::pair { "Vec", Scalar::eFloat }, { "IVec", Scalar::eInt }, { "UVec", Scalar::eUInt } })
+            if (const Shape shape = vector(prefix, scalar); shape.Known()) return shape;
+        return {};
+    }
+
+    std::string ShapeName(const Shape shape)
+    {
+        const bool one = shape.components == 1;
+        switch (shape.scalar) {
+            case Scalar::eFloat: return one ? "Float" : std::format("Vec{}", shape.components);
+            case Scalar::eDouble: return one ? "Double" : std::format("Double{}", shape.components);
+            case Scalar::eInt: return one ? "Int" : std::format("IVec{}", shape.components);
+            case Scalar::eUInt: return one ? "UInt" : std::format("UVec{}", shape.components);
+            case Scalar::eBool: return one ? "Bool" : std::format("Bool{}", shape.components);
+            case Scalar::eNone: break;
+        }
+        return {};
+    }
+
+    Value Conform(const Value& value, const Shape shape)
+    {
+        if (!shape.Known()) return value;
+        const auto number = [&](const Value& each) -> Value {
+            double n;
+            if (const double* given = each.Number()) n = *given;
+            else if (const bool* flag = each.Bool()) n = *flag ? 1.0 : 0.0;
+            else return each;
+            switch (shape.scalar) {
+                case Scalar::eFloat: return static_cast<double>(static_cast<float>(n));
+                case Scalar::eInt: return std::clamp(std::round(n), -2147483648.0, 2147483647.0);
+                case Scalar::eUInt: return std::clamp(std::round(n), 0.0, 4294967295.0);
+                case Scalar::eBool: return n != 0.0;
+                default: return n;
+            }
+        };
+        const auto* items = value.Items();
+        if (shape.components == 1) return items ? (items->empty() ? value : number(items->front())) : number(value);
+        if (!items && !value.Number() && !value.Bool()) return value;
+        Value::List made;
+        for (std::size_t i = 0; i < shape.components; ++i)
+            made.push_back(items ? (i < items->size() ? number((*items)[i]) : number(Value(0.0))) : number(value));
+        return Value(std::move(made));
+    }
+
     bool Applies(const Port& port, const Node& node)
     {
         if (port.when.input.empty()) return true;
@@ -1465,6 +1775,26 @@ namespace kgraph
         static const std::vector<NodeType> types = Build();
         return types;
     }
+
+    std::string_view LayoutTypeOf(const std::string_view fieldType)
+    {
+        static const std::map<std::string_view, std::string_view> layouts {
+            { "f32", "eFloat" }, { "f64", "eFloat" }, { "i32", "eInt" }, { "u32", "eUInt" }, { "bool", "eBool" }, { "bool32", "eBool" },
+            { "vec2", "eVec2" }, { "vec3", "eVec3" }, { "vec4", "eVec4" }, { "quat", "eVec4" }, { "ivec2", "eIVec2" }, { "ivec3", "eIVec3" }, { "ivec4", "eIVec4" },
+            { "uvec2", "eUVec2" }, { "uvec3", "eUVec3" }, { "uvec4", "eUVec4" }, { "mat4", "eMat4" } };
+        const auto it = layouts.find(fieldType);
+        return it == layouts.end() ? std::string_view {} : it->second;
+    }
+
+    const std::vector<std::pair<std::string_view, std::string_view>>& PlaceFields()
+    {
+        static const std::vector<std::pair<std::string_view, std::string_view>> places {
+            { "worldPosition", "eVec3" }, { "forward", "eVec3" }, { "up", "eVec3" }, { "right", "eVec3" }, { "position", "eVec3" }, { "rotation", "eVec3" },
+            { "scale", "eVec3" }, { "orientation", "eVec4" }, { "matrix", "eMat4" }, { "normalMatrix", "eMat4" }, { "previousMatrix", "eMat4" }, { "entityId", "eUInt" } };
+        return places;
+    }
+
+    bool PlacedByDefault(const std::string_view name) { return name == "worldPosition" || name == "forward" || name == "matrix"; }
 
     std::string_view LevelName(const Level level)
     {

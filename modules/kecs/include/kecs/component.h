@@ -193,13 +193,16 @@ namespace kecs
     public:
         explicit FieldList(std::vector<FieldDescription>& fields) : _fields(fields) {}
 
-        /** @brief Declares the member @p member as a field called @p name. */
+        /**
+         * @brief Declares the member @p member as a field called @p name: of the type its C++ type is called (Name), or
+         *        @p type where that says too little — a reference to any resource that is always a mesh, "Mesh".
+         */
         template <typename F>
-        FieldList& Field(std::string name, F T::* member)
+        FieldList& Field(std::string name, F T::* member, const std::string_view type = {})
         {
             FieldDescription field;
             field.name = std::move(name);
-            field.type = std::string(Name<F>::value);
+            field.type = std::string(type.empty() ? Name<F>::value : type);
             // Where the member is in a T, without making one.
             alignas(T) static const std::byte storage[sizeof(T)] {};
             const T* object = reinterpret_cast<const T*>(storage);

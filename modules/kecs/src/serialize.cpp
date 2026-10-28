@@ -158,6 +158,13 @@ namespace kecs
         return it == _codecs.end() ? nullptr : &it->second;
     }
 
+    void Codecs::Reads(std::string type, std::string was) { _reads.emplace(std::move(type), std::move(was)); }
+
+    bool Codecs::ReadsAs(const std::string_view type, const std::string_view was) const
+    {
+        return type == was || _reads.contains(std::pair { std::string(type), std::string(was) });
+    }
+
     Codecs& Codecs::Default()
     {
         static Codecs codecs;
@@ -364,7 +371,7 @@ namespace kecs
                         const auto was = saved->second.fields.find(fieldName);
                         // A field the file's type does not list — newer than it, written in by hand or by a script — is read
                         // as the world's type has it; one it lists otherwise than the world has it is left at its default.
-                        if (!field || (was != saved->second.fields.end() && (was->second.first != field->type || was->second.second != field->size))) {
+                        if (!field || (was != saved->second.fields.end() && (!codecs.ReadsAs(field->type, was->second.first) || was->second.second != field->size))) {
                             problems.insert(std::format("'{}.{}' is not what it was when saved: left at its default", name, fieldName));
                             continue;
                         }

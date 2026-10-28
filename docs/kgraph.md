@@ -205,6 +205,10 @@ works on 32-bit uints, in buffers with `eStorage`:
 | **SunShadows** | `entities`, `cascades` (a buffer whose first four matrices are the cascades'), `matrices` (the same four, a ShadowCascades' `matrices`), `layout` (a mesh's vertex layout), `size` (4096), `without` (components whose entities cast none: `["PointLight"]`) | `atlas`: four cascades' depth, `size` each way, two by two, each entity with a Mesh drawn as each cascade sees it (`koral_shadow`), again only when what it would draw has changed |
 | **Bloom** | `picture` (an image of light, `eStorage`), `sampler` (linear), `threshold` (1), `knee` (0.5), `strength` (1/12) | the picture with what is brighter than `threshold` bled round it, in place (`koral_bloom`): six levels down, five up; and `picture`, for what comes after |
 | **Tonemap** | `picture`, `exposure` (1) | `picture`: an image of eight bits a channel the window's size, exposed, tone mapped (ACES) and encoded for the display (`koral_tonemap`) |
+| **TAA** | `picture`, `depth`, `viewProjection` (this frame's, not jittered), `blend` (0.1) | `picture`: an image like it of the picture blended with what this made the frame before, where each pixel was then (from its depth and the frame before's viewProjection, a LastFrame's), held to the colours round it now in YCoCg so that what moved leaves no trail (`koral_taa`). Its history is a History of what it makes; a frame with none — the first, another size — is the picture as it is. Draw with a Jitter's `jittered` projection |
+| **HiZ** | `depth`, `reversed` (0) | `pyramid`: 512 by 256, nine levels of R32F, each texel the farthest depth of what it covers (`koral_hiz`): of a reversed depth, the least |
+| **InstanceCull** | `instances`, `stride`, `matrixOffset`, `ranges`, `drawCount`, `viewProjection` (as CullInSight's), `early`, `earlyVisible`, `late`, `lateVisible` (two IndirectDraws in eGPU), `depth` (what the early draw draws into), `reversed`, `count` (65536: how many instances at most) | two phases of an indirect draw, on the GPU (`koral_occlusion`): `early` draws what was seen the frame before and is in sight; a HiZ of what it drew; `late` what is in sight, was not seen and is not behind it. Whether each is seen is kept for the next frame. Two Draws of the commands — the late one `load` — and each draw's shader finds its instance through its own `visible`. Also `pyramid` |
+| **Lights** | — | `lights`: every DirectionalLight, then PointLight, then SpotLight of the scene as koral_lights.slang's `KoralLight` (64 bytes: position and range, direction and kind, linear colour times intensity and the cosine of the spot's inner angle, of its outer); `count`, and `directional`, `points` and `spots` |
 
 A scene runs its RigidBodies on the GPU with no PhysicsSimulation: XpbdRigidBodies on a setup page; FixedStep and XpbdStep
 (wired from it) on a page of the fixed step; and a WriteBack of XpbdStep's `bodies` (stride 112, `position` 96,
@@ -227,10 +231,10 @@ the ones below.
 
 | Level | What it is | Examples |
 |---|---|---|
-| 0 value | worked out on the CPU, and what routes it | Number, Math, Vectors, Logic, View, Perspective, Switch, Bundle, Reference |
+| 0 value | worked out on the CPU, and what routes it | Float, Math, Vectors, Logic, View, Perspective, Switch, Bundle, Reference |
 | 1 resource | a GPU object | Image, Buffer, Sampler, ImageView, the pipelines, Primitive, ImageFile |
 | 2 command | one thing done on the GPU | Draw, Dispatch, TraceRays, Blit, Copy, Clear |
-| 3 scene | what is read of the entities, and assembled of them | Entities, Filter, ForEach, MeshPack, IndirectDraws, Meshlets, RayScene, ShaderBuffer, BufferBuilder |
+| 3 scene | what is read of the entities, and assembled of them | Entities, Filter, ForEach, MeshPack, IndirectDraws, Meshlets, RayScene, ShaderBuffer, BufferBuilder, ComponentBuffer |
 | 4 technique | a way of drawing or working, whole | a Function's call: Bloom, Tonemap, SunShadows, RadixSort |
 
 `NodeType::composite` says it is made of other nodes: a Function's call, written out as its function's nodes before
@@ -251,22 +255,49 @@ the editor will build its node list and its nodes from.
 - **Values:** numbers of a kind — Float (32 bits, as a shader's `float`), Double, Int and UInt (what they are given
   rounded toward zero and kept within 32 bits; a UInt none or more) — and vectors of a size and a kind: Vec2, Vec3 and
   Vec4 of floats, IVec2 to IVec4 of ints, UVec2 to UVec4 of uints, each component given (0 when not). Bool, String,
-  Color, Constant (`ePi`, `eTau`, `eE`, `eSqrt2`, `ePhi`), Component, and Split (a vector's `x`, `y`, `z`, `w` as
-  outputs of their own). Number and Vector, of no kind, are not offered any more: a graph that has them keeps them.
+  Color, Constant (`ePi`, `eTau`, `eE`, `eSqrt2`, `ePhi`), and Split (a vector's `x`, `y`, `z`, `w` as outputs of their
+  own). **ColorConvert** says a colour another way: `from` and `to` each of `eSrgb` (as a display shows it: a picked
+  colour), `eLinear` (the terms light adds up in), `eGamma22` (the display's curve as the power 2.2), `eHsv` (hue 0 to 1,
+  saturation and value, of an sRGB colour), and `from` `eKelvin` too (a temperature, as the colour it glows); alpha is
+  passed on, and `luminance` is how bright it is in linear terms. **DeviceSupports** is whether the device has a
+  `feature` — `eMeshShader`, `eRayTracing`, `eAsyncCompute`... — as true or false, for a Switch to go another way where it
+  has not. Number, Vector and Component are no more: a Double, a Vec2 to Vec4 and a Split's output are what they were.
+- **Random numbers** (their own section, Random): a node for each of `<random>`'s distributions — **RandomUniform** (`min`
+  to `max`, 0 to 1), **RandomNormal** and **RandomLognormal** (`mean`, `stddev`), **RandomExponential** and
+  **RandomPoisson** (`lambda`), **RandomGamma** and **RandomWeibull** (`shape`, `scale`), **RandomExtremeValue** and
+  **RandomCauchy** (`location`, `scale`), **RandomChiSquared** and **RandomStudentT** (`degrees`), **RandomFisherF**
+  (`degrees`, `denominatorDegrees`), **RandomBernoulli** and **RandomGeometric** (`p`), **RandomBinomial** (`trials`, `p`)
+  and **RandomNegativeBinomial** (`successes`, `p`) — each with a `seed`, and a `type` that is Auto unless it is set to
+  Float to UVec4. Auto is the shape of the input it is wired to — a Dispatch's `push.tint` of a `float4` is four numbers,
+  an Int's `value` a whole one — through what takes any kind and gives what it is given (an Add, a Lerp) to what that is
+  wired to; the first wire that says, and a Float when none does (`Runtime`: `WiredShape`). One built before what it is
+  wired to says — a pipeline built after it — is drawn again once that does. Each of a distribution's inputs is a number for
+  every component or a vector, one for each. A whole kind's numbers are whole: a uniform one each from `min` to `max`,
+  both included, as likely; any other rounded to the nearest and kept within what the kind holds. It is drawn when it is
+  built, and the same seed gives the same numbers on any machine: the generator is `std::mt19937_64`, whose output the
+  standard fixes, and the distributions are the engine's own (`kgraph/random.h`), not a standard library's, whose
+  algorithms differ. A **RandomDevice** is a seed no one chose, from `std::random_device`: a new one each time the graph is
+  opened, kept while it runs whatever else is edited, and drawn again when its `draw` changes.
 - **Math:** Add, Subtract, Multiply, Divide, Min, Max, Pow, Mod, MultiplyAdd, Negate, Abs, Floor, Ceil, Round,
   Trunc, Fract, Sign, Saturate, OneMinus, Reciprocal, Sqrt, InverseSqrt, Exp, Exp2, Log, Log2, Log10, Sin, Cos,
   Tan, Asin, Acos, Atan, Atan2, Sinh, Cosh, Tanh, Radians, Degrees, Clamp, Lerp, InverseLerp, Remap (`value` from
   `fromMin`–`fromMax` to `toMin`–`toMax`), Smoothstep, Step. They work on numbers and, a component at a time, on
   vectors; a number goes with every component.
 - **Vectors:** Length, Normalize, Dot, Cross, Distance, Reflect, Refract (`eta`; all zero when it is all
-  reflected), Project (`a` along `onto`). Matrices of four by four: MatrixMultiply, MatrixInverse, MatrixTranspose,
+  reflected), Project (`a` along `onto`), ColorConvert. Quaternions, x y z w as an entity's `orientation` is:
+  QuatFromEuler (degrees, as an entity's rotation), QuatFromAxisAngle, QuatToEuler, QuatToMatrix, QuatMultiply (`a`
+  after `b`), QuatInverse, QuatSlerp (the shorter way) and QuatRotate (a vector turned). Matrices of four by four: MatrixMultiply, MatrixInverse, MatrixTranspose,
   MatrixDeterminant; MatrixTranslate, MatrixRotate (x, y, z in degrees, as an entity's rotation), MatrixAxisAngle,
   MatrixScale and MatrixCompose (position, rotation and scale, as the world composes an entity's); TransformPoint
   (divided by its w), TransformDirection and TransformPlane (a plane where a matrix that moves points puts it).
-- **Cameras:** View, Perspective, Orthographic, Frustum, Oblique, Paraboloid, CubeFace, ShadowCascades and
-  PointShadows. See [The scene](#the-scene).
-- **Logic:** Less, LessOrEqual, Greater, GreaterOrEqual, Equal, NotEqual, Not, And, Or, Xor, and Select
-  (`a` when its condition is true, `b` when not).
+- **Cameras:** View, Perspective, Orthographic, Frustum, Oblique, Paraboloid, CubeFace, ShadowCascades, PointShadows and
+  Jitter. See [The scene](#the-scene).
+- **Logic:** Less, LessOrEqual, Greater, GreaterOrEqual, Equal, NotEqual, Not, And, Or, Xor, Any, All and Select
+  (`a` when its condition is true, `b` when not). Less to GreaterOrEqual compare vectors a component at a time — a
+  number with every component — giving true or false for each; Any and All say those as one, and a Select given one
+  for each component picks each component of `a` or `b` by its own. Equal and NotEqual compare whole values.
+- **LastFrame** is a value as it was the frame before — last frame's viewProjection, for what moved since — and `valid`,
+  false on the first frame.
 - **VertexLayout** describes a mesh's vertices: a list of `{ "semantic": "POSITION", "type": "eFloat",
   "count": 3 }`, packed in the order given. Its output goes to a pipeline's `vertexShader.layout` and to a
   Mesh node's `vertexLayout`.
@@ -275,20 +306,31 @@ the editor will build its node list and its nodes from.
   (the inside ones, in). Its second output,
   `layout`, is what a pipeline that draws it takes as `vertex.layout`.
 - **Entities** is every entity, a **Filter** those of them with and without components, an **Entity** one of them (the
-  first with a component, or one by name), and a **ForEach** reads any
+  first with a component, or one by name — of no component, the one named, wherever it is), and a **ForEach** reads any
   component of the world — the scene's Camera and lights are the engine's package's scripts —
-  every entity of it; **ComponentValue** and **EntityTransform** one field, or one place, of an entity.
+  every entity of it. Each gives where each entity is: `matrix`, `normalMatrix`, `previousMatrix` (where it was the
+  frame before: what motion vectors are worked out from), `worldPosition` and the rest.
+  **SceneBounds** is the box round some of them (`entities`: an Entities node's, a Filter's) — each one's mesh where it
+  is, or where it is when it has none — as `min`, `max`, `center`, `radius` and `count`: what ShadowCascades' bounds are.
+  **WriteComponent** writes a `value` into a `component`'s `field` of an entity (`entity` by name, or the first that has
+  it), when it holds something else: what the graph worked out, for a script or the inspector.
   **View** and a lens — **Perspective**, **Orthographic**, **Frustum**, **Oblique**, **Paraboloid** — are what a
-  camera or a light sees, **Linear** a colour as light adds it up, **Collect** every element's value as one list,
-  and **ShadowCascades** and **PointShadows** the shadow maps' matrices. **DataBuffer**
-  packs values into a buffer a shader reads. See [The scene](#the-scene).
+  camera or a light sees, **ColorConvert** a colour as light adds it up, **Collect** every element's value as one list,
+  and **ShadowCascades** and **PointShadows** the shadow maps' matrices. A BufferBuilder `eUniform` packs values into a
+  block a shader reads. See [The scene](#the-scene).
+- **DebugShapes** draws lines in the scene where values say, every frame — `kind` eLine or eArrow (`from`, `to`), eBox
+  (`min`, `max`), eSphere (`center`, `radius`), eFrustum (`matrix`, a viewProjection), eAxes (`matrix`, `size`) or
+  eTransformedBox (the cube -1 to 1 turned by `matrix`), in `color` — as many as its values have: ShadowCascades'
+  four matrices are four frusta. A DebugDraw pass draws them, with the scene's other debug shapes.
 - **ShaderBuffer** is a buffer a shader declares, with an input for each field of its struct, and **ForEach** is
   every entity that has a component, an element at a time: an output for each of its fields, and where it is. Wired together they are an element for each entity. See [A shader's buffer, from the world](#a-shaders-buffer-from-the-world).
 - **BufferBuilder** is a buffer whose element is laid out on the node. See [A buffer laid out on its node](#a-buffer-laid-out-on-its-node).
+- **ComponentBuffer** is every entity of a component as a buffer, laid out as the component is: a ForEach and a
+  BufferBuilder as one node. See [A component's buffer](#a-components-buffer).
 - **A node for each component.** Every component of the world — the package's, a project's scripts', a pipeline's — is
-  offered as two more: `PointLight`, a ForEach of it, and `PointLight Buffer`, a BufferBuilder laid out as that
-  ForEach's struct is (`Runtime::Presets()`). Neither is a type of its own: what is saved is the ForEach and the
-  BufferBuilder they are, and the editor offers them, and `Document::AddNode` makes them, by those names.
+  offered as one more: `PointLight`, a ForEach of it (`Runtime::Presets()`). It is no type of its own: what is saved
+  is the ForEach it is, and the editor offers it, and `Document::AddNode` makes it, by that name. Its buffer is a
+  ComponentBuffer, told the component.
 - **Screen** is the scene's window. Its `extent`, `size`, `width`, `height` and `aspect` outputs are the window's
   size: an image whose `extent` is wired to it is rebuilt when the window is resized, and so is whatever is
   made of that image. **Reference** stands for another node by id: how a pass brings in what an
@@ -313,7 +355,10 @@ the editor will build its node list and its nodes from.
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
   multisampled image made an ordinary one), Copy (image to image of one size), CopyBuffer, ClearBuffer,
   CopyBufferToImage, CopyImageToBuffer, GenerateMipmaps, Dispatch, TraceRays and Draw. Every command the
-  framework's command buffer records has a node, and each of its arguments is an input.
+  framework's command buffer records has a node, and each of its arguments is an input. A Clear clears every mip and
+  layer of an image: a depth image to its `depth` (1) and `stencil` (0), an image of whole numbers (UINT, SINT) to the
+  whole numbers its `color` says, as those bits rather than floats. See [Shorthands, and what comes back](#shorthands-and-what-comes-back)
+  for ComputePass, RenderTarget, History and Readback.
 
 Every pass node also takes `enabled`: false leaves the pass out, with the node still there and still ok.
 
@@ -322,6 +367,34 @@ CopyImageToBuffer (`kgraph::RunsAsync`) — also takes `async`: true runs it on 
 passes it does not depend on, ordered against them by what it reads and writes (`kor::PassBuilder::AsyncCompute`). One
 that uses the screen stays on the graphics queue, and on a device with no second queue it runs there in order, which is
 always correct; its node's note says which. `FrameGraph::Schedule` says where each pass ran.
+
+## Shorthands, and what comes back
+
+Some nodes are one node to whoever writes the graph and several to what runs it: written out before anything runs
+(`expand.cpp`, as a Function's call is), each under its own id, so that its outputs and its status are its own.
+
+- A **ComputePass** is a compute shader run: a ComputePipeline (`<id>/pipeline`) of its `module`, `entry`, `param.<name>`
+  and `constant.<name>`, and the node itself a Dispatch of it with the rest — `groups`, `cover`, `indirect`, `idle`,
+  `push.<name>`, `enabled`, `async`. Its shader's parameters are its ports (`Runtime::PortsOf`). A pipeline more than
+  one Dispatch runs is still a ComputePipeline and Dispatches.
+- A **RenderTarget** is an Image of a `format`, sized by the window — or by the image wired to `sizeOf` — times `scale`
+  (a number, or one each way), rounded up and at least a pixel: the Screen, a Multiply, a Ceil and a Max written out
+  (`<id>/screen`, `<id>/scaled`, `<id>/rounded`, `<id>/extent`). `extent` given is the size instead. `mipLevels` 0 is
+  every level down to a pixel. Its usage is what it is used as, as an Image's is; its `extent` out is what it worked out.
+- A **History** is what a buffer or an image (`of`) was when the frame before was over: a Keep on a page of its own
+  before every other (`@history`), copied when the frame begins, before anything writes `of`. What reads its `out`
+  during a frame reads the frame before's, while it writes `of` itself. `valid` is false until a frame has been copied
+  (the first, and after `of` is made anew). A Keep says `valid` as well, from the frame after it first copied. A kept
+  copy is made to be read — sampled, or as storage — whatever `of` was made for.
+- A **Readback** is a few numbers back on the CPU, as a value: of a `buffer`, `type` (eFloat, eUInt, eVec4...) at
+  `offset`; of an `image`, the texel at `texel` (x, y, and z or a layer) of `mip`, as many numbers as its format has
+  channels, each as a shader reads it (a half, a normalized integer). It is a pass: copied where it is among the passes,
+  into the next of four buffers of its own, a frame each, and read from the oldest — what the GPU is done with, three
+  frames late. `ready` is false until a copy has come back. What is wired from it follows it every frame.
+
+A **Screen** also gives the window's `format` (eBGRA8_UNORM...) and `scale` — how many of its pixels a point of the
+desktop is — as whoever runs the graph says (`Runtime::SetScreenLook`). A **Time** also gives `frame`: which frame this
+is, from 0, one more each frame the graph runs — a Jitter's.
 
 ## Loops and branches
 
@@ -412,6 +485,38 @@ An unsigned builder argument is at least 0. A Script node's `field.<name>` input
 and `[Logarithmic]`. Anything else is unbounded — a position, a matrix, what a math node works on. The graph does not
 check them: a value from a wire, or a file, is used as it is.
 
+`Port::shape` is exactly what a value input takes or a value output gives — `Shape`: the kind of its numbers (`Scalar`:
+float, double, int, uint, bool) and how many, 1 to 4 — where that is said: each number and vector node's inputs and
+output, a Color's, a builder's argument of a number's kind, a pipeline's `constant.<name>` and a draw's `push.<name>` as
+their shaders declare them. It is not said of what takes any kind (a Math node's `a`), of what is not numbers, of a
+matrix, or of a whole of parts. An editor draws an input by its shape, not by what it holds: a `float4` four drags (or a
+colour) before anything is set, an int dragged a unit at a time, a uint at none or more, a bool a box to tick; and what is
+set of an input is made its shape (`Conform`: rounded to a whole number, kept within what an int or a uint holds, cut to a
+float's precision, as many numbers as it has) — so an Int holds 3, not 2.6, whatever was dragged or typed.
+
+### What a shader says of its inputs
+
+A Slang shader's push constants carry their defaults and, with `import koral_inspector;`
+(`packages/koral/shaders/koral_inspector.slang`), what the editor keeps them within and draws them as:
+
+```slang
+import koral_inspector;
+
+void computeMain(uint3 id : SV_DispatchThreadID,
+                 [Range(0, 50)] uniform float windSpeed = 10.0,
+                 [Color] uniform float4 tint = float4(1, 0.5, 0, 1),
+                 [Min(0)] uniform int steps = 3)
+```
+
+`[Range(min, max)]`, `[Min(n)]`, `[Max(n)]`, `[Logarithmic]` and `[Color]` (a `float3` or `float4`) are a parameter's;
+Slang lets an attribute be a parameter's or a struct field's, not both, so a field's are `[FieldRange]`, `[FieldMin]`,
+`[FieldMax]`, `[FieldLogarithmic]` and `[FieldColor]`. A default becomes the input's `Port::initial`: what a draw given
+nothing for it runs with, and what an editor shows it as. Slang gives a scalar's; a vector's is read from the source — the
+entry point's parameters, or its struct's body — when it is written as numbers (`float4(1, 0.5, 0, 1)`, `float3(1)`); one
+worked out (`= speed * 2`) is said in the input's doc, and is zero. A specialization constant's default is its input's
+`initial` too. Koral carries both (`kor::Shader::Annotation`, on a `PushConstantField` and a pipeline's
+`PushConstantMember`); what an attribute means is the engine's.
+
 `Port::group` is the part of an inspector an input is in — a Draw's *Indirect*, *Depth*, *Stencil*; a builder's struct,
 `rasterizationState`; what three or more inputs share the start of the name of, `color[]` — and empty for what is at
 the top. `Port::when` is when it does anything: while another input is one of some values (a Draw's `indirectOffset`
@@ -482,7 +587,9 @@ it leaves unwired, and every push constant its shaders have, is each draw's own,
 - `param.<name>` for each parameter the pipeline's node leaves unwired, a resource (set 1). A sampled image whose
   sampler the pipeline does not wire has `param.<name>.sampler` beside it.
 - `push.<name>` for each push constant, by the name the shader gives it: a number, a vector, a matrix. One given
-  nothing is zero.
+  nothing is the default its shader declares it with (`uniform float speed = 10.0`), or zero for one declared with none;
+  and a new entity's component, of what its draws take from nobody else, starts as those defaults. See [What a shader
+  says of its inputs](#what-a-shader-says-of-its-inputs).
 
 Nothing is given by the engine behind a draw's back: a model matrix is a push constant like any other, wired.
 
@@ -580,12 +687,11 @@ these, which work out what is not held:
 | **Oblique** | A `projection` whose near plane is moved to a `plane` (a, b, c, d) as it is seen: a TransformPlane of the world's plane by the View's matrix. What is behind a mirror or under water is left out; x and y are as they were. |
 | **Paraboloid** | Half of all round a point, for a dual-paraboloid map. No matrix can bend a picture so: it gives a shader `params` (near, far, 1 / (far - near), 1 for the front or -1 for the back), and the `turn` that faces a view that half: a MatrixMultiply of it and the View's matrix. |
 | **CubeFace** | One `face` (0 to 5) of a cube round a point: its `direction` (+x, -x, +y, -y, +z, -z) and its `up`, as a cube map's layers have them. |
-| **Linear** | A colour as picked, in the linear terms light adds up in: red, green and blue to the power 2.2. |
+| **ColorConvert** | A colour as picked (`eSrgb`, or `eGamma22` as the power 2.2), in the linear terms light adds up in — or any of the other ways it says: see [Node types](#node-types). |
+| **Jitter** | A place within a pixel for each `frame` (a Time's), of a Halton (2, 3) sequence `phases` long (8): `pixels` (-0.5 to 0.5 each way), `clip` (2 * pixels / `size`), and `jittered`, a `projection` moved by it in clip space — what a temporal antialiasing draws with. |
 | **Collect** | `out`: a value worked out once an element of a ForEach, every element's one after another, as one list; `count`. |
 | **ShadowCascades** | A light's shadow maps, fitted to what a camera sees: `matrices` (four, one after another), `splits` (how far from the camera each reaches), `worldTexel`, `tileTexel`, `direction`. Inputs: the camera's `view` and `projection` (where its near and far planes are is read from it), `direction` (the way the light travels: a DirectionalLight's entity's `forward`), `resolution` of one cascade, `distance`, `lambda`, and `boundsMin` and `boundsMax` of what casts. |
 | **PointShadows** | See [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame). |
-| **ComponentValue** | `out`: one field of any component, of the first entity with it or the one `entity` names; `present`. |
-| **EntityTransform** | `matrix`, `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`, `scale`, `present`, of an entity by name. |
 
 Each lens gives `projection` (and `out`) and `inverseProjection`, with depth 0 at its near plane and 1 at its far
 one and Y pointing down, as the device has it — `flipY` false for one as glm makes it. A lens and a View know nothing
@@ -614,7 +720,10 @@ script's own camera component, with fields of its own, is wired the same way.
 
 The **main** View and the main lens (`main` true on each) are the scene's view. Whoever runs the graph can put its own
 in place of them (`Runtime::SetView`): the main View's matrix is then that, and the main Perspective has its field of
-view, near and far. That is how an
+view, near and far — or, given an `orthographic` height, is a box that tall, its depth the same way round as the
+lens's (an effect that works a position out of depth as a perspective would then sees it wrong). Entities it is
+told to leave out (`Runtime::SetHidden`) are in no list of entities with a Mesh, in that runtime alone: what lights
+them and the world are as they were. That is how an
 editor looks at a scene from where it likes; and what the editor's gizmo, `Runtime::ViewProjection()`, `CurrentView()`
 and a DebugDraw node go by is the main View's and its lens's. A View that is not main is left alone.
 
@@ -627,20 +736,19 @@ source's, so nothing is read or made twice. The editor's Game panel is one: the 
 editor's own view.
 
 These values are wired like any others: into Math and Vectors nodes (`Append`, `Slice` — `count` numbers of a list from its `first` —, `MatrixMultiply` and
-`MatrixInverse` among them) and into a **DataBuffer**, whose `field[n].value` inputs are packed one after
-another as a shader's block lays them out (std140: a number in four bytes, a vector of three or four
-aligned to sixteen, so a `float3` followed by a `float` share one `float4`). `field[n].type` says what a
-value is where its size doesn't: `eUInt`, or `eUVec4` for a `uint4` given one number. `usage` is `eUniform`
-for a block or `eStorage` for an array. So a shader's
+`MatrixInverse` among them) and into a **BufferBuilder** of `usage` `eUniform`, laid out as a shader's block is
+(std140: a number in four bytes, a vector of three or four aligned to sixteen, so a `float3` followed by a `float`
+share one `float4`). So a shader's
 
 ```slang
-struct FrameData { float4x4 viewProjection; float4 cameraPosition; float4 skyZenith; /* w: ambient */ };
+struct FrameData { float4x4 viewProjection; float4 cameraPosition; float3 skyZenith; float ambient; };
 ```
 
-is a DataBuffer with `seen`, `camera.position` (as `eVec4`), `sky.zenith` and
-`sky.ambient` wired to fields 0 to 3.
+is a BufferBuilder laid out `viewProjection` eMat4, `cameraPosition` eVec4, `skyZenith` eVec3 and `ambient` eFloat, with
+`seen`, `camera.position` (three numbers: the fourth is 0), `sky.zenith` and `sky.ambient` wired to them. See
+[A buffer laid out on its node](#a-buffer-laid-out-on-its-node).
 
-A node that reads the world, every value worked out from one, and every DataBuffer one reaches are brought
+A node that reads the world, every value worked out from one, and every buffer one reaches are brought
 up to date each frame without anything being built again: the value changes where it is, and the buffer is
 written. Anything else wired to such a value (an image's extent, a pipeline's constant) has it as it was
 when the graph was last set.
@@ -709,7 +817,7 @@ built again, with the pipeline that reads it, only when there are more than that
 struct and the node's fields follow. An input for a field the struct no longer has is an error on the node that
 lists the fields it does have.
 
-Values are as the component holds them: a colour is as it was picked, not converted to linear (a Linear node does
+Values are as the component holds them: a colour is as it was picked, not converted to linear (a ColorConvert does
 that), and an angle is in degrees. Pow, Radians and Cos nodes between the two do that for each entity.
 
 ### Bundles
@@ -770,6 +878,30 @@ it has room for that many: of a ForEach's elements, the first that many; with no
 is a camera's block — of the View and the Perspective of [The scene](#the-scene) — and the spots' array, an element
 a spot. The editor's inspector edits a layout a line a field.
 
+### A component's buffer
+
+A **ComponentBuffer** is a buffer of every entity that has its `component`, an element each, laid out as the component
+is. It is written out, before anything runs, as a ForEach of the component (`<id>/each`) and the node itself a
+BufferBuilder whose `layout` is the fields it holds, each wired from the ForEach's output of it. `with`, `without` and
+`where` are the ForEach's; `usage`, `count` and `after` the BufferBuilder's, and so are its outputs.
+
+`fields` is which it holds, by name: the component's numbers, vectors and matrices (a string or an asset is no field
+of a buffer), and where the entity is — `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`, `scale`,
+`orientation`, `matrix`, `normalMatrix`, `entityId`. Not given, it holds every field of the component, then
+`worldPosition`, `forward` and `matrix`. However they are ticked, they are laid out the component's first, as it
+declares them, then where the entity is in that order: the shader's struct is written so. A name the component has
+not is left out and said on the node. The inspector ticks them; another component chosen starts them again.
+
+A field wired by itself, `field.<name>`, takes its wire instead of the entity's: a camera's `viewProjection` worked
+out by a lens, in a buffer of the rest of the Camera. One wired that is not ticked is left out, and said.
+
+```json
+{ "id": "spot data", "type": "ComponentBuffer", "inputs": { "component": "SpotLight",
+    "fields": [ "color", "range", "outerAngle", "worldPosition", "forward" ] } }
+```
+
+is the spots, as `struct Spot { float3 color; float range; float outerAngle; float3 worldPosition; float3 forward; }`.
+
 A light's camera is a View and a lens like the scene's, worked out like any value: wired from a ForEach of lights,
 once an element — so a buffer of the lights' cameras is made as a buffer of the scene's camera is.
 
@@ -802,7 +934,10 @@ float4 Paraboloid(float3 world, float4x4 view, float4 params)   // params: near,
 
 Two pass nodes go with it, for a graph that wants them — an editor has both of its own, and needs neither of a
 scene's (see [the editor](editor.md)). **Pick** takes an image of ids — one a pipeline draws `entityId` into — and
-`Runtime::Pick(u, v, then)` reads one pixel of it back, a few frames later, as the entity there.
+`Runtime::Pick(u, v, then)` reads one pixel of it back, a few frames later, as the entity there. Given its `depth`
+too — the depth image the ids were drawn with, with eTransferSrc — `Runtime::PickAt(u, v, then)` reads the depth of
+that pixel and the eight round it, with the view as it was (`PickHit`): where on a surface the pixel is, and which way
+the surface faces.
 **DebugDraw** draws the scene's `kor::DebugDraw` shapes over an image, seen as the graph's main View sees
 (`Runtime::SetDebugDraw`).
 
@@ -1297,7 +1432,6 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A model's meshes are handed to the device in one go when the file is read: a very large one is a pause of a
   frame or so then. A model's meshes have no tangents; a shader that wants a normal map's frame works it out (as
   `samples/forward-plus` does).
-- A DataBuffer holds numbers, vectors and matrices, not nested structs or arrays of anything but floats.
 - A ShaderBuffer reads the struct of a buffer an entry point uses: a struct no entry point reaches is not in the
   compiled shader. Numbers of 16 or 64 bits, and arrays of arrays, are left as zero. Of a block with fields before
   its array (`buffer B { uint count; Light lights[]; }`) only the array is filled.

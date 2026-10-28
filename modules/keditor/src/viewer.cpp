@@ -90,13 +90,65 @@ namespace keditor
             }, { std::move(main), std::move(side) });
         }
 
+        /**
+         * A table whose columns are made wider or narrower by dragging the line after each: what one is dragged to is kept
+         * while the table shows as many columns. A column given no width starts at 80.
+         */
+        struct ResizableTable final : kui::StatefulWidget {
+            std::vector<kui::TableColumn> columns;
+            std::vector<std::vector<kui::Widget>> rows;
+            kui::TableOptions options;
+            std::vector<float> widths;      // each column's, as dragged or as given
+
+            ResizableTable(std::vector<kui::TableColumn> c, std::vector<std::vector<kui::Widget>> r, const kui::TableOptions o)
+                : columns(std::move(c)), rows(std::move(r)), options(o) { Fit(); }
+            void DidUpdateWidget(const kui::StatefulWidget& newer) override
+            {
+                const auto& now = static_cast<const ResizableTable&>(newer);
+                const bool other = now.columns.size() != columns.size()
+                                   || !std::ranges::equal(now.columns, columns, [](const auto& a, const auto& b) { return a.title == b.title; });
+                columns = now.columns;
+                rows = now.rows;
+                options = now.options;
+                if (other) { widths.clear(); Fit(); }
+            }
+            void Fit()
+            {
+                for (std::size_t i = widths.size(); i < columns.size(); ++i) widths.push_back(columns[i].width > 0.f ? columns[i].width : 80.f);
+            }
+
+            kui::Widget Build() override
+            {
+                static constexpr float Grip = 6.f, Least = 24.f;
+                std::vector<kui::TableColumn> sized = columns;
+                float wide = 0.f;
+                for (std::size_t i = 0; i < sized.size(); ++i) { sized[i].width = widths[i]; wide += widths[i]; }
+                std::vector<kui::Widget> layers { kui::SizedBox(wide, -1.f, kui::Table(std::move(sized), rows, options)) };
+                // A grip on the line after each column, down the whole table.
+                float x = 0.f;
+                for (std::size_t i = 0; i < widths.size(); ++i) {
+                    x += widths[i];
+                    kui::GestureOptions grip;
+                    grip.SetCursor(kui::PointerCursor::eResizeHorizontal);
+                    grip.onPanUpdate = [this, i](const kor::Vec2 delta, kor::Vec2) { SetState([&] { widths[i] = std::max(widths[i] + delta.x, Least); }); };
+                    layers.push_back(kui::Positioned(kui::PositionedOptions {}.SetLeft(x - Grip * 0.5f).SetTop(0.f).SetBottom(0.f).SetWidth(Grip),
+                                                     kui::GestureDetector(std::move(grip), kui::SizedBox(Grip, -1.f))));
+                }
+                return kui::Stack(std::move(layers));
+            }
+        };
+        kui::Widget Resizable(std::vector<kui::TableColumn> columns, std::vector<std::vector<kui::Widget>> rows)
+        {
+            return kui::Make<ResizableTable>(std::move(columns), std::move(rows), kui::TableOptions {}.SetRowHeight(22.f));
+        }
+
         const kui::Color ChannelColor[4] { kui::Color::Hex(0xFF5C5C), kui::Color::Hex(0x5CDB6E), kui::Color::Hex(0x5C9DFF), kui::Color::Hex(0xD8D8D8) };
         constexpr const char* ChannelName[4] { "R", "G", "B", "A" };
 
         // ---- an image ------------------------------------------------------------------------------------------
 
         /**
-         * The picture, as big as there is room for or zoomed: the wheel zooms about the pointer, a drag moves it, and
+         * The picture, as big as there is room for or zoomed: the wheel zooms about the pointer, the middle button moves it, and
          * the texel under the pointer is said under it. Where it looks is its own, kept from build to build.
          */
         struct TextureCanvas final : kui::StatefulWidget {
@@ -156,6 +208,7 @@ namespace keditor
                 kui::GestureOptions gestures;
                 gestures.onHover = [this](const kor::Vec2 local) { SetState([&] { pointer = local; }); };
                 gestures.onExit = [this] { SetState([&] { pointer.reset(); }); };
+                gestures.SetPanButton(kor::MouseButton::eMiddle);
                 gestures.onPanUpdate = [this](const kor::Vec2 delta, const kor::Vec2 local) {
                     SetState([&] {
                         if (scale <= 0.f) scale = Fit();
@@ -181,7 +234,7 @@ namespace keditor
                     Bar({ kgui::Muted(zoom, 12.f), Chip("Fit", [this] { SetState([&] { scale = 0.f; centre = { 0.5f, 0.5f }; }); }),
                           Chip("1:1", [this] { SetState([&] { scale = 1.f; }); }) })));
                 // Under it: the texel under the pointer, as it is stored.
-                std::string said = "Over the picture: what a texel holds. The wheel zooms, a drag moves it.";
+                std::string said = "Over the picture: what a texel holds. The wheel zooms, the middle button moves it.";
                 if (const auto& peek = session->ViewedPeek(); peek && pointer) {
                     const kor::Vec2 at = ToImage(*pointer) * Texels();
                     if (at.x >= 0.f && at.y >= 0.f && at.x < Texels().x && at.y < Texels().y) {
@@ -267,7 +320,7 @@ namespace keditor
                     controls.push_back(kgui::Labeled("Slice", kui::SizedBox(80.f, -1.f, kgui::DragFloats({ static_cast<float>(view.look.slice) }, [session, depth = peek->extent.z](const std::vector<float>& to) {
                         session->imageView.look.slice = static_cast<std::uint32_t>(std::clamp(std::round(to[0]), 0.f, static_cast<float>(depth - 1)));
                         session->ViewChanged();
-                    }, 0.2f, 0, 0.f, static_cast<float>(peek->extent.z - 1))), 40.f));
+                    }, 0.2f, 0, 0.f, static_cast<float>(peek->extent.z - 1), false, kui::NumberType::eUInt)), 40.f));
                 controls.push_back(kui::SizedBox(110.f, -1.f, kui::Dropdown({ "Linear", "Nearest" }, view.filter == kui::ImageFilter::eNearest ? 1 : 0, [session](const int f) {
                     session->imageView.filter = f == 1 ? kui::ImageFilter::eNearest : kui::ImageFilter::eLinear;
                     session->ViewChanged();
@@ -303,12 +356,12 @@ namespace keditor
                 facts.push_back(Bar({ kui::Expanded(Heading("Histogram")), kui::Checkbox(view.logHistogram, [session](const bool on) { session->imageView.logHistogram = on; session->ViewChanged(); }, "Log") }));
                 facts.push_back(HistogramView(histogram, view.logHistogram, view.look.channels, view.look.black, view.look.white));
                 facts.push_back(Bar({ kgui::Muted(std::format("{:.4g}", histogram.least), 11.f), kui::Expanded(kui::Text("")), kgui::Muted(std::format("{:.4g}", histogram.greatest), 11.f) }));
-                std::vector<kui::TableColumn> columns { { "", 30.f }, { "least" }, { "greatest" }, { "mean" } };
+                std::vector<kui::TableColumn> columns { { "", 30.f }, { "least", 76.f }, { "greatest", 76.f }, { "mean", 76.f } };
                 std::vector<std::vector<kui::Widget>> stats;
                 for (int ch = 0; ch < histogram.channels; ++ch)
                     stats.push_back({ kui::Text(texel.depth ? "D" : ChannelName[ch], kui::TextStyle {}.SetSize(12.f).SetColor(ChannelColor[histogram.channels == 1 ? 3 : ch])),
                                       kgui::Line(std::format("{:.5g}", histogram.min[ch])), kgui::Line(std::format("{:.5g}", histogram.max[ch])), kgui::Line(std::format("{:.5g}", histogram.mean[ch])) });
-                if (!stats.empty()) facts.push_back(kui::Table(std::move(columns), std::move(stats), kui::TableOptions {}.SetRowHeight(22.f)));
+                if (!stats.empty()) facts.push_back(kui::ScrollView(Resizable(std::move(columns), std::move(stats)), kui::Axis::eHorizontal));
                 if (histogram.nans || histogram.infinities)
                     facts.push_back(Red(std::format("{} values are not numbers, and {} are endless.", histogram.nans, histogram.infinities)));
                 facts.push_back(kgui::Muted(std::format("Counted over {} texels{}.", histogram.texels,
@@ -383,20 +436,18 @@ namespace keditor
                 kgui::Labeled("Go to", kui::SizedBox(90.f, -1.f, kgui::DragFloats({ static_cast<float>(table.first) }, [session, total = table.total](const std::vector<float>& to) {
                     session->bufferFirst = static_cast<std::size_t>(std::clamp(std::round(to[0]), 0.f, static_cast<float>(total == 0 ? 0 : total - 1)));
                     session->ViewChanged();
-                }, 1.f, 0, 0.f, static_cast<float>(table.total == 0 ? 0 : table.total - 1))), 44.f),
+                }, 1.f, 0, 0.f, static_cast<float>(table.total == 0 ? 0 : table.total - 1), false, kui::NumberType::eUInt)), 44.f),
                 kui::Checkbox(session->bufferHex, [session](const bool on) { session->bufferHex = on; session->ViewChanged(); }, "Hexadecimal"),
             }));
             // The table: a column a number, each as wide as a number needs — or its name, when that is wider — moved across
-            // when there are many. A field's name, in a table of a line a field, has room for itself.
+            // when there are many, and each made wider or narrower by dragging the line after it. A field's name, in a table of a line a field, has room for itself.
             std::vector<kui::TableColumn> columns;
-            float wide = 0.f;
             for (std::size_t i = 0; i < table.columns.size(); ++i) {
                 float width = i == 0 ? (table.byField ? 40.f : 64.f) : table.byField ? (i == 1 ? 130.f : 76.f) : 96.f;
                 width = std::max(width, 7.2f * static_cast<float>(table.columns[i].size()) + 20.f);
                 if (table.byField && i == 1)
                     for (const auto& row : table.rows) width = std::max(width, 7.2f * static_cast<float>(row[1].size()) + 20.f);
                 columns.push_back({ table.columns[i], width });
-                wide += width;
             }
             std::vector<std::vector<kui::Widget>> cells;
             for (const auto& row : table.rows) {
@@ -405,8 +456,7 @@ namespace keditor
                     line.push_back(kgui::Line(row[i], kui::TextStyle {}.SetSize(12.f).SetColor(i == 0 ? kui::Theme::Current().textMuted : kui::Theme::Current().text)));
                 cells.push_back(std::move(line));
             }
-            rows.push_back(kui::Expanded(kui::ScrollView(kui::ScrollView(kui::SizedBox(wide, -1.f, kui::Table(std::move(columns), std::move(cells), kui::TableOptions {}.SetRowHeight(22.f))),
-                                                                         kui::Axis::eHorizontal))));
+            rows.push_back(kui::Expanded(kui::ScrollView(kui::ScrollView(Resizable(std::move(columns), std::move(cells)), kui::Axis::eHorizontal))));
             return Rows(std::move(rows), 8.f);
         }
 
@@ -471,7 +521,7 @@ namespace keditor
                                                kgui::Line(std::format("{} × {}", ChannelTypeName(attribute.channelType), attribute.channelCount * attribute.locations)),
                                                kgui::Line(std::to_string(attribute.binding)), kgui::Line(std::to_string(attribute.offset)) });
                     if (!attributes.empty())
-                        facts.push_back(kui::Table({ { "what" }, { "as" }, { "buffer", 52.f }, { "byte", 44.f } }, std::move(attributes), kui::TableOptions {}.SetRowHeight(22.f)));
+                        facts.push_back(kui::ScrollView(Resizable({ { "what", 90.f }, { "as", 90.f }, { "buffer", 52.f }, { "byte", 44.f } }, std::move(attributes)), kui::Axis::eHorizontal));
                     for (std::size_t b = 0; b < layout.bindings.size(); ++b)
                         facts.push_back(Fact(std::format("Buffer {}", b), std::format("{} bytes a vertex", layout.bindings[b].stride)));
                 }
