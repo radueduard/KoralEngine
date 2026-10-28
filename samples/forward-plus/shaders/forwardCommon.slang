@@ -6,6 +6,7 @@
 
 __exported import entity;
 __exported import koral_bindless;
+__exported import PbrMaterial;     // what each thing drawn is made of: the engine writes it of the kind
 
 public struct Camera {
     public float4x4 view;
@@ -65,18 +66,23 @@ public struct Sun {
  */
 public struct Instance {
     [entity("MATRIX")] public float4x4 model;
-    public float3 albedo;       // its colour, as picked
-    public float metallic;
-    public float3 emission;     // the light it gives off itself, as light: above 1 it blooms
-    public float roughness;
-    public float alphaCutoff;   // above 0: where its albedoMap is less opaque than this, nothing is drawn
-    public float transparency;  // how much of what is behind it shows through, over what its albedoMap lets: 0 none, 1 all of it — glass
-    [entity("TEXTURE")] public uint albedoMap;      // its colour; a: how opaque
-    [entity("TEXTURE")] public uint normalMap;      // which way its surface faces, texel by texel, relative to the mesh's own
-    [entity("TEXTURE")] public uint roughnessMap;   // g: how rough; b: how much a metal
-    [entity("TEXTURE")] public uint emissiveMap;
+    [PbrMaterial("baseColor")] public float4 baseColor;    // its colour, as picked; a: how opaque
+    [PbrMaterial] public float metallic;
+    [PbrMaterial] public float3 emission;     // the light it gives off itself, as light: above 1 it blooms
+    [PbrMaterial] public float roughness;
+    [PbrMaterial] public uint alphaMode;      // 0 opaque; 1 cut out, where its albedoMap is less opaque than alphaCutoff; 2 drawn over what is behind it — glass
+    [PbrMaterial] public float alphaCutoff;
+    [PbrMaterial("baseColorMap")] public uint albedoMap;            // its colour; a: how opaque
+    [PbrMaterial] public uint normalMap;                            // which way its surface faces, texel by texel, relative to the mesh's own
+    [PbrMaterial("metallicRoughnessMap")] public uint roughnessMap; // g: how rough; b: how much a metal
+    [PbrMaterial] public uint emissiveMap;
     public float translucency;  // how much light falling on its back shows through on its front, tinted by its colour: cloth, a leaf, paper
 };
+
+/** Whether it is cut out where its picture is less opaque than its alphaCutoff. */
+public bool isCutOut(Instance instance) { return instance.alphaMode == 1; }
+/** How much of what is behind it shows through, over what its albedoMap lets: 0 none, 1 all of it — glass. */
+public float transparencyOf(Instance instance) { return instance.alphaMode == 2 ? saturate(1.0 - instance.baseColor.a) : 0.0; }
 
 /**
  * What a surface is made of, as rays see it: the ray tracer's own material — its component, which each entity holds as
@@ -85,16 +91,17 @@ public struct Instance {
  */
 public struct RayMaterial {
     [entity("MATRIX")] public float4x4 model;
-    public float3 albedo;              // its colour, as picked
-    public float metallic;
-    public float3 emission;            // the light it gives off itself
-    public float roughness;
-    public float alphaCutoff;          // above 0: where its albedoMap is less opaque than this, rays pass through
+    [PbrMaterial("baseColor")] public float4 baseColor;    // its colour, as picked
+    [PbrMaterial] public float metallic;
+    [PbrMaterial] public float3 emission;     // the light it gives off itself
+    [PbrMaterial] public float roughness;
+    [PbrMaterial] public uint alphaMode;      // 1: cut out — where its albedoMap is less opaque than alphaCutoff, rays pass through
+    [PbrMaterial] public float alphaCutoff;
     public float reflectionBlur;       // how much more its reflection rays spread than its roughness says: 0 as rough as it is
-    [entity("TEXTURE")] public uint albedoMap;
-    [entity("TEXTURE")] public uint normalMap;
-    [entity("TEXTURE")] public uint roughnessMap;      // g: how rough; b: how much a metal
-    [entity("TEXTURE")] public uint emissiveMap;
+    [PbrMaterial("baseColorMap")] public uint albedoMap;
+    [PbrMaterial] public uint normalMap;
+    [PbrMaterial("metallicRoughnessMap")] public uint roughnessMap;   // g: how rough; b: how much a metal
+    [PbrMaterial] public uint emissiveMap;
     public float translucency;         // how much light falling on its back shows through on its front, tinted by its colour
 };
 /**

@@ -29,6 +29,12 @@ namespace keditor
         std::map<std::string, std::string> textureFormats;
         /** Whether a scene opened with pictures not compressed asks to compress them. In `project.json` when it does not. */
         bool askToCompress = true;
+        /**
+         * What a model file's materials are imported as, by what the file reports them as (Document::SetImportKind):
+         * `"pbr"` and `"classic"` to a material kind's name, for every file (`""`) or for one (`@models/old.obj`). In
+         * `project.json` when it is not as it starts.
+         */
+        std::map<std::string, std::map<std::string, std::string>> importKinds;
 
         /** @brief Makes a project in @p directory, which is made too: one empty scene, "main", and a `shaders` folder. */
         static bool Create(const std::filesystem::path& directory, std::string name, Project& out, std::string& error);

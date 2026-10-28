@@ -105,12 +105,12 @@ Instance instanceOf(uint pack, uint instance)
     const RayMaterial own = instances[instance];
     Instance made;
     made.model = own.model;
-    made.albedo = own.albedo;
+    made.baseColor = own.baseColor;
     made.metallic = own.metallic;
     made.emission = own.emission;
     made.roughness = own.roughness;
+    made.alphaMode = min(own.alphaMode, 1u);      // the solid scene's: none drawn over what is behind it
     made.alphaCutoff = own.alphaCutoff;
-    made.transparency = 0.0;
     made.albedoMap = own.albedoMap;
     made.normalMap = own.normalMap;
     made.roughnessMap = own.roughnessMap;
@@ -142,7 +142,7 @@ float2 uvAt(uint pack, uint3 corners, float2 barycentrics)
 void cutOut(inout Hit payload, BuiltInTriangleIntersectionAttributes attributes)
 {
     const RayMaterial draw = instances[InstanceID()];
-    if (draw.alphaCutoff <= 0.0 || draw.albedoMap == ~0u) return;
+    if (draw.alphaMode != 1 || draw.albedoMap == ~0u) return;
     const float2 uv = uvAt(Solid, cornersOf(Solid, InstanceID(), PrimitiveIndex()), attributes.barycentrics);
     if (kor::texture2D(draw.albedoMap).SampleLevel(textureSampler, uv, 0.0).a < draw.alphaCutoff) IgnoreHit();
 }
@@ -334,7 +334,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
 
     const float4 base = pictureAt(draw.albedoMap, uv, dx, dy);
     const float4 material = pictureAt(draw.roughnessMap, uv, dx, dy);
-    const float3 albedo = pow(max(draw.albedo, 0.0), 2.2) * pow(base.rgb, 2.2);
+    const float3 albedo = pow(max(draw.baseColor.rgb, 0.0), 2.2) * pow(base.rgb, 2.2);
 
     // A normal map, which way its u and v run over the triangle worked out from the triangle's corners: where they are in
     // the world, and in the picture.
@@ -369,7 +369,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
     surface.through = saturate(draw.translucency);
     // How opaque, as the forward pass works it out: what of the picture behind does not show through, and more of it
     // mirrored the more along it a pane is seen.
-    const float seeThrough = saturate(draw.transparency);
+    const float seeThrough = transparencyOf(draw);
     surface.opaque = base.a * (1.0 - seeThrough);
     if (seeThrough > 0.0) surface.opaque = saturate(surface.opaque + (1.0 - surface.opaque) * dot(fresnel(surface.facingEye, surface.straightOn), float3(0.2126, 0.7152, 0.0722)) * (1.0 - surface.roughness));
     return surface;

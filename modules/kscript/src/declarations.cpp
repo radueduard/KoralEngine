@@ -13,6 +13,7 @@
 #include <format>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <optional>
 #include <regex>
 #include <sstream>
@@ -50,6 +51,41 @@ namespace kscript
             const std::string bare = type.substr(type.rfind('.') == std::string::npos ? 0 : type.rfind('.') + 1);
             const auto it = types.find(bare);
             return it == types.end() ? nullptr : &it->second;
+        }
+
+        /** A Material's picture: a shared reference, laid out at the front of it. */
+        const Kind TextureKind { "Image", TextureSize, alignof(std::shared_ptr<void>), 't', 0 };
+
+        bool IsTexture(const std::string& written)
+        {
+            return written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1) == "Texture";
+        }
+
+        /**
+         * What a Texture field starts as, by the name of the picture: `Texture.White` (`$white`), `Texture.Black`,
+         * `Texture.Normal`, or one given by name — `"@textures/ramp.png"`, `new("...")`, `Texture("...")`. Null for what
+         * is not understood without running it.
+         */
+        std::optional<std::string> PictureOf(const std::string& value)
+        {
+            if (value.empty()) return "$white";
+            static const std::regex constant(R"(^(?:[\w.]+\.)?Texture\.(White|Black|Normal)$)");
+            static const std::regex named(R"rx(^(?:new\s*(?:[\w.]+)?\s*\(|(?:[\w.]+\.)?Texture\s*\()?\s*"((?:[^"\\]|\\.)*)"\s*\)?$)rx");
+            std::smatch found;
+            if (std::regex_match(value, found, constant)) {
+                std::string name = "$" + found[1].str();
+                name[1] = static_cast<char>(std::tolower(static_cast<unsigned char>(name[1])));
+                return name;
+            }
+            if (!std::regex_match(value, found, named)) return std::nullopt;
+            // Kotlin writes a dollar in a string as `\$`.
+            std::string name;
+            const std::string said = found[1].str();
+            for (std::size_t i = 0; i < said.size(); ++i) {
+                if (said[i] == '\\' && i + 1 < said.size()) ++i;
+                name += said[i];
+            }
+            return name;
         }
 
         /** The source without its comments: each a space, its line breaks kept, so that lines are where they were. Strings are left as they are. */
@@ -197,8 +233,14 @@ namespace kscript
             static const std::regex range(R"([\[@,]\s*(?:[\w.]+\.)?Range\s*\(\s*(?:min\s*=\s*)?([^,()]+),\s*(?:max\s*=\s*)?([^,()]+)\))");
             static const std::regex least(R"([\[@,]\s*(?:[\w.]+\.)?Min\s*\(\s*(?:min\s*=\s*)?([^,()]+)\))");
             static const std::regex logarithmic(R"([\[@,]\s*(?:[\w.]+\.)?Logarithmic\b)");
+            static const std::regex choices(R"([\[@,]\s*(?:[\w.]+\.)?Choices\s*\(([^)]*)\))");
+            static const std::regex choice(R"rx("((?:[^"\\]|\\.)*)")rx");
             std::smatch found;
             field.logarithmic = std::regex_search(statement, logarithmic);
+            if (std::regex_search(statement, found, choices)) {
+                const std::string listed = found[1].str();
+                for (auto it = std::sregex_iterator(listed.begin(), listed.end(), choice); it != std::sregex_iterator(); ++it) field.choices.push_back((*it)[1].str());
+            }
             if (std::regex_search(statement, found, range)) {
                 const auto low = Literal(found[1].str()), high = Literal(found[2].str());
                 if (low && high && *low <= *high) { field.min = *low; field.max = *high; }
@@ -351,8 +393,8 @@ namespace kscript
         const std::string where = file.empty() ? std::string() : std::format("{}: ", file);
         // A class, what it is said to be before its body, and its body.
         static const std::regex classes(R"(\bclass\s+(\w+)([^{;]*)\{)");
-        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript)\b)");
-        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript)\s*\(\s*\))");
+        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript|Material)\b)");
+        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript|Material)\s*\(\s*\))");
         static const std::regex named(R"rx(ScriptName\s*\(\s*(?:name\s*=\s*)?"([^"]*)"\s*\)\s*\]?\s*[\w\s]*$)rx");
         static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
         static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
@@ -369,14 +411,15 @@ namespace kscript
             ScriptType type;
             type.name = found[1].str();
             type.makesResources = base[1].str() == "ResourceScript";
+            type.material = base[1].str() == "Material";
             if (std::smatch name; std::regex_search(before, name, named)) type.name = name[1].str();
 
             const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
             const std::size_t close = Closing(text, open);
             bool fine = true;
-            std::size_t offset = 0, alignment = 1;
-            struct Start { std::size_t offset; const Kind* kind; std::vector<double> numbers; };
-            std::vector<Start> starts;
+            // Each field as it is written, laid out once they are all read: a material's pictures first.
+            struct Parsed { std::string name, statement, value; const Kind* kind; };
+            std::vector<Parsed> parsed;
             // A Kotlin annotation on a line of its own is the next property's.
             static const std::regex annotationsOnly(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)+$)");
             std::string pending;
@@ -410,16 +453,29 @@ namespace kscript
                     }
                     if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;
                 }
-                const Kind* kind = KindOf(written, kotlin);
+                const Kind* kind = type.material && IsTexture(written) ? &TextureKind : KindOf(written, kotlin);
                 if (!kind) {
-                    out.problems.push_back(std::format("{}{}.{} is a {}, which a script cannot keep", where, type.name, name, written.empty() ? "type not written" : written));
+                    out.problems.push_back(std::format("{}{}.{} is a {}, which a {} cannot keep", where, type.name, name, written.empty() ? "type not written" : written,
+                                                       IsTexture(written) ? "script (only a Material has pictures)" : "script"));
                     fine = false;
                     break;
                 }
+                parsed.push_back({ name, statement, value, kind });
+            }
+            if (!fine) continue;
+            std::ranges::stable_partition(parsed, [](const Parsed& p) { return p.kind == &TextureKind; });
+            std::size_t offset = 0, alignment = 1;
+            struct Start { std::size_t offset; const Kind* kind; std::vector<double> numbers; };
+            std::vector<Start> starts;
+            for (const auto& [name, statement, value, kind] : parsed) {
                 offset = (offset + kind->alignment - 1) / kind->alignment * kind->alignment;
                 type.fields.push_back({ .name = name, .type = kind->name, .offset = offset, .size = kind->size });
                 Limits(statement, type.fields.back());
-                if (!value.empty()) {
+                if (kind == &TextureKind) {
+                    const auto picture = PictureOf(value);
+                    if (!picture) out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts white", where, type.name, name, value));
+                    type.textures.emplace_back(name, picture.value_or("$white"));
+                } else if (!value.empty()) {
                     auto numbers = Numbers(value);
                     const bool identity = kind->numbers == 16 && numbers && numbers->empty();
                     if (identity) numbers = std::vector<double> { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
@@ -430,7 +486,6 @@ namespace kscript
                 offset += kind->size;
                 alignment = std::max(alignment, kind->alignment);
             }
-            if (!fine) continue;
             type.alignment = alignment;
             type.size = (offset + alignment - 1) / alignment * alignment;
             type.initial.assign(type.size, std::byte { 0 });
@@ -482,7 +537,7 @@ namespace kscript
 #endif
     }
 
-    std::vector<std::string> DeclarePackage(Scripts& scripts)
+    std::vector<std::string> DeclarePackage(Scripts& scripts, std::vector<ScriptType>* materials)
     {
         const std::filesystem::path folder = PackageDirectory() / "scripts";
         std::error_code ignored;
@@ -498,6 +553,7 @@ namespace kscript
         std::ranges::sort(found.types, {}, &ScriptType::name);
         for (auto& type : found.types) {
             if (type.makesResources) continue;      // a script that makes resources is no component
+            if (type.material) { if (materials) materials->push_back(std::move(type)); continue; }
             std::string error;
             const std::string name = type.name;
             if (scripts.Declare(std::move(type), &error) == kecs::NoComponent) found.problems.push_back(std::format("{}: {}", name, error));

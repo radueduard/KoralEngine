@@ -85,11 +85,38 @@ the script runs: a script can set a field to anything.
 ## The engine's package
 
 Every project has the engine's own scripts as well: `Camera`, `DirectionalLight`, `PointLight`, `SpotLight` and
-`Sky`, in `packages/koral/scripts`, in C# and in Kotlin. They are data and nothing else — what a light does is the
+`Sky`, in `packages/koral/scripts`, in C# and in Kotlin — and its two material kinds (see [Materials](#materials)). They are data and nothing else — what a light does is the
 graph's, through a ForEach of it — and are compiled with a project's own (Kotlin's build has them as a source
 folder), so a script reads one as it reads its own: `World.Read<PointLight>(entity)!.range`. Their fields are
 lowerCamel in both languages, as the graph and the scene files name them. `kengine_package_directory()` says
 where the package is; `KORAL_ENGINE_PACKAGE` in the environment moves it.
+
+## Materials
+
+A material kind is a class that derives from `Material`: what a drawn thing is made of, data and nothing else. Its
+public fields are a component, shown on an entity as a script's are, saved with the scene and set from a script by
+name (`World.Set(entity, "PbrMaterial", "roughness", 0.2f)`). Nothing is called on it. Besides a script's field types,
+it has pictures: a `Texture` field, which starts as the picture it is given — `"@textures/ramp.png"`, or a texel,
+`Texture.White`, `Texture.Black`, `Texture.Normal`.
+
+```csharp
+public sealed class Toon : Material
+{
+    public Texture ramp = "@textures/ramp.png";
+    public Vec4 tint = new(1f, 1f, 1f, 1f);
+    [Range(1, 8)] public int bands = 3;
+    [Choices("Hard", "Soft")] public int edge = 0;      // a whole number, shown by name
+}
+```
+
+The engine's package has two: `PbrMaterial` (base colour, metallic, roughness, emission: what a glTF describes) and
+`BlinnPhongMaterial` (diffuse, specular, shininess: what an OBJ, or an FBX's Phong, describes). A project's are found
+with its scripts.
+
+Each kind is also a Slang module of its name, written into the project's `cache/shaders` (or, with no project, the
+user's temporary folder) whenever the kind is declared: a struct of it — a picture as its bindless index, true or false
+as a `uint`, a field of no GPU form (`Entity`) left out and said — and the attribute a shader takes one of its fields by,
+`[Toon("tint")]`. `import koral_materials;` imports every kind there is.
 
 ## The scene from a script
 

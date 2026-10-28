@@ -251,10 +251,8 @@ without making any (`$cube`, `$sphere`, `$roundedBox`, `$wedge`, `$stairs`, `$te
 onto an entity's Mesh as any mesh is. Their inspector chooses their **tangents**, every default mesh alike: a `TANGENT` of
 four numbers (w the bitangent's side), a `TANGENT` and a `BITANGENT` of three, as a model's meshes have them, or
 neither — saved with the scene's graph, and undone as any change (see [Default meshes](kgraph.md#default-meshes)). **Materials/Defaults** holds materials (`material:Gold`, `material:Red plastic`,
-plastics, metals, wood, rubber, two that glow): dropped on an entity in the scene tree or the inspector, what draws it
-(a component with an `albedo`, or a pipeline's with a `color`, as the standard graph's `default` has) is given its
-albedo, metallic, roughness and emission — as many of them as it has — and its pictures are set white; an entity
-drawn by nothing is given one first. The table is `Session::DefaultMaterials()`.
+plastics, metals, wood, rubber, two that glow): each a PbrMaterial asset, dropped on an entity in the scene tree or
+the inspector, which it then follows (`Document::GiveMaterial`). The table is `Session::DefaultMaterials()`.
 
 ### Prefabs
 
@@ -413,16 +411,17 @@ dragged or typed, and dragged by so much of what it is where its script says `[L
 range, a camera's near and far. The transform's rotation goes round from −180 to 180 degrees; its scale is dragged by
 so much of its size. The tick beside a component's name switches it off without removing it.
 
-A pipeline's component is a **material**. What two or more of an entity's materials have alike — a field of the same
-name and type, the forward pass's `albedo` and the ray tracer's — is a card of its own, **Shared material**, framed
-apart from the components: the pipelines it is of, each a chip to go to it (● a pass running now uses it, ○ none
-does), then each field once. Read from a material in use, it is set in every one of them whichever renderer is
-chosen; one set apart since — by a script, an undo — gets a **differs** pill at once, and pressed, every one is as the
-one shown. A texture given to the entity (dropped on it from the Assets panel) goes into each material's field of
-that name too. Under the card, each material has what is its own: *pipeline's own · 1 field, the rest shared above*.
-A material no pass the choices leave running reads (`Session::MaterialInUse`: none runs its pipeline, nor reads its
-Draw's buffer of instances — the meshlets read the forward Draw's) is another renderer's: dimmed, shut unless
-opened, and what is its own is not set while so. **Add** lists the
+A material is a component of its own, of a material kind (see [Materials](scripts.md#materials)): `PbrMaterial`,
+`BlinnPhongMaterial`, or a project's. Its card says which asset it follows — *material · Red · 1 field its own* — and,
+while it follows one, has **Apply to the asset** (what is the entity's own written to the asset: every entity that
+follows it has it), **Revert** (it is as its asset is) and **Unlink** (its own altogether). A field set on the entity
+itself is its own from then on, marked ●, and the asset no longer sets it. A texture given to the entity (dropped on it
+from the Assets panel) goes into its material's colour picture, `baseColorMap` or `diffuseMap`, before any other.
+
+A pipeline's component is its **Pipeline parameters**: what its shaders read of each entity that no material kind gives.
+One no pass the choices leave running reads (`Session::MaterialInUse`: none runs its pipeline, nor reads its Draw's
+buffer of instances — the meshlets read the forward Draw's) is another renderer's: dimmed, shut unless opened, and what
+is its own is not set while so. **Add** lists the
 components the entity doesn't have yet: each pipeline's (what its draws take from each entity), `Mesh`, and the
 scene's tags. **New tag** makes a tag and gives it to the entity.
 
@@ -536,12 +535,20 @@ Assets panel, picked, in its folder.
 A model is put in the scene by dragging it onto the scene or the scene tree, or with its **Import into the scene...**: that
 makes entities of it (`Document::ImportModel`): an entity for each
 thing in the file under one named for the file, placed as the file places them, with the file's lights. Each
-drawn part has its Mesh (`@model.gltf#3`), and every component a pipeline of the graph makes that has an
-`albedo` field, filled from the part's material a field by name: `albedo`, `metallic`, `roughness`, `emission`,
-`alphaCutoff`, and the pictures `albedoMap`, `normalMap`, `roughnessMap` and `emissiveMap` (`$white` for one the
-material has not). A part with a cut-out has the tag `Masked`, and one drawn over what is behind it — glass, a
-decal — `Blended`. The meshes and pictures stay in their files, and are found by them again when the scene is
-opened. All of it is read off the frame: the entity named for the file is there at once, its things are made
+drawn part has its Mesh (`@model.gltf#3`) and a material that follows one of the file's: each of a model's materials
+is a **Material asset**, `@model.gltf#material:2`, listed in the Assets panel beside its meshes. What kind it is
+depends on how the file reports it (a Reported material, `kgraph::ReportOf`): described physically (a glTF, or any file
+that gives a metallic or a roughness) it is a `PbrMaterial`, the classic way (an OBJ, an FBX's Phong) a
+`BlinnPhongMaterial` — filled a field by name from what the file says. That is only the default: the project chooses
+what each is imported as, for every file or for one (`Session::SetImportKind`, kept in `project.json` under
+`materials.importAs`). A part whose material is see-through by its opacity has the tag `Blended`, and one with a
+cut-out `Masked`: the tags follow its material's `alphaMode`. A material asset picked in the Assets panel shows its
+fields, set there for every entity that follows it — but for what one has made its own; what was changed of a
+model's is kept beside the model, in `<model>.materials.json`, so that the file is never written and a field the file
+changes on a reimport is the file's again unless it was changed here. A project's own material is a `.kmat` file in its
+assets. The meshes and pictures stay in their files, and are found by them again when the scene is
+opened. A scene saved before materials were their own — a pipeline's component holding `albedo` and its pictures — has
+each such entity given a PbrMaterial of those values when it is opened. All of it is read off the frame: the entity named for the file is there at once, its things are made
 under it when the file is read, and their pictures come in after.
 
 **Before it is put in the scene, it is asked about.** Whichever way it is put there — *Import into the

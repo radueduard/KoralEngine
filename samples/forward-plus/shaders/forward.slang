@@ -385,9 +385,9 @@ Output fragment(RasterInfo raster)
 {
     const Instance draw = instances[raster.instance];
     float4 base = pictureOf(draw.albedoMap, textureSampler, raster.uv);
-    if (draw.alphaCutoff > 0.0 && base.a < draw.alphaCutoff) discard;
+    if (isCutOut(draw) && base.a < draw.alphaCutoff) discard;
     float4 material = pictureOf(draw.roughnessMap, textureSampler, raster.uv);
-    float3 albedo = pow(max(draw.albedo, 0.0), 2.2) * pow(base.rgb, 2.2);
+    float3 albedo = pow(max(draw.baseColor.rgb, 0.0), 2.2) * pow(base.rgb, 2.2);
     float roughness = saturate(draw.roughness * material.g);
     float3 world = raster.worldPosition;
 
@@ -448,7 +448,7 @@ Output fragment(RasterInfo raster)
     Output output;
     // How opaque it is: what the blended pipeline draws it over the picture by. What it mirrors is on it however
     // clear it is: a pane seen along itself shows more of the sky than of what is behind it.
-    float clear = saturate(draw.transparency);
+    float clear = transparencyOf(draw);
     float opaque = base.a * (1.0 - clear);
     if (clear > 0.0) opaque = saturate(opaque + (1.0 - opaque) * dot(fresnel(surface.facingEye, surface.straightOn), float3(0.2126, 0.7152, 0.0722)) * (1.0 - roughness));
     output.color = float4(lit, opaque);

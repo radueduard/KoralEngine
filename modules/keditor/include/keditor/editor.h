@@ -441,6 +441,18 @@ namespace keditor
         /** @brief Makes entities of a model file (Document::ImportModel), and picks the one over them all. */
         bool ImportModel(const std::filesystem::path& file);
         /**
+         * @brief What a model file's materials reported as @p model are imported as, from now on: for every file, or —
+         *        with @p model file — for that one; kept in the project. An empty @p kind for a file takes its own away.
+         */
+        void SetImportKind(kgraph::ModelMaterial::Model model, const std::string& kind, const std::filesystem::path& file = {});
+        /**
+         * @brief Makes a Material asset of the project's own, of @p kind, starting as its kind starts it: a `.kmat` file in
+         *        `assets/materials`, named "Material" (or "Material 2", ...). It is picked; its id, empty when there is no project.
+         */
+        std::string NewMaterial(const std::string& kind = "PbrMaterial");
+        /** @brief Makes @p entity 's own material of @p kind an asset of the project's (NewMaterial), which it then follows. */
+        std::string MaterialAssetFrom(kecs::Entity entity, const std::string& kind);
+        /**
          * @brief Brings a picture or a model into the project, as one of its assets — and nothing into the scene: the Assets
          *        panel has it, to be dragged onto the scene or the outliner when it is wanted there. A picture is copied to
          *        `assets/textures`, a model to a folder of its own in `assets/models`, with what it names beside it — a

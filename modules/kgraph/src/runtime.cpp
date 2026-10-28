@@ -163,19 +163,25 @@ namespace kgraph
          * A buffer its shader marks `[entity("PER_INSTANCE")]`: an element for each entity a draw draws, which the draw
          * makes and fills. A field marked `[entity("MATRIX")]` (or NORMAL_MATRIX, POSITION, ID) is where the entity is,
          * or which; one marked TEXTURE is a picture the entity holds, by its bindless index, and one marked STORAGE an
-         * image it holds that the shader writes, by its bindless storage index; any other is the entity's own, a field of
-         * the pipeline's component.
+         * image it holds that the shader writes, by its bindless storage index; one marked with a material kind's
+         * attribute — `[PbrMaterial("roughness")]` — is that field of the entity's material of that kind, a picture of it
+         * by its bindless index; any other is the entity's own, a field of the pipeline's component.
          */
         struct Instancing {
             struct Field {
-                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId, eTexture, eStorage };
-                /** Whether it names an image the entity holds, by an index: TEXTURE or STORAGE. */
-                [[nodiscard]] bool Pictured() const { return from == From::eTexture || from == From::eStorage; }
+                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId, eTexture, eStorage, eMaterial, eMaterialTexture };
+                /** Whether it names an image the entity holds, by an index: TEXTURE, STORAGE, or a material's picture. */
+                [[nodiscard]] bool Pictured() const { return from == From::eTexture || from == From::eStorage || from == From::eMaterialTexture; }
+                /** Whether it is of a material of the entity's: a field of it, or a picture. */
+                [[nodiscard]] bool Material() const { return from == From::eMaterial || from == From::eMaterialTexture; }
                 std::string name {};
                 std::uint32_t offset = 0, size = 0;     // in the element
                 From from = From::eComponent;
-                std::string type {};                       // eComponent: the component field's type
-                std::size_t at = 0;                     // eComponent, eTexture: where it is in the pipeline's component
+                std::string type {};                       // eComponent, eMaterial: the member's type, as a component field's is named
+                std::size_t at = 0;                     // eComponent, eTexture: where it is in the pipeline's component; a material's, in it
+                std::string kind {};                    // a material's: its kind
+                kecs::FieldDescription source {};       // and its field
+                kecs::ComponentId component = kecs::NoComponent;    // the kind's component, in the world
             };
             std::uint32_t stride = 0;
             std::vector<Field> fields;
@@ -483,6 +489,9 @@ namespace kgraph
             std::string source;                     // the Filter whose entities they are
             std::vector<std::string> draws;         // the Draws that draw with it: built again when there are more than there is room for
             kecs::ComponentId component = kecs::NoComponent;    // the pipeline's: where each entity's own fields are
+            // The material kinds its fields are of, each once: what an entity must have all of to be drawn.
+            std::vector<kecs::ComponentId> materials;
+            std::size_t skipped = 0;                // entities laid out as no one's for want of one of them, the last time
             kor::ResourceRef<kor::Buffer> buffer;
             Held held;                              // the buffer, as what a Draw's slot holds
             std::size_t capacity = 0;               // how many elements there is room for
@@ -497,7 +506,8 @@ namespace kgraph
             // What each element was last laid out from, and when, by version: what is looked at to write only what changed.
             std::uint64_t version = 0;              // goes up each time an element is laid out again; 0, never laid out
             std::vector<std::uint64_t> rowKey;      // the entity in each element (KeyOf), 0 for none
-            std::vector<std::uint8_t> rowOwned;     // whether that entity had the pipeline's component
+            // Which of what it reads that entity had: the pipeline's component (bit 0), and each material kind it names (from bit 1).
+            std::vector<std::uint32_t> rowOwned;
             std::vector<std::uint64_t> rowChanged;  // the version each element was last laid out at
             std::vector<const void*> rowPictures;   // what each element's TEXTURE fields name, a Member's id: so many an element
             // Each image named, and how many times: read (TEXTURE) and written (STORAGE).
@@ -570,6 +580,7 @@ namespace kgraph
             bool own = false;
             for (const auto& field : instancing.fields) {
                 key += std::format("|{}:{}:{}", field.offset, field.size, static_cast<int>(field.from));
+                if (field.Material()) { key += std::format("@{}:{}:{}", field.component, field.at, field.type); continue; }
                 if (field.from == Instancing::Field::From::eComponent || field.Pictured()) { key += std::format("@{}", field.at); own = true; }
             }
             // Only fields of the entity's own are read from the component: without any, which component it is says nothing.
@@ -841,7 +852,7 @@ namespace kgraph
         }
 
         /** A parameter its shader marks for the engine: a buffer of each instance's, as its element's fields are marked. */
-        static void Instanced(const kor::Shader::Descriptor& descriptor, Parameter& parameter)
+        static void Instanced(const kor::Shader::Descriptor& descriptor, Parameter& parameter, const std::vector<MaterialKind>& kinds, const kecs::World* world)
         {
             const std::string& name = parameter.name;
             if (descriptor.semanticNamespace != "entity") return;   // another module's to fill
@@ -869,8 +880,35 @@ namespace kgraph
                         return;
                     }
                     field.type = type;
+                } else if (const auto kind = std::ranges::find(kinds, member.semanticNamespace, &MaterialKind::name); kind != kinds.end()) {
+                    // A field of the entity's material of that kind: the one it names, or — named nothing — the member's own name.
+                    const std::string wanted = member.semantic.empty() ? member.name : member.semantic;
+                    const auto source = std::ranges::find(kind->fields, wanted, &kecs::FieldDescription::name);
+                    if (source == kind->fields.end()) {
+                        std::string known;
+                        for (const auto& f : kind->fields) known += std::format("{}{}", known.empty() ? "" : ", ", f.name);
+                        parameter.problem = std::format("'{}.{}' is marked {}(\"{}\"), which the kind has not: it has {}", name, member.name, kind->name, wanted, known);
+                        return;
+                    }
+                    kor::Pipeline::PushConstantMember as;
+                    as.scalar = member.scalar;
+                    as.rows = member.rows;
+                    as.columns = member.columns;
+                    as.size = member.size;
+                    as.count = 1;
+                    const std::string type = ConstantType(as).first;
+                    if (const std::string misfit = MaterialFieldMisfit(*source, type); !misfit.empty()) {
+                        parameter.problem = std::format("'{}.{}' is marked {}(\"{}\"), which is {}", name, member.name, kind->name, wanted, misfit);
+                        return;
+                    }
+                    field.from = source->type == "Image" ? Instancing::Field::From::eMaterialTexture : Instancing::Field::From::eMaterial;
+                    field.type = type;
+                    field.at = source->offset;
+                    field.kind = kind->name;
+                    field.source = *source;
+                    field.component = world ? world->Find(kind->name) : kecs::NoComponent;
                 } else if (member.semanticNamespace != "entity") {
-                    parameter.problem = std::format("'{}.{}' asks the {} module for {}: an instance's field is the entity's — entity(\"MATRIX\"), NORMAL_MATRIX, POSITION, ID — or its own", name, member.name, member.semanticNamespace, member.semantic);
+                    parameter.problem = std::format("'{}.{}' asks the {} module for {}: an instance's field is the entity's — entity(\"MATRIX\"), NORMAL_MATRIX, POSITION, ID — a material kind's, or its own", name, member.name, member.semanticNamespace, member.semantic);
                     return;
                 } else if (member.semantic == "MATRIX" || member.semantic == "NORMAL_MATRIX") {
                     if (!matrix) return wrong("a float4x4");
@@ -898,7 +936,7 @@ namespace kgraph
             parameter.instancing = std::move(instancing);
         }
 
-        Interface Reflect(const std::vector<kor::ResourceRef<const kor::Shader>>& shaders)
+        Interface Reflect(const std::vector<kor::ResourceRef<const kor::Shader>>& shaders, const std::vector<MaterialKind>& kinds = {}, const kecs::World* world = nullptr)
         {
             Interface out;
             for (const auto& shader : shaders) {
@@ -909,7 +947,7 @@ namespace kgraph
                         const auto known = std::ranges::find(out.parameters, name, &Parameter::name);
                         if (known == out.parameters.end()) {
                             out.parameters.push_back({ name, descriptor.type, descriptor.access });
-                            if (!descriptor.semanticNamespace.empty()) Instanced(descriptor, out.parameters.back());
+                            if (!descriptor.semanticNamespace.empty()) Instanced(descriptor, out.parameters.back(), kinds, world);
                         }
                         else if (known->access != descriptor.access) known->access = kor::Shader::AccessKind::eReadWrite;
                     }
@@ -1463,6 +1501,21 @@ namespace kgraph
             return it == scripts.end() ? nullptr : &it->second;
         }
         [[nodiscard]] std::uint64_t ScriptsVersion() const { return source ? source->ScriptsVersion() : scriptsVersion; }
+
+        // The material kinds of the world, by name, and where their Slang modules are written.
+        std::vector<MaterialKind> materialKinds;
+        /** The kinds a shader's attributes name: this runtime's, or — one that follows another, with none of its own — the other's. */
+        [[nodiscard]] const std::vector<MaterialKind>& Kinds() const { return materialKinds.empty() && source ? source->Kinds() : materialKinds; }
+        std::filesystem::path generatedShaders;
+        std::vector<std::string> materialNotes;
+        void WriteMaterials()
+        {
+            if (generatedShaders.empty()) {
+                generatedShaders = std::filesystem::temp_directory_path() / "koral" / "materials";
+                kor::Shader::AddSearchPath(generatedShaders);
+            }
+            materialNotes = WriteMaterialModules(generatedShaders, materialKinds);
+        }
 
         std::uint64_t watchFrame = 0;
         std::map<std::string, Watching, std::less<>> watched;
@@ -2145,7 +2198,7 @@ namespace kgraph
             if (!translated) return Fail(translated.error());
             const Inputs& inputs = *translated;
             info->shaders = ShadersOf(inputs, &info->vertexShader);
-            const Interface interface = Reflect(info->shaders);
+            const Interface interface = Reflect(info->shaders, Kinds(), world);
             info->ports = interface.ports;
             info->meshShaders = node.type == "GraphicsPipeline" && StagesOf(node) == "eMesh";
             info->vertexInputs = info->vertexShader.Get() && !info->vertexShader->BlockLayout().inputs.empty();
@@ -2282,7 +2335,7 @@ namespace kgraph
             for (const Slot& slot : info->slots) {
                 if (!slot.instancing || taken.contains("param." + slot.field)) continue;
                 for (auto& field : slot.instancing->fields) {
-                    if (!field.Pictured()) continue;
+                    if (!field.Pictured() || field.Material()) continue;    // a material's is the material's to hold
                     if (std::ranges::find(layout->slots, field.name, &Slot::field) != layout->slots.end())
                         return Fail(std::format("'{}' is a picture of '{}' and of something else its draws take: the entity's own can be only one of them", field.name, slot.parameter));
                     field.at = layout->slots.size() * sizeof(Held);
@@ -4724,6 +4777,17 @@ namespace kgraph
                 material.emissiveMap = picture(from.emissiveTexturePath);
                 // A file's emissive factor is what its emissive picture is multiplied by: with no picture, there is none.
                 if (!material.emissiveMap.empty()) for (int i = 0; i < 3; ++i) material.emission[i] = from.emissiveFactor[i];
+                material.occlusionMap = picture(from.ambientOcclusionTexturePath);
+                // Described the classic way: its own colours, and what is not physical of it.
+                if (from.model == kmdl::Importer::Material::Model::eClassic) {
+                    material.model = ModelMaterial::Model::eClassic;
+                    for (int i = 0; i < 4; ++i) material.diffuse[i] = from.diffuseColor[i];
+                    for (int i = 0; i < 3; ++i) material.specular[i] = from.specularColor[i];
+                    material.shininess = from.shininess;
+                    material.specularMap = picture(from.specularTexturePath);
+                    material.shininessMap = picture(from.shininessTexturePath);
+                    material.alphaMap = picture(from.alphaTexturePath);
+                }
                 model.materials.push_back(std::move(material));
             }
             kor::Vec3 lower(1e30f), upper(-1e30f);
@@ -7548,6 +7612,9 @@ namespace kgraph
             instances->source = filter->id;
             instances->draws = { draw.id };
             instances->component = info.component;
+            for (const auto& field : slot.instancing->fields)
+                if (field.Material() && field.component != kecs::NoComponent && !std::ranges::contains(instances->materials, field.component))
+                    instances->materials.push_back(field.component);
             instances->clock = frames;
             instances->capacity = std::bit_ceil(std::max<std::size_t>(found->second.listed->Rows(), 64));
             auto buffer = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(instances->capacity * slot.instancing->stride))
@@ -7614,17 +7681,23 @@ namespace kgraph
             // What could have changed since it was last written. Nothing: none of them is looked at.
             const std::uint64_t moves = world ? world->MoveClock() : 0;
             const bool owned = world && instances.component != kecs::NoComponent;
-            const std::uint64_t owns = owned ? world->ChangesOf(instances.component) : 0;
+            const bool materialed = world && !instances.materials.empty();
+            // What it reads of each entity, changed: its own component, or one of its materials.
+            std::uint64_t owns = owned ? world->ChangesOf(instances.component) : 0;
+            if (materialed)
+                for (const kecs::ComponentId kind : instances.materials) owns += world->ChangesOf(kind);
+            // An entity is drawn only with every material kind its fields are of: without one, it is laid out as no one's.
+            const std::uint32_t needed = ((1u << instances.materials.size()) - 1u) << 1;
             const std::uint64_t listed = list ? list->version : 0;
             const bool replaced = pictured > 0 && replacements != instances.seenReplacements;
             if (!fresh && !replaced && list == instances.seenList && listed == instances.seenListed && moves == instances.seenMoves
                 && owns == instances.seenOwns && laid == instances.laid)
                 return;
             const bool lookMoved = moves != instances.seenMoves;
-            const bool lookOwn = owned && owns != instances.seenOwns;
+            const bool lookOwn = (owned || materialed) && owns != instances.seenOwns;
             const kecs::Tick ownSince = instances.seenTick;
             // What is written from here on is written after this: at a tick of its own.
-            if (owned && (fresh || lookOwn)) {
+            if ((owned || materialed) && (fresh || lookOwn)) {
                 instances.seenTick = world->CurrentTick();
                 world->AdvanceTick();
             }
@@ -7682,6 +7755,13 @@ namespace kgraph
             const std::size_t parts = (laid + Grain - 1) / Grain;
             std::vector<Looked> looked(parts);
             const kecs::World& reading = *world;
+            // Which of what it reads an entity has: its own component (bit 0), each material kind (from bit 1).
+            const auto had = [&](const kecs::Entity entity) {
+                std::uint32_t mask = owned && reading.Get(entity, instances.component) ? 1u : 0u;
+                for (std::size_t m = 0; m < instances.materials.size(); ++m)
+                    if (reading.Get(entity, instances.materials[m])) mask |= 2u << m;
+                return mask;
+            };
             const auto look = [&](const std::size_t index) {
                 Looked& part = looked[index];
                 for (std::size_t row = index * Grain; row < std::min(laid, (index + 1) * Grain); ++row) {
@@ -7690,8 +7770,11 @@ namespace kgraph
                     bool due = fresh || replaced || instances.rowKey[row] != KeyOf(entity);
                     if (!due && lookMoved) due = reading.MovedAt(entity) > instances.seenMoves;
                     if (!due && lookOwn) {
-                        const void* own = reading.Get(entity, instances.component);
-                        due = (own != nullptr) != (instances.rowOwned[row] != 0) || (own && reading.ChangedTickOf(entity, instances.component) > ownSince);
+                        const std::uint32_t mask = had(entity);
+                        due = mask != instances.rowOwned[row];
+                        if (!due && (mask & 1u)) due = reading.ChangedTickOf(entity, instances.component) > ownSince;
+                        for (std::size_t m = 0; !due && m < instances.materials.size(); ++m)
+                            if (mask & (2u << m)) due = reading.ChangedTickOf(entity, instances.materials[m]) > ownSince;
                     }
                     if (!due) continue;
                     part.again.push_back(static_cast<std::uint32_t>(row));
@@ -7730,8 +7813,10 @@ namespace kgraph
                     std::byte* element = instances.staged.data() + std::size_t { row } * stride;
                     empty(element);
                     instances.rowKey[row] = KeyOf(entity);
-                    instances.rowOwned[row] = own != nullptr;
+                    const std::uint32_t mask = had(entity);
+                    instances.rowOwned[row] = mask;
                     instances.rowChanged[row] = version;
+                    if ((mask & needed) != needed) continue;    // without one of its materials: no one's, and not drawn
                     static const kecs::Mat4 nowhere {};
                     const kecs::Mat4& placed = placing ? placedMatrices[entity.index] : nowhere;
                     for (const auto& field : fields) {
@@ -7759,8 +7844,13 @@ namespace kgraph
                             std::memcpy(at, &id, 4);
                             break;
                         }
+                        case Instancing::Field::From::eMaterial:
+                            if (const auto* material = static_cast<const std::byte*>(reading.Get(entity, field.component)))
+                                WriteMaterialField(field.source, material + field.at, field.type, at, field.size);
+                            break;
                         case Instancing::Field::From::eTexture:
-                        case Instancing::Field::From::eStorage: break;     // below, one at a time: what they name is counted
+                        case Instancing::Field::From::eStorage:
+                        case Instancing::Field::From::eMaterialTexture: break;     // below, one at a time: what they name is counted
                         }
                     }
                 }
@@ -7774,11 +7864,13 @@ namespace kgraph
                     const kecs::Entity entity = list->entities[row / list->repeat];
                     const auto* own = owned ? static_cast<const std::byte*>(reading.Get(entity, instances.component)) : nullptr;
                     std::byte* element = instances.staged.data() + std::size_t { row } * stride;
+                    const bool drawn = (instances.rowOwned[row] & needed) == needed;
                     std::size_t texture = 0;
                     for (const auto& field : fields) {
                         if (!field.Pictured()) continue;
                         std::uint32_t index = ~0u;
-                        const Held* held = own ? reinterpret_cast<const Held*>(own + field.at) : nullptr;
+                        const std::byte* from = !drawn ? nullptr : field.Material() ? static_cast<const std::byte*>(reading.Get(entity, field.component)) : own;
+                        const Held* held = from ? reinterpret_cast<const Held*>(from + field.at) : nullptr;
                         // A picture read since it was given is what was made in its place: its stand-in is what it was.
                         const Resource* now = held ? held->get() : nullptr;
                         while (now && now->replacedBy) now = now->replacedBy.get();
@@ -7799,6 +7891,11 @@ namespace kgraph
                         std::memcpy(element + field.offset, &index, 4);
                     }
                 }
+            if (changed && materialed) {
+                std::size_t skipped = 0;
+                for (std::size_t row = 0; row < laid; ++row) skipped += instances.rowKey[row] != 0 && (instances.rowOwned[row] & needed) != needed;
+                instances.skipped = skipped;
+            }
             instances.laid = laid;
             instances.seenList = list;
             instances.seenListed = listed;
@@ -8842,7 +8939,7 @@ namespace kgraph
                     for (const Held& named : it->second.pipeline->named)
                         if (named && named->handle) shaders.push_back(kor::capi::ShaderOf(named->handle));
                 if (shaders.empty() || !std::ranges::all_of(shaders, [](const auto& shader) { return shader.Valid(); })) continue;   // one that does not compile says nothing yet
-                const Interface interface = Reflect(shaders);
+                const Interface interface = Reflect(shaders, Kinds(), world);
                 std::set<std::string> pushes;
                 for (const auto& shader : shaders)
                     for (const auto& block : shader->BlockLayout().pushConstants | std::views::values)
@@ -9930,6 +10027,18 @@ namespace kgraph
         return node && node->status.ok && node->pipeline ? node->pipeline->component : kecs::NoComponent;
     }
 
+    std::vector<std::string> Runtime::MaterialsOf(const std::string_view id) const
+    {
+        std::vector<std::string> kinds;
+        const auto* node = _impl->Find(id);
+        if (!node || !node->status.ok || !node->pipeline) return kinds;
+        for (const auto& slot : node->pipeline->slots)
+            if (slot.instancing)
+                for (const auto& field : slot.instancing->fields)
+                    if (field.Material() && !std::ranges::contains(kinds, field.kind)) kinds.push_back(field.kind);
+        return kinds;
+    }
+
     const kecs::Migration* Runtime::MigrationOf(const std::string_view id) const
     {
         const auto* node = _impl->Find(id);
@@ -9972,6 +10081,59 @@ namespace kgraph
         for (const auto& each : from->scripts | std::views::values) out.push_back(each.script);
         return out;
     }
+
+    kecs::ComponentId Runtime::DeclareMaterialKind(MaterialKind kind, std::string* error)
+    {
+        kecs::World* world = _impl->world;
+        if (!world) { if (error) *error = "there is no world to make the kind a component of"; return kecs::NoComponent; }
+        const kecs::ComponentId existing = world->Find(kind.name);
+        const auto known = std::ranges::find(_impl->materialKinds, kind.name, &MaterialKind::name);
+        if (existing != kecs::NoComponent && known == _impl->materialKinds.end()) {
+            if (error) *error = std::format("there is a component named '{}' already, which is no material kind: the kind needs another name", kind.name);
+            return kecs::NoComponent;
+        }
+        // What a new one's pictures start as: found now, as a stand-in until a file is read.
+        std::vector<Held> starting;
+        for (const auto& [field, picture] : kind.textures) starting.push_back(ResourceOf(picture));
+        kecs::ComponentDescription description = MaterialComponentOf(kind, std::move(starting));
+        kecs::ComponentId id = existing;
+        if (existing == kecs::NoComponent) id = world->Register(std::move(description));
+        else {
+            try { (void)world->Reshape(existing, std::move(description)); }
+            catch (const std::exception& e) { if (error) *error = e.what(); return kecs::NoComponent; }
+        }
+        if (known != _impl->materialKinds.end()) *known = std::move(kind);
+        else {
+            _impl->materialKinds.push_back(std::move(kind));
+            std::ranges::sort(_impl->materialKinds, {}, &MaterialKind::name);
+        }
+        _impl->WriteMaterials();
+        // What a shader takes of a kind is worked out as its pipeline is built — a pipeline node's, or a pass's own: the
+        // graph is built again, the next frame. A kind is declared seldom: when a project's scripts are read.
+        for (auto& built : _impl->built | std::views::values) built.signature.clear();
+        _impl->stale = true;
+        return id;
+    }
+
+    const std::vector<MaterialKind>& Runtime::MaterialKinds() const { return _impl->materialKinds; }
+
+    const MaterialKind* Runtime::MaterialKindOf(const std::string_view name) const
+    {
+        const auto it = std::ranges::find(_impl->materialKinds, name, &MaterialKind::name);
+        return it == _impl->materialKinds.end() ? nullptr : &*it;
+    }
+
+    void Runtime::SetGeneratedShaderDirectory(std::filesystem::path directory)
+    {
+        if (directory == _impl->generatedShaders) return;
+        kor::Shader::AddSearchPath(directory);
+        _impl->generatedShaders = std::move(directory);
+        _impl->WriteMaterials();
+    }
+
+    const std::filesystem::path& Runtime::GeneratedShaderDirectory() const { return _impl->generatedShaders; }
+
+    const std::vector<std::string>& Runtime::MaterialNotes() const { return _impl->materialNotes; }
 
     std::vector<PassUse> Runtime::UsesOf(const std::string_view id, const std::string_view output) const
     {

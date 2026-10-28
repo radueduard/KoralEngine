@@ -15,15 +15,15 @@ struct RasterInfo {
 };
 
 // One block of push constants both stages read. `model` is the engine's to give: where the entity
-// is in the world, and which entity it is. The rest is the entity's own — the fields of the component this
-// pipeline's node makes, which is what makes an entity drawn:
+// is in the world, and which entity it is. The rest is what the entity's PbrMaterial is, wired to the Draw from
+// a Filter of what has one (baseColor to albedo):
 //   albedo     its colour, as picked: what it is under white light
 //   metallic   0 for a thing that is not metal, 1 for one that is: its colour is then its reflection's
 //   roughness  0 polished, 1 matte
 //   emission   the light it gives off itself, as a colour: added whatever lights it
 struct DrawData {
     float4x4 model;
-    float3 albedo;
+    float4 albedo;          // a: how opaque, which nothing here uses
     float metallic;
     float3 emission;
     float roughness;
@@ -81,7 +81,7 @@ float3 reflected(float facing, float3 straightOn)
 [shader("fragment")]
 float4 fragment(RasterInfo raster) : SV_Target
 {
-    float3 albedo = toLinear(draw.albedo);
+    float3 albedo = toLinear(draw.albedo.rgb);
     float metallic = saturate(draw.metallic);
     float roughness = clamp(draw.roughness, 0.045, 1.0);   // none at all is a highlight too small to draw
     float3 normal = normalize(raster.normal);

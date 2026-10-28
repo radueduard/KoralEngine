@@ -16,16 +16,28 @@
 
 namespace kgraph
 {
+    /**
+     * @brief A material as the file reports it: described physically (a glTF, or any file that gives a metallic or a
+     *        roughness), whose albedo, roughness and metallic are filled; or the classic way (an OBJ, an FBX's Phong),
+     *        whose diffuse, specular and shininess are. What it is imported as is chosen by which (materials.h, ReportOf).
+     */
     struct ModelMaterial {
+        enum class Model { ePbr, eClassic };
         std::string name;
+        Model model = Model::ePbr;
         float albedo[4] { 1.f, 1.f, 1.f, 1.f };     ///< In linear terms, as a file has it; a: how opaque.
         float emission[3] { 0.f, 0.f, 0.f };
         float roughness = 1.f, metallic = 0.f;
+        float diffuse[4] { 1.f, 1.f, 1.f, 1.f };    ///< The classic ones, as the file has them; a: how opaque.
+        float specular[3] { 0.f, 0.f, 0.f };
+        float shininess = 0.f;                      ///< The Phong exponent.
         float alphaCutoff = 0.f;                    ///< Above 0: a texel less opaque than this is not drawn. 0: all of it is.
         bool blended = false;                       ///< Drawn over what is behind it by how opaque it is: glass, a decal.
         bool doubleSided = false;
-        /// Its pictures, each by the name it is found by (`@...`); empty for one it has not.
-        std::string albedoMap, normalMap, roughnessMap, emissiveMap;
+        /// Its pictures, each by the name it is found by (`@...`); empty for one it has not. roughnessMap is glTF's
+        /// metallic and roughness in one (g and b).
+        std::string albedoMap, normalMap, roughnessMap, emissiveMap, occlusionMap;
+        std::string specularMap, shininessMap, alphaMap;   ///< The classic ones'.
     };
 
     struct ModelNode {

@@ -2821,11 +2821,12 @@ class $NAME : ResourceScript() {
                 for (const auto& entry : std::filesystem::recursive_directory_iterator(folder, std::filesystem::directory_options::skip_permission_denied, ignored)) {
                     if (!entry.is_regular_file(ignored)) continue;
                     const std::string kind = ending(entry.path());
-                    if (!pictures.contains(kind) && !models.contains(kind)) continue;
+                    const bool material = kind == ".kmat";      // a project's own Material asset
+                    if (!pictures.contains(kind) && !models.contains(kind) && !material) continue;
                     Asset asset;
                     asset.id = runtime.AssetId(entry.path());
                     if (!listed.insert(asset.id).second) continue;
-                    asset.kind = models.contains(kind) ? Asset::Kind::eModel : Asset::Kind::eTexture;
+                    asset.kind = material ? Asset::Kind::eMaterial : models.contains(kind) ? Asset::Kind::eModel : Asset::Kind::eTexture;
                     asset.file = entry.path();
                     asset.label = std::filesystem::relative(entry.path(), folder, ignored).generic_string();
                     assets.push_back(std::move(asset));
@@ -2911,6 +2912,34 @@ class $NAME : ResourceScript() {
             }
             // In a folder, a thing is called what its file is.
             if (asset.kind == Asset::Kind::eTexture || (asset.kind == Asset::Kind::eModel && !asset.file.empty())) asset.label = asset.file.filename().string();
+        }
+        // A model's materials — each an asset its things follow — shown beside its meshes, in its folder: of every model
+        // the scene has (read), and of every asset an entity follows, whether it was imported now or the scene opened.
+        {
+            Document& doc = Doc();
+            for (const kecs::Entity entity : doc.World().All())
+                if (const auto* link = doc.World().Get<MaterialLink>(entity)) {
+                    std::stringstream lines(link->assets);
+                    for (std::string line; std::getline(lines, line);)
+                        if (const auto space = line.find(' '); space != std::string::npos) (void)doc.MaterialAssetOf(line.substr(space + 1));
+                }
+            for (const auto& asset : std::vector<Asset>(assets))
+                if (asset.kind == Asset::Kind::eModel && asset.loaded) (void)doc.MaterialAssetOf(asset.id + "#material:0");
+            for (const auto& id : doc.MaterialAssetIds()) {
+                // The editor's own are listed under Materials/Defaults; a project's file with its folder.
+                if (id.starts_with("material:") || id.ends_with(".kmat") || !listed.insert(id).second) continue;
+                const MaterialAsset* material = doc.MaterialAssetOf(id);
+                if (!material) continue;
+                Asset asset;
+                asset.kind = Asset::Kind::eMaterial;
+                asset.id = id;
+                asset.label = material->name;
+                asset.parent = asset.group = id.substr(0, id.find('#'));
+                const auto model = std::ranges::find(assets, asset.parent, &Asset::id);
+                asset.folder = model != assets.end() ? model->folder : std::string("Materials");
+                asset.loaded = true;
+                assets.push_back(std::move(asset));
+            }
         }
         std::ranges::stable_sort(assets, [](const Asset& a, const Asset& b) { // A shader's entries as its module declares them.
             const auto label = [](const Asset& asset) -> const std::string& { static const std::string none; return asset.kind == Asset::Kind::eShader ? none : asset.label; };
@@ -3040,6 +3069,13 @@ class $NAME : ResourceScript() {
                 if (const auto input = node.inputs.find("pipeline"); input != node.inputs.end() && input->second.link && input->second.link->node == pipeline->second) ran = std::max(ran, passOf(node.pass));
             if (const kgraph::Node* node = doc.Graph().Find(pipeline->second); ran < 0 && node) ran = passOf(node->pass);
             if (ran >= 0) last = ran;
+        } else if (doc.Runtime().MaterialKindOf(component)) {
+            // A material's: the first pass that draws with a pipeline whose shaders take something of the kind.
+            for (const auto& node : doc.Graph().nodes) {
+                const auto input = node.inputs.find("pipeline");
+                if (input == node.inputs.end() || !input->second.link) continue;
+                if (std::ranges::contains(doc.Runtime().MaterialsOf(input->second.link->node), std::string(component))) last = std::min(last, passOf(node.pass));
+            }
         }
         const bool mesh = fieldType == "Mesh", picture = fieldType == "Image";
         std::vector<std::string> choices;
@@ -3076,7 +3112,7 @@ class $NAME : ResourceScript() {
             Say(std::format("{} is {}'s mesh.", asset->label, name));
             return true;
         case Asset::Kind::eTexture: {
-            // Its albedo's, before any other; one with nothing in it, before one that has something.
+            // A material's base colour (or diffuse), before any other; one with nothing in it, before one that has something.
             std::optional<std::pair<std::string, std::string>> best;
             int bestScore = -1;
             for (const auto& component : doc.ComponentsOf(entity))
@@ -3084,7 +3120,8 @@ class $NAME : ResourceScript() {
                     if (field.type != "Image") continue;
                     const kgraph::Value held = doc.Field(entity, component, field.name);
                     const bool free = !held.String() || held.String()->empty() || held.String()->starts_with("$");
-                    const int score = (field.name.find("albedo") != std::string::npos ? 2 : 0) + (free ? 1 : 0);
+                    const bool colour = field.name.find("albedo") != std::string::npos || field.name == "baseColorMap" || field.name == "diffuseMap";
+                    const int score = (colour ? 2 : 0) + (free ? 1 : 0);
                     if (score > bestScore) { bestScore = score; best = { component, field.name }; }
                 }
             if (!best) { Say(std::format("{} has no field that holds a picture: a component of a pipeline that samples one has.", name), true); return false; }
@@ -3106,42 +3143,18 @@ class $NAME : ResourceScript() {
             // Dropped on an entity, a prefab's instance is made under it.
             return !PlacePrefab(id, entity).IsNull();
         case Asset::Kind::eMaterial: {
-            const Material* material = MaterialOf(id);
-            if (!material) return false;
-            // What the entity is drawn with that has a material's fields — an albedo, or, a pipeline's that has no
-            // more than that, a colour (a light's is not one); none, the first there is that has them (not the blended
-            // one's, where there is another): what an imported model's things are given.
-            const auto colourOf = [&](const std::string& component) -> const char* {
-                const kecs::ComponentId c = doc.World().Find(component);
-                if (c == kecs::NoComponent) return nullptr;
-                const auto& type = doc.World().Describe(c);
-                if (type.FindField("albedo")) return "albedo";
-                return type.FindField("color") && doc.Runtime().ComponentOf(component) == c ? "color" : nullptr;
-            };
-            std::vector<std::string> components;
-            for (const auto& component : doc.ComponentsOf(entity))
-                if (colourOf(component)) components.push_back(component);
-            if (components.empty()) {
-                std::vector<std::string> all;
-                for (const auto& component : doc.ComponentNames())
-                    if (colourOf(component)) all.push_back(component);
-                const auto unblended = std::ranges::find_if(all, [](const std::string& c) { return c.find("blend") == std::string::npos; });
-                if (all.empty()) { Say("The scene draws nothing with a material: no pipeline's component has an albedo or a colour.", true); return false; }
-                const std::string chosen = unblended != all.end() ? *unblended : all.front();
-                if (!doc.AddComponent(entity, chosen)) { Say(std::format("{} could not be given {}.", name, chosen), true); return false; }
-                components.push_back(chosen);
+            // A Material asset: the entity follows it from now on — one of the editor's, a model's, a project's file.
+            if (const Material* material = MaterialOf(id); material && !doc.MaterialAssetOf(id)) {
+                using kgraph::Value;
+                const float* c = material->albedo;
+                const float* e = material->emission;
+                doc.AddMaterialAsset({ .id = id, .name = material->name, .kind = "PbrMaterial",
+                                       .values = { { "baseColor", Value(Value::List { c[0], c[1], c[2], 1.0 }) }, { "metallic", Value(material->metallic) },
+                                                   { "roughness", Value(material->roughness) }, { "emission", Value(Value::List { e[0], e[1], e[2] }) } } });
             }
-            const auto vec = [](const float* v) { return kgraph::Value(kgraph::Value::List { v[0], v[1], v[2] }); };
-            for (const auto& component : components) {
-                const auto& type = doc.World().Describe(doc.World().Find(component));
-                const auto give = [&](const char* field, const kgraph::Value& value) { if (type.FindField(field)) doc.SetField(entity, component, field, value); };
-                give(colourOf(component), vec(material->albedo));
-                give("metallic", kgraph::Value(material->metallic));
-                give("roughness", kgraph::Value(material->roughness));
-                give("emission", vec(material->emission));
-                for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) give(map, kgraph::Value("$white"));
-            }
-            Say(std::format("{} is made of {}.", name, material->name));
+            std::string error;
+            if (!doc.GiveMaterial(entity, id, &error)) { Say(std::format("{} could not be given {}: {}.", name, asset->label, error), true); return false; }
+            Say(std::format("{} is made of {}.", name, asset->label));
             return true;
         }
         case Asset::Kind::eScript: {
@@ -3493,6 +3506,57 @@ class $NAME : ResourceScript() {
         if (_hasProject && !_project.Save(error)) Say(error, true);
     }
 
+    void Session::SetImportKind(const kgraph::ModelMaterial::Model model, const std::string& kind, const std::filesystem::path& file)
+    {
+        Doc().SetImportKind(model, kind, file);
+        const std::string key = file.empty() ? std::string() : Doc().Runtime().AssetId(file);
+        const char* reported = model == kgraph::ModelMaterial::Model::eClassic ? "classic" : "pbr";
+        if (kind.empty()) {
+            if (const auto it = _project.importKinds.find(key); it != _project.importKinds.end()) {
+                it->second.erase(reported);
+                if (it->second.empty()) _project.importKinds.erase(it);
+            }
+        } else {
+            _project.importKinds[key][reported] = kind;
+        }
+        std::string error;
+        if (_hasProject && !_project.Save(error)) Say(error, true);
+    }
+
+    std::string Session::NewMaterial(const std::string& kind)
+    {
+        if (!_hasProject) { Say("A material of the project's own goes in a project: File, New project.", true); return {}; }
+        if (!Doc().Runtime().MaterialKindOf(kind)) { Say(std::format("There is no material kind '{}'.", kind), true); return {}; }
+        const std::filesystem::path folder = _project.directory / "assets" / "materials";
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
+        std::filesystem::path file = folder / "Material.kmat";
+        for (int n = 2; std::filesystem::exists(file, ec); ++n) file = folder / std::format("Material {}.kmat", n);
+        std::ofstream(file, std::ios::binary) << std::format("{{\n  \"koral-material\": 1,\n  \"kind\": {},\n  \"values\": {{}}\n}}\n", kecs::json::Quote(kind));
+        Doc().SetAssetDirectory(_project.directory / "assets");
+        const std::string id = Doc().Runtime().AssetId(file);
+        if (!Doc().MaterialAssetOf(id)) { Say(std::format("{} could not be made.", file.filename().string()), true); return {}; }
+        SelectAsset(id);
+        Say(std::format("A {} of the project's: {}. Drag it onto an entity, which then follows it.", kind, file.filename().string()));
+        return id;
+    }
+
+    std::string Session::MaterialAssetFrom(const kecs::Entity entity, const std::string& kind)
+    {
+        Document& doc = Doc();
+        const kecs::ComponentId id = doc.World().Find(kind);
+        if (id == kecs::NoComponent || !doc.World().Has(entity, id)) return {};
+        const std::string made = NewMaterial(kind);
+        if (made.empty()) return {};
+        // What the entity's is, every field: the asset's now, and the entity follows it.
+        for (const auto& field : doc.World().Describe(id).fields)
+            if (const kgraph::Value value = doc.Field(entity, kind, field.name); !value.IsNull()) doc.SetMaterialAssetField(made, field.name, value);
+        doc.GiveMaterial(entity, made);
+        SelectAsset(made);
+        Say(std::format("{}'s {} is an asset of the project's now, which it follows.", doc.NameOf(entity), kind));
+        return made;
+    }
+
     void Session::DontAskToCompress()
     {
         _project.askToCompress = false;
@@ -3658,6 +3722,11 @@ class $NAME : ResourceScript() {
     {
         if (_hasProject) Doc().SetAssetDirectory(_project.directory / "assets");
         std::string error;
+        // What its materials are imported as: what the project says, for every file and for this one.
+        for (const auto& [model, kinds] : _project.importKinds)
+            for (const auto& [reported, kind] : kinds)
+                Doc().SetImportKind(reported == "classic" ? kgraph::ModelMaterial::Model::eClassic : kgraph::ModelMaterial::Model::ePbr, kind,
+                                    model.empty() ? std::filesystem::path() : std::filesystem::path(model.substr(1)));
         const kecs::Entity root = Doc().ImportModel(file, &error);
         if (root.IsNull()) { Say(error, true); return false; }
         if (const auto at = std::exchange(placeAt, std::nullopt)) Doc().SetPosition(root, { at->x, at->y, at->z });
@@ -8181,6 +8250,7 @@ class $NAME : ResourceScript() {
                     { "New shader...", [this] { SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; }); }, _session->HasProject() },
                     { "New script...", [this] { SetState([&] { _dialog = Dialog::eNewScript; _newId.clear(); _newKind = 0; }); }, _session->HasProject() },
                     { "Create prefab...", [this] { SetState([&] { _dialog = Dialog::eNewPrefab; _newId.clear(); }); }, _session->HasProject() },
+                    { "New material", [this] { _session->NewMaterial(); SetState(); }, _session->HasProject() },
                     { "Import a model or a picture...", [this] { SetState([&] { _dialog = Dialog::eImportModel; }); } },
                     { {}, {}, true, true },
                     { "Show in the file manager", [this, here] { _session->ShowInFiles(here); }, project },
@@ -8350,11 +8420,12 @@ class $NAME : ResourceScript() {
                                              std::move(kinds), kui::TreeNodeOptions {}.SetIndent(14.f)));
 
                 // ---- over it all: something made, something looked for; under it: what is picked, and how big things are shown
-                const std::vector<std::string> made { "Folder...", "Shader...", "Script...", "Import a model or a picture...", "Prefab of the picked entity", "Prefab..." };
+                const std::vector<std::string> made { "Folder...", "Shader...", "Script...", "Import a model or a picture...", "Prefab of the picked entity", "Prefab...", "Material" };
                 const std::vector<std::string> kindNames { "Every kind", "Models", "Meshes", "Textures", "Shaders", "Scripts", "Scenes", "Prefabs", "Materials" };
                 kui::Widget bar = kui::Row({
                     kui::Tooltip("Makes something in the project: a folder here, a shader, a script, a prefab of the picked entity; or brings a model's or a picture's file in.",
                         kui::Dropdown(made, -1, [this](const int index) {
+                            if (index == 6) { _session->NewMaterial(); SetState(); return; }
                             if (index == 5) { SetState([&] { _dialog = Dialog::eNewPrefab; _newId.clear(); }); return; }
                             if (index == 4) {
                                 // The entity picked, and what is under it: a prefab, and it its first instance.
@@ -8936,18 +9007,54 @@ class $NAME : ResourceScript() {
                     rows.push_back(Small("Open in Visual Studio Code", [this, asset] { if (asset.stage.empty()) _session->OpenInCode(asset.file); else _session->OpenAsset(asset); }));
                     break;
                 }
-                case Session::Asset::Kind::eMaterial:
-                    if (const Session::Material* material = Session::MaterialOf(asset.id)) {
-                        rows.push_back(AssetPreview(asset, 72.f));
+                case Session::Asset::Kind::eMaterial: {
+                    rows.push_back(AssetPreview(asset, 72.f));
+                    if (const Session::Material* material = Session::MaterialOf(asset.id); material && !Doc().MaterialAssetOf(asset.id)) {
                         const auto three = [](const float* v) { return std::format("{:.2f}, {:.2f}, {:.2f}", v[0], v[1], v[2]); };
-                        rows.push_back(kgui::Labeled("Albedo", kgui::Line(three(material->albedo)), LabelWidth));
+                        rows.push_back(kgui::Labeled("Base colour", kgui::Line(three(material->albedo)), LabelWidth));
                         rows.push_back(kgui::Labeled("Metallic", kgui::Line(std::format("{:.2f}", material->metallic)), LabelWidth));
                         rows.push_back(kgui::Labeled("Roughness", kgui::Line(std::format("{:.2f}", material->roughness)), LabelWidth));
                         rows.push_back(kgui::Labeled("Emission", kgui::Line(three(material->emission)), LabelWidth));
+                    } else if (const MaterialAsset* material = Doc().MaterialAssetOf(asset.id)) {
+                        // Its fields, as its kind has them: set here, they are set in every entity that follows it, but
+                        // for what one made its own.
+                        std::size_t following = 0;
+                        for (const kecs::Entity entity : Doc().World().All()) following += Doc().MaterialAssetOfEntity(entity, material->kind) == material->id;
+                        rows.push_back(kgui::Labeled("Kind", kgui::Line(material->kind), LabelWidth));
+                        rows.push_back(kgui::Labeled("Followed by", kgui::Line(std::format("{} {}", following, following == 1 ? "entity" : "entities")), LabelWidth));
+                        const kecs::ComponentId kind = Doc().World().Find(material->kind);
+                        if (kind != kecs::NoComponent)
+                            for (const auto& field : Doc().World().Describe(kind).fields) {
+                                const std::string id = asset.id, name = field.name;
+                                const auto set = [this, id, name](const Value& value) {
+                                    std::string error;
+                                    if (!Doc().SetMaterialAssetField(id, name, value, &error)) _session->Say(error, true);
+                                };
+                                const auto said = std::ranges::find(material->values, name, &std::pair<std::string, Value>::first);
+                                const Value now = said != material->values.end() ? said->second : Value();
+                                kui::Widget editor;
+                                if (field.type == "Image") editor = kgui::Line(now.String() ? *now.String() : std::string("as its kind starts it"));
+                                else if (!field.choices.empty()) {
+                                    const int selected = now.Number() ? static_cast<int>(*now.Number()) : 0;
+                                    editor = kui::Dropdown(field.choices, selected, [set](const int index) { set(Value(index)); });
+                                } else if (const auto* items = now.Items()) {
+                                    std::vector<float> numbers;
+                                    for (const auto& item : *items) numbers.push_back(item.Number() ? static_cast<float>(*item.Number()) : 0.f);
+                                    editor = DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, kgraph::NumberLimits { field.min, field.max, field.logarithmic }, field.type.starts_with("i") ? kui::NumberType::eInt : kui::NumberType::eFloat);
+                                } else if (const bool* on = now.Bool()) {
+                                    editor = kui::Checkbox(*on, [set](const bool changed) { set(Value(changed)); });
+                                } else if (const double* number = now.Number()) {
+                                    editor = kui::DragValue(*number, [set](const double v) { set(Value(v)); });
+                                } else {
+                                    editor = kgui::Muted("as its kind starts it", 11.f);
+                                }
+                                rows.push_back(kui::Tooltip(field.type, kgui::Labeled(name, std::move(editor), LabelWidth)));
+                            }
                     }
-                    rows.push_back(kgui::Muted("Drag it from the Assets panel onto an entity, in the scene tree or the inspector: what draws it (a pipeline's "
-                                               "component with an albedo, or a colour) is given these, its pictures white. One drawn by nothing is given one."));
+                    rows.push_back(kgui::Muted("Drag it from the Assets panel onto an entity, in the scene tree or the inspector: the entity is given a material of "
+                                               "its kind and follows it — changed here, it changes, but for what was changed on the entity itself."));
                     break;
+                }
                 case Session::Asset::Kind::eScene:
                     rows.push_back(kgui::Muted("A scene of the project's: its graph and its entities, as they were saved."));
                     break;
@@ -9791,112 +9898,31 @@ class $NAME : ResourceScript() {
                     }
                     return editor;
                 };
-                // The materials it has — the components of pipelines — and what two or more of them have alike, a field of
-                // the same name and type: set once, for each, above what each has of its own. One that no pass the
+                // The pipelines' parameters it has — what its draws take of it that no material does. One that no pass the
                 // choices leave running uses (another renderer's) is shut, and what is its own is not set while so.
                 std::vector<std::string> materials;
                 for (const auto& component : has)
                     if (pipelines.contains(component) && !doc.World().Describe(doc.World().Find(component)).fields.empty()) materials.push_back(component);
                 std::map<std::string, bool> inUse;
                 for (const auto& material : materials) inUse[material] = _session->MaterialInUse(material);
-                std::vector<std::pair<std::string, std::string>> sharedFields;     // a field, and its type
-                std::map<std::string, std::vector<std::string>> sharedBy;          // a field, the materials that have it
-                if (materials.size() > 1) {
-                    std::map<std::pair<std::string, std::string>, std::vector<std::string>> having;
-                    for (const auto& material : materials)
-                        for (const auto& field : doc.World().Describe(doc.World().Find(material)).fields) {
-                            auto& list = having[{ field.name, field.type }];
-                            if (list.empty() && material == materials.front()) sharedFields.emplace_back(field.name, field.type);
-                            list.push_back(material);
-                        }
-                    std::erase_if(sharedFields, [&](const auto& field) { return having[field].size() < 2; });
-                    for (const auto& field : sharedFields) sharedBy[field.first] = having[field];
-                }
-                bool sharedShown = sharedFields.empty();
                 for (const auto& component : has) {
                     const bool material = std::ranges::contains(materials, component);
-                    if (material && !sharedShown) {
-                        // What its materials have alike: a card of its own, none of theirs — read from one in use, and set in
-                        // each of them whichever renderer is chosen. What each has besides is under it, in its own.
-                        sharedShown = true;
-                        rows.push_back(kui::Separator());
-                        const bool shut = _componentsShut.contains(" shared");
-                        std::vector<kui::Widget> card;
-                        std::vector<kui::Widget> head;
-                        head.push_back(kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon(shut ? "chevron_right" : "expand_more", kui::IconStyle::eFilled, t.textMuted)),
-                                                   [this, shut] { SetState([&] { if (shut) _componentsShut.erase(" shared"); else _componentsShut.insert(" shared"); }); },
-                                                   kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
-                        head.push_back(kui::SizedBox(16.f, 16.f, kui::Icon("link", kui::IconStyle::eFilled, t.primary)));
-                        head.push_back(Heading("Shared material"));
-                        head.push_back(kui::Expanded(kgui::Muted(std::format("{} pipelines, one value each", materials.size()), 11.f)));
-                        card.push_back(kui::Row(std::move(head), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
-                        // The pipelines it is of, each to go to: whether a pass the choices leave running uses it now.
-                        std::vector<kui::Widget> of;
-                        for (const auto& each : materials) {
-                            const auto pipeline = pipelines.find(each);
-                            const std::string node = pipeline != pipelines.end() ? pipeline->second : std::string();
-                            of.push_back(kui::Tooltip(inUse[each] ? std::format("The {} pipeline's material: a pass running now uses it. Pressed, the pipeline on the graph.", each)
-                                                                  : std::format("The {} pipeline's material: no pass the choices leave running uses it now — set here all the same. Pressed, the pipeline on the graph.", each),
-                                                      kui::Opacity(inUse[each] ? 1.f : 0.6f, Chip(std::format("{} {}", inUse[each] ? "●" : "○", each), [this, node] { _session->GoTo(node); }))));
-                        }
-                        card.push_back(kui::Wrap(std::move(of), 4.f, 4.f));
-                        if (!shut) {
-                            card.push_back(kgui::Muted("What the pipelines' materials have alike, a field of the same name: set here, it is set in every one of them, whichever renderer is chosen.", 11.f));
-                            const auto readFrom = std::ranges::find_if(materials, [&](const std::string& each) { return inUse[each]; });
-                            for (const auto& [fieldName, fieldType] : sharedFields) {
-                                const std::vector<std::string>& by = sharedBy[fieldName];
-                                const std::string from = readFrom != materials.end() && std::ranges::contains(by, *readFrom) ? *readFrom : by.front();
-                                const auto& fields = doc.World().Describe(doc.World().Find(from)).fields;
-                                const auto field = std::ranges::find(fields, fieldName, &std::remove_cvref_t<decltype(fields.front())>::name);
-                                const auto set = [this, entity, by, fieldName](const Value& changed) {
-                                    std::string error;
-                                    for (const auto& each : by)
-                                        if (!Doc().SetField(entity, each, fieldName, changed, &error)) { _session->Say(error, true); return; }
-                                };
-                                kui::Widget editor = fieldEditor(from, *field, set);
-                                // Each of them, followed: one set apart since — by a script, an undo — is said, and made
-                                // alike again by a press.
-                                auto readAll = [this, entity, by, fieldName] {
-                                    Value::List all;
-                                    for (const auto& each : by) all.push_back(Doc().Field(entity, each, fieldName));
-                                    return Value(std::move(all));
-                                };
-                                const std::size_t shown = static_cast<std::size_t>(std::ranges::find(by, from) - by.begin());
-                                auto apart = [this, by, shown, set, from](const Value& all) -> kui::Widget {
-                                    const auto* values = all.Items();
-                                    if (!values || values->size() != by.size()) return kui::SizedBox(0.f, 0.f);
-                                    std::string others;
-                                    for (std::size_t i = 0; i < by.size(); ++i)
-                                        if (i != shown && (*values)[i] != (*values)[shown]) others += (others.empty() ? "" : ", ") + by[i];
-                                    if (others.empty()) return kui::SizedBox(0.f, 0.f);
-                                    return kui::Tooltip(std::format("{} has another value: this is {}'s. Pressed, every one is {}'s.", others, from, from),
-                                                        Chip("differs", [set, value = (*values)[shown]] { set(value); }));
-                                };
-                                editor = kui::Row({ kui::Expanded(std::move(editor)), kui::Make<LiveValue>(_session, std::move(readAll), std::move(apart)) },
-                                                  kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
-                                std::string names;
-                                for (const auto& each : by) names += (names.empty() ? "" : ", ") + each;
-                                card.push_back(kui::Tooltip(std::format("{}: set in {}", fieldType, names), kgui::Labeled(fieldName, std::move(editor), LabelWidth)));
-                            }
-                        }
-                        // Framed apart from the components, its edge the theme's accent: it is theirs together, none's alone.
-                        rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(8.f))
-                                                          .SetDecoration(kui::Decoration {}.SetColor(t.primary.WithAlpha(0.05f)).SetBorderWidth(1.f).SetBorderColor(t.primary.WithAlpha(0.45f)).SetRadius(6.f)),
-                            kui::Column(std::move(card), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(6.f))));
-                    }
                     rows.push_back(kui::Separator());
                     const auto& type = doc.World().Describe(doc.World().Find(component));
                     auto [componentIcon, what, componentTint] = kindOf(component);
                     // Another renderer's: shut unless opened, and what is its own not set while no pass uses it.
                     const bool unused = material && !inUse[component];
                     const bool shut = unused ? !_unusedOpen.contains(component) : _componentsShut.contains(component);
-                    if (material) {
-                        std::size_t own = 0;
-                        for (const auto& field : type.fields)
-                            if (const auto shared = sharedBy.find(field.name); shared == sharedBy.end() || !std::ranges::contains(shared->second, component)) ++own;
-                        what = unused ? std::string("pipeline's own · no pass uses it now") : std::string("pipeline's own");
-                        if (!sharedFields.empty() && std::ranges::any_of(sharedBy, [&](const auto& shared) { return std::ranges::contains(shared.second, component); }))
-                            what += own ? std::format(" · {} {}, the rest shared above", own, own == 1 ? "field" : "fields") : std::string(" · nothing besides what is shared above");
+                    if (material) what = unused ? std::string("pipeline parameters · no pass uses them now") : std::string("pipeline parameters");
+                    // A material: of which kind, which asset it follows, and how much of it is the entity's own.
+                    const bool kind = doc.Runtime().MaterialKindOf(component) != nullptr;
+                    const std::string followed = kind ? doc.MaterialAssetOfEntity(entity, component) : std::string();
+                    const std::vector<std::string> ownFields = kind ? doc.MaterialOverridesOf(entity, component) : std::vector<std::string>();
+                    if (kind) {
+                        const MaterialAsset* asset = followed.empty() ? nullptr : Doc().MaterialAssetOf(followed);
+                        what = followed.empty() ? std::string("material · its own")
+                             : std::format("material · {}{}", asset ? asset->name : followed,
+                                           ownFields.empty() ? std::string() : std::format(" · {} {} its own", ownFields.size(), ownFields.size() == 1 ? "field" : "fields"));
                     }
                     const auto pipeline = pipelines.find(component);
                     std::vector<kui::Widget> head;
@@ -9933,17 +9959,37 @@ class $NAME : ResourceScript() {
                         { "Go to its pipeline", [this, node = pipeline != pipelines.end() ? pipeline->second : std::string()] { _session->GoTo(node); }, pipeline != pipelines.end() },
                     }, kui::Opacity(unused ? 0.55f : 1.f, kui::Row(std::move(head), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)))));
                     if (shut) continue;
+                    // A material that follows an asset: what of it is the entity's own, kept or not.
+                    if (!followed.empty()) {
+                        const auto act = [this, entity, component](bool (Document::*what)(kecs::Entity, std::string_view), const char* done) {
+                            return [this, entity, component, what, done] { if ((Doc().*what)(entity, component)) _session->Say(done); };
+                        };
+                        std::vector<kui::Widget> buttons;
+                        if (!ownFields.empty()) {
+                            buttons.push_back(kui::Tooltip("Writes what is its own to the material asset: every entity that follows it has it.",
+                                                           Small("Apply to the asset", act(&Document::ApplyMaterial, "Applied to the material: every entity that follows it has it."))));
+                            buttons.push_back(kui::Tooltip("Drops what is its own: it is as its material asset is.",
+                                                           Small("Revert", act(&Document::RevertMaterial, "Reverted: it is as its material is."))));
+                        }
+                        buttons.push_back(kui::Tooltip("Makes the material its own: it no longer follows the asset.",
+                                                       Small("Unlink", act(&Document::UnlinkMaterial, "Unlinked: its material is its own now."))));
+                        rows.push_back(kui::Row(std::move(buttons), kui::FlexOptions {}.SetGap(6.f)));
+                    } else if (kind) {
+                        rows.push_back(kui::Tooltip("Saves it as a material of the project's, in assets/materials: the entity follows it, and so can others dropped it on.",
+                                                    Small("Make an asset of it", [this, entity, component] { _session->MaterialAssetFrom(entity, component); })));
+                    }
                     for (const auto& field : type.fields) {
                         const std::string fieldName = field.name;
-                        // What it has alike with another material is set above, for both.
-                        if (const auto shared = sharedBy.find(fieldName); shared != sharedBy.end() && std::ranges::contains(shared->second, component)) continue;
                         const auto set = [this, entity, component, fieldName](const Value& changed) {
                             std::string error;
                             if (!Doc().SetField(entity, component, fieldName, changed, &error)) _session->Say(error, true);
                         };
                         kui::Widget editor = fieldEditor(component, field, set);
                         if (unused) editor = kui::Disabled(std::move(editor));
-                        rows.push_back(kui::Tooltip(field.type, kgui::Labeled(fieldName, std::move(editor), LabelWidth)));
+                        // The entity's own, not its asset's: marked so.
+                        const bool own = std::ranges::contains(ownFields, fieldName);
+                        rows.push_back(kui::Tooltip(own ? std::format("{} · the entity's own: its material asset no longer sets it", field.type) : field.type,
+                                                    kgui::Labeled(own ? std::format("● {}", fieldName) : fieldName, std::move(editor), LabelWidth)));
                     }
                 }
 

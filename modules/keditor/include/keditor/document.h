@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <array>
 #include <filesystem>
 #include <memory>
 #include <set>
@@ -51,6 +52,29 @@ namespace keditor
     /** @brief On every entity of a prefab's instance, the one over it too: which entity of the prefab it is. */
     struct PrefabPart {
         std::int32_t part = 0;
+    };
+
+    /**
+     * @brief On an entity whose materials follow Material assets: which asset each kind of its follows, and what of
+     *        them the entity has made its own (Document::MaterialOverridesOf) — every other field is the asset's.
+     */
+    struct MaterialLink {
+        std::string assets;     ///< "<kind> <asset>" a line: `PbrMaterial @sponza/Sponza.gltf#material:3`
+        std::string overrides;  ///< "<kind>.<field>" a line
+    };
+
+    /**
+     * @brief A Material kept in the project, which entities share: one of a model file's (`@sponza/Sponza.gltf#material:3`),
+     *        a project's own file (`@materials/brass.kmat`), or one of the editor's (`material:Gold`). A field it does
+     *        not say is as its kind starts it.
+     */
+    struct MaterialAsset {
+        std::string id;
+        std::string name;       ///< As it is shown: the file's name for it.
+        std::string kind;
+        std::vector<std::pair<std::string, kgraph::Value>> values;     ///< By field.
+        /// A model's: what the file reported, before anything was changed of it here — what an edit is kept apart from.
+        std::vector<std::pair<std::string, kgraph::Value>> reported;
     };
 
     /** @brief What a function says it is for, beside its graph in its file: what the list of nodes offers it under and finds it by. */
@@ -428,7 +452,8 @@ namespace keditor
         void ScriptUses(std::string_view node) { _scriptResources.emplace(node); _runtime->ReachedFromTheCpu(node); }
         [[nodiscard]] const std::set<std::string>& ScriptResources() const { return _scriptResources; }
         /** @brief Where files named without their whole path are: a project's `assets` folder. Load and Save say it from the scene's own place. */
-        void SetAssetDirectory(const std::filesystem::path& directory) { _runtime->SetAssetDirectory(directory); }
+        /// The project's material kinds' Slang modules are written into its `cache/shaders`, beside it.
+        void SetAssetDirectory(const std::filesystem::path& directory);
 
         /**
          * @brief Makes the components the scripts under @p folder — or the one script file it is — declare known, as their
@@ -441,6 +466,51 @@ namespace keditor
          *        and what they start as. One a host runs already stays as the host made it.
          */
         void DeclareResourceScript(kscript::ScriptType type);
+        /**
+         * @brief Makes a Material's script a material kind of the scene: a component whose pictures start as it says,
+         *        and a Slang module of it for shaders to import. DeclareScripts does it for each it finds.
+         */
+        void DeclareMaterialKind(kscript::ScriptType type);
+
+        // ---- materials ----------------------------------------------------------------------------------------------
+
+        /**
+         * @brief Which material kind a model file's material reported as @p model is imported as: for every file, or —
+         *        with @p file — for that one, before what every file is. By default PbrMaterial and BlinnPhongMaterial.
+         *        An empty @p kind for a file takes its own away.
+         */
+        void SetImportKind(kgraph::ModelMaterial::Model model, std::string kind, const std::filesystem::path& file = {});
+        [[nodiscard]] std::string ImportKind(kgraph::ModelMaterial::Model model, const std::filesystem::path& file = {}) const;
+        /** @brief Makes @p asset one entities can follow, or puts it in the place of the one with its id. */
+        void AddMaterialAsset(MaterialAsset asset);
+        /**
+         * @brief The asset of @p id. A model's is there once the model is read — from what it reports, and what was
+         *        changed of it since (kept in `<model>.materials.json` beside it); a project's file is read when it is
+         *        first asked for. Null for none.
+         */
+        [[nodiscard]] const MaterialAsset* MaterialAssetOf(std::string_view id);
+        /** @brief Every asset known now, by id. */
+        [[nodiscard]] std::vector<std::string> MaterialAssetIds() const;
+        /**
+         * @brief Gives @p entity the material @p asset is — its kind, every field as the asset has it — following it from
+         *        now on: what it had of that kind made its own is forgotten. False, with @p error saying why, for no asset.
+         */
+        bool GiveMaterial(kecs::Entity entity, std::string_view asset, std::string* error = nullptr);
+        /** @brief The asset @p entity 's material of @p kind follows; empty for none. */
+        [[nodiscard]] std::string MaterialAssetOfEntity(kecs::Entity entity, std::string_view kind) const;
+        /** @brief The fields of @p entity 's material of @p kind it has made its own: set on it, not on its asset. */
+        [[nodiscard]] std::vector<std::string> MaterialOverridesOf(kecs::Entity entity, std::string_view kind) const;
+        /**
+         * @brief Sets a field of an asset, and so of every entity's material that follows it and has not made that field
+         *        its own. A model's is kept beside the model; a project's file is written.
+         */
+        bool SetMaterialAssetField(std::string_view asset, std::string_view field, const kgraph::Value& value, std::string* error = nullptr);
+        /** @brief Writes what @p entity made its own of its @p kind material to its asset: every entity that follows it has it. */
+        bool ApplyMaterial(kecs::Entity entity, std::string_view kind);
+        /** @brief Forgets what @p entity made its own of its @p kind material: it is as its asset is. */
+        bool RevertMaterial(kecs::Entity entity, std::string_view kind);
+        /** @brief Stops @p entity 's @p kind material following its asset: what it has is its own. */
+        bool UnlinkMaterial(kecs::Entity entity, std::string_view kind);
         /**
          * @brief Runs a ResourceScript: @p fill fills the images and buffers each Script node that names it makes, given
          *        that node's settings as @p type lays them out. What it makes is what @p type says, or — when it says
@@ -486,7 +556,23 @@ namespace keditor
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
         std::vector<std::string> _notes;
-        void Imported(kecs::Entity root, const kgraph::Model& model);
+        // Materials: the assets entities follow, by id; which kind each reported model is imported as, for every file
+        // ("") and for one; and whether a field is being set because an asset has it, which makes nothing an override.
+        std::map<std::string, MaterialAsset, std::less<>> _materialAssets;
+        std::map<std::string, std::array<std::string, 2>, std::less<>> _importKinds { { "", { "PbrMaterial", "BlinnPhongMaterial" } } };
+        bool _following = false;
+        /** The entity's MaterialLink lines of @p which ("assets", "overrides"), and back. */
+        [[nodiscard]] std::vector<std::string> LinkLines(kecs::Entity entity, bool overrides) const;
+        void SetLinkLines(kecs::Entity entity, bool overrides, const std::vector<std::string>& lines);
+        /** A model's materials as assets, from what it reports and what was changed of it since. */
+        void MakeModelMaterials(const std::filesystem::path& file, const kgraph::Model& model);
+        /** Writes what was changed of a model's materials beside it, or a project's material's file. */
+        void SaveMaterialAsset(const MaterialAsset& asset);
+        /** Tags @p entity Masked or Blended as its materials' alphaMode says. */
+        void SyncAlphaTags(kecs::Entity entity);
+        /** What a scene saved before materials were their own had in its pipelines' components, made each entity's PbrMaterial. */
+        void MigrateMaterials(const kecs::json::Value& world, const std::vector<kecs::Entity>& entities);
+        void Imported(const std::filesystem::path& file, kecs::Entity root, const kgraph::Model& model);
         std::vector<std::pair<std::filesystem::path, kecs::Entity>> _importing;     // a model being read, and the entity its things go under
         std::uint64_t _revision = 0, _saved = 0;
         std::uint64_t _moves = 0;                       // of _revision, the changes that were only an entity moved
@@ -520,4 +606,12 @@ template <> struct kecs::Fields<keditor::PrefabPart> {
 };
 template <> struct kecs::Fields<keditor::Label> {
     static void Describe(kecs::FieldList<keditor::Label>& list) { list.Field("text", &keditor::Label::text); }
+};
+template <> struct kecs::Name<keditor::MaterialLink> { static constexpr std::string_view value = "MaterialLink"; };
+template <> struct kecs::Fields<keditor::MaterialLink> {
+    static void Describe(kecs::FieldList<keditor::MaterialLink>& list)
+    {
+        list.Field("assets", &keditor::MaterialLink::assets);
+        list.Field("overrides", &keditor::MaterialLink::overrides);
+    }
 };

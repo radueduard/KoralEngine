@@ -42,7 +42,7 @@ Seen prepassVertex(float3 position : POSITION, float2 uv : UV, uint index : SV_I
 uint prepassFragment(Seen seen) : SV_Target0
 {
     const Instance instance = instances[seen.instance];
-    if (instance.alphaCutoff > 0.0 && pictureOf(instance.albedoMap, textureSampler, seen.uv).a < instance.alphaCutoff) discard;
+    if (isCutOut(instance) && pictureOf(instance.albedoMap, textureSampler, seen.uv).a < instance.alphaCutoff) discard;
     return seen.instance + 1;
 }
 

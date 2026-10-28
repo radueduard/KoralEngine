@@ -63,6 +63,12 @@ namespace kscript
         /// A ResourceScript: no component, but what a Script node of the graph runs — it makes resources and fills them.
         bool makesResources = false;
         std::vector<DeclaredResource> resources;    ///< A ResourceScript's, in the order it declares them.
+        /// A Material: a kind of what a drawn thing is made of, data and nothing else. No component of the Scripts': its
+        /// pictures are shared references, which what keeps them makes it with (kgraph::Runtime::DeclareMaterialKind).
+        bool material = false;
+        /// A Material's pictures, each a field of type "Image" at the front of it, by name: what each starts as (`$white`,
+        /// `@textures/ramp.png`), in the order they are laid out.
+        std::vector<std::pair<std::string, std::string>> textures;
     };
 
     class Scripts {

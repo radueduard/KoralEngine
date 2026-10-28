@@ -178,6 +178,36 @@ annotation class Min(val min: Float)
 @Retention(AnnotationRetention.SOURCE)
 annotation class Logarithmic
 
+/** What a whole-number property is one of, by name: the first is 0, the second 1. `@Choices("Opaque", "Masked", "Blended")`. */
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Choices(vararg val names: String)
+
+/**
+ * A kind of what a drawn thing is made of: data and nothing else. Its public vars are a component, shown on an entity as
+ * a script's are, which a shader takes by annotating its own members (`[PbrMaterial("roughness")]`). Nothing is called
+ * on it. The engine's package has `PbrMaterial` and `BlinnPhongMaterial`; a project may declare more.
+ *
+ * ```kotlin
+ * class Toon : Material() {
+ *     var tint = Vec4(1f, 1f, 1f, 1f)
+ *     var ramp = Texture("@textures/ramp.png")
+ *     @Range(1f, 8f) var bands = 3
+ * }
+ * ```
+ */
+abstract class Material
+
+/** A Material's picture, by the name it is found by: `"@textures/wall.png"`, or one of a texel — [White], [Black], [Normal]. */
+data class Texture(val name: String) {
+    companion object {
+        @JvmField val White = Texture("\$white")
+        @JvmField val Black = Texture("\$black")
+        /** Straight out of the surface. */
+        @JvmField val Normal = Texture("\$normal")
+    }
+}
+
 /** Gives a script's component another name than its class's. */
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)

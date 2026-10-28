@@ -23,6 +23,9 @@
 // A TEXTURE or STORAGE field is a field of the entity's own component too, an image, which the frame graph is told the
 // pass reads — or, for STORAGE, writes — though no descriptor of the pass binds it.
 //
+// A field marked with a material kind's attribute — `[PbrMaterial("roughness")]`, of `import PbrMaterial;` — is that
+// field of the entity's material of that kind; an entity without one is not drawn.
+//
 // Any field not annotated is the entity's own: a field of the component named after the pipeline's node, shown in
 // the inspector and set from a script (`world.set(entity, "<pipeline>", "color", ...)`). It is zero on an entity
 // without that component.

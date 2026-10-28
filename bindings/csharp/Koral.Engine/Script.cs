@@ -240,6 +240,45 @@ public sealed class MinAttribute(float min) : Attribute
 [AttributeUsage(AttributeTargets.Field)]
 public sealed class LogarithmicAttribute : Attribute;
 
+/// <summary>
+/// What a whole-number field is one of, by name: the first is 0, the second 1. The editor shows and is given the name.
+/// <c>[Choices("Opaque", "Masked", "Blended")] public uint alphaMode;</c>. Read from the script's source.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class ChoicesAttribute(params string[] names) : Attribute
+{
+    public string[] Names { get; } = names;
+}
+
+/// <summary>
+/// A kind of what a drawn thing is made of: data and nothing else. Its public fields are a component, shown on an
+/// entity as a script's are, which a shader takes by annotating its own members (<c>[PbrMaterial("roughness")]</c>).
+/// Nothing is called on it. The engine's package has <c>PbrMaterial</c> and <c>BlinnPhongMaterial</c>; a project may
+/// declare more.
+/// <code>
+/// public sealed class Toon : Material
+/// {
+///     public Vec4 tint = new(1f, 1f, 1f, 1f);
+///     public Texture ramp = "@textures/ramp.png";
+///     [Range(1, 8)] public int bands = 3;
+/// }
+/// </code>
+/// </summary>
+public abstract class Material;
+
+/// <summary>
+/// A Material's picture, by the name it is found by: <c>"@textures/wall.png"</c>, or one of a texel —
+/// <see cref="White"/>, <see cref="Black"/>, <see cref="Normal"/> (straight out of the surface).
+/// </summary>
+public readonly record struct Texture(string Name)
+{
+    public static readonly Texture White = new("$white");
+    public static readonly Texture Black = new("$black");
+    public static readonly Texture Normal = new("$normal");
+
+    public static implicit operator Texture(string name) => new(name);
+}
+
 /// <summary>Gives a script's component another name than its class's.</summary>
 [AttributeUsage(AttributeTargets.Class)]
 public sealed class ScriptNameAttribute(string name) : Attribute

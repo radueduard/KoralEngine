@@ -62,9 +62,20 @@ namespace keditor
             for (const auto& [kind, format] : textureFormats) formats += std::format("{}{}: {}", formats.empty() ? "" : ", ", kecs::json::Quote(kind), kecs::json::Quote(format));
             textures = std::format(",\n  \"textures\": {{ \"askToCompress\": {}, \"formats\": {{ {} }} }}", askToCompress ? "true" : "false", formats);
         }
-        out << std::format("{{\n  \"koral-engine-project\": 1,\n  \"name\": {},\n  \"scenes\": [{}],\n  \"start\": {}{}{}\n}}\n",
+        // What models' materials are imported as, when that is not as it starts.
+        std::string materials;
+        if (!importKinds.empty()) {
+            std::string files;
+            for (const auto& [file, kinds] : importKinds) {
+                std::string each;
+                for (const auto& [model, kind] : kinds) each += std::format("{}{}: {}", each.empty() ? "" : ", ", kecs::json::Quote(model), kecs::json::Quote(kind));
+                files += std::format("{}{}: {{ {} }}", files.empty() ? "" : ", ", kecs::json::Quote(file), each);
+            }
+            materials = std::format(",\n  \"materials\": {{ \"importAs\": {{ {} }} }}", files);
+        }
+        out << std::format("{{\n  \"koral-engine-project\": 1,\n  \"name\": {},\n  \"scenes\": [{}],\n  \"start\": {}{}{}{}\n}}\n",
                            kecs::json::Quote(name), list, kecs::json::Quote(start),
-                           scripts.empty() ? std::string() : std::format(",\n  \"scripts\": {}", kecs::json::Quote(scripts)), textures);
+                           scripts.empty() ? std::string() : std::format(",\n  \"scripts\": {}", kecs::json::Quote(scripts)), textures, materials);
         return true;
     }
 
@@ -101,6 +112,11 @@ namespace keditor
             if (const auto* formats = textures->Find("formats"))
                 for (const auto& [kind, format] : formats->members) if (format.kind == kecs::json::Value::Kind::eString) out.textureFormats[kind] = format.string;
         }
+        if (const auto* materials = file.Find("materials"))
+            if (const auto* importAs = materials->Find("importAs"))
+                for (const auto& [model, kinds] : importAs->members)
+                    for (const auto& [reported, kind] : kinds.members)
+                        if (kind.kind == kecs::json::Value::Kind::eString) out.importKinds[model][reported] = kind.string;
         if (out.start.empty() && !out.scenes.empty()) out.start = out.scenes.front();
         return true;
     }

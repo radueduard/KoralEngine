@@ -1177,7 +1177,13 @@ struct Instance {
 
 A field marked `MATRIX`, `NORMAL_MATRIX` (both `float4x4`), `POSITION` (`float3`) or `ID` (`uint`, one more than the
 entity's index) is where the entity is, or which. One marked `TEXTURE` or `STORAGE` (`uint`) is an image the entity
-holds — a field of the component, an Image — by its bindless index for reading, or for writing; ~0 for none. Any other — a number, a vector or a `float4x4` — is the entity's own:
+holds — a field of the component, an Image — by its bindless index for reading, or for writing; ~0 for none. One
+marked with a material kind's attribute — `[PbrMaterial("roughness")] float rough;`, or `[PbrMaterial] float roughness;`
+for the field of the member's name (`import PbrMaterial;`, or `import koral_materials;` for every kind) — is that field
+of the entity's material of that kind, a picture of it by its bindless index. Its type is the field's, but that a
+colour's three fill a `float4` (w 1), a `float4`'s first three a `float3`, true or false a `uint`; anything else is
+the pipeline's error, naming the member and the field. Every kind a shader names is one an entity must have to be
+drawn by it: one without is laid out as no one's, and not drawn (`Runtime::MaterialsOf` lists them). Any other — a number, a vector or a `float4x4` — is the entity's own:
 a field of the pipeline's component, as its unwired `param.`s and `push.`s are, shown in the inspector and set from a
 script (`world.set(cube, "<pipeline>", "color", Vec3(1f, 0f, 0f))`). An entity without the component has zeros there.
 The component is not one of the Filter's `with`: the pipeline's vertex layout comes from the pack, which comes from the

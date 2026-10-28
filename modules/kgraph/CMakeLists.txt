@@ -1,5 +1,5 @@
 # kgraph: a scene's pass graph, as data and running. Needs the framework.
-add_library(kgraph STATIC src/textures.cpp src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/meshes.cpp src/scene.cpp src/blocks.cpp src/expand.cpp src/random.cpp)
+add_library(kgraph STATIC src/textures.cpp src/graph.cpp src/catalog.cpp src/runtime.cpp src/entities.cpp src/materials.cpp src/meshes.cpp src/scene.cpp src/blocks.cpp src/expand.cpp src/random.cpp)
 add_library(KoralEngine::kgraph ALIAS kgraph)
 target_include_directories(kgraph PUBLIC include)
 target_link_libraries(kgraph PUBLIC kecs Koral::Koral PRIVATE Koral::koral-image-import Koral::koral-image-compress Koral::koral-model-import)
@@ -7,7 +7,7 @@ target_compile_options(kgraph PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -We
 target_compile_options(kgraph PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)   # runtime.cpp has more sections than a COFF object holds by default
 
 if(KORAL_ENGINE_BUILD_TESTS)
-    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/test_draw.cpp tests/test_buffers.cpp tests/test_builder.cpp tests/test_flow.cpp tests/test_gpu_physics.cpp tests/test_scale.cpp tests/test_random.cpp tests/support.cpp)
+    add_executable(kgraph_tests tests/test_graph.cpp tests/test_runtime.cpp tests/test_entities.cpp tests/test_materials.cpp tests/test_draw.cpp tests/test_buffers.cpp tests/test_builder.cpp tests/test_flow.cpp tests/test_gpu_physics.cpp tests/test_scale.cpp tests/test_random.cpp tests/support.cpp)
     target_link_libraries(kgraph_tests PRIVATE kgraph kscript kphysics GTest::gtest GTest::gtest_main)   # kphysics: what the GPU's spheres are compared with
     koral_engine_runtime(kgraph_tests)
     target_compile_definitions(kgraph_tests PRIVATE KGRAPH_TEST_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shaders"

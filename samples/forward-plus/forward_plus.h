@@ -858,12 +858,12 @@ namespace forwardplus
             doc.SetScale(entity, scale);
             doc.AddComponent(entity, "Mesh");
             doc.SetField(entity, "Mesh", "mesh", Value(kgraph::DefaultMeshId(mesh)));
-            if (doc.AddComponent(entity, "forward")) {
-                // It has no pictures of its own: each is white, which leaves what it is multiplied by as it is.
-                for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(entity, "forward", map, Value("$white"));
-                doc.SetField(entity, "forward", "albedo", albedo);
-                doc.SetField(entity, "forward", "metallic", Value(metallic));
-                doc.SetField(entity, "forward", "roughness", Value(roughness));
+            // What it is made of: its own, of no asset. It has no pictures of its own: each starts as its kind says, white.
+            if (doc.AddComponent(entity, "PbrMaterial")) {
+                const auto& colour = *albedo.Items();
+                doc.SetField(entity, "PbrMaterial", "baseColor", Value(Value::List { colour[0], colour[1], colour[2], 1.0 }));
+                doc.SetField(entity, "PbrMaterial", "metallic", Value(metallic));
+                doc.SetField(entity, "PbrMaterial", "roughness", Value(roughness));
             }
             return entity;
         };
@@ -909,7 +909,7 @@ namespace forwardplus
                                             { static_cast<float>(std::cos(turn) * away), 0.45f + 0.9f * static_cast<float>(i % 3), static_cast<float>(std::sin(turn) * away - 2.0) },
                                             { 0.16f, 0.16f, 0.16f }, vec(0, 0, 0), 0.0, 1.0);
             // A ball of the sphere's half a unit across, made 0.16 of that.
-            doc.SetField(lamp, "forward", "emission", LampEmission(color, 3.0, 3.5, 0.08));
+            doc.SetField(lamp, "PbrMaterial", "emission", LampEmission(color, 3.0, 3.5, 0.08));
             doc.AddComponent(lamp, "PointLight");
             doc.SetField(lamp, "PointLight", "color", color);
             doc.SetField(lamp, "PointLight", "intensity", Value(3.0));
@@ -955,10 +955,9 @@ namespace forwardplus
             doc.SetScale(lamp, { 0.1f, 0.1f, 0.1f });
             doc.AddComponent(lamp, "Mesh");
             doc.SetField(lamp, "Mesh", "mesh", Value(kgraph::DefaultMeshId("sphere")));
-            if (doc.AddComponent(lamp, "forward")) {
-                for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(lamp, "forward", map, Value("$white"));
-                doc.SetField(lamp, "forward", "albedo", vec(0, 0, 0));
-                doc.SetField(lamp, "forward", "emission", LampEmission(color, 3.0, 3.5, 0.05));
+            if (doc.AddComponent(lamp, "PbrMaterial")) {
+                doc.SetField(lamp, "PbrMaterial", "baseColor", Value(Value::List { 0.0, 0.0, 0.0, 1.0 }));
+                doc.SetField(lamp, "PbrMaterial", "emission", LampEmission(color, 3.0, 3.5, 0.05));
             }
             doc.AddComponent(lamp, "PointLight");
             doc.SetField(lamp, "PointLight", "color", color);

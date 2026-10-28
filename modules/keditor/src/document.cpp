@@ -136,11 +136,15 @@ namespace keditor
         kgraph::RegisterCodecs(_codecs, _runtime.get());
         _world.Id<Label>();
         _world.Id<PrefabLink>();
+        _world.Id<MaterialLink>();
         _world.Id<PrefabPart>();
         _world.Id<kgraph::Mesh>();
         // What every scene has, whatever its project: the engine's package — the Camera, the lights, the Sky — and its
         // shaders' modules, for any shader to import (`import entity;`).
-        for (auto& problem : kscript::DeclarePackage(_scripts)) _notes.push_back(std::move(problem));
+        std::vector<kscript::ScriptType> materials;
+        for (auto& problem : kscript::DeclarePackage(_scripts, &materials)) _notes.push_back(std::move(problem));
+        for (auto& kind : materials) DeclareMaterialKind(std::move(kind));
+        _saved = _revision;     // what every scene has is no change to it
         static const bool searched = (kor::Shader::AddSearchPath(kscript::PackageDirectory() / "shaders"), true);
         (void)searched;
     }
@@ -153,6 +157,7 @@ namespace keditor
         for (auto& problem : declared.problems) _notes.push_back(std::move(problem));
         for (auto& type : declared.types) {
             if (type.makesResources) { DeclareResourceScript(std::move(type)); continue; }    // what a Script node runs, no component
+            if (type.material) { DeclareMaterialKind(std::move(type)); continue; }
             std::string error;
             const std::string name = type.name;
             if (_scripts.Declare(std::move(type), &error) == kecs::NoComponent) _notes.push_back(std::format("{}: {}", name, error));
@@ -188,6 +193,305 @@ namespace keditor
             if (running.name == type.name && running.fill) return;
         _runtime->SetResourceScript(ResourceScriptOf(std::move(type)));
         Changed();
+    }
+
+    void Document::DeclareMaterialKind(kscript::ScriptType type)
+    {
+        kgraph::MaterialKind kind { .name = std::move(type.name), .fields = std::move(type.fields), .size = type.size, .alignment = type.alignment,
+                                    .initial = std::move(type.initial), .textures = std::move(type.textures) };
+        const std::string name = kind.name;
+        std::string error;
+        if (_runtime->DeclareMaterialKind(std::move(kind), &error) == kecs::NoComponent) _notes.push_back(std::format("{}: {}", name, error));
+        for (const auto& note : _runtime->MaterialNotes())
+            if (std::ranges::find(_notes, note) == _notes.end()) _notes.push_back(note);
+        Changed();
+    }
+
+    // ---- materials ----------------------------------------------------------------------------------------------
+
+    namespace {
+        constexpr const char* ModelMaterialsEnding = ".materials.json";
+
+        std::vector<std::string> Lines(const std::string& text)
+        {
+            std::vector<std::string> lines;
+            std::stringstream in(text);
+            for (std::string line; std::getline(in, line);) if (!line.empty()) lines.push_back(line);
+            return lines;
+        }
+        std::string Joined(const std::vector<std::string>& lines)
+        {
+            std::string text;
+            for (const auto& line : lines) text += line + '\n';
+            return text;
+        }
+        /** Named values as JSON, and back. */
+        std::string ValuesJson(const std::vector<std::pair<std::string, Value>>& values)
+        {
+            std::string out = "{";
+            for (const auto& [name, value] : values) out += std::format("{}{}: {}", out.size() > 1 ? ", " : " ", kecs::json::Quote(name), value.ToJson());
+            return out + (out.size() > 1 ? " }" : "}");
+        }
+        std::vector<std::pair<std::string, Value>> ValuesOf(const kecs::json::Value& json)
+        {
+            std::vector<std::pair<std::string, Value>> values;
+            for (const auto& [name, value] : json.members) values.emplace_back(name, Value::FromJson(value));
+            return values;
+        }
+        void Put(std::vector<std::pair<std::string, Value>>& values, const std::string_view name, Value value)
+        {
+            const auto it = std::ranges::find(values, name, &std::pair<std::string, Value>::first);
+            if (it != values.end()) it->second = std::move(value);
+            else values.emplace_back(std::string(name), std::move(value));
+        }
+        /** The model file and the material's number an asset id names: `@sponza/Sponza.gltf#material:3`. */
+        std::optional<std::pair<std::string, int>> ModelMaterialOf(const std::string_view id)
+        {
+            const auto at = id.rfind("#material:");
+            if (!id.starts_with('@') || at == std::string_view::npos) return std::nullopt;
+            return std::pair { std::string(id.substr(0, at)), std::atoi(std::string(id.substr(at + 10)).c_str()) };
+        }
+    }
+
+    void Document::SetImportKind(const kgraph::ModelMaterial::Model model, std::string kind, const std::filesystem::path& file)
+    {
+        const std::string key = file.empty() ? std::string() : _runtime->AssetId(file);
+        auto [it, made] = _importKinds.try_emplace(key);
+        it->second[model == kgraph::ModelMaterial::Model::eClassic ? 1 : 0] = std::move(kind);
+        if (!key.empty() && it->second[0].empty() && it->second[1].empty()) _importKinds.erase(it);
+        Changed();
+    }
+
+    std::string Document::ImportKind(const kgraph::ModelMaterial::Model model, const std::filesystem::path& file) const
+    {
+        const std::size_t which = model == kgraph::ModelMaterial::Model::eClassic ? 1 : 0;
+        if (!file.empty())
+            if (const auto it = _importKinds.find(_runtime->AssetId(file)); it != _importKinds.end() && !it->second[which].empty()) return it->second[which];
+        return _importKinds.at("")[which];
+    }
+
+    void Document::AddMaterialAsset(MaterialAsset asset)
+    {
+        std::string id = asset.id;
+        _materialAssets.insert_or_assign(std::move(id), std::move(asset));
+    }
+
+    const MaterialAsset* Document::MaterialAssetOf(const std::string_view id)
+    {
+        if (const auto it = _materialAssets.find(id); it != _materialAssets.end()) return &it->second;
+        if (const auto model = ModelMaterialOf(id)) {
+            // A model's, once the model is read.
+            const std::filesystem::path file = _runtime->AssetDirectory().empty() ? std::filesystem::path(model->first.substr(1)) : _runtime->AssetDirectory() / model->first.substr(1);
+            if (const auto read = _runtime->ModelOf(file)) MakeModelMaterials(file, *read);
+        } else if (id.starts_with('@') && id.ends_with(".kmat")) {
+            // A project's own: its file.
+            const std::filesystem::path file = _runtime->AssetDirectory() / std::string(id.substr(1));
+            std::ifstream in(file, std::ios::binary);
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            kecs::json::Value parsed;
+            std::string error;
+            if (in && kecs::json::Parse(text, parsed, error))
+                if (const auto* kind = parsed.Find("kind"); kind && kind->kind == kecs::json::Value::Kind::eString) {
+                    MaterialAsset asset { .id = std::string(id), .name = file.stem().string(), .kind = kind->string };
+                    if (const auto* values = parsed.Find("values")) asset.values = ValuesOf(*values);
+                    AddMaterialAsset(std::move(asset));
+                }
+        }
+        const auto it = _materialAssets.find(id);
+        return it == _materialAssets.end() ? nullptr : &it->second;
+    }
+
+    std::vector<std::string> Document::MaterialAssetIds() const
+    {
+        std::vector<std::string> ids;
+        for (const auto& id : _materialAssets | std::views::keys) ids.push_back(id);
+        return ids;
+    }
+
+    void Document::MakeModelMaterials(const std::filesystem::path& file, const kgraph::Model& model)
+    {
+        const std::string named = _runtime->AssetId(file);
+        // What was changed of them here, kept beside the model.
+        kecs::json::Value changed;
+        std::ifstream in(std::filesystem::path(file).concat(ModelMaterialsEnding), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string ignored;
+        const bool hasChanges = in && kecs::json::Parse(text, changed, ignored);
+        for (std::size_t i = 0; i < model.materials.size(); ++i) {
+            const kgraph::ReportedMaterial report = kgraph::ReportOf(model.materials[i]);
+            MaterialAsset asset;
+            asset.id = std::format("{}#material:{}", named, i);
+            asset.name = report.name.empty() ? std::format("{} {}", file.stem().string(), i) : report.name;
+            asset.kind = ImportKind(report.model, file);
+            // Filled by name: what of the report the kind has a field for. The rest is as the kind starts it.
+            const kgraph::MaterialKind* kind = _runtime->MaterialKindOf(asset.kind);
+            for (const auto& [name, value] : report.values)
+                if (!kind || std::ranges::contains(kind->fields, name, &kecs::FieldDescription::name)) asset.reported.emplace_back(name, value);
+            asset.values = asset.reported;
+            if (hasChanges)
+                if (const auto* materials = changed.Find("materials"))
+                    if (const auto* own = materials->Find(std::to_string(i)))
+                        for (auto& [name, value] : ValuesOf(*own)) Put(asset.values, name, std::move(value));
+            AddMaterialAsset(std::move(asset));
+        }
+    }
+
+    void Document::SaveMaterialAsset(const MaterialAsset& asset)
+    {
+        if (const auto model = ModelMaterialOf(asset.id)) {
+            // A model's: what differs from what the file reports, for each of its materials, beside the model.
+            const std::filesystem::path file = _runtime->AssetDirectory() / model->first.substr(1);
+            std::string materials;
+            for (const auto& [id, each] : _materialAssets) {
+                const auto of = ModelMaterialOf(id);
+                if (!of || of->first != model->first) continue;
+                std::vector<std::pair<std::string, Value>> differs;
+                for (const auto& [name, value] : each.values)
+                    if (const auto was = std::ranges::find(each.reported, name, &std::pair<std::string, Value>::first); was == each.reported.end() || was->second != value)
+                        differs.emplace_back(name, value);
+                if (!differs.empty()) materials += std::format("{}    {}: {}", materials.empty() ? "" : ",\n", kecs::json::Quote(std::to_string(of->second)), ValuesJson(differs));
+            }
+            const std::filesystem::path beside = std::filesystem::path(file).concat(ModelMaterialsEnding);
+            std::error_code ec;
+            if (materials.empty()) { std::filesystem::remove(beside, ec); return; }
+            std::ofstream(beside, std::ios::binary | std::ios::trunc) << std::format("{{\n  \"koral-materials\": 1,\n  \"materials\": {{\n{}\n  }}\n}}\n", materials);
+            return;
+        }
+        if (asset.id.starts_with('@') && asset.id.ends_with(".kmat"))
+            std::ofstream(_runtime->AssetDirectory() / asset.id.substr(1), std::ios::binary | std::ios::trunc)
+                << std::format("{{\n  \"koral-material\": 1,\n  \"kind\": {},\n  \"values\": {}\n}}\n", kecs::json::Quote(asset.kind), ValuesJson(asset.values));
+    }
+
+    std::vector<std::string> Document::LinkLines(const kecs::Entity entity, const bool overrides) const
+    {
+        const MaterialLink* link = _world.Alive(entity) ? _world.Get<MaterialLink>(entity) : nullptr;
+        return link ? Lines(overrides ? link->overrides : link->assets) : std::vector<std::string>();
+    }
+
+    void Document::SetLinkLines(const kecs::Entity entity, const bool overrides, const std::vector<std::string>& lines)
+    {
+        MaterialLink link = _world.Has<MaterialLink>(entity) ? *_world.Get<MaterialLink>(entity) : MaterialLink {};
+        (overrides ? link.overrides : link.assets) = Joined(lines);
+        if (link.assets.empty() && link.overrides.empty()) _world.Remove<MaterialLink>(entity);
+        else _world.Add<MaterialLink>(entity, std::move(link));
+    }
+
+    std::string Document::MaterialAssetOfEntity(const kecs::Entity entity, const std::string_view kind) const
+    {
+        for (const auto& line : LinkLines(entity, false))
+            if (line.size() > kind.size() && line.starts_with(kind) && line[kind.size()] == ' ') return line.substr(kind.size() + 1);
+        return {};
+    }
+
+    std::vector<std::string> Document::MaterialOverridesOf(const kecs::Entity entity, const std::string_view kind) const
+    {
+        std::vector<std::string> fields;
+        for (const auto& line : LinkLines(entity, true))
+            if (line.size() > kind.size() && line.starts_with(kind) && line[kind.size()] == '.') fields.push_back(line.substr(kind.size() + 1));
+        return fields;
+    }
+
+    bool Document::GiveMaterial(const kecs::Entity entity, const std::string_view id, std::string* error)
+    {
+        const MaterialAsset* asset = MaterialAssetOf(id);
+        if (!asset) { if (error) *error = std::format("there is no material '{}'", id); return false; }
+        const MaterialAsset given = *asset;     // (what setting fields does may add assets: a copy)
+        if (!_world.Alive(entity)) { if (error) *error = "the entity is not in the scene"; return false; }
+        const kecs::ComponentId kind = _world.Find(given.kind);
+        if (kind == kecs::NoComponent) { if (error) *error = std::format("'{}' is a {}, and there is no such material kind", given.name, given.kind); return false; }
+        // Afresh: as the kind starts it, then as the asset has it.
+        _world.Add(entity, kind);
+        _following = true;
+        for (const auto& [field, value] : given.values)
+            if (_world.Describe(kind).FindField(field)) SetField(entity, given.kind, field, value);
+        _following = false;
+        std::vector<std::string> assets = LinkLines(entity, false), overrides = LinkLines(entity, true);
+        std::erase_if(assets, [&](const std::string& line) { return line.starts_with(given.kind + " "); });
+        std::erase_if(overrides, [&](const std::string& line) { return line.starts_with(given.kind + "."); });
+        assets.push_back(std::format("{} {}", given.kind, given.id));
+        SetLinkLines(entity, false, assets);
+        SetLinkLines(entity, true, overrides);
+        SyncAlphaTags(entity);
+        Changed();
+        return true;
+    }
+
+    bool Document::SetMaterialAssetField(const std::string_view id, const std::string_view field, const Value& value, std::string* error)
+    {
+        if (!MaterialAssetOf(id)) { if (error) *error = std::format("there is no material '{}'", id); return false; }
+        MaterialAsset& asset = _materialAssets.find(id)->second;
+        const kecs::ComponentId kind = _world.Find(asset.kind);
+        if (kind == kecs::NoComponent || !_world.Describe(kind).FindField(field)) {
+            if (error) *error = std::format("a {} has no field '{}'", asset.kind, field);
+            return false;
+        }
+        Put(asset.values, field, value);
+        SaveMaterialAsset(asset);
+        // Every entity that follows it, and has not made the field its own.
+        const std::string line = std::format("{} {}", asset.kind, asset.id);
+        _following = true;
+        for (const kecs::Entity entity : _world.All()) {
+            const auto links = LinkLines(entity, false);
+            if (!std::ranges::contains(links, line) || std::ranges::contains(MaterialOverridesOf(entity, asset.kind), field)) continue;
+            SetField(entity, asset.kind, field, value);
+            if (field == "alphaMode") SyncAlphaTags(entity);
+        }
+        _following = false;
+        Changed();
+        return true;
+    }
+
+    bool Document::ApplyMaterial(const kecs::Entity entity, const std::string_view kind)
+    {
+        const std::string id = MaterialAssetOfEntity(entity, kind);
+        if (id.empty()) return false;
+        const auto fields = MaterialOverridesOf(entity, kind);
+        // Its own no longer: the asset's, and so every entity's that follows it.
+        std::vector<std::string> overrides = LinkLines(entity, true);
+        std::erase_if(overrides, [&](const std::string& line) { return line.starts_with(std::string(kind) + "."); });
+        SetLinkLines(entity, true, overrides);
+        for (const auto& field : fields) SetMaterialAssetField(id, field, Field(entity, kind, field));
+        return true;
+    }
+
+    bool Document::RevertMaterial(const kecs::Entity entity, const std::string_view kind)
+    {
+        const std::string id = MaterialAssetOfEntity(entity, kind);
+        return !id.empty() && GiveMaterial(entity, id);
+    }
+
+    bool Document::UnlinkMaterial(const kecs::Entity entity, const std::string_view kind)
+    {
+        if (MaterialAssetOfEntity(entity, kind).empty()) return false;
+        std::vector<std::string> assets = LinkLines(entity, false), overrides = LinkLines(entity, true);
+        std::erase_if(assets, [&](const std::string& line) { return line.starts_with(std::string(kind) + " "); });
+        std::erase_if(overrides, [&](const std::string& line) { return line.starts_with(std::string(kind) + "."); });
+        SetLinkLines(entity, false, assets);
+        SetLinkLines(entity, true, overrides);
+        Changed();
+        return true;
+    }
+
+    void Document::SyncAlphaTags(const kecs::Entity entity)
+    {
+        // The most see-through of its materials says: blended over masked over opaque.
+        int mode = 0;
+        for (const auto& kind : _runtime->MaterialKinds())
+            if (const kecs::ComponentId id = _world.Find(kind.name); id != kecs::NoComponent && _world.Has(entity, id))
+                if (const auto* number = Field(entity, kind.name, "alphaMode").Number()) mode = std::max(mode, static_cast<int>(*number));
+        for (const auto& [tag, wanted] : { std::pair { "Masked", 1 }, std::pair { "Blended", 2 } }) {
+            const kecs::ComponentId id = AddTag(tag);
+            if ((mode == wanted) != _world.Has(entity, id)) {
+                if (mode == wanted) _world.Add(entity, id);
+                else _world.Remove(entity, id);
+            }
+        }
+    }
+
+    void Document::SetAssetDirectory(const std::filesystem::path& directory)
+    {
+        _runtime->SetAssetDirectory(directory);
+        if (!directory.empty()) _runtime->SetGeneratedShaderDirectory(directory.parent_path() / "cache" / "shaders");
     }
 
     void Document::RegisterResourceScript(kscript::ScriptType type, std::function<std::string(std::span<kgraph::Contents>, std::span<const std::byte>)> fill)
@@ -236,7 +540,7 @@ namespace keditor
         // A model that was being read, read: its things are made under the entity that stood for it.
         for (auto it = _importing.begin(); it != _importing.end();) {
             std::string why;
-            if (const auto model = _runtime->ModelOf(it->first, &why)) Imported(it->second, *model);
+            if (const auto model = _runtime->ModelOf(it->first, &why)) Imported(it->first, it->second, *model);
             else if (why.empty()) { ++it; continue; }
             else { _notes.push_back(why); Changed(); }
             it = _importing.erase(it);
@@ -1171,6 +1475,18 @@ namespace keditor
         }
         _world.MarkChanged(entity, id);
         Override(entity, std::format("{}.{}", component, field));
+        // A material that follows an asset, set on the entity itself: that field is the entity's own from now on.
+        if (_runtime->MaterialKindOf(component)) {
+            if (!_following && !MaterialAssetOfEntity(entity, component).empty()) {
+                const std::string line = std::format("{}.{}", component, field);
+                std::vector<std::string> overrides = LinkLines(entity, true);
+                if (!std::ranges::contains(overrides, line)) {
+                    overrides.push_back(line);
+                    SetLinkLines(entity, true, overrides);
+                }
+            }
+            if (field == "alphaMode" && !_following) SyncAlphaTags(entity);
+        }
         Changed();
         return true;
     }
@@ -1358,6 +1674,7 @@ namespace keditor
             }
         if (!loaded.ok) { error = loaded.error; return false; }
         for (const auto& problem : loaded.problems) _notes.push_back(problem);
+        MigrateMaterials(*worldText, loaded.entities);
         // Each prefab's instance as its prefab is now: what was saved of it, and what has changed in the prefab since.
         UpdatePrefabs();
         Changed();
@@ -1365,11 +1682,56 @@ namespace keditor
         return true;
     }
 
+    void Document::MigrateMaterials(const kecs::json::Value& world, const std::vector<kecs::Entity>& entities)
+    {
+        // A scene saved when a pipeline's component held what a thing is made of — its albedo, its pictures — and no
+        // material did: each such entity is given a PbrMaterial of those values, of no asset. What was the pipeline's
+        // besides is its Pipeline parameters still.
+        const kecs::json::Value* saved = world.Find("entities");
+        const kecs::ComponentId pbr = _world.Find("PbrMaterial");
+        if (!saved || pbr == kecs::NoComponent) return;
+        const auto hasKind = [&](const kecs::Entity entity) {
+            return std::ranges::any_of(_runtime->MaterialKinds(), [&](const kgraph::MaterialKind& kind) { return _world.Has(entity, _world.Find(kind.name)); });
+        };
+        std::size_t migrated = 0;
+        for (std::size_t i = 0; i < saved->items.size() && i < entities.size(); ++i) {
+            const kecs::json::Value* components = saved->items[i].Find("components");
+            if (!components || !_world.Alive(entities[i]) || hasKind(entities[i])) continue;
+            for (const auto& [name, values] : components->members) {
+                const kecs::json::Value* albedo = values.Find("albedo");
+                if (!albedo || albedo->kind != kecs::json::Value::Kind::eArray || albedo->items.size() < 3 || _runtime->MaterialKindOf(name)) continue;
+                const kecs::Entity entity = entities[i];
+                _world.Add(entity, pbr);
+                const auto number = [&](const char* field, const double otherwise) {
+                    const kecs::json::Value* v = values.Find(field);
+                    return v && v->kind == kecs::json::Value::Kind::eNumber ? v->number : otherwise;
+                };
+                const double transparency = number("transparency", 0.0), cutoff = number("alphaCutoff", 0.0);
+                SetField(entity, "PbrMaterial", "baseColor", Value(Value::List { albedo->items[0].number, albedo->items[1].number, albedo->items[2].number, 1.0 - transparency }));
+                SetField(entity, "PbrMaterial", "metallic", Value(number("metallic", 0.0)));
+                SetField(entity, "PbrMaterial", "roughness", Value(number("roughness", 0.5)));
+                if (const kecs::json::Value* emission = values.Find("emission"); emission && emission->items.size() >= 3)
+                    SetField(entity, "PbrMaterial", "emission", Value(Value::List { emission->items[0].number, emission->items[1].number, emission->items[2].number }));
+                SetField(entity, "PbrMaterial", "alphaMode", Value(transparency > 0.0 || _world.Has(entity, _world.Find("Blended")) ? 2 : cutoff > 0.0 ? 1 : 0));
+                if (cutoff > 0.0) SetField(entity, "PbrMaterial", "alphaCutoff", Value(cutoff));
+                for (const auto& [from, to] : { std::pair { "albedoMap", "baseColorMap" }, { "normalMap", "normalMap" }, { "roughnessMap", "metallicRoughnessMap" }, { "emissiveMap", "emissiveMap" } })
+                    if (const kecs::json::Value* map = values.Find(from); map && map->kind == kecs::json::Value::Kind::eString && !map->string.empty())
+                        SetField(entity, "PbrMaterial", to, Value(map->string));
+                SyncAlphaTags(entity);
+                ++migrated;
+                break;
+            }
+        }
+        if (migrated > 0)
+            _notes.push_back(std::format("{} {} what {} made of from {} pipeline's component: a PbrMaterial each now, of no asset", migrated,
+                                         migrated == 1 ? "entity had" : "entities had", migrated == 1 ? "it is" : "each is", migrated == 1 ? "its" : "a"));
+    }
+
     bool Document::Save(const std::filesystem::path& path, std::string& error)
     {
         // A function open in place is closed first, keeping what was done to it: its page is no part of the scene.
         if (_opened && !CloseFunction(true, &error)) return false;
-        if (_runtime->AssetDirectory().empty()) _runtime->SetAssetDirectory(std::filesystem::absolute(path).parent_path().parent_path() / "assets");
+        if (_runtime->AssetDirectory().empty()) SetAssetDirectory(std::filesystem::absolute(path).parent_path().parent_path() / "assets");
         std::error_code ec;
         if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -1392,66 +1754,32 @@ namespace keditor
         return root;
     }
 
-    void Document::Imported(const kecs::Entity root, const kgraph::Model& read)
+    void Document::Imported(const std::filesystem::path& file, const kecs::Entity root, const kgraph::Model& read)
     {
         using kgraph::Value;
         const kgraph::Model* model = &read;
         if (!_world.Alive(root)) return;    // taken out again while its file was being read
 
-        // What a drawn thing is made of goes into every component that has a material's fields.
-        std::vector<std::string> materials;
-        for (const auto& name : ComponentNames())
-            if (const kecs::ComponentId id = _world.Find(name); id != kecs::NoComponent && _world.Describe(id).FindField("albedo")) materials.push_back(name);
+        // What each drawn thing is made of: one of the file's materials, an asset its things follow — of the kind what
+        // the file reports it as is imported as (ImportKind), filled from the report a field by name.
         AddTag("Masked");
         AddTag("Blended");
+        MakeModelMaterials(file, read);
+        const std::string named = _runtime->AssetId(file);
         const auto vec = [](const float* v) { return Value(Value::List { v[0], v[1], v[2] }); };
-        const auto give = [&](const kecs::Entity entity, const std::string& component, const char* field, const Value& value) {
-            if (_world.Describe(_world.Find(component)).FindField(field)) SetField(entity, component, field, value);
-        };
         const auto drawn = [&](const kecs::Entity entity, const kgraph::ModelNode::Part& part) {
             AddComponent(entity, "Mesh");
             SetField(entity, "Mesh", "mesh", Value(part.mesh));
             if (part.material < 0 || part.material >= static_cast<int>(model->materials.size())) {
                 // The file says nothing of what it is made of: something matte and pale, rather than nothing at all.
-                const float pale[3] { 0.8f, 0.8f, 0.8f };
-                for (const auto& component : materials) {
-                    if (component.find("blend") != std::string::npos && materials.size() > 1) continue;
-                    AddComponent(entity, component);
-                    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) give(entity, component, map, Value("$white"));
-                    give(entity, component, "albedo", vec(pale));
-                    give(entity, component, "roughness", Value(0.8));
-                }
+                if (!MaterialAssetOf("material:Default"))
+                    AddMaterialAsset({ .id = "material:Default", .name = "Default", .kind = ImportKind(kgraph::ModelMaterial::Model::ePbr),
+                                       .values = { { "baseColor", Value(Value::List { 0.8, 0.8, 0.8, 1.0 }) }, { "roughness", Value(0.8) } } });
+                GiveMaterial(entity, "material:Default");
                 return;
             }
-            const kgraph::ModelMaterial& material = model->materials[static_cast<std::size_t>(part.material)];
-            // A file's colour is light; a component's is as it is picked.
-            const float picked[3] { std::pow(std::max(material.albedo[0], 0.f), 1.f / 2.2f), std::pow(std::max(material.albedo[1], 0.f), 1.f / 2.2f),
-                                    std::pow(std::max(material.albedo[2], 0.f), 1.f / 2.2f) };
-            // What is drawn over what is behind it is the blended pipeline's to draw, and the rest the others': each
-            // entity has the material once, in the component of what draws it. A graph that has no pipeline named
-            // for blending draws both with what it has.
-            const auto blends = [](const std::string& component) { return component.find("blend") != std::string::npos; };
-            const bool apart = std::ranges::any_of(materials, blends) && !std::ranges::all_of(materials, blends);
-            for (const auto& component : materials) {
-                if (apart && blends(component) != material.blended) continue;
-                AddComponent(entity, component);
-                give(entity, component, "albedo", vec(picked));
-                give(entity, component, "metallic", Value(material.metallic));
-                give(entity, component, "roughness", Value(material.roughness));
-                give(entity, component, "emission", vec(material.emission));
-                give(entity, component, "alphaCutoff", Value(material.alphaCutoff));
-                // What is drawn over what is behind it lets that through by as much as its colour is not opaque: a decal at a
-                // third of its picture's opacity.
-                if (material.blended) give(entity, component, "transparency", Value(std::clamp(1.0 - material.albedo[3], 0.0, 1.0)));
-                // A picture the material has not is white, which leaves what it is multiplied by as it is.
-                const auto picture = [](const std::string& map) { return Value(map.empty() ? std::string("$white") : map); };
-                give(entity, component, "albedoMap", picture(material.albedoMap));
-                give(entity, component, "normalMap", picture(material.normalMap));
-                give(entity, component, "roughnessMap", picture(material.roughnessMap));
-                give(entity, component, "emissiveMap", picture(material.emissiveMap));
-            }
-            if (material.blended) AddComponent(entity, "Blended");
-            else if (material.alphaCutoff > 0.f) AddComponent(entity, "Masked");
+            std::string why;
+            if (!GiveMaterial(entity, std::format("{}#material:{}", named, part.material), &why)) _notes.push_back(std::format("{}: {}", file.filename().string(), why));
         };
 
         std::vector<kecs::Entity> made(model->nodes.size(), root);
@@ -2539,7 +2867,7 @@ namespace keditor
     {
         // A scene is in a project's `scenes` folder, beside its `assets`: where its entities' files are named from.
         const std::filesystem::path project = std::filesystem::absolute(path).parent_path().parent_path();
-        _runtime->SetAssetDirectory(project / "assets");
+        SetAssetDirectory(project / "assets");
         // Its scripts' components, as their sources declare them: whether or not anything runs them, they are what the file's are.
         DeclareScripts(project / "scripts");
         std::ifstream in(path, std::ios::binary);

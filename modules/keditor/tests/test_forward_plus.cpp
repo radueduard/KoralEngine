@@ -443,9 +443,9 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         settle();
         EXPECT_FALSE(session.CanUndo()) << "nothing was done yet";
         const kecs::Entity ball = doc.World().FindEntity("Ball 0 0");
-        const auto roughness = [&] { return doc.Field(doc.World().FindEntity("Ball 0 0"), "forward", "roughness"); };
+        const auto roughness = [&] { return doc.Field(doc.World().FindEntity("Ball 0 0"), "PbrMaterial", "roughness"); };
         const kgraph::Value was = roughness();
-        ASSERT_TRUE(doc.SetField(ball, "forward", "roughness", kgraph::Value(0.9)));
+        ASSERT_TRUE(doc.SetField(ball, "PbrMaterial", "roughness", kgraph::Value(0.9)));
         settle();
         ASSERT_TRUE(doc.SetInput("run tone map", "push.exposure", 2.0));
         settle();
@@ -654,10 +654,9 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         const kecs::Entity ball = doc.World().FindEntity("Ball 0 0");
         ASSERT_FALSE(ball.IsNull());
         std::string error;
-        // Given the picture as one is dropped on it: its albedo's, in each material it has — the ray tracer's too.
+        // Given the picture as one is dropped on it: its material's colour picture, which every renderer reads.
         EXPECT_TRUE(session.GiveAsset(texture->id, ball)) << session.Status();
-        EXPECT_EQ(doc.Field(ball, "forward", "albedoMap"), kgraph::Value(texture->id));
-        EXPECT_EQ(doc.Field(ball, "ray tracer", "albedoMap"), kgraph::Value(texture->id)) << "what the materials share is set in each";
+        EXPECT_EQ(doc.Field(ball, "PbrMaterial", "baseColorMap"), kgraph::Value(texture->id));
         EXPECT_TRUE(doc.SetField(ball, "Mesh", "mesh", kgraph::Value(mesh->id), &error)) << error;
         session.Select(ball);
         EXPECT_TRUE(shows(session.AssetLabel(texture->id))) << "the field says what it holds by its name, a file's as much as a node's";
@@ -671,26 +670,25 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
 
         // A model's mesh is called what its file calls it, and listed under its model.
         EXPECT_EQ(mesh->group, "Sponza.gltf");
-        // Each imported thing has its material once: in the component of the pipeline that draws it.
-        const kecs::ComponentId blended = doc.World().Find("forward blended"), solid = doc.World().Find("forward");
-        std::size_t both = 0, imported = 0;
+        // Each imported thing has its material: a PbrMaterial, a glTF's being physical, that follows one of the model's.
+        std::size_t following = 0, imported = 0;
         for (const kecs::Entity entity : doc.Entities()) {
             const auto held = doc.Field(entity, "Mesh", "mesh");
             if (!held.String() || !held.String()->starts_with("@")) continue;
             ++imported;
-            both += doc.World().Has(entity, blended) && doc.World().Has(entity, solid);
+            following += doc.MaterialAssetOfEntity(entity, "PbrMaterial").starts_with("@");
         }
         EXPECT_GT(imported, 20u);
-        EXPECT_EQ(both, 0u);
+        EXPECT_EQ(following, imported);
 
         // A picture of an instance's left empty is none, which the shader reads as white: drawn all the same, and
         // nothing is wrong with it.
         EXPECT_TRUE(doc.Runtime().PassedBy().empty());
-        ASSERT_TRUE(doc.SetField(ball, "forward", "normalMap", kgraph::Value(), &error)) << error;
+        ASSERT_TRUE(doc.SetField(ball, "PbrMaterial", "normalMap", kgraph::Value(), &error)) << error;
         for (int i = 0; i < 6; ++i) Frame();
         EXPECT_TRUE(doc.Runtime().PassedBy().empty());
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
-        ASSERT_TRUE(doc.SetField(ball, "forward", "normalMap", kgraph::Value("$white"), &error)) << error;
+        ASSERT_TRUE(doc.SetField(ball, "PbrMaterial", "normalMap", kgraph::Value("$white"), &error)) << error;
 
         // A note is words on the graph: it makes nothing, and nothing is wrong with it.
         const std::string note = doc.AddNode("Note", 40, 40, "why", "show");
@@ -800,7 +798,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_NEAR(roughness("ray tracer"), was, 1e-6) << "given the forward pass's when it was made";
         // One set apart from outside the inspector — a script, say — is said at once, and made alike again by a press.
         EXPECT_FALSE(shows("differs"));
-        ASSERT_TRUE(doc.SetField(ball, "forward", "roughness", kgraph::Value(0.5)));
+        ASSERT_TRUE(doc.SetField(ball, "PbrMaterial", "roughness", kgraph::Value(0.5)));
         wait(8, 0.3);
         EXPECT_TRUE(shows("differs")) << "the forward pass's is not the ray tracer's now";
         {
@@ -1000,7 +998,7 @@ TEST(ForwardPlus, TheGraphIsWorkedOn) {
         const auto meshes = session.FieldChoices("Mesh", "Mesh");
         EXPECT_FALSE(meshes.empty());
         for (const auto& choice : meshes) EXPECT_TRUE(doc.Runtime().ResourceOf(choice) && doc.Runtime().ResourceOf(choice)->kind == "Mesh") << choice;
-        const auto pictures = session.FieldChoices("forward", "Image");
+        const auto pictures = session.FieldChoices("PbrMaterial", "Image");
         EXPECT_TRUE(std::ranges::contains(pictures, std::string("$white")));
         EXPECT_FALSE(std::ranges::contains(pictures, std::string("hdr"))) << "what the forward pass draws into is not given to what it draws";
         EXPECT_FALSE(std::ranges::contains(pictures, std::string("bloom down"))) << "nor what a later pass makes";
@@ -1113,8 +1111,8 @@ TEST(ForwardPlus, AModelIsImportedWithItsPicturesUnderASkyFromAFile) {
         std::size_t textured = 0;
         for (const kecs::Entity entity : doc.Entities()) {
             const auto has = [&](const char* component) { return doc.World().Has(entity, doc.World().Find(component)); };
-            if (!has("forward") || has("PointLight")) continue;
-            const auto mesh = doc.Field(entity, "Mesh", "mesh"), albedo = doc.Field(entity, "forward", "albedoMap");
+            if (!has("PbrMaterial") || has("PointLight")) continue;
+            const auto mesh = doc.Field(entity, "Mesh", "mesh"), albedo = doc.Field(entity, "PbrMaterial", "baseColorMap");
             ASSERT_TRUE(mesh.String() && mesh.String()->starts_with("@")) << doc.NameOf(entity) << ": " << mesh.ToJson();
             EXPECT_NE(mesh.String()->find(".gltf#"), std::string::npos);
             if (albedo.String() && albedo.String()->starts_with("@")) ++textured;
@@ -1160,10 +1158,12 @@ TEST(ForwardPlus, ADecalIsImportedSeeThroughAndNotMetal) {
     ASSERT_FALSE(decal.IsNull());
     ASSERT_FALSE(brass.IsNull());
     EXPECT_TRUE(doc.World().Has(decal, doc.World().Find("Blended")));
-    EXPECT_NEAR(*doc.Field(decal, "forward blended", "transparency").Number(), 0.65, 1e-4) << "its colour's alpha, 0.35, is how opaque it is";
-    EXPECT_EQ(*doc.Field(decal, "forward blended", "metallic").Number(), 0.0) << "it says nothing of being metal";
-    EXPECT_EQ(*doc.Field(brass, "forward", "metallic").Number(), 1.0) << "it says it is";
-    EXPECT_NEAR(*doc.Field(brass, "forward", "roughness").Number(), 0.3, 1e-4);
+    EXPECT_EQ(doc.Field(decal, "PbrMaterial", "alphaMode"), kgraph::Value(2.0)) << "drawn over what is behind it";
+    EXPECT_NEAR((*doc.Field(decal, "PbrMaterial", "baseColor").Items())[3].Number() ? *(*doc.Field(decal, "PbrMaterial", "baseColor").Items())[3].Number() : 0.0, 0.35, 1e-4)
+        << "its colour's alpha, 0.35, is how opaque it is";
+    EXPECT_EQ(*doc.Field(decal, "PbrMaterial", "metallic").Number(), 0.0) << "it says nothing of being metal";
+    EXPECT_EQ(*doc.Field(brass, "PbrMaterial", "metallic").Number(), 1.0) << "it says it is";
+    EXPECT_NEAR(*doc.Field(brass, "PbrMaterial", "roughness").Number(), 0.3, 1e-4);
 }
 
 // The scene drawn three ways, a branch of pages each, chosen by `renderer`: by vertex shaders, by task and mesh shaders
@@ -1185,12 +1185,11 @@ TEST(ForwardPlus, TheSceneIsDrawnThreeWays) {
     doc.SetScale(pane, { 4.f, 3.f, 0.05f });
     doc.AddComponent(pane, "Mesh");
     doc.SetField(pane, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("cube")));
-    doc.AddComponent(pane, "Blended");
-    ASSERT_TRUE(doc.AddComponent(pane, "forward blended"));
-    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(pane, "forward blended", map, kgraph::Value("$white"));
-    doc.SetField(pane, "forward blended", "albedo", kgraph::Value(kgraph::Value::List { 1.0, 0.05, 0.05 }));
-    doc.SetField(pane, "forward blended", "roughness", kgraph::Value(0.9));
-    doc.SetField(pane, "forward blended", "transparency", kgraph::Value(0.5));
+    ASSERT_TRUE(doc.AddComponent(pane, "PbrMaterial"));
+    doc.SetField(pane, "PbrMaterial", "baseColor", kgraph::Value(kgraph::Value::List { 1.0, 0.05, 0.05, 0.5 }));
+    doc.SetField(pane, "PbrMaterial", "roughness", kgraph::Value(0.9));
+    doc.SetField(pane, "PbrMaterial", "alphaMode", kgraph::Value("Blended"));     // and so the tag: drawn over what is behind it
+    EXPECT_TRUE(doc.World().Has(pane, doc.World().Find("Blended")));
     const auto settle = [&](const int frames) {
         for (int i = 0; i < frames; ++i) Frame();
         for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
@@ -1312,8 +1311,7 @@ TEST(ForwardPlus, MeshletsBehindAWallAreNotDrawnAndAreOnceItIsGone) {
     doc.SetScale(wall, { 20.f, 20.f, 0.2f });
     doc.AddComponent(wall, "Mesh");
     doc.SetField(wall, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("cube")));
-    ASSERT_TRUE(doc.AddComponent(wall, "forward"));
-    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(wall, "forward", map, kgraph::Value("$white"));
+    ASSERT_TRUE(doc.AddComponent(wall, "PbrMaterial"));
     settle(30);
     const auto [walled, walledListed] = drawnEarly();
     ASSERT_GT(walledListed, 0u);
@@ -1355,10 +1353,10 @@ TEST(ForwardPlus, AThinThingLitFromBehindLetsTheLightThrough) {
     doc.SetScale(panel, { 4.f, 1.f, 3.f });
     doc.AddComponent(panel, "Mesh");
     doc.SetField(panel, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("plane")));
-    ASSERT_TRUE(doc.AddComponent(panel, "forward"));
-    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(panel, "forward", map, kgraph::Value("$white"));
-    doc.SetField(panel, "forward", "albedo", kgraph::Value(kgraph::Value::List { 0.9, 0.2, 0.15 }));
-    doc.SetField(panel, "forward", "roughness", kgraph::Value(0.9));
+    ASSERT_TRUE(doc.AddComponent(panel, "PbrMaterial"));
+    ASSERT_TRUE(doc.AddComponent(panel, "forward"));      // its pipeline parameters: how much light shows through it
+    doc.SetField(panel, "PbrMaterial", "baseColor", kgraph::Value(kgraph::Value::List { 0.9, 0.2, 0.15, 1.0 }));
+    doc.SetField(panel, "PbrMaterial", "roughness", kgraph::Value(0.9));
     forwardplus::GiveRayMaterials(doc);
     ASSERT_TRUE(doc.World().Describe(doc.World().Find("forward")).FindField("translucency"));
     ASSERT_TRUE(doc.World().Describe(doc.World().Find("ray tracer")).FindField("translucency")) << "a field the two materials share";
@@ -1410,9 +1408,8 @@ TEST(ForwardPlus, TheRaysAreLitByWhatGivesOffLightAndNotByPointLights) {
     doc.SetScale(ball, { 0.3f, 0.3f, 0.3f });
     doc.AddComponent(ball, "Mesh");
     doc.SetField(ball, "Mesh", "mesh", kgraph::Value(kgraph::DefaultMeshId("sphere")));
-    ASSERT_TRUE(doc.AddComponent(ball, "forward"));
-    for (const char* map : { "albedoMap", "normalMap", "roughnessMap", "emissiveMap" }) doc.SetField(ball, "forward", map, kgraph::Value("$white"));
-    doc.SetField(ball, "forward", "emission", forwardplus::LampEmission(white, 3.0, 4.0, 0.15));
+    ASSERT_TRUE(doc.AddComponent(ball, "PbrMaterial"));
+    doc.SetField(ball, "PbrMaterial", "emission", forwardplus::LampEmission(white, 3.0, 4.0, 0.15));
     forwardplus::GiveRayMaterials(doc);
     const kecs::Entity bare = doc.CreateEntity("Bare light");
     doc.SetPosition(bare, { 6.f, 1.f, 9.f });

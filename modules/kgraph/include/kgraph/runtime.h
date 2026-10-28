@@ -41,6 +41,7 @@
 #include "assets.h"
 #include "catalog.h"
 #include "graph.h"
+#include "materials.h"
 #include "meshes.h"
 #include "view.h"
 
@@ -580,6 +581,11 @@ namespace kgraph
          *        when the pipeline has neither, and so runs once.
          */
         [[nodiscard]] kecs::ComponentId ComponentOf(std::string_view id) const;
+        /**
+         * @brief The material kinds pipeline node @p id's shaders take fields of (`[PbrMaterial("roughness")]`), in the
+         *        order they are first named: what an entity must have every one of to be drawn by it. None for another node.
+         */
+        [[nodiscard]] std::vector<std::string> MaterialsOf(std::string_view id) const;
         /** @brief What became of that component's fields when the pipeline last changed its shape; null when it never did. */
         [[nodiscard]] const kecs::Migration* MigrationOf(std::string_view id) const;
         /**
@@ -620,6 +626,29 @@ namespace kgraph
         void RemoveResourceScript(std::string_view name);
         /** @brief The resource scripts a Script node can name, by name: of the runtime it follows, for one that follows another. */
         [[nodiscard]] std::vector<ResourceScript> ResourceScripts() const;
+
+        // ---- materials ------------------------------------------------------------------------------------------------
+
+        /**
+         * @brief Makes @p kind a component of the world — or gives the one so named its new shape, entities keeping
+         *        the fields whose name and type are the same — each new one's pictures starting as the kind says, and
+         *        writes its Slang module (materials.h) where SetGeneratedShaderDirectory says. NoComponent, with
+         *        @p error saying why, when the name is a component's that is no material kind's, or there is no world.
+         */
+        kecs::ComponentId DeclareMaterialKind(MaterialKind kind, std::string* error = nullptr);
+        /** @brief The material kinds there are, by name. */
+        [[nodiscard]] const std::vector<MaterialKind>& MaterialKinds() const;
+        /** @brief The kind so named; null for none. */
+        [[nodiscard]] const MaterialKind* MaterialKindOf(std::string_view name) const;
+        /**
+         * @brief Where the material kinds' Slang modules are written, and shaders find them (`import PbrMaterial;`,
+         *        `import koral_materials;`): a project's generated shaders. Until it is set, a folder of the user's
+         *        temporary files. Every kind's is written there at once.
+         */
+        void SetGeneratedShaderDirectory(std::filesystem::path directory);
+        [[nodiscard]] const std::filesystem::path& GeneratedShaderDirectory() const;
+        /** @brief What writing the kinds' modules last said: fields of no GPU form, a file that could not be written. */
+        [[nodiscard]] const std::vector<std::string>& MaterialNotes() const;
         /**
          * @brief The inputs taken off pipeline nodes because an edited shader no longer has them, or has them as
          *        another kind: "node.input", in the order it happened. Current() no longer has them. Emptied by the call.

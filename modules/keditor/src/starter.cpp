@@ -687,25 +687,25 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         target("scene target", "color", "depth", 760, 40);
         set("scene target", "color[0].clear", Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 1 } } } } });
         // The pipeline is what every draw shares: the frame's values and the lights. What each draw has of its own —
-        // its mesh, where it is, an albedo, how metallic and how rough it is, what light it gives off — is wired to the
-        // Draw from a ForEach of the pipeline's component, which is the shader's push constants nothing else gives.
+        // its mesh, where it is, its colour, how metallic and how rough it is, what light it gives off — is wired to the
+        // Draw from a Filter of what has a mesh and a PbrMaterial: the material's fields, each to a push constant.
         node("GraphicsPipeline", "lit", 1020, 40);
         shaders("lit", "lit");
         wire(bring("shape", 760, 420), "lit", "vertex.layout", "layout");
         wire("scene target", "lit", "framebuffer");
         wire(bring("frame data", 760, 540), "lit", "param.frame");
         wire(bring("light data", 760, 660), "lit", "param.lights");
-        // Every entity; those with a Mesh and the pipeline's component; a draw of each, with its own.
+        // Every entity; those with a Mesh and a PbrMaterial; a draw of each, with what its material is.
         node("Entities", "all", 1020, 260);
         node("Filter", "drawn", 1020, 360);
         wire("all", "drawn", "entities");
-        set("drawn", "with", Value::List { "Mesh", "lit" });
+        set("drawn", "with", Value::List { "Mesh", "PbrMaterial" });
         node("Draw", "draw scene", 1300, 40);
         wire("lit", "draw scene", "pipeline");
         wire("drawn", "draw scene", "mesh", "Mesh.mesh");
         wire("drawn", "draw scene", "push.model", "matrix");
-        for (const char* field : { "albedo", "metallic", "roughness", "emission" })
-            wire("drawn", "draw scene", (std::string("push.") + field).c_str(), (std::string("lit.") + field).c_str());
+        for (const auto& [push, field] : { std::pair { "albedo", "baseColor" }, { "metallic", "metallic" }, { "roughness", "roughness" }, { "emission", "emission" } })
+            wire("drawn", "draw scene", (std::string("push.") + push).c_str(), (std::string("PbrMaterial.") + field).c_str());
 
         // ---- sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn -----------
         pass = "sky";
@@ -748,9 +748,9 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         const kecs::Entity sphere = doc.CreateEntity("Sphere");
         doc.AddComponent(sphere, "Mesh");
         doc.SetField(sphere, "Mesh", "mesh", Value(kgraph::DefaultMeshId("sphere")));
-        if (doc.AddComponent(sphere, "lit")) {
-            doc.SetField(sphere, "lit", "albedo", vec(0.85f, 0.6f, 1.f));
-            doc.SetField(sphere, "lit", "roughness", Value(0.5));
+        if (doc.AddComponent(sphere, "PbrMaterial")) {
+            doc.SetField(sphere, "PbrMaterial", "baseColor", Value(Value::List { 0.85f, 0.6f, 1.f, 1.f }));
+            doc.SetField(sphere, "PbrMaterial", "roughness", Value(0.5));
         }
         return sphere;
     }

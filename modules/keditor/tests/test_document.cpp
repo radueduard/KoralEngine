@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <fstream>
+#include <map>
 #include <set>
 #include <ranges>
 
@@ -1000,4 +1002,100 @@ TEST_F(DocumentTest, TheEnginesBloomOpenedInPlaceHasNothingWrong) {
     for (int i = 0; i < 3; ++i) support::Frame();
     for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << "written out: " << problem;
     EXPECT_EQ(doc.Graph().Find("bloom/level above")->inputs.at("of").value, Value("bloom/down level"));
+}
+
+// A model's materials are imported as what its file reports them: an OBJ's the classic way, as BlinnPhongMaterials, each
+// an asset its things follow. Changed in the asset, every thing that follows it is — but for what one made its own,
+// which it keeps until it is applied to the asset, reverted, or the thing unlinked. What was changed of a model's is
+// kept beside it.
+TEST_F(DocumentTest, AModelsMaterialsAreAssetsItsThingsFollow) {
+    const auto project = scene::MakeProject("materials");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    {
+        std::ofstream mtl(models / "two.mtl");
+        mtl << "newmtl red\nKd 1 0 0\nKs 0.5 0.5 0.5\nNs 32\nillum 2\nnewmtl glass\nKd 0.2 0.4 0.8\nd 0.25\nillum 2\n";
+        std::ofstream obj(models / "two.obj");
+        obj << "mtllib two.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\n"
+               "o a\nusemtl red\nf 1 2 3\no b\nusemtl red\nf 2 4 3\no pane\nusemtl glass\nf 1 2 4\n";
+    }
+    doc.SetAssetDirectory(project.directory / "assets");
+    const kecs::Entity root = doc.ImportModel(models / "two.obj");
+    ASSERT_FALSE(root.IsNull());
+    for (int i = 0; i < 400 && (i < 2 || doc.Reading() > 0); ++i) Frame();
+
+    const kecs::ComponentId mesh = doc.World().Find("Mesh");
+    std::map<std::string, kecs::Entity> drawn;
+    for (const kecs::Entity entity : doc.World().All())
+        if (doc.World().Has(entity, mesh)) drawn[doc.NameOf(entity)] = entity;
+    ASSERT_EQ(drawn.size(), 3u) << "a thing for each of the file's";
+    const kecs::Entity a = drawn.begin()->second, b = std::next(drawn.begin())->second;
+    kecs::Entity pane = kecs::NullEntity;
+    for (const auto& [name, entity] : drawn) if (name.find("pane") != std::string::npos) pane = entity;
+    ASSERT_FALSE(pane.IsNull());
+
+    const std::string red = doc.MaterialAssetOfEntity(a, "BlinnPhongMaterial");
+    ASSERT_FALSE(red.empty()) << "an OBJ's material is classic: a BlinnPhongMaterial";
+    EXPECT_EQ(red.substr(0, red.find('#')), "@models/two.obj");
+    EXPECT_EQ(doc.MaterialAssetOfEntity(b, "BlinnPhongMaterial"), red) << "two things of one material follow one asset";
+    EXPECT_NE(doc.MaterialAssetOfEntity(pane, "BlinnPhongMaterial"), red);
+    EXPECT_EQ(doc.Field(a, "BlinnPhongMaterial", "diffuse"), kgraph::Value(kgraph::Value::List { 1.0, 0.0, 0.0, 1.0 }));
+    EXPECT_EQ(doc.Field(a, "BlinnPhongMaterial", "shininess"), kgraph::Value(32.0));
+    EXPECT_TRUE(doc.World().Has(pane, doc.World().Find("Blended"))) << "see-through by its opacity: drawn over what is behind it";
+    EXPECT_FALSE(doc.World().Has(a, doc.World().Find("Blended")));
+    ASSERT_NE(doc.MaterialAssetOf(red), nullptr);
+    EXPECT_EQ(doc.MaterialAssetOf(red)->kind, "BlinnPhongMaterial");
+
+    // Changed in the asset: in everything that follows it, and kept beside the model.
+    ASSERT_TRUE(doc.SetMaterialAssetField(red, "shininess", kgraph::Value(64)));
+    EXPECT_EQ(doc.Field(a, "BlinnPhongMaterial", "shininess"), kgraph::Value(64.0));
+    EXPECT_EQ(doc.Field(b, "BlinnPhongMaterial", "shininess"), kgraph::Value(64.0));
+    EXPECT_TRUE(std::filesystem::exists(models / "two.obj.materials.json"));
+
+    // Changed on a thing: its own, which the asset no longer sets.
+    ASSERT_TRUE(doc.SetField(a, "BlinnPhongMaterial", "shininess", kgraph::Value(8)));
+    EXPECT_EQ(doc.MaterialOverridesOf(a, "BlinnPhongMaterial"), std::vector<std::string> { "shininess" });
+    ASSERT_TRUE(doc.SetMaterialAssetField(red, "shininess", kgraph::Value(16)));
+    EXPECT_EQ(doc.Field(a, "BlinnPhongMaterial", "shininess"), kgraph::Value(8.0)) << "its own";
+    EXPECT_EQ(doc.Field(b, "BlinnPhongMaterial", "shininess"), kgraph::Value(16.0));
+
+    // Applied: the asset's, and so every thing's that follows it.
+    ASSERT_TRUE(doc.ApplyMaterial(a, "BlinnPhongMaterial"));
+    EXPECT_TRUE(doc.MaterialOverridesOf(a, "BlinnPhongMaterial").empty());
+    EXPECT_EQ(doc.Field(b, "BlinnPhongMaterial", "shininess"), kgraph::Value(8.0));
+
+    // Reverted: as its asset is.
+    ASSERT_TRUE(doc.SetField(b, "BlinnPhongMaterial", "specular", kgraph::Value(kgraph::Value::List { 1.0, 1.0, 1.0 })));
+    ASSERT_TRUE(doc.RevertMaterial(b, "BlinnPhongMaterial"));
+    EXPECT_TRUE(doc.MaterialOverridesOf(b, "BlinnPhongMaterial").empty());
+    EXPECT_EQ(doc.Field(b, "BlinnPhongMaterial", "specular"), doc.Field(a, "BlinnPhongMaterial", "specular"));
+
+    // Unlinked: its own altogether.
+    ASSERT_TRUE(doc.UnlinkMaterial(b, "BlinnPhongMaterial"));
+    EXPECT_TRUE(doc.MaterialAssetOfEntity(b, "BlinnPhongMaterial").empty());
+    ASSERT_TRUE(doc.SetMaterialAssetField(red, "shininess", kgraph::Value(100)));
+    EXPECT_EQ(doc.Field(b, "BlinnPhongMaterial", "shininess"), kgraph::Value(8.0));
+    EXPECT_EQ(doc.Field(a, "BlinnPhongMaterial", "shininess"), kgraph::Value(100.0));
+
+    // Made a material of its own again, an alpha mode sets what it is tagged.
+    ASSERT_TRUE(doc.SetField(pane, "BlinnPhongMaterial", "alphaMode", kgraph::Value(0)));
+    EXPECT_FALSE(doc.World().Has(pane, doc.World().Find("Blended")));
+}
+
+// What a reported model is imported as is the project's to say — for every file, or for one.
+TEST_F(DocumentTest, WhatAMaterialIsImportedAsIsAChoice) {
+    scene::MakeProject("import kinds");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    using Model = kgraph::ModelMaterial::Model;
+    EXPECT_EQ(doc.ImportKind(Model::ePbr), "PbrMaterial");
+    EXPECT_EQ(doc.ImportKind(Model::eClassic), "BlinnPhongMaterial");
+    doc.SetImportKind(Model::eClassic, "PbrMaterial", "models/old.obj");
+    EXPECT_EQ(doc.ImportKind(Model::eClassic, "models/old.obj"), "PbrMaterial");
+    EXPECT_EQ(doc.ImportKind(Model::eClassic, "models/other.obj"), "BlinnPhongMaterial");
+    EXPECT_EQ(doc.ImportKind(Model::ePbr, "models/old.obj"), "PbrMaterial") << "what that file does not say is every file's";
+    doc.SetImportKind(Model::eClassic, "", "models/old.obj");
+    EXPECT_EQ(doc.ImportKind(Model::eClassic, "models/old.obj"), "BlinnPhongMaterial");
 }

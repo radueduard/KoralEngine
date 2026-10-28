@@ -330,3 +330,97 @@ TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {
     EXPECT_EQ(kept->min, 1.f);
     EXPECT_EQ(kept->max, 179.f);
 }
+
+// A Material is data and nothing else: a kind of what a drawn thing is made of. Its pictures (Textures) come first,
+// each a shared reference that starts as the picture it names, then its other fields as any script's; a choice of so
+// many is a whole number with names.
+TEST(Declarations, AMaterialIsAKindOfWhatThingsAreMadeOf) {
+    constexpr const char* csharp = R"(
+        public sealed class Toon : Material
+        {
+            public Vec4 Tint = new(1f, 0.5f, 0.25f, 1f);
+            public Texture Ramp = "@textures/ramp.png";
+            [Range(1, 8)] public int Bands = 3;
+            [Choices("Opaque", "Masked", "Blended")] public uint AlphaMode;
+            public Texture Normals = Texture.Normal;
+        }
+    )";
+    const auto found = kscript::Declare(csharp, false, "Toon.cs");
+    for (const auto& problem : found.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(found.types.size(), 1u);
+    const auto& toon = found.types.front();
+    EXPECT_TRUE(toon.material);
+    EXPECT_FALSE(toon.makesResources);
+    ASSERT_EQ(toon.fields.size(), 5u);
+    EXPECT_EQ(toon.fields[0].name, "Ramp") << "the pictures first, as they are written";
+    EXPECT_EQ(toon.fields[1].name, "Normals");
+    for (int i : { 0, 1 }) {
+        EXPECT_EQ(toon.fields[i].type, "Image");
+        EXPECT_EQ(toon.fields[i].size, kscript::TextureSize);
+        EXPECT_EQ(toon.fields[i].offset, i * kscript::TextureSize);
+    }
+    EXPECT_EQ(toon.fields[2].name, "Tint");
+    EXPECT_EQ(toon.fields[2].offset, 2 * kscript::TextureSize);
+    ASSERT_EQ(toon.textures.size(), 2u);
+    EXPECT_EQ(toon.textures[0], (std::pair<std::string, std::string> { "Ramp", "@textures/ramp.png" }));
+    EXPECT_EQ(toon.textures[1], (std::pair<std::string, std::string> { "Normals", "$normal" }));
+    EXPECT_FLOAT_EQ(FloatAt(toon, "Tint", 1), 0.5f);
+    const auto* bands = Field(toon, "Bands");
+    ASSERT_NE(bands, nullptr);
+    EXPECT_EQ(bands->min, 1.f);
+    const auto* mode = Field(toon, "AlphaMode");
+    ASSERT_NE(mode, nullptr);
+    EXPECT_EQ(mode->choices, (std::vector<std::string> { "Opaque", "Masked", "Blended" }));
+
+    constexpr const char* kotlin = R"(
+        class Toon : Material() {
+            var tint = Vec4(1f, 0.5f, 0.25f, 1f)
+            var ramp = Texture("@textures/ramp.png")
+            var normals = Texture.Normal
+        }
+    )";
+    const auto inKotlin = kscript::Declare(kotlin, true, "Toon.kt");
+    for (const auto& problem : inKotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(inKotlin.types.size(), 1u);
+    EXPECT_TRUE(inKotlin.types.front().material);
+    EXPECT_EQ(inKotlin.types.front().textures, (std::vector<std::pair<std::string, std::string>> { { "ramp", "@textures/ramp.png" }, { "normals", "$normal" } }));
+
+    // A Texture is a material's: a script keeps none.
+    const auto script = kscript::Declare("public sealed class S : Script { public Texture T; }", false, "S.cs");
+    EXPECT_TRUE(script.types.empty());
+    EXPECT_FALSE(script.problems.empty());
+}
+
+// The engine's package has its two kinds, the same in either language, given apart from the scripts' components.
+TEST(Declarations, ThePackagesMaterialsArePbrAndBlinnPhong) {
+    const auto folder = kscript::PackageDirectory() / "scripts";
+    for (const char* name : { "PbrMaterial", "BlinnPhongMaterial" }) {
+        const auto csharp = kscript::DeclareFiles(folder / (std::string(name) + ".cs"));
+        const auto kotlin = kscript::DeclareFiles(folder / (std::string(name) + ".kt"));
+        for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+        for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+        ASSERT_EQ(csharp.types.size(), 1u) << name;
+        ASSERT_EQ(kotlin.types.size(), 1u) << name;
+        const auto& a = csharp.types.front();
+        const auto& b = kotlin.types.front();
+        EXPECT_TRUE(a.material);
+        EXPECT_EQ(a.size, b.size) << name;
+        EXPECT_EQ(a.initial, b.initial) << name << " starts the same in both";
+        EXPECT_EQ(a.textures, b.textures) << name;
+        ASSERT_EQ(a.fields.size(), b.fields.size()) << name;
+        for (std::size_t i = 0; i < a.fields.size(); ++i) {
+            EXPECT_TRUE(a.fields[i].SameAs(b.fields[i])) << name << "." << a.fields[i].name;
+            EXPECT_EQ(a.fields[i].offset, b.fields[i].offset);
+            EXPECT_EQ(a.fields[i].choices, b.fields[i].choices);
+        }
+    }
+
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    std::vector<kscript::ScriptType> materials;
+    for (const auto& problem : kscript::DeclarePackage(scripts, &materials)) ADD_FAILURE() << problem;
+    EXPECT_EQ(world.Find("PbrMaterial"), kecs::NoComponent) << "a material is made a component by what keeps its pictures";
+    ASSERT_EQ(materials.size(), 2u);
+    EXPECT_EQ(materials[0].name, "BlinnPhongMaterial");
+    EXPECT_EQ(materials[1].name, "PbrMaterial");
+}

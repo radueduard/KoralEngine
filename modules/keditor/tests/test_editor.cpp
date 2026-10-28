@@ -904,14 +904,12 @@ TEST_F(EditorTest, TheLitSceneDrawsLitMeshesUnderASky) {
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     ASSERT_TRUE(Doc().Runtime().Ok());
 
-    // The pipeline's component is what makes an entity drawn, and it is the shader's: what its push constants ask of
-    // each entity. Where it is, which it is and which is picked are the engine's to say, and no fields of it.
-    const kecs::ComponentId renderer = Doc().Runtime().ComponentOf("lit");
-    ASSERT_NE(renderer, kecs::NoComponent);
-    std::vector<std::string> fields;
-    for (const auto& field : Doc().World().Describe(renderer).fields) fields.push_back(field.name);
-    std::ranges::sort(fields);
-    EXPECT_EQ(fields, (std::vector<std::string> { "albedo", "emission", "metallic", "roughness" }));
+    // What its push constants ask of each entity is its PbrMaterial's, wired from a Filter of what has one: the pipeline
+    // has no parameters of its own. Where it is is the engine's to say.
+    EXPECT_EQ(Doc().Runtime().ComponentOf("lit"), kecs::NoComponent);
+    const kgraph::Node* drawn = Doc().Graph().Find("drawn");
+    ASSERT_NE(drawn, nullptr);
+    EXPECT_EQ(drawn->inputs.at("with").value, kgraph::Value(kgraph::Value::List { "Mesh", "PbrMaterial" }));
     EXPECT_EQ(Doc().World().Find("MeshRenderer"), kecs::NoComponent) << "there is no renderer but what a shader makes";
     EXPECT_EQ(Doc().World().Find("Spin"), kecs::NoComponent) << "what a thing does is a script's";
     EXPECT_EQ(Doc().Runtime().ComponentOf("sky"), kecs::NoComponent);
@@ -2582,23 +2580,21 @@ TEST_F(EditorTest, TheDefaultMeshesAndMaterialsAreAssetsOfEveryProject) {
     ASSERT_NE(gold, assets.end());
     EXPECT_EQ(gold->folder, "Materials/Defaults");
 
-    // Dropped on an entity that is drawn, what draws it is given the material — the standard graph's, its colour; on
-    // one that is not, it is given that first. A light's colour is no material's.
+    // Dropped on an entity, a default material is a PbrMaterial asset it follows: its colour the material's. A light's
+    // colour is no material's.
     kecs::World& world = Doc().World();
-    kecs::Entity drawn = kecs::NullEntity;
-    world.EachEntity([&](const kecs::Entity e) { if (drawn.IsNull() && world.Has(e, world.Find("default"))) drawn = e; });
-    ASSERT_FALSE(drawn.IsNull());
-    ASSERT_TRUE(Session().GiveAsset("material:Gold", drawn));
-    EXPECT_EQ(*Doc().Field(drawn, "default", "color").Items(), (kgraph::Value::List { 1.f, 0.78f, 0.34f }));
     const kecs::Entity sun = world.FindEntity("Sun");
     ASSERT_TRUE(Session().GiveAsset("material:Gold", sun));
-    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(sun), std::string("default"))) << "given what draws, not its light coloured";
+    EXPECT_EQ(Doc().MaterialAssetOfEntity(sun, "PbrMaterial"), "material:Gold");
+    EXPECT_EQ(*Doc().Field(sun, "PbrMaterial", "baseColor").Items(), (kgraph::Value::List { 1.f, 0.78f, 0.34f, 1.f }));
+    EXPECT_EQ(Doc().Field(sun, "PbrMaterial", "metallic"), kgraph::Value(1.0));
     EXPECT_EQ(*Doc().Field(sun, "DirectionalLight", "color").Items(), (kgraph::Value::List { 1.f, 0.96f, 0.9f }));
     const kecs::Entity bare = Doc().CreateEntity("Bare");
     ASSERT_TRUE(Session().GiveAsset("$torus", bare));
     ASSERT_TRUE(Session().GiveAsset("material:Red plastic", bare));
-    EXPECT_TRUE(std::ranges::contains(Doc().ComponentsOf(bare), std::string("default")));
-    EXPECT_EQ(*Doc().Field(bare, "default", "color").Items(), (kgraph::Value::List { 0.8f, 0.1f, 0.08f }));
+    EXPECT_EQ(*Doc().Field(bare, "PbrMaterial", "baseColor").Items(), (kgraph::Value::List { 0.8f, 0.1f, 0.08f, 1.f }));
+    ASSERT_TRUE(Session().GiveAsset("material:Gold", bare));
+    EXPECT_EQ(Doc().MaterialAssetOfEntity(bare, "PbrMaterial"), "material:Gold") << "another dropped on it: it follows that one";
     EXPECT_FALSE(Session().GiveAsset("material:Nothing", bare));
     for (int i = 0; i < 5; ++i) Frame();
 
