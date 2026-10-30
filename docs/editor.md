@@ -540,8 +540,8 @@ is a **Material asset**, `@model.gltf#material:2`, listed in the Assets panel be
 depends on how the file reports it (a Reported material, `kgraph::ReportOf`): described physically (a glTF, or any file
 that gives a metallic or a roughness) it is a `PbrMaterial`, the classic way (an OBJ, an FBX's Phong) a
 `BlinnPhongMaterial` — filled a field by name from what the file says. That is only the default: the project chooses
-what each is imported as, for every file or for one (`Session::SetImportKind`, kept in `project.json` under
-`materials.importAs`). A part whose material is see-through by its opacity has the tag `Blended`, and one with a
+what each is imported as, for every file (`Session::SetImportKind`, kept in `project.json` under
+`materials.importAs`) or for one (kept in its meta, as `materialKinds`). A part whose material is see-through by its opacity has the tag `Blended`, and one with a
 cut-out `Masked`: the tags follow its material's `alphaMode`. A material asset picked in the Assets panel shows its
 fields, set there for every entity that follows it — but for what one has made its own; what was changed of a
 model's is kept beside the model, in `<model>.materials.json`, so that the file is never written and a field the file
@@ -835,9 +835,50 @@ that again after the panels have been moved.
   fixed array). Its fields are ports from the start, as a ShaderBuffer's are.
 - A new node goes where the pointer asked for it, or in the middle of what the graph shows.
 
-Not yet, in the Assets panel: a file is not renamed or moved from it (the scene knows a file by where it is, and
-would lose it); a scene is listed, and not opened from there. The grid shows the first 160 pictures of what
-it lists — textures, and meshes once theirs are drawn — and the rest by their kind.
+- **Each file is an asset, known by an ID** kept beside it in `<file>.meta` (see
+  [ADR 0003](adr/0003-assets-are-made-by-producers.md)): a scene, a prefab and a material name what they have by that ID
+  on disk, and by where it is in the editor. So a file is **renamed or moved** from its menu (*Rename or move...*): its
+  meta goes with it, a model's files with it too, and every scene still has it — the one open is saved first, and read
+  again after. A file moved outside the editor with its meta is the same asset; moved without it, it is found again by
+  its name when it is the one file of that name with no meta.
+- **Used by**, in a picked asset's inspector, is the project's files that name it, as they are saved; moving one to the
+  trash says first what would have nothing.
+- **A scene pressed twice is opened**: the one open saved first, when it has changed.
+- How a model's meshes are read, how a picture is kept, and what a model's materials are imported as, are the asset's:
+  in its meta, read by every scene of the project. A scene saved before that has them moved into the metas when it is
+  saved.
+
+- **A model's meshes and materials are its parts**, each known by its name in the file: written again with them in
+  another order — as an export may — every entity keeps the mesh it had, wherever the file has it now. One the file no
+  longer has is said among the problems.
+- **A model's material is extracted** into the project (*Extract into the project*, in its inspector): written to
+  `assets/materials/<its name>.kmat` as it is now, and every entity that followed it follows that, keeping what it made
+  its own. The model's file read again no longer changes it.
+
+The grid shows the first 160 pictures of what it lists — textures, and meshes once theirs are drawn — and the rest by
+their kind.
+
+- **A model put in the scene is an instance of the prefab made of it** (`.koral/cache/prefabs/<the model's ID>.prefab`):
+  whenever the model is read again — written again by another program, read with other settings — the prefab is made
+  again, and every place it was put follows it, keeping what each made its own.
+- **A file written again while the scene has it is read again**, within a second: a picture painted over, a model
+  exported again. What held what was of it holds what it is now.
+- **What a model's materials take of the file**: picked in its material's inspector, under *From the file*, each field
+  of its kind takes the value of its own name, or another the file reports (a project's kind's `tint` the file's
+  `diffuse`); what nothing takes is listed as *Not taken*. Kept in the model's meta, as `materialFields`.
+- **Small pictures**: a mesh's is drawn once and kept in `.koral/cache/thumbnails` by what the mesh is made of, so the
+  next run reads it; a model is shown by its first mesh's; a material by a sphere of it, drawn from its values — its
+  colour and picture, how metal and how rough, what it gives off — under the editor's own light and sky. (Not by the
+  project's shader, which needs what the project's graph makes: its lights, its camera, its shadows.)
+
+### Exporting the game
+
+**Project, Export the game...** writes into an empty folder — out of the project, or in its `build` folder — every scene
+of the project and what they have, and nothing else: each asset its scenes reach, by what names what (a scene its
+materials and meshes, a material its pictures, a model the files beside it), with its meta; the project's shaders,
+scripts, functions and objects, which are found by their names; and the project's cache, with every model read ahead
+into it, so that the game never runs an importer. `manifest.json` says what it is made of (`kasset::Reach`).
+`koral-play --project <folder>` runs it.
 
 ## The scene tree, the inspector, and what is carried between panels
 

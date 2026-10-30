@@ -1,22 +1,24 @@
 # Scripts
 
 A script is a class added to entities. Its public fields are a component: data the engine keeps, shows in
-the inspector, saves with the scene and carries across a reload. Its methods are called on each entity that
-has it. Scripts are written in C# or Kotlin.
+the inspector, saves with the scene and carries across a reload. Every script is a **Setup** — initialised once,
+switched on and off, gone — and takes the **pieces** of what else it does: **PerFrame** to be called every frame,
+**FixedStep** on the game's steady step, **BeforeDraw** before the frame is drawn. Only what it takes is ever called on
+it. Scripts are written in C# or Kotlin.
 
 ```csharp
-public sealed class Spin : Script
+public sealed class Spin : Setup, PerFrame
 {
     public float Speed;             // in the inspector, in the file, kept across a reload
     public float Angle;
     private int _frames;            // this run's only
 
-    protected override void Update(float delta) => Angle += Speed * delta;
+    public void Update(float delta) => Angle += Speed * delta;
 }
 ```
 
 ```kotlin
-class Spin : Script() {
+class Spin : Setup(), PerFrame {
     var speed = 0f
     var angle = 0f
     private var frames = 0
@@ -27,25 +29,75 @@ class Spin : Script() {
 
 ## What is called, and when
 
-| C# | Kotlin | When |
-|---|---|---|
-| `OnCreated` | `onCreated` | The script was added to the entity. Once, switched on or off. |
-| `OnEnabled` | `onEnabled` | It was switched on, or added switched on. |
-| `Start` | `start` | Before its first update. Once. |
-| `FixedUpdate(step)` | `fixedUpdate(step)` | A steady step of the game: 0 to 8 times a frame. |
-| `Update(delta)` | `update(delta)` | Once a frame, while it is switched on. |
-| `LateUpdate(delta)` | `lateUpdate(delta)` | After every script's update. |
-| `Prepare` | `prepare` | `GraphicsScript` only. After the updates and before the passes — in the editor, played or not. |
-| `OnDisabled` | `onDisabled` | It was switched off, or is about to go while on. |
-| `OnDestroyed` | `onDestroyed` | It is about to go: removed, or its entity destroyed. |
+| | C# | Kotlin | When |
+|---|---|---|---|
+| Setup | `Initialize` | `initialize` | Before anything else is called on it while the scene plays. Once. |
+| Setup | `OnEnabled` | `onEnabled` | It was switched on, or added switched on. |
+| FixedStep | `FixedUpdate(step)` | `fixedUpdate(step)` | A steady step of the game: 0 to 8 times a frame. |
+| PerFrame | `Update(delta)` | `update(delta)` | Once a frame, while it is switched on. |
+| PerFrame | `LateUpdate(delta)` | `lateUpdate(delta)` | After every script's update. Optional: a PerFrame need not have one. |
+| BeforeDraw | `Prepare` | `prepare` | After the updates and before the passes — in the editor, played or not. |
+| Setup | `OnDisabled` | `onDisabled` | It was switched off, or is about to go while on. |
+| Setup | `OnDestroyed` | `onDestroyed` | It is about to go: removed, or its entity destroyed. |
 
 Before each call the fields hold what the engine has, and after it the engine has what they hold. A method
 may change the world: create and destroy entities, add and remove components, itself included.
 
 A script that throws is logged once for each kind of call, and the other scripts carry on.
 
-Only what a class does is called: a hook it leaves as `Script` has it — no `LateUpdate` of its own, no `FixedUpdate` —
-is never called on its entities, so thousands of a script that only updates cost an update each and nothing more.
+An entity running a script is given a tag for each piece the script takes — `PerFrame`, `FixedStep`, `BeforeDraw` —
+which a graph's Filter can ask for, and which goes when no script of the entity's takes that piece any more. The tags
+are worked out again from the scripts, so a scene's file does not hold them.
+
+A script written before Setup derives from `Script` (or `GraphicsScript`, for `Prepare`) and overrides the hooks it
+uses — `OnCreated`, `Start`, `Update`... It still runs, with only what it overrides called; a new one is a Setup.
+
+## Generators
+
+A script that takes **MeshGenerator** makes its entity's mesh. Its public fields are what the mesh is made of, and
+its `Initialize(MeshWriter)` writes it — positions, normals, UVs, tangents or attributes of its own, by semantic, and
+its triangles. It is given only the writer, never the world: what it makes is of its fields alone.
+
+```csharp
+public sealed class Pyramid : Setup, MeshGenerator
+{
+    [Range(0.1f, 10)] public float Height = 1;
+    public void Initialize(MeshWriter mesh)
+    {
+        mesh.Positions([new(-0.5f, 0, -0.5f), new(0.5f, 0, -0.5f), new(0.5f, 0, 0.5f), new(-0.5f, 0, 0.5f), new(0, Height, 0)]);
+        mesh.Indices([0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3]);
+    }
+}
+```
+
+```kotlin
+class Pyramid : Setup(), MeshGenerator {
+    var height = 1f
+    override fun initialize(mesh: MeshWriter) {
+        mesh.positions(floatArrayOf(-0.5f, 0f, -0.5f, 0.5f, 0f, -0.5f, 0.5f, 0f, 0.5f, -0.5f, 0f, 0.5f, 0f, height, 0f))
+        mesh.indices(intArrayOf(0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3))
+    }
+}
+```
+
+Added to an entity, it is that entity's procedural mesh: the entity's `Mesh` holds what it made
+(`$script/gen/Pyramid/<what it was made of>`), so a Filter `with Mesh` finds it as it finds any other. It is made
+again whenever its fields change — dragged in the inspector, set while the scene plays, or not playing at all — and
+every entity with the same fields shares one mesh, made once. What was made is kept in the project's
+`.koral/cache/meshes`: a scene opened without its scripts (plain `koral-editor`, `koral-play`) still has it.
+
+A script that takes **ImageGenerator** makes a picture of its entity's material the same way: its
+`Initialize(ImageWriter)` sizes the picture and writes its texels, and the material field its `Into` names
+(`baseColorMap` unless it says) holds it — made again when its fields change, shared by every entity of the same
+fields, kept in `.koral/cache/images`. A picture a compute shader makes is a graph's Image, which a material's picture
+field can hold as it is.
+
+In the editor, an entity's Mesh offers the project's mesh generators beside its meshes, as *Pyramid (procedural)*:
+picked, the entity is given that generator, and it makes the mesh. **Save the generator**, in the inspector, writes the
+generator with its fields as they are to `assets/generators/<name>.kgen`; dropped on another entity from the Assets
+panel, that one is given the generator and **follows the file**, as an entity follows a Material asset: the fields set
+in the `.kgen`'s inspector reach every entity that follows it, the one it was saved from among them, but for what an
+entity has set itself. A scene opened has what the file says now.
 
 ## Fields
 
@@ -157,7 +209,7 @@ hundred, most of the frame for tens of thousands. One script that moves them all
 there are — the transforms of many at once, three floats an entity, in the order the entities are given:
 
 ```kotlin
-class Spinner : Script() {
+class Spinner : Setup(), PerFrame {
     var speed = 90f
     private var cubes: Entities? = null              // where the engine reads them: made once, given each frame
     private var rotations = FloatArray(0)            // kept, so that a frame makes nothing new
@@ -195,7 +247,7 @@ A script that is only data — fields, and no function of its own — is called 
 frame: such a component on thousands of entities costs nothing until something reads it.
 
 ```kotlin
-class SpinSpeed : Script() { var degreesPerSecond = 90f }      // a speed each, in the inspector
+class SpinSpeed : Setup() { var degreesPerSecond = 90f }      // a speed each, in the inspector
 
 // in the script that turns them, each frame:
 speeds = world.floatsOf(cubes, "SpinSpeed", "degreesPerSecond", speeds)
@@ -252,17 +304,17 @@ Script meshes are not saved with the scene: a script makes them when it runs. Ko
 `MeshAttribute.floats(...)`. From C: `kengine_mesh_create`, `kengine_mesh_with_attributes`,
 `kengine_mesh_without_attributes`, `kengine_mesh_attribute` (see `koral_engine.h`).
 
-## Graphics scripts
+## Before the frame is drawn
 
-A `GraphicsScript` makes what the graph's passes take and nothing else makes. Its `Prepare` runs after
+A script that takes `BeforeDraw` makes what the graph's passes take and nothing else makes. Its `Prepare` runs after
 every update and before anything is drawn, so what it writes is what this frame's passes read. The usual
 case is a buffer node the script fills:
 
 ```csharp
-public sealed class LightCamera : GraphicsScript
+public sealed class LightCamera : Setup, BeforeDraw
 {
     public float Reach;
-    protected override void Prepare()
+    public void Prepare()
     {
         var light = World.Read<Light>(Entity);
         if (light is null) return;
@@ -410,7 +462,7 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 - **A ResourceScript runs only with its project's scripts**, as every script does: in plain `koral-editor` what it
   makes is made with nothing in it, and its node says so.
 - **Scripts run only while the scene plays** in the editor (Play, in the Scene panel): nothing is created, enabled
-  or started before then — a `GraphicsScript`'s `Prepare` alone runs as the scene is edited, for what is drawn — and
+  or started before then — a `BeforeDraw`'s `Prepare` alone runs as the scene is edited, for what is drawn — and
   what they made is gone on Stop. Start the editor with
   `koral-engine-dotnet --edit`: plain `koral-editor` runs no scripts.
 - **The inspector follows a script ten times a second**, while the scene plays and the entity is picked: a

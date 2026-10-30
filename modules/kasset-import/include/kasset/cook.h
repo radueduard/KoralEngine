@@ -1,9 +1,10 @@
 #pragma once
 
-// kgraph: cooking a picture — a file, or a pack of others' channels — into a block-compressed KTX2 in the project's
+// kasset: cooking a picture — a file, or a pack of others' channels — into a block-compressed KTX2 in the project's
 // cache, and what is read of a picture when it has not been. Touches nothing of the device: run on any thread.
 
-#include <kgraph/textures.h>
+#include <kasset/cache.h>
+#include <kasset/texture.h>
 
 #include <expected>
 #include <filesystem>
@@ -15,8 +16,11 @@
 
 #include <koralImageImport.h>
 
-namespace kgraph::cook
+namespace kasset::cook
 {
+    /** @brief The picture cook, as a producer: its name and version. Up whenever what it makes changes. */
+    inline constexpr std::string_view TextureProducer = "texture@1";
+
     /** @brief A picture file of an asset id: where it is on disk. */
     using FileOf = std::function<std::filesystem::path(std::string_view id)>;
 
@@ -31,7 +35,7 @@ namespace kgraph::cook
 
     /**
      * @brief Where @p recipe's cooked file is in @p cache: its name, and a key of everything it was cooked of — each
-     *        file's size and time, and the settings — so a file or a setting changed is another name, and the old one
+     *        file's content, and the settings — so a file or a setting changed is another name, and the old one
      *        is cooked again rather than read. Nothing when a file it is of is not there, or there is no cache.
      */
     [[nodiscard]] std::optional<std::filesystem::path> CookedPath(const std::filesystem::path& cache, const Recipe& recipe, const FileOf& fileOf);

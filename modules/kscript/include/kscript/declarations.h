@@ -26,7 +26,7 @@ namespace kscript
 
     /**
      * @brief The script types @p source declares, read as C# when @p kotlin is false and Kotlin when it is. A class is a
-     *        Script's when it derives from Script or GraphicsScript; abstract ones are none. One that derives from
+     *        Script's when it derives from Setup (or, as one was written before it, Script or GraphicsScript); abstract ones are none. One that derives from
      *        ResourceScript makes resources (ScriptType::makesResources), and is no component: its fields of a resource
      *        type — `public Image Height = new(format: "eR32_SFLOAT", width: 256, height: 256);`, Kotlin's
      *        `val height = Image(format = "eR32_SFLOAT", width = 256, height = 256)` — are what it makes, each

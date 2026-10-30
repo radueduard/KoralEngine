@@ -245,3 +245,20 @@ TEST(Serialize, ATypeNamedMoreNarrowlyReadsWhatWasSavedWhenItSaysItDoes) {
     EXPECT_EQ(*static_cast<const float*>(reading.Get(read.entities[0], again)), 2.5f) << "said: what was saved";
     EXPECT_TRUE(read.problems.empty());
 }
+
+// A component the world works out again from what is saved is not saved: a file would only repeat it.
+TEST(Serialize, WhatIsNotSavedIsLeftOut)
+{
+    World world;
+    const kecs::ComponentId worked = world.Register([] {
+        kecs::ComponentDescription d;
+        d.name = "PerFrame";
+        d.saved = false;
+        return d;
+    }());
+    const Entity e = world.Create(Position { 1, 2 });
+    world.Add(e, worked);
+    const kecs::Saved saved = kecs::Save(world);
+    EXPECT_EQ(saved.json.find("PerFrame"), std::string::npos) << saved.json;
+    EXPECT_NE(saved.json.find("Position"), std::string::npos);
+}

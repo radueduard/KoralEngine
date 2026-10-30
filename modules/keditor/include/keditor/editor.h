@@ -24,6 +24,7 @@
 #include <koralViewport.h>
 #include <scene.h>
 
+#include <kasset/database.h>
 #include <kgraph/catalog.h>
 
 #include "document.h"
@@ -102,6 +103,8 @@ namespace keditor
         void SetSecondView(GameScene* second) { _second = second; }
         [[nodiscard]] bool HasProject() const { return _hasProject; }
         [[nodiscard]] const Project& CurrentProject() const { return _project; }
+        /** @brief Every asset of the project, by ID: null with no project open. */
+        [[nodiscard]] kasset::Database* AssetDatabase();
         [[nodiscard]] const std::string& SceneName() const { return _scene; }
 
         /** @brief Makes a project in @p directory and saves the scene being worked on as its first. */
@@ -669,7 +672,7 @@ namespace keditor
 
         /** @brief Something of the project's that is in a file: what the Assets panel lists. */
         struct Asset {
-            enum class Kind : std::uint8_t { eModel, eMesh, eTexture, eShader, eScript, eScene, ePrefab, eMaterial };
+            enum class Kind : std::uint8_t { eModel, eMesh, eTexture, eShader, eScript, eScene, ePrefab, eMaterial, eGenerator };
             Kind kind = Kind::eTexture;
             /// What it is picked by, and — for a mesh or a texture — what an entity's field holds to have it:
             /// `@textures/wall.png`, `@sponza.gltf#3`. A shader module is `shader:<module>` and each entry point of
@@ -718,6 +721,11 @@ namespace keditor
         std::string selectedAsset;          ///< The asset the inspector shows, when it is picked: by its id.
         /** @brief A small picture of a listed mesh, once it is drawn; empty until then. */
         [[nodiscard]] kor::ResourceRef<const kor::Image> MeshPicture(std::string_view id) const;
+        /**
+         * @brief A material's small picture: a sphere of its colour, once the sphere is drawn. Of a default material, a
+         *        project's own, or a model's (its base colour, or its diffuse).
+         */
+        [[nodiscard]] kor::ResourceRef<const kor::Image> MaterialPicture(const std::string& id);
         /**
          * @brief How many small pictures of meshes have been drawn: what shows one follows this, and is built again alone
          *        when a new one is made — one every few frames while the Assets panel's are drawn, each was the whole interface.
@@ -776,6 +784,37 @@ namespace keditor
         bool ShowInFiles(const std::filesystem::path& path);
         /** @brief Moves a file or a folder of the project's to the system's trash. False, with Status saying why, when it cannot. */
         bool TrashAsset(const std::filesystem::path& path);
+        /**
+         * @brief The project's files that name asset @p id (`@textures/wall.png`, `prefab:Tree.prefab`) — or a part of
+         *        it — as they are saved: what has nothing once it is gone. From the project's folder.
+         */
+        [[nodiscard]] std::vector<std::string> AssetUsers(const std::string& id);
+        /**
+         * @brief Moves asset @p id 's file to @p to — from the project's folder, or whole — with its meta, and a model with
+         *        what it names beside it. What names it still does: the scene open is saved first, and read again after,
+         *        and each file that named it by where it was names it by its ID. Picked in the Assets panel after.
+         */
+        bool MoveAsset(const std::string& id, const std::filesystem::path& to);
+        /** @brief Opens the project's scene @p name (`main`): the one open saved first, when it has changed. */
+        bool OpenScene(const std::string& name);
+        /**
+         * @brief Makes a model's material @p id one of the project's own, in `assets/materials/<its name>.kmat`, which
+         *        every entity that followed it follows (Document::ExtractMaterial). Its id, picked; empty when it was not.
+         */
+        std::string ExtractMaterial(const std::string& id);
+        /**
+         * @brief Writes @p entity 's generator — the component of it that makes its mesh or a picture — with its fields
+         *        as they are, to `assets/generators/<its name>.kgen`: a generator as an asset, given to other entities by
+         *        dropping it on them. Its id, picked; empty when the entity has no generator.
+         */
+        std::string SaveGenerator(kecs::Entity entity);
+        /**
+         * @brief Writes the game into @p folder — empty, out of the project or in its `build` folder: every scene of the
+         *        project and what they reach (kasset::Reach), its shaders, scripts and functions, each asset's meta, and
+         *        the cache with every model read ahead, so the game never runs an importer; and `manifest.json`, which
+         *        says what it is made of. What `koral-play --project <folder>` runs.
+         */
+        bool ExportGame(const std::filesystem::path& folder);
         /** @brief What a field that holds something of a file is shown as: the mesh's or the file's own name, not where it is. */
         [[nodiscard]] std::string AssetLabel(const std::string& id) const;
         void SelectAsset(std::string id) { selectedAsset = std::move(id); selectedNode.clear(); selectedEntity = kecs::NullEntity; alsoSelected.clear(); ++_changes; }
@@ -813,6 +852,18 @@ namespace keditor
         [[nodiscard]] static kui::Theme SavedTheme();
         /** @brief Keeps @p design, dark or light, as the theme the editor opens in. */
         static bool SetSavedTheme(kui::ThemeDesign design, bool dark);
+        /** @brief How the editor's window was when it was last closed: its size, where it was, and whether maximized. */
+        struct SavedWindow {
+            kor::UVec2 extent { 1600, 950 };        ///< As it was last not maximized.
+            std::optional<kor::IVec2> position;     ///< None where the platform does not say (Wayland).
+            bool maximized = false;
+        };
+        /** @brief The editor's window as this user last left it (KeepWindow); the first run's when it never was. */
+        [[nodiscard]] static SavedWindow LastWindow();
+        /** @brief Whether this run's window is kept for the next (KeepWindow): the program's ordinary run, not one of so many frames. */
+        static inline bool keepsWindow = false;
+        /** @brief Keeps how @p window is for the next run: nothing for an offscreen one, a test's editor, or unless keepsWindow. */
+        static void KeepWindow(const kor::Window& window);
         /** @brief A theme chosen (Settings, Theme): the editor puts it on between frames, and keeps it. */
         void ChooseTheme(kui::ThemeDesign design, bool dark);
         std::optional<kui::Theme> themeChosen;  ///< What ChooseTheme chose, until the editor puts it on.
@@ -956,6 +1007,13 @@ namespace keditor
         GameScene* _second = nullptr;
         Project _project;
         bool _hasProject = false;
+        std::uint64_t _usersIndexed = ~std::uint64_t(0);    ///< The Version the asset database's index was last read at.
+        /** The project's assets as the document found them, with the editor's own materials. False, having said what was wrong, when anything was. */
+        bool ScanAssets();
+        /** The thumbnails, made the first time they are asked for: kept in the project's cache between runs. */
+        Thumbnails& ThumbnailsHere();
+        /** What mesh @p id is made of, as a key: a model's file's content and its import, a generator's id. Empty when that is not known. */
+        [[nodiscard]] std::string MeshKey(const std::string& id) const;
         std::filesystem::path _scriptsHost;
         bool _handingOver = false;
         std::string _scene = "main";

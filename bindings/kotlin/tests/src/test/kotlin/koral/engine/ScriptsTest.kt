@@ -7,6 +7,7 @@ import kotlin.io.path.copyToRecursively
 import kotlin.io.path.deleteRecursively
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -42,7 +43,7 @@ class ScriptsTest {
             install("a")
             val host = ScriptHost(world, classes)
             assertTrue(host.load(), "the scripts load: ${host.errors}")
-            assertEquals(setOf("Feeder", "Spin", "Watcher"), host.scripts)
+            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Spin", "Watcher"), host.scripts)
             assertTrue(world.hasComponentType("Spin"), "a script is a component type, by its class name")
 
             val wheel = world.create("Wheel")
@@ -120,6 +121,36 @@ class ScriptsTest {
             frames(1)
             assertEquals(off + 1, number(wheel, "Spin", "updates"), "and switched on, it carries on")
             assertEquals(listOf(wheel), world.with("Spin"), "found by a query")
+
+            // ---- a generator is its entity's mesh: of its fields, shared, made again when they change -----------
+            run {
+                val a = world.create("Pyramid A")
+                val b = world.create("Pyramid B")
+                assertTrue(world.add(a, "Pyramid") && world.add(b, "Pyramid"), "a generator is a component")
+                world.set(a, "Pyramid", "height", 2f)
+                world.set(b, "Pyramid", "height", 2f)
+                frames(2)
+                val made = world.fieldJson(a, "Mesh", "mesh").trim('"')
+                assertTrue(made.startsWith("\$script/gen/Pyramid/"), "its entity's Mesh holds what it made: $made")
+                assertEquals(made, world.fieldJson(b, "Mesh", "mesh").trim('"'), "the same fields, the same mesh")
+                assertEquals(5, world.meshes.read(made).vertexCount, "as it wrote it")
+                world.set(b, "Pyramid", "height", 3f)
+                frames(2)
+                assertNotEquals(made, world.fieldJson(b, "Mesh", "mesh").trim('"'), "changed, it is made again")
+                world.destroy(a)
+                world.destroy(b)
+            }
+            run {
+                val tiled = world.create("Tiled")
+                assertTrue(world.add(tiled, "PbrMaterial") && world.add(tiled, "Checker"), "a picture generator is a component")
+                frames(2)
+                val made = world.fieldJson(tiled, "PbrMaterial", "baseColorMap").trim('"')
+                assertTrue(made.startsWith("\$script/gen/Checker/"), "its material's picture is what it made: $made")
+                world.set(tiled, "Checker", "squares", 4)
+                frames(2)
+                assertNotEquals(made, world.fieldJson(tiled, "PbrMaterial", "baseColorMap").trim('"'), "changed, it is made again")
+                world.destroy(tiled)
+            }
 
             // ---- a graphics script writes what the graph takes ---------------------------------------------------
             world.addNode("Buffer", "numbers")

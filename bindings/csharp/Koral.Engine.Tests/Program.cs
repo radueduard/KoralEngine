@@ -40,16 +40,16 @@ Frames(1);
 
 // What the editor's Assets, New script makes: as it is, it has to compile and to turn its entity.
 Write("Roller.cs", """
-    public sealed class Roller : Script
+    public sealed class Roller : Setup, PerFrame
     {
-        public float Speed;         // a field starts at zero: set it in the inspector, or in Start
+        public float Speed;         // a field starts at zero: set it in the inspector, or in Initialize
 
-        protected override void Start()
+        protected override void Initialize()
         {
             if (Speed == 0) Speed = 45;
         }
 
-        protected override void Update(float delta)
+        public void Update(float delta)
         {
             // Turns its entity about the up axis, so many degrees a second.
             World.SetRotation(Entity, World.RotationOf(Entity) + new Vec3(0, Speed * delta, 0));
@@ -73,14 +73,40 @@ Write("Spin.cs", """
     """);
 Write("Feeder.cs", """
     // The graphics half: what a pass reads, written from an entity's data before anything is drawn.
-    public sealed class Feeder : GraphicsScript
+    public sealed class Feeder : Setup, BeforeDraw
     {
         public float Value;
         public int Prepared;
-        protected override void Prepare()
+        public void Prepare()
         {
             ++Prepared;
             World.Buffer("numbers")?.Write([Value, Value * 2]);
+        }
+    }
+    """);
+Write("Pyramid.cs", """
+    // A mesh made of its fields: made again when they change, and shared by every entity of the same ones.
+    public sealed class Pyramid : Setup, MeshGenerator
+    {
+        public float Height = 1;
+        public void Initialize(MeshWriter mesh)
+        {
+            mesh.Positions([new(-0.5f, 0, -0.5f), new(0.5f, 0, -0.5f), new(0.5f, 0, 0.5f), new(-0.5f, 0, 0.5f), new(0, Height, 0)]);
+            mesh.Indices([0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3]);
+        }
+    }
+    """);
+Write("Checker.cs", """
+    // A picture made of its fields, in its entity's material: made again when they change.
+    public sealed class Checker : Setup, ImageGenerator
+    {
+        public int Squares = 2;
+        public void Initialize(ImageWriter image)
+        {
+            image.Size(8, 8);
+            for (var y = 0; y < image.Height; ++y)
+                for (var x = 0; x < image.Width; ++x)
+                    image.Set(x, y, (x * Squares / image.Width + y * Squares / image.Height) % 2 == 0 ? new Vec4(1, 1, 1, 1) : new Vec4(0, 0, 0, 1));
         }
     }
     """);
@@ -127,7 +153,7 @@ Write("Watcher.cs", """
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
 // The project's, and the engine's package's: compiled with them, so that a script reads a light as it reads its own.
-Check(host.Scripts.Order().SequenceEqual(["Camera", "DirectionalLight", "Feeder", "Instancer", "PointLight", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
+Check(host.Scripts.Order().SequenceEqual(["Camera", "Checker", "DirectionalLight", "Feeder", "Instancer", "PointLight", "Pyramid", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
       $"each is a script, the package's among them: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 {
@@ -141,11 +167,49 @@ Check(world.HasComponentType("Spin"), "a script is a component type, by its clas
 var wheel = world.Create("Wheel");
 
 {
+    // A generator is its entity's mesh: of its fields, shared by those of the same fields, made again when they change.
+    var a = world.Create("Pyramid A");
+    var b = world.Create("Pyramid B");
+    Check(world.Add(a, "Pyramid") && world.Add(b, "Pyramid"), "a generator is a component");
+    world.Set(a, "Pyramid", "Height", 2f);
+    world.Set(b, "Pyramid", "Height", 2f);
+    Frames(2);
+    var made = world.FieldJson(a, "Mesh", "mesh").Trim('"');
+    Check(made.StartsWith("$script/gen/Pyramid/"), $"its entity's Mesh holds what it made: {made}");
+    Equal(world.FieldJson(b, "Mesh", "mesh").Trim('"'), made, "the same fields, the same mesh");
+    Equal(world.Meshes.Read(made).VertexCount, 5, "as it wrote it");
+    Near(world.Meshes.Read(made).Find("POSITION")!.AsFloats()[13], 2, "of its fields");
+    world.Set(b, "Pyramid", "Height", 3f);
+    Frames(2);
+    var again = world.FieldJson(b, "Mesh", "mesh").Trim('"');
+    Check(again != made && again.StartsWith("$script/gen/Pyramid/"), "changed, it is made again");
+    Equal(world.FieldJson(a, "Mesh", "mesh").Trim('"'), made, "and the other keeps its own");
+    world.Destroy(a);
+    world.Destroy(b);
+}
+
+{
+    // A picture generator is its entity's material's picture: of its fields, made again when they change.
+    var tiled = world.Create("Tiled");
+    Check(world.Add(tiled, "PbrMaterial") && world.Add(tiled, "Checker"), "a picture generator is a component");
+    world.Set(tiled, "Checker", "Squares", 2);
+    Frames(2);
+    var made = world.FieldJson(tiled, "PbrMaterial", "baseColorMap").Trim('"');
+    Check(made.StartsWith("$script/gen/Checker/"), $"its material's picture is what it made: {made}");
+    world.Set(tiled, "Checker", "Squares", 4);
+    Frames(2);
+    Check(world.FieldJson(tiled, "PbrMaterial", "baseColorMap").Trim('"') != made, "changed, it is made again");
+    world.Destroy(tiled);
+}
+
+{
     var barrel = world.Create("Barrel");
     Check(world.Add(barrel, "Roller"), "the script the editor makes is a component");
     Frames(3);
     Near(Number(barrel, "Roller", "Speed"), 45, "it started");
     Check(world.RotationOf(barrel).Y > 0, "and turns its entity");
+    Check(world.Has(barrel, "PerFrame"), "an entity running a script that takes PerFrame has its tag");
+    Check(!world.Has(barrel, "FixedStep"), "and not one of a piece it does not take");
     world.Destroy(barrel);
 }
 

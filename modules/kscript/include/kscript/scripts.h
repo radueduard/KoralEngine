@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -60,6 +61,8 @@ namespace kscript
         /// or, for a type registered again without one, what it started as before, field by field.
         std::vector<std::byte> initial;
         Callbacks callbacks;
+        /// What it takes besides Setup, as its source says (`PerFrame`, `MeshGenerator`): what an editor offers it for.
+        std::vector<std::string> pieces;
         /// A ResourceScript: no component, but what a Script node of the graph runs — it makes resources and fills them.
         bool makesResources = false;
         std::vector<DeclaredResource> resources;    ///< A ResourceScript's, in the order it declares them.
@@ -116,6 +119,14 @@ namespace kscript
         /** @brief Before the world goes: disabled and destroyed on everything, as if each were removed. */
         void Shutdown();
 
+        /**
+         * @brief The tags an entity running a script is given for what the script does, each a component of no data that
+         *        is not saved: `PerFrame` for one that updates (Update, LateUpdate), `FixedStep` for one called on the
+         *        fixed step, `BeforeDraw` for one that prepares what is drawn. What a graph's Filter asks for, to find
+         *        the entities something runs on; taken away when no script of the entity's does that any more.
+         */
+        static constexpr std::array<std::string_view, 3> Pieces { "PerFrame", "FixedStep", "BeforeDraw" };
+
     private:
         struct State {
             bool enabled = false, started = false;
@@ -128,6 +139,12 @@ namespace kscript
         };
 
         kecs::ComponentId Add(ScriptType type, bool live, std::string* error, kecs::Migration* migration);
+        /** The tag a piece is (Pieces), made the first time it is asked for. */
+        kecs::ComponentId PieceTag(std::string_view piece);
+        /** Gives @p entity the tags of what @p type does. */
+        void GiveTags(const Type& type, kecs::Entity entity);
+        /** Takes away the tags no live script of each entity left behind does any more: what Gone could not, while the world was changing. */
+        void TakeTags();
         /** Tells of what changed since it last looked: components made, switched on and off. Then the entities to run. */
         std::vector<kecs::Entity> Sync(Type& type);
         void Gone(Type& type, kecs::Entity entity);
@@ -136,6 +153,7 @@ namespace kscript
 
         kecs::World& _world;
         std::vector<std::unique_ptr<Type>> _types;      // never erased: an observer of each is out there
+        std::vector<kecs::Entity> _untagged;            // entities that lost a script, whose tags are looked at again
         std::shared_ptr<bool> _alive = std::make_shared<bool>(true);
     };
 }

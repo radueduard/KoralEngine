@@ -2,7 +2,7 @@
 // on the GPU and never one by one on the CPU: no entity each. Near, each is its mesh; far, a point of `color`.
 // Data and nothing else: the engine's Instances, CullInstances and SplatPoints functions make, cull and draw them.
 
-public sealed class Instancer : Script
+public sealed class Instancer : Setup
 {
     [Min(0f)] public int count = 100000;            // How many. Each is 20 bytes on the GPU: 100 million is 2 GB.
     [Min(0f)] public Vec2 extent = new(100f, 100f); // The square they are scattered over, along x and z, centred on the entity.

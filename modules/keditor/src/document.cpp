@@ -1,6 +1,11 @@
 #include <keditor/document.h>
 
+#include <kasset/cache.h>
+#include <kasset/parameters.h>
+#include <kasset/rewrite.h>
+
 #include <algorithm>
+#include <array>
 #include <set>
 #include <cmath>
 #include <cctype>
@@ -160,9 +165,129 @@ namespace keditor
             if (type.material) { DeclareMaterialKind(std::move(type)); continue; }
             std::string error;
             const std::string name = type.name;
+            _scriptPieces[name] = type.pieces;
             if (_scripts.Declare(std::move(type), &error) == kecs::NoComponent) _notes.push_back(std::format("{}: {}", name, error));
         }
         Changed();
+    }
+
+    bool Document::GivePicture(const kecs::Entity entity, const std::string_view field, const std::string& id)
+    {
+        if (!_world.Alive(entity)) return false;
+        for (const auto& component : ComponentsOf(entity)) {
+            const kecs::ComponentId type = _world.Find(component);
+            const kecs::FieldDescription* described = type == kecs::NoComponent ? nullptr : _world.Describe(type).FindField(field);
+            if (!described || described->type != "Image") continue;
+            return SetField(entity, component, field, Value(id));
+        }
+        return false;
+    }
+
+    bool Document::SaveGenerator(const kecs::Entity entity, const std::string_view script, const std::filesystem::path& file, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        const kecs::ComponentId type = _world.Find(script);
+        if (!_world.Alive(entity) || type == kecs::NoComponent || !_world.Has(entity, type)) return fail(std::format("{} has no {}", NameOf(entity), script));
+        // Its fields, each as the scene saves it.
+        std::string fields;
+        for (const auto& field : _world.Describe(type).fields)
+            fields += std::format("{}{}: {}", fields.empty() ? "" : ", ", kecs::json::Quote(field.name), Field(entity, script, field.name).ToJson());
+        kasset::Meta meta;
+        meta.id = kasset::Id::New();
+        meta.kind = kasset::Kind::eGenerated;
+        meta.producer = std::string(script);
+        meta.parameters = std::format("{{ \"fields\": {{ {} }} }}", fields);
+        std::error_code ec;
+        std::filesystem::create_directories(file.parent_path(), ec);
+        if (auto saved = kasset::Save(file, meta); !saved) return fail(saved.error());
+        if (_assets) (void)_assets->Add(file);
+        return true;
+    }
+
+    bool Document::GiveGenerator(const kecs::Entity entity, const std::filesystem::path& file, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        const auto meta = kasset::Load(file);
+        if (!meta) return fail(meta.error());
+        if (meta->kind != kasset::Kind::eGenerated || meta->producer.empty()) return fail(std::format("{} is no generator", file.filename().string()));
+        if (_world.Find(meta->producer) == kecs::NoComponent) return fail(std::format("there is no script {}: the project's scripts are what a generator runs", meta->producer));
+        if (!_world.Alive(entity)) return fail("the entity is not in the scene");
+        // One generator of a kind an entity: what it had of it is this one now, afresh.
+        if (!std::ranges::contains(ComponentsOf(entity), meta->producer)) AddComponent(entity, meta->producer);
+        const GeneratorAsset asset = GeneratorOf(file);
+        _following = true;
+        for (const auto& [name, value] : asset.fields) SetField(entity, meta->producer, name, value);
+        _following = false;
+        std::vector<std::string> links = LinkLines(entity, false), overrides = LinkLines(entity, true);
+        std::erase_if(links, [&](const std::string& line) { return line.starts_with(meta->producer + " "); });
+        std::erase_if(overrides, [&](const std::string& line) { return line.starts_with(meta->producer + "."); });
+        links.push_back(std::format("{} {}", meta->producer, _runtime->AssetId(file)));
+        SetLinkLines(entity, false, links);
+        SetLinkLines(entity, true, overrides);
+        return true;
+    }
+
+    Document::GeneratorAsset Document::GeneratorOf(const std::filesystem::path& file) const
+    {
+        GeneratorAsset asset;
+        const auto meta = kasset::Load(file);
+        if (!meta || meta->kind != kasset::Kind::eGenerated) return asset;
+        asset.script = meta->producer;
+        const std::string json = kasset::ParameterOf(*meta, "fields");
+        kecs::json::Value root;
+        std::string why;
+        if (!json.empty() && kecs::json::Parse(json, root, why))
+            for (const auto& [name, value] : root.members) asset.fields.emplace_back(name, Value::FromJson(value));
+        return asset;
+    }
+
+    bool Document::SetGeneratorField(const std::filesystem::path& file, const std::string& field, const Value& value, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        auto meta = kasset::Load(file);
+        if (!meta) return fail(meta.error());
+        GeneratorAsset asset = GeneratorOf(file);
+        if (asset.script.empty()) return fail(std::format("{} is no generator", file.filename().string()));
+        if (const auto at = std::ranges::find(asset.fields, field, &std::pair<std::string, Value>::first); at != asset.fields.end()) at->second = value;
+        else asset.fields.emplace_back(field, value);
+        std::string fields;
+        for (const auto& [name, each] : asset.fields) fields += std::format("{}{}: {}", fields.empty() ? "" : ", ", kecs::json::Quote(name), each.ToJson());
+        kasset::SetParameter(*meta, "fields", std::format("{{ {} }}", fields));
+        if (auto saved = kasset::Save(file, *meta); !saved) return fail(saved.error());
+        if (_assets) (void)_assets->Scan();     // the file is what it knows the asset by
+        // Every entity that follows it, and has not made the field its own.
+        const std::string line = std::format("{} {}", asset.script, _runtime->AssetId(file));
+        _following = true;
+        for (const kecs::Entity entity : _world.All())
+            if (std::ranges::contains(LinkLines(entity, false), line) && !std::ranges::contains(MaterialOverridesOf(entity, asset.script), field))
+                SetField(entity, asset.script, field, value);
+        _following = false;
+        Changed();
+        return true;
+    }
+
+    void Document::FollowGenerators()
+    {
+        _following = true;
+        for (const kecs::Entity entity : _world.All())
+            for (const auto& line : LinkLines(entity, false)) {
+                const auto space = line.find(' ');
+                if (space == std::string::npos || !line.ends_with(".kgen") || !line.substr(space + 1).starts_with('@')) continue;
+                const std::string script = line.substr(0, space), named = line.substr(space + 2);
+                const std::filesystem::path path(named);
+                const auto own = MaterialOverridesOf(entity, script);
+                for (const auto& [field, value] : GeneratorOf(path.is_absolute() ? path : _runtime->AssetDirectory() / path).fields)
+                    if (!std::ranges::contains(own, field)) SetField(entity, script, field, value);
+            }
+        _following = false;
+    }
+
+    std::vector<std::string> Document::ScriptsTaking(const std::string_view piece) const
+    {
+        std::vector<std::string> names;
+        for (const auto& [name, pieces] : _scriptPieces)
+            if (std::ranges::contains(pieces, piece)) names.push_back(name);
+        return names;
     }
 
     namespace {
@@ -287,7 +412,8 @@ namespace keditor
             // A project's own: its file.
             const std::filesystem::path file = _runtime->AssetDirectory() / std::string(id.substr(1));
             std::ifstream in(file, std::ios::binary);
-            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (_assets) text = kasset::FromIds(text, *_assets);
             kecs::json::Value parsed;
             std::string error;
             if (in && kecs::json::Parse(text, parsed, error))
@@ -308,13 +434,68 @@ namespace keditor
         return ids;
     }
 
+    void Document::RecordModelParts(const std::filesystem::path& file, const kgraph::Model& model)
+    {
+        if (!_assets) return;
+        const std::string named = _runtime->AssetId(file);
+        const auto reference = _assets->FromLegacy(named);
+        if (!reference || reference->part) return;
+        // Each part by its name in the file: one the file now has elsewhere among its meshes is the same part, and what
+        // held it is led to where it is now.
+        std::map<int, int> meshes, materials;
+        const auto record = [&](const kasset::Kind kind, const std::vector<std::string>& names, std::map<int, int>& moved) {
+            std::map<kasset::Id, int> was;
+            for (const kasset::Part& part : _assets->Find(reference->asset)->meta.parts)
+                if (part.kind == kind && part.index >= 0) was[part.id] = part.index;
+            const auto recorded = _assets->RecordParts(reference->asset, kind, names);
+            if (!recorded) { _notes.push_back(recorded.error()); return; }
+            for (std::size_t i = 0; i < recorded->ids.size(); ++i)
+                if (const auto at = was.find(recorded->ids[i]); at != was.end() && at->second != static_cast<int>(i)) moved[at->second] = static_cast<int>(i);
+            for (const kasset::Part& gone : recorded->gone)
+                _notes.push_back(std::format("{} no longer has the {} '{}': what had it has nothing now", file.filename().string(), kasset::KindName(kind),
+                                             gone.name.empty() ? std::format("#{}", gone.index) : gone.name));
+        };
+        std::vector<std::string> names;
+        for (const auto& material : model.materials) names.push_back(material.name);
+        record(kasset::Kind::eMesh, model.meshNames, meshes);
+        record(kasset::Kind::eMaterial, names, materials);
+        if (meshes.empty() && materials.empty()) return;
+        // What holds them — an entity's Mesh, the material it follows — named by where they were: named again.
+        const auto moved = [&](const std::string& id) -> std::optional<std::string> {
+            if (!id.starts_with(named + "#")) return std::nullopt;
+            std::string_view rest = std::string_view(id).substr(named.size() + 1);
+            const bool material = rest.starts_with("material:");
+            if (material) rest.remove_prefix(9);
+            const auto& map = material ? materials : meshes;
+            const auto at = map.find(std::atoi(std::string(rest).c_str()));
+            if (at == map.end()) return std::nullopt;
+            return std::format("{}#{}{}", named, material ? "material:" : "", at->second);
+        };
+        const kecs::ComponentId mesh = _world.Find("Mesh");
+        for (const kecs::Entity entity : _world.All()) {
+            if (mesh != kecs::NoComponent && _world.Has(entity, mesh)) {
+                const kgraph::Value held = Field(entity, "Mesh", "mesh");    // (kept: what String gives is of it)
+                if (const std::string* id = held.String())
+                    if (const auto now = moved(*id)) SetField(entity, "Mesh", "mesh", kgraph::Value(*now));
+            }
+            std::vector<std::string> lines = LinkLines(entity, false);
+            bool changed = false;
+            for (std::string& line : lines)
+                if (const auto space = line.find(' '); space != std::string::npos)
+                    if (const auto now = moved(line.substr(space + 1))) { line = line.substr(0, space + 1) + *now; changed = true; }
+            if (changed) SetLinkLines(entity, false, lines);
+        }
+    }
+
     void Document::MakeModelMaterials(const std::filesystem::path& file, const kgraph::Model& model)
     {
+        RecordModelParts(file, model);
         const std::string named = _runtime->AssetId(file);
         // What was changed of them here, kept beside the model.
         kecs::json::Value changed;
         std::ifstream in(std::filesystem::path(file).concat(ModelMaterialsEnding), std::ios::binary);
-        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (_assets) text = kasset::FromIds(text, *_assets);
         std::string ignored;
         const bool hasChanges = in && kecs::json::Parse(text, changed, ignored);
         for (std::size_t i = 0; i < model.materials.size(); ++i) {
@@ -323,10 +504,15 @@ namespace keditor
             asset.id = std::format("{}#material:{}", named, i);
             asset.name = report.name.empty() ? std::format("{} {}", file.stem().string(), i) : report.name;
             asset.kind = ImportKind(report.model, file);
-            // Filled by name: what of the report the kind has a field for. The rest is as the kind starts it.
+            // Filled by name: what of the report the kind has a field for — or, where the model says, another of the report's
+            // values (MaterialFieldsOf). The rest is as the kind starts it.
             const kgraph::MaterialKind* kind = _runtime->MaterialKindOf(asset.kind);
+            const auto mapped = MaterialFieldsOf(file, asset.kind);
             for (const auto& [name, value] : report.values)
-                if (!kind || std::ranges::contains(kind->fields, name, &kecs::FieldDescription::name)) asset.reported.emplace_back(name, value);
+                if ((!kind || std::ranges::contains(kind->fields, name, &kecs::FieldDescription::name)) && !mapped.contains(name)) asset.reported.emplace_back(name, value);
+            for (const auto& [field, from] : mapped)
+                if (const Value* value = report.Find(from); value && (!kind || std::ranges::contains(kind->fields, field, &kecs::FieldDescription::name)))
+                    asset.reported.emplace_back(field, *value);
             asset.values = asset.reported;
             if (hasChanges)
                 if (const auto* materials = changed.Find("materials"))
@@ -334,6 +520,86 @@ namespace keditor
                         for (auto& [name, value] : ValuesOf(*own)) Put(asset.values, name, std::move(value));
             AddMaterialAsset(std::move(asset));
         }
+    }
+
+    std::map<std::string, std::string> Document::MaterialFieldsOf(const std::filesystem::path& file, const std::string_view kind) const
+    {
+        if (!_assets) return {};
+        const auto reference = _assets->Lookup(_runtime->AssetId(file));
+        const kasset::Entry* entry = reference && !reference->part ? _assets->Find(reference->asset) : nullptr;
+        if (!entry) return {};
+        kecs::json::Value root;
+        std::string error;
+        const std::string json = kasset::ParameterOf(entry->meta, "materialFields");
+        std::map<std::string, std::string> fields;
+        if (json.empty() || !kecs::json::Parse(json, root, error)) return fields;
+        if (const auto* of = root.Find(kind))
+            for (const auto& [field, from] : of->members)
+                if (from.kind == kecs::json::Value::Kind::eString) fields[field] = from.string;
+        return fields;
+    }
+
+    bool Document::SetMaterialField(const std::filesystem::path& file, const std::string_view kind, const std::string& field, const std::string& reported, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        const auto reference = _assets ? _assets->Lookup(_runtime->AssetId(file)) : std::nullopt;
+        const kasset::Entry* entry = reference && !reference->part ? _assets->Find(reference->asset) : nullptr;
+        if (!entry || entry->meta.kind != kasset::Kind::eModel) return fail(std::format("{} is no model of the project's", file.filename().string()));
+        // Every kind's, as the meta has them, with this one's changed.
+        std::map<std::string, std::map<std::string, std::string>> all;
+        kecs::json::Value root;
+        std::string ignored;
+        if (const std::string json = kasset::ParameterOf(entry->meta, "materialFields"); !json.empty() && kecs::json::Parse(json, root, ignored))
+            for (const auto& [name, of] : root.members)
+                for (const auto& [f, from] : of.members) all[name][f] = from.string;
+        if (reported.empty()) all[std::string(kind)].erase(field);
+        else all[std::string(kind)][field] = reported;
+        std::erase_if(all, [](const auto& each) { return each.second.empty(); });
+        std::string json;
+        for (const auto& [name, of] : all) {
+            std::string fields;
+            for (const auto& [f, from] : of) fields += std::format("{}{}: {}", fields.empty() ? "" : ", ", kecs::json::Quote(f), kecs::json::Quote(from));
+            json += std::format("{}{}: {{ {} }}", json.empty() ? "" : ", ", kecs::json::Quote(name), fields);
+        }
+        if (auto set = _assets->SetParameter(reference->asset, "materialFields", json.empty() ? std::string() : "{ " + json + " }"); !set) return fail(set.error());
+        // Made again so, and what follows each has it.
+        const auto model = _runtime->ModelOf(file);
+        if (!model) return true;    // read later, it is read so
+        MakeModelMaterials(file, *model);
+        const std::string named = _runtime->AssetId(file);
+        for (const kecs::Entity entity : _world.All()) {
+            const std::string follows = MaterialAssetOfEntity(entity, kind);
+            if (!follows.starts_with(named + "#material:")) continue;
+            const MaterialAsset* asset = MaterialAssetOf(follows);
+            if (!asset) continue;
+            const auto own = MaterialOverridesOf(entity, kind);
+            _following = true;
+            for (const auto& [name, value] : asset->values)
+                if (!std::ranges::contains(own, name)) SetField(entity, kind, name, value);
+            _following = false;
+        }
+        Changed();
+        return true;
+    }
+
+    std::vector<std::string> Document::UnusedReported(const std::string_view id)
+    {
+        const auto model = ModelMaterialOf(id);
+        const MaterialAsset* asset = model ? MaterialAssetOf(id) : nullptr;
+        if (!asset) return {};
+        const std::filesystem::path file = _runtime->AssetDirectory().empty() ? std::filesystem::path(model->first.substr(1)) : _runtime->AssetDirectory() / model->first.substr(1);
+        const auto read = _runtime->ModelOf(file);
+        if (!read || model->second < 0 || model->second >= static_cast<int>(read->materials.size())) return {};
+        const kgraph::ReportedMaterial report = kgraph::ReportOf(read->materials[static_cast<std::size_t>(model->second)]);
+        const kgraph::MaterialKind* kind = _runtime->MaterialKindOf(asset->kind);
+        const auto mapped = MaterialFieldsOf(file, asset->kind);
+        std::vector<std::string> unused;
+        for (const auto& [name, value] : report.values) {
+            const bool byName = kind && std::ranges::contains(kind->fields, name, &kecs::FieldDescription::name) && !mapped.contains(name);
+            const bool taken = std::ranges::any_of(mapped, [&](const auto& each) { return each.second == name; });
+            if (!byName && !taken) unused.push_back(name);
+        }
+        return unused;
     }
 
     void Document::SaveMaterialAsset(const MaterialAsset& asset)
@@ -354,12 +620,14 @@ namespace keditor
             const std::filesystem::path beside = std::filesystem::path(file).concat(ModelMaterialsEnding);
             std::error_code ec;
             if (materials.empty()) { std::filesystem::remove(beside, ec); return; }
-            std::ofstream(beside, std::ios::binary | std::ios::trunc) << std::format("{{\n  \"koral-materials\": 1,\n  \"materials\": {{\n{}\n  }}\n}}\n", materials);
+            const std::string json = std::format("{{\n  \"koral-materials\": 1,\n  \"materials\": {{\n{}\n  }}\n}}\n", materials);
+            std::ofstream(beside, std::ios::binary | std::ios::trunc) << (_assets ? kasset::ToIds(json, *_assets) : json);
             return;
         }
-        if (asset.id.starts_with('@') && asset.id.ends_with(".kmat"))
-            std::ofstream(_runtime->AssetDirectory() / asset.id.substr(1), std::ios::binary | std::ios::trunc)
-                << std::format("{{\n  \"koral-material\": 1,\n  \"kind\": {},\n  \"values\": {}\n}}\n", kecs::json::Quote(asset.kind), ValuesJson(asset.values));
+        if (asset.id.starts_with('@') && asset.id.ends_with(".kmat")) {
+            const std::string json = std::format("{{\n  \"koral-material\": 1,\n  \"kind\": {},\n  \"values\": {}\n}}\n", kecs::json::Quote(asset.kind), ValuesJson(asset.values));
+            std::ofstream(_runtime->AssetDirectory() / asset.id.substr(1), std::ios::binary | std::ios::trunc) << (_assets ? kasset::ToIds(json, *_assets) : json);
+        }
     }
 
     std::vector<std::string> Document::LinkLines(const kecs::Entity entity, const bool overrides) const
@@ -389,6 +657,49 @@ namespace keditor
         for (const auto& line : LinkLines(entity, true))
             if (line.size() > kind.size() && line.starts_with(kind) && line[kind.size()] == '.') fields.push_back(line.substr(kind.size() + 1));
         return fields;
+    }
+
+    std::string Document::ExtractMaterial(const std::string_view id, const std::filesystem::path& file, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return std::string(); };
+        if (!ModelMaterialOf(id)) return fail(std::format("'{}' is no model's material", id));
+        const MaterialAsset* asset = MaterialAssetOf(id);
+        if (!asset) return fail(std::format("'{}' is not read yet: its model is still being read", id));
+        std::error_code ec;
+        if (file.extension() != ".kmat") return fail(std::format("{} is no material's file: it ends in .kmat", file.filename().string()));
+        if (std::filesystem::exists(file, ec)) return fail(std::format("{} is there already", file.filename().string()));
+        std::filesystem::create_directories(file.parent_path(), ec);
+        MaterialAsset own = *asset;
+        own.id = _runtime->AssetId(file);
+        own.name = file.stem().string();
+        own.reported.clear();
+        if (!own.id.starts_with('@')) return fail(std::format("{} is not among the project's assets", file.generic_string()));
+        SaveMaterialAsset(own);
+        if (!std::filesystem::exists(file, ec)) return fail(std::format("{} could not be written", file.generic_string()));
+        if (_assets) (void)_assets->Add(file);
+        AddMaterialAsset(own);
+        // The model says so in its meta: what its things are made of, made again, is this — its prefab's too.
+        const auto model = ModelMaterialOf(id);
+        const std::filesystem::path modelFile = _runtime->AssetDirectory().empty() ? std::filesystem::path(model->first.substr(1)) : _runtime->AssetDirectory() / model->first.substr(1);
+        if (_assets)
+            if (const auto of = _assets->Lookup(model->first); of && !of->part)
+                if (const auto kept = _assets->FromLegacy(own.id)) {
+                    const kasset::Entry* entry = _assets->Find(of->asset);
+                    auto extracted = kasset::KindsFrom(kasset::ParameterOf(entry->meta, "extracted")).value_or(std::map<std::string, std::string> {});
+                    extracted[std::to_string(model->second)] = kept->Text();
+                    (void)_assets->SetParameter(of->asset, "extracted", kasset::ToJson(extracted));
+                }
+        // Who followed the model's follows this, with what each made its own still its own.
+        for (const kecs::Entity entity : _world.All()) {
+            std::vector<std::string> lines = LinkLines(entity, false);
+            bool changed = false;
+            for (std::string& line : lines)
+                if (line == std::format("{} {}", own.kind, id)) { line = std::format("{} {}", own.kind, own.id); changed = true; }
+            if (changed) SetLinkLines(entity, false, lines);
+        }
+        if (const auto read = _runtime->ModelOf(modelFile); read && _modelPrefabs.contains(modelFile)) RemakeModelPrefab(modelFile, *read);
+        Changed();
+        return own.id;
     }
 
     bool Document::GiveMaterial(const kecs::Entity entity, const std::string_view id, std::string* error)
@@ -472,13 +783,77 @@ namespace keditor
         return true;
     }
 
+    void Document::FollowModelMaterial(const kecs::Entity entity)
+    {
+        if (!_world.Alive(entity) || !LinkLines(entity, false).empty()) return;
+        const Value mesh = Field(entity, "Mesh", "mesh");
+        const std::string* id = mesh.String();
+        const auto hash = id ? id->rfind('#') : std::string::npos;
+        if (!id || !id->starts_with('@') || hash == std::string::npos) return;
+        const std::string named = id->substr(1, hash - 1);
+        const std::filesystem::path file = _runtime->AssetDirectory().empty() ? std::filesystem::path(named) : _runtime->AssetDirectory() / named;
+        _toFollow.emplace_back(file, entity);
+        (void)_runtime->ModelOf(file);     // read off the frame from now
+    }
+
+    namespace {
+        /**
+         * Whether a field an old scene set is as the file has it: the same numbers (as a float keeps them), the same
+         * picture however its path is written, and — for a normal map — white and the flat normal alike, as neither bends it.
+         */
+        bool Alike(const std::string_view field, const Value& mine, const Value& theirs)
+        {
+            if (mine.Number() && theirs.Number()) return std::abs(*mine.Number() - *theirs.Number()) <= 1e-5 * std::max(1.0, std::abs(*theirs.Number()));
+            if (mine.Items() && theirs.Items()) {
+                const auto &a = *mine.Items(), &b = *theirs.Items();
+                if (a.size() != b.size()) return false;
+                for (std::size_t i = 0; i < a.size(); ++i) if (!Alike(field, a[i], b[i])) return false;
+                return true;
+            }
+            if (mine.String() && theirs.String()) {
+                const auto normal = [](const std::string& picture) { return std::filesystem::path(picture).lexically_normal().generic_string(); };
+                if (normal(*mine.String()) == normal(*theirs.String())) return true;
+                const auto flat = [](const std::string& picture) { return picture == "$white" || picture == "$normal"; };
+                return field.find("ormal") != std::string_view::npos && flat(*mine.String()) && flat(*theirs.String());
+            }
+            return mine == theirs;
+        }
+    }
+
+    void Document::FollowedModel(const kecs::Entity entity, const std::filesystem::path& file, const kgraph::Model& model)
+    {
+        if (!_world.Alive(entity) || !LinkLines(entity, false).empty()) return;
+        const Value mesh = Field(entity, "Mesh", "mesh");
+        const std::string* id = mesh.String();
+        if (!id) return;
+        int material = -1;
+        for (const auto& node : model.nodes)
+            for (const auto& part : node.parts) if (part.mesh == *id) material = part.material;
+        if (material < 0 || material >= static_cast<int>(model.materials.size())) return;
+        const std::string asset = std::format("{}#material:{}", _runtime->AssetId(file), material);
+        const MaterialAsset* followed = MaterialAssetOf(asset);
+        if (!followed) return;
+        const std::string kind = followed->kind;
+        // What a scene set before materials were their own (MigrateMaterials): kept where the file says otherwise.
+        static constexpr std::array set { "baseColor", "metallic", "roughness", "emission", "alphaMode", "alphaCutoff", "baseColorMap", "normalMap", "metallicRoughnessMap", "emissiveMap" };
+        std::vector<std::pair<std::string, Value>> had;
+        if (_world.Has(entity, _world.Find(kind)))
+            for (const char* field : set)
+                if (Value value = Field(entity, kind, field); !value.IsNull()) had.emplace_back(field, std::move(value));
+        if (!GiveMaterial(entity, asset)) return;
+        for (const auto& [field, value] : had)
+            if (!Alike(field, value, Field(entity, kind, field))) SetField(entity, kind, field, value);
+    }
+
     void Document::SyncAlphaTags(const kecs::Entity entity)
     {
         // The most see-through of its materials says: blended over masked over opaque.
         int mode = 0;
         for (const auto& kind : _runtime->MaterialKinds())
-            if (const kecs::ComponentId id = _world.Find(kind.name); id != kecs::NoComponent && _world.Has(entity, id))
-                if (const auto* number = Field(entity, kind.name, "alphaMode").Number()) mode = std::max(mode, static_cast<int>(*number));
+            if (const kecs::ComponentId id = _world.Find(kind.name); id != kecs::NoComponent && _world.Has(entity, id)) {
+                const Value alpha = Field(entity, kind.name, "alphaMode");     // (kept: what Number gives is of it)
+                if (const auto* number = alpha.Number()) mode = std::max(mode, static_cast<int>(*number));
+            }
         for (const auto& [tag, wanted] : { std::pair { "Masked", 1 }, std::pair { "Blended", 2 } }) {
             const kecs::ComponentId id = AddTag(tag);
             if ((mode == wanted) != _world.Has(entity, id)) {
@@ -492,6 +867,60 @@ namespace keditor
     {
         _runtime->SetAssetDirectory(directory);
         if (!directory.empty()) _runtime->SetGeneratedShaderDirectory(directory.parent_path() / "cache" / "shaders");
+        // The project's assets, when the folder is a project's — and only then: a folder that is not one is given no metas.
+        // Found again only for another project.
+        const std::filesystem::path root = directory.empty() ? std::filesystem::path() : directory.lexically_normal().parent_path();
+        if (_assets && _assets->Root() == root) return;
+        _assets.reset();
+        _assetProblems.clear();
+        std::error_code failed;
+        if (root.empty() || !std::filesystem::is_regular_file(root / "project.json", failed)) return;
+        _assets = std::make_unique<kasset::Database>(root);
+        for (const auto& name : kgraph::DefaultMeshNames()) _assets->AddBuiltIn(kasset::Kind::eMesh, "mesh/" + name, kgraph::DefaultMeshId(name));
+        for (const std::string_view texel : { "white", "black", "normal" })
+            _assets->AddBuiltIn(kasset::Kind::eTexture, std::format("texture/{}", texel), std::format("${}", texel));
+        _assetProblems = _assets->Scan();
+    }
+
+    void Document::ImportSettingsInto(kgraph::Graph& graph) const
+    {
+        if (!_assets) return;
+        for (const kasset::Entry* entry : _assets->Entries()) {
+            const std::string named = _assets->ToLegacy({ entry->meta.id, {} });
+            if (!named.starts_with('@')) continue;
+            if (entry->meta.kind == kasset::Kind::eModel) {
+                if (const auto import = kasset::MeshImportFrom(kasset::ParameterOf(entry->meta, "mesh"))) {
+                    if (import->Default()) graph.meshImports.erase(named.substr(1));
+                    else graph.meshImports[named.substr(1)] = *import;
+                }
+            } else if (entry->meta.kind == kasset::Kind::eTexture) {
+                if (const auto import = kasset::TextureImportFrom(kasset::ParameterOf(entry->meta, "texture"))) {
+                    if (import->Default()) graph.textureImports.erase(named);
+                    else graph.textureImports[named] = *import;
+                }
+            }
+        }
+    }
+
+    void Document::StoreImportSettings()
+    {
+        if (!_assets) return;
+        std::set<kasset::Id> stored;
+        const auto store = [&](const std::string& named, const std::string_view key, const std::string& json) {
+            const auto reference = _assets->FromLegacy(named);
+            if (!reference || reference->part) return;
+            stored.insert(reference->asset);
+            if (auto set = _assets->SetParameter(reference->asset, key, json); !set) _notes.push_back(set.error());
+        };
+        for (const auto& [file, import] : Graph().meshImports) store("@" + file, "mesh", import.Default() ? std::string() : kasset::ToJson(import));
+        for (const auto& [file, import] : Graph().textureImports) store(file, "texture", import.Default() ? std::string() : kasset::ToJson(import));
+        // What the scene no longer says anything of is read as it is by default: what its meta said of it is taken away.
+        for (const kasset::Entry* entry : _assets->Entries()) {
+            if (stored.contains(entry->meta.id)) continue;
+            const std::string_view key = entry->meta.kind == kasset::Kind::eModel ? "mesh" : entry->meta.kind == kasset::Kind::eTexture ? "texture" : "";
+            if (!key.empty() && !kasset::ParameterOf(entry->meta, key).empty())
+                if (auto set = _assets->SetParameter(entry->meta.id, key, ""); !set) _notes.push_back(set.error());
+        }
     }
 
     void Document::RegisterResourceScript(kscript::ScriptType type, std::function<std::string(std::span<kgraph::Contents>, std::span<const std::byte>)> fill)
@@ -544,6 +973,26 @@ namespace keditor
             else if (why.empty()) { ++it; continue; }
             else { _notes.push_back(why); Changed(); }
             it = _importing.erase(it);
+        }
+        // A model placed as its prefab's instance, read again: its prefab made again, and every instance follows.
+        for (auto& [file, seen] : _modelPrefabs)
+            if (const auto model = _runtime->ModelOf(file); model && model.get() != seen) {
+                seen = model.get();
+                RemakeModelPrefab(file, *model);
+            }
+        // A model a scene has parts of, read: its parts known by their names, and what holds them led to where they are now.
+        for (auto it = _partsToRecord.begin(); it != _partsToRecord.end();) {
+            std::string why;
+            if (const auto model = _runtime->ModelOf(*it, &why)) RecordModelParts(*it, *model);
+            else if (why.empty()) { ++it; continue; }
+            it = _partsToRecord.erase(it);
+        }
+        // A model read whose material an entity is to follow.
+        for (auto it = _toFollow.begin(); it != _toFollow.end();) {
+            std::string why;
+            if (const auto model = _runtime->ModelOf(it->first, &why)) FollowedModel(it->second, it->first, *model);
+            else if (why.empty()) { ++it; continue; }
+            it = _toFollow.erase(it);
         }
         // A shader edited under the graph: what it took off the nodes is a change like any other.
         for (auto& taken : _runtime->TakeReset()) {
@@ -1476,17 +1925,15 @@ namespace keditor
         _world.MarkChanged(entity, id);
         Override(entity, std::format("{}.{}", component, field));
         // A material that follows an asset, set on the entity itself: that field is the entity's own from now on.
-        if (_runtime->MaterialKindOf(component)) {
-            if (!_following && !MaterialAssetOfEntity(entity, component).empty()) {
-                const std::string line = std::format("{}.{}", component, field);
-                std::vector<std::string> overrides = LinkLines(entity, true);
-                if (!std::ranges::contains(overrides, line)) {
-                    overrides.push_back(line);
-                    SetLinkLines(entity, true, overrides);
-                }
+        if (!_following && !MaterialAssetOfEntity(entity, component).empty()) {
+            const std::string line = std::format("{}.{}", component, field);
+            std::vector<std::string> overrides = LinkLines(entity, true);
+            if (!std::ranges::contains(overrides, line)) {
+                overrides.push_back(line);
+                SetLinkLines(entity, true, overrides);
             }
-            if (field == "alphaMode" && !_following) SyncAlphaTags(entity);
         }
+        if (_runtime->MaterialKindOf(component) && field == "alphaMode" && !_following) SyncAlphaTags(entity);
         Changed();
         return true;
     }
@@ -1646,7 +2093,13 @@ namespace keditor
     {
         std::string tags;
         for (const auto& tag : _tags) tags += std::format("{}{}", tags.empty() ? "" : ", ", kecs::json::Quote(tag));
-        return std::format("{{\n\"koral-scene\": 1,\n\"tags\": [{}],\n\"graph\": {},\n\"world\": {}\n}}\n", tags, Graph().ToJson(), kecs::Save(_world, _codecs).json);
+        // How the project's files are read is theirs, in their metas: the scene keeps only what is of a file it has no meta of.
+        kgraph::Graph graph = Graph();
+        if (_assets) {
+            std::erase_if(graph.meshImports, [&](const auto& entry) { return _assets->FromLegacy("@" + entry.first).has_value(); });
+            std::erase_if(graph.textureImports, [&](const auto& entry) { return _assets->FromLegacy(entry.first).has_value(); });
+        }
+        return std::format("{{\n\"koral-scene\": 1,\n\"tags\": [{}],\n\"graph\": {},\n\"world\": {}\n}}\n", tags, graph.ToJson(), kecs::Save(_world, _codecs).json);
     }
 
     bool Document::FromJson(const std::string_view json, std::string& error)
@@ -1660,6 +2113,7 @@ namespace keditor
 
         kgraph::Graph graph;
         if (!kgraph::Graph::FromJson(graphText->raw, graph, error)) return false;
+        ImportSettingsInto(graph);
         // The graph first: it makes the components its pipelines' entities have, and the resources they hold.
         WithFunctions(graph);
         _runtime->Set(std::move(graph));
@@ -1675,6 +2129,34 @@ namespace keditor
         if (!loaded.ok) { error = loaded.error; return false; }
         for (const auto& problem : loaded.problems) _notes.push_back(problem);
         MigrateMaterials(*worldText, loaded.entities);
+        FollowGenerators();
+        // Each model placed as its prefab's instance: its prefab made again once it is read, should the model have changed.
+        if (_assets)
+            for (const kecs::Entity entity : _world.All())
+                if (const PrefabLink* link = _world.Get<PrefabLink>(entity)) {
+                    const std::filesystem::path prefab(link->prefab);
+                    const auto id = kasset::Id::Parse(prefab.stem().string());
+                    const kasset::Entry* model = id && prefab.parent_path().filename() == "prefabs" ? _assets->Find(*id) : nullptr;
+                    if (model && model->meta.kind == kasset::Kind::eModel) _modelPrefabs.try_emplace(_assets->Root() / model->file, nullptr);
+                }
+        // Each model whose parts it has: once each is read, its parts are given IDs by their names.
+        if (_assets) {
+            const auto model = [&](const std::string_view id) {
+                const auto hash = id.rfind('#');
+                if (!id.starts_with('@') || hash == std::string_view::npos) return;
+                const std::filesystem::path file(std::string(id.substr(1, hash - 1)));
+                _partsToRecord.insert(file.is_absolute() || _runtime->AssetDirectory().empty() ? file : _runtime->AssetDirectory() / file);
+            };
+            const kecs::ComponentId mesh = _world.Find("Mesh");
+            for (const kecs::Entity entity : _world.All()) {
+                if (mesh != kecs::NoComponent && _world.Has(entity, mesh)) {
+                    const kgraph::Value held = Field(entity, "Mesh", "mesh");    // (kept: what String gives is of it)
+                    if (const std::string* id = held.String()) model(*id);
+                }
+                for (const auto& line : LinkLines(entity, false))
+                    if (const auto space = line.find(' '); space != std::string::npos) model(std::string_view(line).substr(space + 1));
+            }
+        }
         // Each prefab's instance as its prefab is now: what was saved of it, and what has changed in the prefab since.
         UpdatePrefabs();
         Changed();
@@ -1718,12 +2200,13 @@ namespace keditor
                     if (const kecs::json::Value* map = values.Find(from); map && map->kind == kecs::json::Value::Kind::eString && !map->string.empty())
                         SetField(entity, "PbrMaterial", to, Value(map->string));
                 SyncAlphaTags(entity);
+                FollowModelMaterial(entity);
                 ++migrated;
                 break;
             }
         }
         if (migrated > 0)
-            _notes.push_back(std::format("{} {} what {} made of from {} pipeline's component: a PbrMaterial each now, of no asset", migrated,
+            _notes.push_back(std::format("{} {} what {} made of from {} pipeline's component: a PbrMaterial each now, following its model's where it has one", migrated,
                                          migrated == 1 ? "entity had" : "entities had", migrated == 1 ? "it is" : "each is", migrated == 1 ? "its" : "a"));
     }
 
@@ -1736,7 +2219,9 @@ namespace keditor
         if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) { error = std::format("'{}' cannot be written", path.string()); return false; }
-        out << ToJson();
+        StoreImportSettings();
+        // Its files kept by their IDs: moved or renamed, they are still its.
+        out << (_assets ? kasset::ToIds(ToJson(), *_assets) : ToJson());
         if (!out.flush()) { error = std::format("'{}' could not be written whole", path.string()); return false; }
         _saved = _revision;
         return true;
@@ -1754,7 +2239,53 @@ namespace keditor
         return root;
     }
 
+    namespace {
+        bool WritePrefabFile(const std::filesystem::path& file, const kgraph::Value& root, std::string& error, kasset::Database* assets);
+    }
+
+    std::filesystem::path Document::ModelPrefabOf(const std::filesystem::path& model) const
+    {
+        if (!_assets) return {};
+        const auto reference = _assets->Lookup(_runtime->AssetId(model));
+        if (!reference || reference->part) return {};
+        return kasset::CacheDirectoryOf(_assets->Root()) / "prefabs" / (reference->asset.Text() + ".prefab");
+    }
+
     void Document::Imported(const std::filesystem::path& file, const kecs::Entity root, const kgraph::Model& read)
+    {
+        BuildModel(file, root, read);
+        // What was put in the scene is an instance of the model's prefab: read again, the model makes it again, and this follows.
+        const std::filesystem::path prefab = ModelPrefabOf(file);
+        if (prefab.empty() || !_world.Alive(root)) return;
+        std::string why;
+        if (!SaveAsPrefab(root, prefab, &why)) { _notes.push_back(why); return; }
+        _modelPrefabs[file] = &read;
+    }
+
+    void Document::RemakeModelPrefab(const std::filesystem::path& file, const kgraph::Model& model)
+    {
+        const std::filesystem::path prefab = ModelPrefabOf(file);
+        if (prefab.empty()) return;
+        const bool clean = !Dirty();
+        // Made where nothing sees it, written, and gone again.
+        const kecs::Entity scratch = CreateEntity(file.stem().string());
+        BuildModel(file, scratch, model);
+        _world.Add<PrefabLink>(scratch, PrefabLink { prefab.generic_string(), {}, -1 });
+        const Value written = WritePrefab(scratch);
+        DestroyEntity(scratch);
+        std::ifstream in(prefab, std::ios::binary);
+        const std::string before((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        std::string why;
+        if (!WritePrefabFile(prefab, written, why, _assets.get())) { _notes.push_back(why); return; }
+        std::ifstream again(prefab, std::ios::binary);
+        const std::string after((std::istreambuf_iterator<char>(again)), std::istreambuf_iterator<char>());
+        // As it was: nothing of the scene is any other, and a scene just opened is still as it was saved.
+        if (after == before) { if (clean) _saved = _revision; return; }
+        UpdatePrefabs(prefab);
+    }
+
+    void Document::BuildModel(const std::filesystem::path& file, const kecs::Entity root, const kgraph::Model& read)
     {
         using kgraph::Value;
         const kgraph::Model* model = &read;
@@ -1766,6 +2297,10 @@ namespace keditor
         AddTag("Blended");
         MakeModelMaterials(file, read);
         const std::string named = _runtime->AssetId(file);
+        std::map<std::string, std::string> extracted;
+        if (_assets)
+            if (const auto of = _assets->Lookup(named); of && !of->part)
+                extracted = kasset::KindsFrom(kasset::ParameterOf(_assets->Find(of->asset)->meta, "extracted")).value_or(std::map<std::string, std::string> {});
         const auto vec = [](const float* v) { return Value(Value::List { v[0], v[1], v[2] }); };
         const auto drawn = [&](const kecs::Entity entity, const kgraph::ModelNode::Part& part) {
             AddComponent(entity, "Mesh");
@@ -1779,7 +2314,12 @@ namespace keditor
                 return;
             }
             std::string why;
-            if (!GiveMaterial(entity, std::format("{}#material:{}", named, part.material), &why)) _notes.push_back(std::format("{}: {}", file.filename().string(), why));
+            std::string material = std::format("{}#material:{}", named, part.material);
+            // One made the project's own (ExtractMaterial) is that.
+            if (const auto at = extracted.find(std::to_string(part.material)); at != extracted.end())
+                if (const auto reference = kasset::Reference::Parse(at->second))
+                    if (std::string own = _assets->ToLegacy(*reference); !own.empty()) material = std::move(own);
+            if (!GiveMaterial(entity, material, &why)) _notes.push_back(std::format("{}: {}", file.filename().string(), why));
         };
 
         std::vector<kecs::Entity> made(model->nodes.size(), root);
@@ -1794,12 +2334,19 @@ namespace keditor
             if (node.parts.size() == 1) drawn(entity, node.parts.front());
             else for (std::size_t part = 0; part < node.parts.size(); ++part) drawn(CreateEntity(std::format("{} [{}]", NameOf(entity), part), entity), node.parts[part]);
         }
-        for (const auto& light : model->lights) {
-            const kecs::Entity entity = CreateEntity(light.name.empty() ? std::string("Light") : light.name, root);
-            SetPosition(entity, { light.position[0], light.position[1], light.position[2] });
-            // Forward is -Z: turned about Y to face the way it shines, then tipped up or down.
+        // Its lights and cameras: each on the thing of the file's it is on, whose place and turn are all of it; one with a
+        // place or a turn of its own besides, a thing of its own under the model, where it is in the file.
+        const auto holder = [&](const int node, const bool atNode, const std::string& name, const float* position, const float* direction) {
+            if (atNode && node >= 0 && static_cast<std::size_t>(node) < made.size()) return made[static_cast<std::size_t>(node)];
+            const kecs::Entity entity = CreateEntity(name, root);
+            SetPosition(entity, { position[0], position[1], position[2] });
+            // Forward is -Z: turned about Y to face the way it looks, then tipped up or down.
             static constexpr float Degrees = 180.f / 3.14159265358979323846f;
-            SetRotation(entity, { std::asin(std::clamp(light.direction[1], -1.f, 1.f)) * Degrees, std::atan2(-light.direction[0], -light.direction[2]) * Degrees, 0.f });
+            SetRotation(entity, { std::asin(std::clamp(direction[1], -1.f, 1.f)) * Degrees, std::atan2(-direction[0], -direction[2]) * Degrees, 0.f });
+            return entity;
+        };
+        for (const auto& light : model->lights) {
+            const kecs::Entity entity = holder(light.node, light.atNode, light.name.empty() ? std::string("Light") : light.name, light.position, light.direction);
             const char* component = light.kind == kgraph::ModelLight::Kind::eDirectional ? "DirectionalLight" : light.kind == kgraph::ModelLight::Kind::eSpot ? "SpotLight" : "PointLight";
             AddComponent(entity, component);
             SetField(entity, component, "color", vec(light.color));
@@ -1810,6 +2357,15 @@ namespace keditor
                 SetField(entity, component, "outerAngle", Value(light.outerAngle));
             }
         }
+        for (const auto& camera : model->cameras) {
+            const kecs::Entity entity = holder(camera.node, camera.atNode, camera.name.empty() ? std::string("Camera") : camera.name, camera.position, camera.direction);
+            AddComponent(entity, "Camera");
+            SetField(entity, "Camera", "orthographic", Value(camera.orthographic));
+            if (camera.orthographic) SetField(entity, "Camera", "height", Value(camera.height));
+            else SetField(entity, "Camera", "fieldOfView", Value(std::clamp(camera.fieldOfView, 1.f, 179.f)));
+            if (camera.zNear > 0.f) SetField(entity, "Camera", "near", Value(camera.zNear));
+            SetField(entity, "Camera", "far", Value(camera.zFar));     // 0: as far as there is
+        }
         Changed();
     }
 
@@ -1818,13 +2374,14 @@ namespace keditor
     namespace {
         constexpr const char* FunctionEnding = ".kfunc";
 
-        bool ReadFunction(const std::filesystem::path& file, kgraph::Graph& out, std::string& error)
+        bool ReadFunction(const std::filesystem::path& file, kgraph::Graph& out, std::string& error, const kasset::Database* assets = nullptr)
         {
             std::ifstream in(file, std::ios::binary);
             if (!in) { error = std::format("'{}' cannot be read", file.generic_string()); return false; }
             std::stringstream read;
             read << in.rdbuf();
-            const std::string text = read.str();     // (kept: what the parse gives of it is views into it)
+            // (kept: what the parse gives of it is views into it) Its files named by where they are now.
+            const std::string text = assets ? kasset::FromIds(read.str(), *assets) : read.str();
             kecs::json::Value parsed;
             if (!kecs::json::Parse(text, parsed, error)) return false;
             const auto* version = parsed.Find("koral-function");
@@ -1852,7 +2409,7 @@ namespace keditor
             return about;
         }
 
-        bool WriteFunction(const std::filesystem::path& file, const kgraph::Graph& graph, const FunctionAbout& about, std::string& error)
+        bool WriteFunction(const std::filesystem::path& file, const kgraph::Graph& graph, const FunctionAbout& about, std::string& error, kasset::Database* assets = nullptr)
         {
             std::error_code ec;
             std::filesystem::create_directories(file.parent_path(), ec);
@@ -1867,7 +2424,8 @@ namespace keditor
                 for (const auto& tag : about.tags) tags += (tags.empty() ? "" : ", ") + kecs::json::Quote(tag);
                 said += std::format("\"tags\": [{}],\n", tags);
             }
-            out << std::format("{{\n\"koral-function\": 1,\n{}\"graph\": {}\n}}\n", said, graph.ToJson());
+            const std::string json = std::format("{{\n\"koral-function\": 1,\n{}\"graph\": {}\n}}\n", said, graph.ToJson());
+            out << (assets ? kasset::ToIds(json, *assets) : json);
             if (!out.flush()) { error = std::format("'{}' could not be written whole", file.generic_string()); return false; }
             return true;
         }
@@ -2000,7 +2558,7 @@ namespace keditor
                 if (!cached.second || cached.first != written) {
                     kgraph::Graph read;
                     std::string error;
-                    if (!ReadFunction(file, read, error)) { _notes.push_back(error); continue; }
+                    if (!ReadFunction(file, read, error, _assets.get())) { _notes.push_back(error); continue; }
                     cached = { written, std::make_shared<const kgraph::Graph>(std::move(read)) };
                 }
                 graph.functions[*name] = cached.second;
@@ -2132,7 +2690,7 @@ namespace keditor
         graph.nodes.push_back(std::move(call));
         const std::string made = graph.nodes.back().id;
         std::string why;
-        if (!WriteFunction(file, function, {}, why)) return fail(why);
+        if (!WriteFunction(file, function, {}, why, _assets.get())) return fail(why);
         _functionFiles.erase(name);
         WireAcrossPasses(graph, { made });
         Apply(std::move(graph));
@@ -2286,7 +2844,7 @@ namespace keditor
         // Into the project, always: one of the engine's changed is the project's own from then on.
         if (FunctionsDirectory().empty()) return fail("a function is kept in a project, and this scene is in none");
         // What it says it is for goes with it: the engine's, for one of the engine's saved as the project's own.
-        if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, AboutFunction(opened.function), why)) return fail(why);
+        if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, AboutFunction(opened.function), why, _assets.get())) return fail(why);
         _functionFiles.erase(opened.function);
         WireAcrossPasses(graph, { call.id });
         Apply(std::move(graph));
@@ -2378,13 +2936,14 @@ namespace keditor
         }
 
         /** What a prefab's file holds: the entity over the rest, and all of it, each with the part it is. */
-        bool ReadPrefab(const std::filesystem::path& file, Value& root, std::string& error)
+        bool ReadPrefab(const std::filesystem::path& file, Value& root, std::string& error, const kasset::Database* assets = nullptr)
         {
             std::ifstream in(file, std::ios::binary);
             if (!in) { error = std::format("'{}' cannot be read", file.generic_string()); return false; }
             std::stringstream read;
             read << in.rdbuf();
-            const std::string text = read.str();     // (kept: what the parse gives of it is views into it)
+            // (kept: what the parse gives of it is views into it) Its files named by where they are now.
+            const std::string text = assets ? kasset::FromIds(read.str(), *assets) : read.str();
             kecs::json::Value parsed;
             if (!kecs::json::Parse(text, parsed, error)) return false;
             const auto* version = parsed.Find("koral-prefab");
@@ -2566,13 +3125,14 @@ namespace keditor
     }
 
     namespace {
-        bool WritePrefabFile(const std::filesystem::path& file, const Value& root, std::string& error)
+        bool WritePrefabFile(const std::filesystem::path& file, const Value& root, std::string& error, kasset::Database* assets = nullptr)
         {
             std::error_code ec;
             if (file.has_parent_path()) std::filesystem::create_directories(file.parent_path(), ec);
             std::ofstream out(file, std::ios::binary | std::ios::trunc);
             if (!out) { error = std::format("'{}' cannot be written", file.generic_string()); return false; }
-            out << std::format("{{\n\"koral-prefab\": 1,\n\"root\": {}\n}}\n", root.ToJson());
+            const std::string json = std::format("{{\n\"koral-prefab\": 1,\n\"root\": {}\n}}\n", root.ToJson());
+            out << (assets ? kasset::ToIds(json, *assets) : json);
             if (!out.flush()) { error = std::format("'{}' could not be written whole", file.generic_string()); return false; }
             return true;
         }
@@ -2593,7 +3153,7 @@ namespace keditor
         _world.Add<PrefabLink>(entity, PrefabLink { named, {}, -1 });
         const Value written = WritePrefab(entity);
         std::string why;
-        if (!WritePrefabFile(file, written, why)) { Unlink(entity); return fail(why); }
+        if (!WritePrefabFile(file, written, why, _assets.get())) { Unlink(entity); return fail(why); }
         Changed();
         return true;
     }
@@ -2603,7 +3163,7 @@ namespace keditor
         const std::filesystem::path whole = file.is_absolute() || ProjectDirectory().empty() ? file : ProjectDirectory() / file;
         Value prefab;
         std::string why;
-        if (!ReadPrefab(whole, prefab, why)) { if (error) *error = why; return kecs::NullEntity; }
+        if (!ReadPrefab(whole, prefab, why, _assets.get())) { if (error) *error = why; return kecs::NullEntity; }
         const std::filesystem::path project = ProjectDirectory();
         std::error_code ec;
         const auto relative = project.empty() ? std::filesystem::path() : std::filesystem::relative(std::filesystem::absolute(whole), project, ec);
@@ -2690,7 +3250,7 @@ namespace keditor
             const std::filesystem::path file = std::filesystem::path(inner).is_absolute() || ProjectDirectory().empty() ? std::filesystem::path(inner) : ProjectDirectory() / inner;
             Value innerPrefab;
             std::string error;
-            if (!ReadPrefab(file, innerPrefab, error)) { _notes.push_back(std::format("{}: {}", _world.NameOf(entity), error)); return; }
+            if (!ReadPrefab(file, innerPrefab, error, _assets.get())) { _notes.push_back(std::format("{}: {}", _world.NameOf(entity), error)); return; }
             Rebuild(entity, innerPrefab);
             if (changedHere || !kept || !kept->Named()) return;
             // What the outer prefab says the inner instance made its own, it has.
@@ -2791,7 +3351,7 @@ namespace keditor
             if (!prefab && !read.contains(of.generic_string() + "?")) {
                 Value root_;
                 std::string error;
-                if (ReadPrefab(of, root_, error)) prefab = std::move(root_);
+                if (ReadPrefab(of, root_, error, _assets.get())) prefab = std::move(root_);
                 else { read[of.generic_string() + "?"] = std::nullopt; _notes.push_back(std::format("{}: {}. It is as it was saved.", _world.NameOf(root), error)); }
             }
             if (prefab) Rebuild(root, *prefab);
@@ -2808,7 +3368,7 @@ namespace keditor
         const std::filesystem::path file = named.is_absolute() || ProjectDirectory().empty() ? named : ProjectDirectory() / named;
         const Value written = WritePrefab(root);
         std::string why;
-        if (!WritePrefabFile(file, written, why)) return fail(why);
+        if (!WritePrefabFile(file, written, why, _assets.get())) return fail(why);
         _world.Mutable<PrefabLink>(root)->overrides.clear();
         UpdatePrefabs(file);
         Changed();
@@ -2824,7 +3384,7 @@ namespace keditor
         const std::filesystem::path file = named.is_absolute() || ProjectDirectory().empty() ? named : ProjectDirectory() / named;
         Value prefab;
         std::string why;
-        if (!ReadPrefab(file, prefab, why)) return fail(why);
+        if (!ReadPrefab(file, prefab, why, _assets.get())) return fail(why);
         _world.Mutable<PrefabLink>(root)->overrides.clear();
         // What was put under it goes: entities no part of the prefab, and instances of others placed by hand. Those the
         // prefab places are its own, and made as it says.
@@ -2874,6 +3434,12 @@ namespace keditor
         if (!in) { error = std::format("'{}' cannot be read", path.string()); return false; }
         std::stringstream text;
         text << in.rdbuf();
-        return FromJson(text.str(), error);
+        if (!_assets) return FromJson(text.str(), error);
+        // Its files, kept by their IDs, named by where they are now.
+        std::size_t missing = 0;
+        const std::string named = kasset::FromIds(text.str(), *_assets, &missing);
+        if (!FromJson(named, error)) return false;
+        if (missing > 0) _notes.push_back(std::format("{} {} of the scene's {} no longer in the project", missing, missing == 1 ? "file" : "files", missing == 1 ? "is" : "are"));
+        return true;
     }
 }

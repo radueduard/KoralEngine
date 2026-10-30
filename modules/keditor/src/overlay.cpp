@@ -124,6 +124,49 @@ float4 fragment(Raster raster) : SV_Target
     float light = 0.28 + 0.72 * saturate(dot(normal, normalize(float3(0.45, 0.8, 0.4))) * 0.5 + 0.5);
     return float4(float3(0.80, 0.83, 0.90) * light, 1.0);
 }
+
+// A material on a sphere: its colour and picture, how metal and how rough, what it gives off — under the same light, and
+// a sky for what shines to show. The editor's own look at its values: a project's shader needs what its graph makes.
+struct Look {
+    float4x4 model;
+    float4 tint;
+    float4 surface;     // x: metallic, y: roughness
+    float4 glow;
+};
+[[vk::push_constant]] ConstantBuffer<Look> look;
+Texture2D<float4> picture;
+SamplerState smooth;
+
+struct MaterialRaster {
+    float4 position : SV_Position;
+    float3 normal;
+    float2 uv;
+};
+
+[shader("vertex")]
+MaterialRaster materialVertex(float3 position : POSITION, float3 normal : NORMAL, float2 uv : UV)
+{
+    MaterialRaster raster;
+    raster.position = mul(mul(float4(position, 1.0), look.model), view.viewProjection);
+    raster.normal = normal;
+    raster.uv = uv;
+    return raster;
+}
+
+[shader("fragment")]
+float4 materialFragment(MaterialRaster raster) : SV_Target
+{
+    const float3 normal = normalize(raster.normal), toLight = normalize(float3(0.45, 0.8, 0.4)), toEye = normalize(float3(1.0, 0.75, 1.0));
+    const float3 base = picture.Sample(smooth, raster.uv).rgb * look.tint.rgb;
+    const float metallic = saturate(look.surface.x), rough = clamp(look.surface.y, 0.04, 1.0);
+    const float3 shine = lerp(float3(0.04, 0.04, 0.04), base, metallic);
+    const float diffuse = 0.28 + 0.72 * saturate(dot(normal, toLight) * 0.5 + 0.5);
+    const float power = clamp(2.0 / (rough * rough * rough * rough) - 2.0, 1.0, 2048.0);
+    const float highlight = pow(saturate(dot(normal, normalize(toLight + toEye))), power) * (power + 8.0) / 25.0;
+    const float3 mirrored = reflect(-toEye, normal);
+    const float sky = lerp(0.25, 0.95, saturate(mirrored.y * 0.5 + 0.5)) * (1.0 - 0.5 * rough);
+    return float4(base * (1.0 - metallic) * diffuse + shine * (sky + min(highlight, 4.0)) + look.glow.rgb, 1.0);
+}
 )slang";
 
         /** The editor's own shaders, where the framework finds them: written once, beside whatever a project has. */
@@ -395,8 +438,17 @@ float4 fragment(Raster raster) : SV_Target
                 .Set("fragment.module", "koralEditorThumb").Set("fragment.entry", "fragment").Wire("vertex.layout", "shape", "layout")
                 .Wire("framebuffer", "target").Wire("param.view", "view");
             graph.Add("all", "Entities");
-            graph.Add("drawn", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" });
+            graph.Add("drawn", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("without", Value::List { "material" });
             graph.Add("draw", "Draw").Wire("pipeline", "meshes").Wire("mesh", "drawn", "Mesh.mesh").Wire("push.model", "drawn", "matrix");
+            // A material, on what it is shown on: what it looks like the entity's, as a pipeline's parameters are.
+            graph.Add("smooth", "Sampler").Set("minFilter", "eLinear").Set("magFilter", "eLinear").Set("mipmapMode", "eLinear");
+            graph.Add("material", "GraphicsPipeline").Set("vertex.module", "koralEditorThumb").Set("vertex.entry", "materialVertex")
+                .Set("fragment.module", "koralEditorThumb").Set("fragment.entry", "materialFragment").Wire("vertex.layout", "shape", "layout")
+                .Wire("framebuffer", "target").Wire("param.view", "view").Wire("param.smooth", "smooth");
+            graph.Add("looked", "ForEach").Set("component", "material").Set("with", Value::List { "Mesh" });
+            graph.Add("draw material", "Draw").Wire("pipeline", "material").Wire("mesh", "looked", "Mesh.mesh").Wire("push.model", "looked", "matrix")
+                .Wire("push.tint", "looked", "field.tint").Wire("push.surface", "looked", "field.surface").Wire("push.glow", "looked", "field.glow")
+                .Wire("param.picture", "looked", "field.picture");
             return graph;
         }
     }
@@ -406,9 +458,13 @@ float4 fragment(Raster raster) : SV_Target
         kecs::World world;
         std::unique_ptr<kgraph::Runtime> runtime;      // there while there is something to draw
         kecs::Entity entity = kecs::NullEntity;
-        std::vector<std::pair<std::string, std::shared_ptr<kgraph::Resource>>> waiting;
+        struct Waiting { std::string id; std::shared_ptr<kgraph::Resource> mesh; std::optional<Look> look; };
+        std::vector<Waiting> waiting;
         std::set<std::string, std::less<>> asked;
         std::map<std::string, kor::Resource<kor::Image>, std::less<>> made;
+        std::map<std::string, std::vector<kor::U8Vec4>, std::less<>> pixels;    // each picture made, as it was read back
+        std::map<std::string, std::string, std::less<>> keptAs;                 // a picture's key in the cache, by its id
+        std::filesystem::path cache;
         std::string drawing;
         int frames = 0;
         explicit State(kor::FrameGraph& graph) : frameGraph(graph) {}
@@ -417,10 +473,41 @@ float4 fragment(Raster raster) : SV_Target
     Thumbnails::Thumbnails(kor::FrameGraph& frameGraph) : _state(std::make_unique<State>(frameGraph)) { WriteShaders(); }
     Thumbnails::~Thumbnails() { _state->runtime.reset(); }
 
-    void Thumbnails::Want(const std::string& id, std::shared_ptr<kgraph::Resource> mesh)
+    namespace {
+        kor::Resource<kor::Image> ImageOfPixels(const std::vector<kor::U8Vec4>& pixels)
+        {
+            return kor::Image::Builder().SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2(ThumbSize, ThumbSize))
+                .SetUsage(kor::Flags<kor::Image::Usage>(kor::Image::Usage::eSampled) | kor::Image::Usage::eTransferDst)
+                .SetData(std::span<const kor::U8Vec4>(pixels)).Build();
+        }
+    }
+
+    void Thumbnails::SetCache(std::filesystem::path directory) { _state->cache = std::move(directory); }
+
+    void Thumbnails::Want(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, const std::string& kept)
     {
         if (!mesh || mesh->pending || mesh->kind != "Mesh" || !_state->asked.insert(id).second) return;
-        _state->waiting.emplace_back(id, std::move(mesh));
+        // Drawn before, by what it is made of: read, not drawn.
+        if (!kept.empty() && !_state->cache.empty()) {
+            _state->keptAs[id] = kept;
+            std::ifstream in(_state->cache / (kept + ".kthumb"), std::ios::binary);
+            std::vector<kor::U8Vec4> pixels(static_cast<std::size_t>(ThumbSize * ThumbSize));
+            if (in.read(reinterpret_cast<char*>(pixels.data()), static_cast<std::streamsize>(pixels.size() * 4)))
+                if (auto image = ImageOfPixels(pixels); image.Valid()) {
+                    _state->made[id] = std::move(image);
+                    _state->pixels[id] = std::move(pixels);
+                    return;
+                }
+        }
+        _state->waiting.push_back({ id, std::move(mesh), std::nullopt });
+    }
+
+    void Thumbnails::WantMaterial(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, Look look, const std::string& kept)
+    {
+        if (!mesh || mesh->pending || mesh->kind != "Mesh") return;
+        Want(id, std::move(mesh), kept);
+        // Asked just now, and not read from the cache: drawn as it looks.
+        if (!_state->waiting.empty() && _state->waiting.back().id == id) _state->waiting.back().look = std::move(look);
     }
 
     kor::ResourceRef<const kor::Image> Thumbnails::Of(const std::string_view id) const
@@ -453,14 +540,25 @@ float4 fragment(Raster raster) : SV_Target
                 auto image = kor::Image::Builder().SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2(ThumbSize, ThumbSize))
                     .SetUsage(kor::Flags<kor::Image::Usage>(kor::Image::Usage::eSampled) | kor::Image::Usage::eTransferDst)
                     .SetData(std::span<const kor::U8Vec4>(pixels)).Build();
-                if (image.Valid()) { state.made[state.drawing] = std::move(image); made = true; }
+                if (image.Valid()) {
+                    state.made[state.drawing] = std::move(image);
+                    made = true;
+                    // Kept for the next run, by what it is made of.
+                    if (const auto key = state.keptAs.find(state.drawing); key != state.keptAs.end() && !state.cache.empty()) {
+                        std::error_code ec;
+                        std::filesystem::create_directories(state.cache, ec);
+                        std::ofstream(state.cache / (key->second + ".kthumb"), std::ios::binary | std::ios::trunc)
+                            .write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size() * 4));
+                    }
+                    state.pixels[state.drawing] = std::move(pixels);
+                }
                 state.drawing.clear();
             } else if (state.frames > ThumbFrames * 8) {
                 state.drawing.clear();      // it could not be read back: the list shows what it showed before
             }
         }
         if (state.drawing.empty() && !state.waiting.empty()) {
-            auto [id, mesh] = std::move(state.waiting.back());
+            auto [id, mesh, look] = std::move(state.waiting.back());
             state.waiting.pop_back();
             // Seen from a corner, far enough off to see all of the box it is in.
             kor::Vec3 lower(-0.5f), upper(0.5f);
@@ -474,6 +572,17 @@ float4 fragment(Raster raster) : SV_Target
             view.view = kor::LookAt(centre + kor::Normalize(kor::Vec3(1.f, 0.75f, 1.f)) * (radius / std::sin(view.fieldOfView * 0.5f) * 1.05f), centre);
             state.runtime->SetView(view);
             state.world.Mutable<kgraph::Mesh>(state.entity)->mesh = std::move(mesh);
+            // A material: drawn by what looks at one, with its values. A mesh: by the plain light, as it is.
+            const kecs::ComponentId material = state.runtime->ComponentOf("material");
+            if (look && material != kecs::NoComponent) {
+                if (!state.world.Has(state.entity, material)) state.world.Add(state.entity, material);
+                kgraph::Parameters values(state.world, state.entity, material);
+                values.Set("tint", look->colour).Set("surface", kor::Vec4(look->metallic, look->roughness, 0.f, 0.f))
+                    .Set("glow", kor::Vec4(look->emission.x, look->emission.y, look->emission.z, 0.f))
+                    .Set("picture", look->picture ? look->picture : state.runtime->ResourceOf("$white"));
+            } else if (material != kecs::NoComponent && state.world.Has(state.entity, material)) {
+                state.world.Remove(state.entity, material);
+            }
             state.drawing = std::move(id);
             state.frames = 0;
         }

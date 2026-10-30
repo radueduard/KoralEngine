@@ -136,8 +136,23 @@ namespace keditor
         Thumbnails(const Thumbnails&) = delete;
         Thumbnails& operator=(const Thumbnails&) = delete;
 
-        /** @brief Asks for a picture of @p mesh, to be found by @p id. Asked again, nothing more is done. */
-        void Want(const std::string& id, std::shared_ptr<kgraph::Resource> mesh);
+        /**
+         * @brief Asks for a picture of @p mesh, to be found by @p id. Asked again, nothing more is done. With @p kept — a
+         *        key of what the mesh is made of — and a cache (SetCache), it is read from there when it was drawn
+         *        before, by this editor or another, and kept there once it is drawn.
+         */
+        void Want(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, const std::string& kept = {});
+        /** @brief Where pictures are kept between runs: a project's `.koral/cache/thumbnails`. Empty: nowhere. */
+        void SetCache(std::filesystem::path directory);
+        /** @brief What a material looks like, as a small picture of it is drawn: the editor's own light on its values. */
+        struct Look {
+            kor::Vec4 colour { 0.8f, 0.8f, 0.8f, 1.f };
+            float metallic = 0.f, roughness = 0.5f;
+            kor::Vec3 emission { 0.f, 0.f, 0.f };
+            std::shared_ptr<kgraph::Resource> picture;      ///< Its colour's; none, plain.
+        };
+        /** @brief Asks for a picture of @p mesh — a sphere — made of @p look, found by @p id; kept as Want keeps one. */
+        void WantMaterial(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, Look look, const std::string& kept = {});
         /** @brief Each frame, before the frame graph runs. True when a picture was made since the last call. */
         bool Update();
         /** @brief The picture of the mesh asked for by @p id; empty until it is made. */

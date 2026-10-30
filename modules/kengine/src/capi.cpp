@@ -753,6 +753,24 @@ namespace {
     }
 }
 
+const char* kengine_image_create(KengineDocument* document, const char* name, const uint32_t width, const uint32_t height, const uint8_t* rgba)
+{
+    return Guarded([&]() -> const char* {
+        if (!name || !*name) throw std::invalid_argument("a picture needs a name");
+        if (!rgba) throw std::invalid_argument("a picture needs its texels");
+        const std::string id = std::format("$script/{}", name);
+        std::string error;
+        const auto bytes = std::span(reinterpret_cast<const std::byte*>(rgba), static_cast<std::size_t>(width) * height * 4);
+        if (!Doc(document).Runtime().MakeImage(id, width, height, bytes, &error)) { Fail(error); return nullptr; }
+        return Keep(id);
+    }, static_cast<const char*>(nullptr));
+}
+
+bool kengine_entity_give_picture(KengineDocument* document, const KecsEntity entity, const char* field, const char* picture)
+{
+    return Guarded([&] { return field && picture && Doc(document).GivePicture(Of(entity), field, picture); }, false);
+}
+
 const char* kengine_mesh_create(KengineDocument* document, const char* name, const uint32_t vertex_count, const KengineAttribute* attributes,
                                 const uint32_t attribute_count, const uint32_t* indices, const uint32_t index_count, const char* buffers)
 {

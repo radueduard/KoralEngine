@@ -155,6 +155,8 @@ internal object Native {
 
     /** KengineAttribute: the semantic, the type and count of its numbers, and the numbers. */
     val ATTRIBUTE: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("semantic"), JAVA_INT.withName("type"), JAVA_INT.withName("count"), ADDRESS.withName("data"))
+    val kengine_image_create = call("kengine_image_create", ADDRESS, ADDRESS, ADDRESS, JAVA_INT, JAVA_INT, ADDRESS)
+    val kengine_entity_give_picture = call("kengine_entity_give_picture", JAVA_BOOLEAN, ADDRESS, ENTITY, ADDRESS, ADDRESS)
     val kengine_mesh_create = call("kengine_mesh_create", ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS, JAVA_INT, ADDRESS)
     val kengine_mesh_with_attributes = call("kengine_mesh_with_attributes", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS)
     val kengine_mesh_without_attributes = call("kengine_mesh_without_attributes", ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS)

@@ -9,7 +9,7 @@ import koral.engine.Min
 import koral.engine.Range
 import koral.engine.Script
 
-class Instancer : Script() {
+class Instancer : Setup() {
     @Min(0f) var count = 100000             // How many. Each is 20 bytes on the GPU: 100 million is 2 GB.
     @Min(0f) var extent = Vec2(100f, 100f)  // The square they are scattered over, along x and z, centred on the entity.
     var seed = 1                            // Another number, another scattering.

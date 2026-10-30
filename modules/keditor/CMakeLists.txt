@@ -29,11 +29,11 @@ endforeach()
 string(APPEND KEDITOR_ICON_TEXT "    };\n}\n")
 file(GENERATE OUTPUT ${KEDITOR_ICON_HEADER} CONTENT "${KEDITOR_ICON_TEXT}")
 
-add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp src/physics.cpp)
+add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/assets.cpp src/widgets.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp src/physics.cpp)
 target_include_directories(keditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
-target_link_libraries(keditor PUBLIC kgraph kecs kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras PRIVATE Koral::koral-image-import kphysics)
+target_link_libraries(keditor PUBLIC kgraph kecs kasset kscript Koral::Koral Koral::koral-ui Koral::koral-gui-extras PRIVATE kasset-import Koral::koral-image-import kphysics)
 target_compile_options(keditor PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wno-missing-field-initializers>)
 target_compile_options(keditor PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/bigobj>)  # editor.cpp, as kgraph's runtime.cpp
 

@@ -6,8 +6,10 @@ import koral.engine.Min
 import koral.engine.Range
 import koral.engine.Script
 
-class Camera : Script() {
+class Camera : Setup() {
     @Range(1f, 179f) var fieldOfView = 60f    // Top to bottom, in degrees.
     @Min(0.001f) @Logarithmic var near = 0.1f
-    @Min(0.01f) @Logarithmic var far = 100f
+    @Min(0f) var far = 100f                     // 0: as far as there is — a perspective's, no far plane.
+    var orthographic = false                    // Seen in a box, as big however far, rather than through a lens.
+    @Min(0.001f) @Logarithmic var height = 10f  // Orthographic: how much it sees, top to bottom.
 }

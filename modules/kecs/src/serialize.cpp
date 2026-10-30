@@ -220,7 +220,7 @@ namespace kecs
             // By name, so the order is the same whatever order the types were registered in.
             std::vector<std::pair<std::string, ComponentId>> components;
             for (const ComponentId id : world.ComponentsOf(e))
-                components.emplace_back(world.Describe(id).name, id);
+                if (world.Describe(id).saved) components.emplace_back(world.Describe(id).name, id);
             std::ranges::sort(components);
 
             std::string componentText, disabled;

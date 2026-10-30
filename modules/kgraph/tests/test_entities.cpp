@@ -4,6 +4,9 @@
 
 #include <gtest/gtest.h>
 
+#include <kasset/artifact.h>
+#include <kasset/cache.h>
+
 #include <kmath/transform.h>
 
 #include <capiInterop.h>
@@ -1281,6 +1284,39 @@ TEST_F(EntityTest, AModelsAttributesAreReadAsTheSceneSays) {
     std::filesystem::remove(file);
 }
 
+// A generator's mesh is kept in the project's cache when it is made, and is there when it is asked for again with
+// nothing made of it: a scene opened without its scripts still has what they made.
+TEST_F(EntityTest, AGeneratorsMeshIsKeptInTheCache) {
+    const auto root = std::filesystem::temp_directory_path() / "kgraph-generated";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "assets");
+    auto& runtime = *scene->runtime;
+    runtime.Set(kgraph::Graph {});
+    runtime.SetAssetDirectory(root / "assets");
+    std::string error;
+    ASSERT_TRUE(runtime.MakeMesh("$script/gen/Square/aa", SquareData(0.f, true, {}), &error)) << error;
+    const kasset::Cache cache(kasset::CacheDirectoryOf(root));
+    EXPECT_TRUE(std::filesystem::exists(cache.PathOf("meshes", kasset::Key("generated@1").Add("$script/gen/Square/aa"), ".kmesh"))) << "kept when it is made";
+    ASSERT_TRUE(cache.Write("meshes", kasset::Key("generated@1").Add("$script/gen/Square/bb"), ".kmesh", kasset::Serialize(SquareData(0.5f, false, {}))));
+    const auto held = runtime.ResourceOf("$script/gen/Square/bb");
+    ASSERT_NE(held, nullptr) << "what nothing made this run is had from the cache";
+    EXPECT_EQ(held->kind, "Mesh");
+    const auto read = runtime.ReadMesh("$script/gen/Square/bb", &error);
+    ASSERT_TRUE(read) << error;
+    EXPECT_EQ(read->vertexCount, SquareData(0.5f, false, {}).vertexCount);
+    EXPECT_EQ(runtime.ResourceOf("$script/gen/Square/cc"), nullptr) << "and what was never made is nothing";
+    // A picture a generator made, the same.
+    std::vector<std::byte> texels(4 * 4 * 4, std::byte { 200 });
+    ASSERT_TRUE(runtime.MakeImage("$script/gen/Paint/aa/picture", 4, 4, texels, &error)) << error;
+    EXPECT_TRUE(std::filesystem::exists(cache.PathOf("images", kasset::Key("generated@1").Add("$script/gen/Paint/aa/picture"), ".kimage")));
+    EXPECT_FALSE(runtime.MakeImage("$script/gen/Paint/bad", 4, 4, std::span(texels).first(10), &error)) << "so many texels are so many bytes";
+    const auto picture = runtime.ResourceOf("$script/gen/Paint/aa/picture");
+    ASSERT_TRUE(picture);
+    EXPECT_EQ(picture->kind, "Image");
+    runtime.SetAssetDirectory({});
+    std::filesystem::remove_all(root);
+}
+
 // A folder of the assets may be a link to one kept elsewhere: a model in it is found by its name in the assets, and its
 // meshes arrive under the names they were asked for, not as stand-ins forever.
 TEST_F(EntityTest, AModelInAFolderLinkedIntoTheAssetsArrives) {
@@ -1865,6 +1901,52 @@ TEST_F(EntityTest, EachInstanceReadsItsOwnPictureByIndex) {
     EXPECT_TRUE(is(24, { 0, 0, 0 })) << "the one gone is not drawn";
 }
 
+// A file written again while the scene has it — a picture painted over, a model exported again — is read again, and
+// what held it holds what it is now.
+TEST_F(EntityTest, AFileWrittenAgainIsReadAgain) {
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto root = std::filesystem::temp_directory_path() / "kgraph-written-again";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "assets");
+    const auto write = [&](const unsigned char red) {
+        std::ofstream file(root / "assets" / "paint.ppm", std::ios::binary | std::ios::trunc);
+        file << "P6\n8 8\n255\n";
+        for (int i = 0; i < 64; ++i) file.put(static_cast<char>(red)).put(0).put(0);
+    };
+    const auto writeModel = [&](const float height) {
+        std::ofstream(root / "assets" / "tri.obj", std::ios::trunc) << std::format("v 0 0 0\nv 1 0 0\nv 0 {} 0\nf 1 2 3\n", height);
+    };
+    write(10);
+    writeModel(1.f);
+    runtime.Set(kgraph::Graph {});
+    runtime.SetAssetDirectory(root / "assets");
+    const auto picture = runtime.ResourceOf("@paint.ppm");
+    const auto mesh = runtime.ResourceOf("@tri.obj#0");
+    ASSERT_TRUE(picture && mesh);
+    for (int i = 0; i < 400 && (runtime.Reading() > 0 || mesh->pending && !mesh->replacedBy); ++i) Frame();
+    for (int i = 0; i < 3; ++i) Frame();
+    const auto read = [&](const std::string& id) { auto held = runtime.ResourceOf(id); while (held && held->replacedBy) held = held->replacedBy; return held; };
+    const auto pictureBefore = read("@paint.ppm"), meshBefore = read("@tri.obj#0");
+    ASSERT_TRUE(meshBefore && !meshBefore->pending);
+
+    // Written again, a moment later: the time a file system keeps may be no finer than a second.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    write(250);
+    writeModel(3.f);
+    for (int i = 0; i < 400 && (read("@paint.ppm") == pictureBefore || read("@tri.obj#0") == meshBefore); ++i) {
+        Frame();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    EXPECT_NE(read("@paint.ppm"), pictureBefore) << "the picture is read again";
+    EXPECT_NE(read("@tri.obj#0"), meshBefore) << "and the model";
+    std::string error;
+    const auto data = runtime.ReadMesh("@tri.obj#0", &error);
+    ASSERT_TRUE(data) << error;
+    EXPECT_FLOAT_EQ(std::bit_cast<float>(data->Find("POSITION")->words[7]), 3.f) << "as it is now";
+    runtime.SetAssetDirectory({});
+    std::filesystem::remove_all(root);
+}
+
 // A picture file kept block-compressed is cooked into the project's cache and read from there, in its place: the scene
 // still names the file. A pack is one picture of others' channels; each file it is made of reads, to whoever holds it,
 // as the pack's channel it went into, in red, green and blue — before it is cooked (put together as it is read) and
@@ -1953,8 +2035,9 @@ TEST_F(EntityTest, PicturesKeptBlockCompressedAreCookedAndReadFromTheCache) {
     EXPECT_TRUE(runtime.Cooked("@red.ppm"));
     EXPECT_TRUE(runtime.Cooked("@m_ORM.pack"));
     std::size_t files = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(root / "cache" / "textures")) files += entry.path().extension() == ".ktx2";
+    for (const auto& entry : std::filesystem::directory_iterator(runtime.TextureCache())) files += entry.path().extension() == ".ktx2";
     EXPECT_EQ(files, 2u) << "in the project's cache, beside its assets";
+    EXPECT_EQ(runtime.TextureCache(), root / ".koral" / "cache" / "textures");
     const auto red = runtime.ResourceOf("@red.ppm");
     ASSERT_TRUE(red && red->kind == "Image");
     EXPECT_EQ(kor::capi::ImageOf(red->handle)->PixelFormat(), kor::Image::Format::eBC7_UNORM) << "read from what was cooked";
@@ -1975,7 +2058,7 @@ TEST_F(EntityTest, PicturesKeptBlockCompressedAreCookedAndReadFromTheCache) {
     cookAll();
     EXPECT_TRUE(is(8, { 200, 40, 255 })) << "BC5: its red and green, and 1 — " << shown(8);
     files = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(root / "cache" / "textures")) files += entry.path().extension() == ".ktx2";
+    for (const auto& entry : std::filesystem::directory_iterator(runtime.TextureCache())) files += entry.path().extension() == ".ktx2";
     EXPECT_EQ(files, 2u) << "what was cooked of it before is let go of";
 
     // Kept as it is read again: the file, and nothing of the cache.

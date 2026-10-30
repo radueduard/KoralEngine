@@ -103,3 +103,92 @@ class Meshes internal constructor(private val world: World) {
     private fun text(a: Arena, text: String?): MemorySegment = if (text == null) MemorySegment.NULL else a.allocateFrom(text)
     private fun result(made: MemorySegment): String = if (made == MemorySegment.NULL) throw EngineException(Native.lastError) else Native.text(made)
 }
+
+/**
+ * What a [MeshGenerator] writes a mesh into: its attributes by semantic — the usual ones, or its own — its indices, and,
+ * if it says, the buffers they are in. What it does not say is the engine's to choose.
+ */
+class MeshWriter internal constructor() {
+    internal val attributes = mutableListOf<MeshAttribute>()
+    internal var indexList: IntArray? = null
+    internal var bufferLayout: String? = null
+    /** How many vertices it has: as many as its positions. */
+    var vertexCount = 0
+        private set
+
+    /** Where each vertex is, three floats each: what makes it a mesh, and how many vertices it has. */
+    fun positions(xyz: FloatArray) { vertexCount = xyz.size / 3; attribute(MeshAttribute.floats("POSITION", 3, xyz)) }
+    /** Which way each vertex's surface faces, three floats each. */
+    fun normals(xyz: FloatArray) = attribute(MeshAttribute.floats("NORMAL", 3, xyz))
+    /** Where on a picture each vertex is, two floats each: `UV`, or `UV1` for [set] 1. */
+    fun uvs(uv: FloatArray, set: Int = 0) = attribute(MeshAttribute.floats(if (set == 0) "UV" else "UV$set", 2, uv))
+    /** The way each vertex's u grows along its surface, and in w which side of it v does: four floats each. */
+    fun tangents(xyzw: FloatArray) = attribute(MeshAttribute.floats("TANGENT", 4, xyzw))
+    /** Any attribute, by its semantic: in place of one of the same semantic written before. */
+    fun attribute(attribute: MeshAttribute) { attributes.removeAll { it.semantic == attribute.semantic }; attributes += attribute }
+    /** Its triangles, three indices each, counter-clockwise seen from outside. None: drawn in the order of its vertices. */
+    fun indices(indices: IntArray) { indexList = indices.copyOf() }
+    /** Which vertex buffer each attribute is in — `"POSITION; NORMAL UV"`, a buffer to each ';' — rather than the engine's choice. */
+    fun buffers(layout: String) { bufferLayout = layout }
+}
+
+/**
+ * What a script takes to make an entity's mesh: a sphere of so many subdivisions, a terrain of a seed. Its public `var`s
+ * are what it is made of; whenever they change — in the inspector, while the scene plays or not — it is made again, and
+ * the entity's Mesh holds it. A generator is given only what it writes: what it makes is of its fields alone, so every
+ * entity with the same fields shares one mesh, and what was made is kept in the project's cache, there when the scene is
+ * opened without scripts.
+ *
+ * ```kotlin
+ * class Pyramid : Setup(), MeshGenerator {
+ *     var height = 1f
+ *     override fun initialize(mesh: MeshWriter) {
+ *         mesh.positions(floatArrayOf(-0.5f, 0f, -0.5f, 0.5f, 0f, -0.5f, 0.5f, 0f, 0.5f, -0.5f, 0f, 0.5f, 0f, height, 0f))
+ *         mesh.indices(intArrayOf(0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3))
+ *     }
+ * }
+ * ```
+ */
+interface MeshGenerator {
+    /** Writes the mesh, of the fields as they are now. */
+    fun initialize(mesh: MeshWriter)
+}
+
+/** What an [ImageGenerator] writes a picture into: so many texels, four bytes each — red, green, blue, alpha. */
+class ImageWriter internal constructor() {
+    internal var texels = ByteArray(256 * 256 * 4)
+    /** How many texels across and down: [size] says, and it starts 256 by 256. */
+    var width = 256
+        private set
+    var height = 256
+        private set
+
+    /** How big it is: every texel black and see-through again. */
+    fun size(width: Int, height: Int) {
+        require(width > 0 && height > 0) { "a picture has at least one texel" }
+        this.width = width
+        this.height = height
+        texels = ByteArray(width * height * 4)
+    }
+    /** The texel at [x], [y] (from the top left): each of red, green, blue and alpha 0 to 1. */
+    fun set(x: Int, y: Int, red: Float, green: Float, blue: Float, alpha: Float = 1f) {
+        val at = (y * width + x) * 4
+        fun byte(value: Float) = (value * 255f + 0.5f).coerceIn(0f, 255f).toInt().toByte()
+        texels[at] = byte(red); texels[at + 1] = byte(green); texels[at + 2] = byte(blue); texels[at + 3] = byte(alpha)
+    }
+    /** Its texels as bytes, four a texel, a row after another from the top: there to be written whole. */
+    val bytes: ByteArray get() = texels
+}
+
+/**
+ * What a script takes to make a picture of its entity's material: a noise, a height map, a checker. Its public `var`s
+ * are what it is made of; whenever they change it is made again, and the entity's material field [into] holds it. As a
+ * [MeshGenerator], it is given only what it writes; every entity of the same fields shares one, and what was made is
+ * kept in the project's cache.
+ */
+interface ImageGenerator {
+    /** The picture field of its entity's material that holds what it makes: `baseColorMap` unless it says. */
+    val into: String get() = "baseColorMap"
+    /** Writes the picture, of the fields as they are now. */
+    fun initialize(image: ImageWriter)
+}

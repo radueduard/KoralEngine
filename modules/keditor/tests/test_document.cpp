@@ -1084,6 +1084,110 @@ TEST_F(DocumentTest, AModelsMaterialsAreAssetsItsThingsFollow) {
     EXPECT_FALSE(doc.World().Has(pane, doc.World().Find("Blended")));
 }
 
+// A thing of a model's mesh whose material is its own — as a scene saved before materials were their own is migrated —
+// follows the material its mesh has in the file once the model is read. What it set that the file says otherwise is
+// kept as its own; what is only written otherwise (a flat normal map as white) is the file's.
+TEST_F(DocumentTest, AThingOfAModelsMeshFollowsTheModelsMaterial) {
+    const auto project = scene::MakeProject("follow materials");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    {
+        std::ofstream mtl(models / "one.mtl");
+        mtl << "newmtl red\nKd 1 0 0\nillum 2\n";
+        std::ofstream obj(models / "one.obj");
+        obj << "mtllib one.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\no a\nusemtl red\nf 1 2 3\no b\nusemtl red\nf 2 4 3\n";
+    }
+    doc.SetAssetDirectory(project.directory / "assets");
+    doc.SetImportKind(kgraph::ModelMaterial::Model::eClassic, "PbrMaterial");
+    ASSERT_FALSE(doc.ImportModel(models / "one.obj").IsNull());
+    for (int i = 0; i < 400 && (i < 2 || doc.Reading() > 0); ++i) Frame();
+    const kecs::ComponentId mesh = doc.World().Find("Mesh");
+    std::vector<kecs::Entity> drawn;
+    for (const kecs::Entity entity : doc.World().All()) if (doc.World().Has(entity, mesh)) drawn.push_back(entity);
+    ASSERT_EQ(drawn.size(), 2u);
+    const kecs::Entity a = drawn[0], b = drawn[1];
+    const std::string red = doc.MaterialAssetOfEntity(a, "PbrMaterial");
+    ASSERT_FALSE(red.empty());
+
+    // Its own: a roughness the file does not give, and a flat normal map written as white.
+    ASSERT_TRUE(doc.UnlinkMaterial(a, "PbrMaterial"));
+    ASSERT_TRUE(doc.SetField(a, "PbrMaterial", "roughness", kgraph::Value(0.125)));
+    ASSERT_TRUE(doc.SetField(a, "PbrMaterial", "normalMap", kgraph::Value("$white")));
+    doc.FollowModelMaterial(a);
+    doc.FollowModelMaterial(b);     // follows already: nothing
+    EXPECT_GT(doc.Reading(), 0u) << "until its model is read";
+    for (int i = 0; i < 400 && doc.Reading() > 0; ++i) Frame();
+
+    EXPECT_EQ(doc.MaterialAssetOfEntity(a, "PbrMaterial"), red) << "the file's material, shared";
+    EXPECT_EQ(doc.MaterialOverridesOf(a, "PbrMaterial"), std::vector<std::string> { "roughness" }) << "what it set otherwise, its own";
+    EXPECT_EQ(doc.Field(a, "PbrMaterial", "roughness"), kgraph::Value(0.125));
+    EXPECT_EQ(doc.Field(a, "PbrMaterial", "normalMap"), doc.Field(b, "PbrMaterial", "normalMap")) << "white is the flat normal, as the file has it";
+    EXPECT_TRUE(doc.MaterialOverridesOf(b, "PbrMaterial").empty());
+}
+
+// Everything a model file has is imported as it has it: its meshes and materials, and its lights and cameras — each on
+// the thing of the file's it is on, which is where it is and which way it faces, not a thing of its own beside it.
+TEST_F(DocumentTest, AModelsLightsAndCamerasAreImportedOnTheirThings) {
+    const auto project = scene::MakeProject("lights and cameras");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "room.gltf") << R"GLTF({
+  "asset": {"version": "2.0"},
+  "extensionsUsed": ["KHR_lights_punctual"],
+  "extensions": {"KHR_lights_punctual": {"lights": [{"type": "point", "color": [1.0, 0.5, 0.25], "intensity": 7.0, "range": 9.0}]}},
+  "scene": 0,
+  "scenes": [{"nodes": [0, 1, 2, 3]}],
+  "nodes": [
+    {"name": "floor", "mesh": 0},
+    {"name": "eye", "translation": [1.0, 2.0, 3.0], "camera": 0},
+    {"name": "plan", "translation": [0.0, 10.0, 0.0], "camera": 1},
+    {"name": "lamp", "translation": [0.0, 4.0, 0.0], "extensions": {"KHR_lights_punctual": {"light": 0}}}
+  ],
+  "cameras": [
+    {"type": "perspective", "perspective": {"yfov": 0.8, "znear": 0.05, "zfar": 500.0}},
+    {"type": "orthographic", "orthographic": {"xmag": 4.0, "ymag": 3.0, "znear": 0.1, "zfar": 50.0}}
+  ],
+  "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+  "buffers": [{"byteLength": 36, "uri": "data:application/octet-stream;base64,AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAAAAAgD8AAAAA"}],
+  "bufferViews": [{"buffer": 0, "byteLength": 36}],
+  "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0,0,0], "max": [1,1,0]}]
+})GLTF";
+    doc.SetAssetDirectory(project.directory / "assets");
+    const kecs::Entity root = doc.ImportModel(models / "room.gltf");
+    ASSERT_FALSE(root.IsNull());
+    for (int i = 0; i < 400 && (i < 2 || doc.Reading() > 0); ++i) Frame();
+
+    const auto named = [&](const std::string& name) {
+        std::vector<kecs::Entity> found;
+        for (const kecs::Entity entity : doc.World().All()) if (doc.NameOf(entity) == name) found.push_back(entity);
+        return found;
+    };
+    ASSERT_EQ(named("eye").size(), 1u) << "the camera is on its thing, not a thing of its own beside it";
+    ASSERT_EQ(named("lamp").size(), 1u);
+    const kecs::Entity eye = named("eye")[0], plan = named("plan")[0], lamp = named("lamp")[0];
+
+    ASSERT_TRUE(doc.World().Has(eye, doc.World().Find("Camera")));
+    EXPECT_NEAR(*doc.Field(eye, "Camera", "fieldOfView").Number(), 0.8 * 180.0 / std::numbers::pi, 1e-3) << "top to bottom, as the file has it";
+    EXPECT_NEAR(*doc.Field(eye, "Camera", "near").Number(), 0.05, 1e-6);
+    EXPECT_NEAR(*doc.Field(eye, "Camera", "far").Number(), 500.0, 1e-3);
+    EXPECT_EQ(doc.Field(eye, "Camera", "orthographic"), kgraph::Value(false));
+    EXPECT_EQ(doc.World().PositionOf(eye), (kecs::Vec3 { 1.f, 2.f, 3.f })) << "where its thing is";
+
+    ASSERT_TRUE(doc.World().Has(plan, doc.World().Find("Camera")));
+    EXPECT_EQ(doc.Field(plan, "Camera", "orthographic"), kgraph::Value(true));
+    EXPECT_NEAR(*doc.Field(plan, "Camera", "height").Number(), 6.0, 1e-6);
+
+    ASSERT_TRUE(doc.World().Has(lamp, doc.World().Find("PointLight")));
+    EXPECT_NEAR(*doc.Field(lamp, "PointLight", "intensity").Number(), 7.0, 1e-6);
+    EXPECT_NEAR(*doc.Field(lamp, "PointLight", "range").Number(), 9.0, 1e-6);
+    EXPECT_EQ(doc.World().PositionOf(lamp), (kecs::Vec3 { 0.f, 4.f, 0.f }));
+    EXPECT_FALSE(named("floor").empty()) << "and its mesh";
+}
+
 // What a reported model is imported as is the project's to say — for every file, or for one.
 TEST_F(DocumentTest, WhatAMaterialIsImportedAsIsAChoice) {
     scene::MakeProject("import kinds");

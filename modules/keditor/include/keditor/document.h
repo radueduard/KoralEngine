@@ -23,6 +23,7 @@
 #include <map>
 #include <optional>
 
+#include <kasset/database.h>
 #include <kgraph/runtime.h>
 #include <kscript/scripts.h>
 
@@ -55,8 +56,9 @@ namespace keditor
     };
 
     /**
-     * @brief On an entity whose materials follow Material assets: which asset each kind of its follows, and what of
-     *        them the entity has made its own (Document::MaterialOverridesOf) — every other field is the asset's.
+     * @brief On an entity whose materials follow Material assets — or whose generator follows a `.kgen` — which asset each
+     *        component of its follows, and what of them the entity has made its own (Document::MaterialOverridesOf):
+     *        every other field is the asset's.
      */
     struct MaterialLink {
         std::string assets;     ///< "<kind> <asset>" a line: `PbrMaterial @sponza/Sponza.gltf#material:3`
@@ -286,6 +288,24 @@ namespace keditor
         [[nodiscard]] std::vector<std::string> ComponentsOf(kecs::Entity entity) const;
         bool AddComponent(kecs::Entity entity, std::string_view component);
         bool RemoveComponent(kecs::Entity entity, std::string_view component);
+        /**
+         * @brief Gives @p entity picture @p id in its field @p field — of whichever of its components has a picture field
+         *        so named (its material's `baseColorMap`). False when none of them has.
+         */
+        bool GivePicture(kecs::Entity entity, std::string_view field, const std::string& id);
+        /**
+         * @brief Gives @p entity the generator a `.kgen` keeps (@p file): its script as a component, with the fields the
+         *        file has, which the entity follows from then on — but for what is set on the entity itself, as a
+         *        material follows its asset. False, with why, when it is none.
+         */
+        bool GiveGenerator(kecs::Entity entity, const std::filesystem::path& file, std::string* error = nullptr);
+        /** @brief Writes @p entity 's component @p script, its fields as they are, to @p file as a `.kgen`. */
+        bool SaveGenerator(kecs::Entity entity, std::string_view script, const std::filesystem::path& file, std::string* error = nullptr);
+        /** @brief What a `.kgen` keeps: its script, by name, and each of its fields. Empty script for what is none. */
+        struct GeneratorAsset { std::string script; std::vector<std::pair<std::string, kgraph::Value>> fields; };
+        [[nodiscard]] GeneratorAsset GeneratorOf(const std::filesystem::path& file) const;
+        /** @brief Sets field @p field of a `.kgen`, in the file, and in every entity that follows it and has not made the field its own. */
+        bool SetGeneratorField(const std::filesystem::path& file, const std::string& field, const kgraph::Value& value, std::string* error = nullptr);
         bool SetEnabled(kecs::Entity entity, std::string_view component, bool enabled);
         [[nodiscard]] bool IsEnabled(kecs::Entity entity, std::string_view component) const;
 
@@ -388,6 +408,12 @@ namespace keditor
          *        instance. False, with @p error saying why, when the file cannot be written.
          */
         bool SaveAsPrefab(kecs::Entity entity, const std::filesystem::path& file, std::string* error = nullptr);
+        /**
+         * @brief The prefab a model's things placed in a scene are an instance of: made of the model, in the project's
+         *        cache (`.koral/cache/prefabs/<the model's ID>.prefab`), and made again whenever the model is read again,
+         *        so every place it was put follows the file — keeping what each made its own. Empty without a project.
+         */
+        [[nodiscard]] std::filesystem::path ModelPrefabOf(const std::filesystem::path& model) const;
         /** @brief Makes an instance of the prefab at @p file — a path from the project's folder, or a whole one — last under @p parent. */
         kecs::Entity Instantiate(const std::filesystem::path& file, kecs::Entity parent = kecs::NullEntity, std::string* error = nullptr);
         /** @brief The entity over the instance @p entity is of: itself, when it is that. NullEntity for one of no instance. */
@@ -444,7 +470,7 @@ namespace keditor
          *        pictures entities already name. All of it is read off the frame; the scene runs meanwhile, and what
          *        is drawn fills in as each arrives.
          */
-        [[nodiscard]] std::size_t Reading() const { return _importing.size() + _runtime->Reading(); }
+        [[nodiscard]] std::size_t Reading() const { return _importing.size() + _toFollow.size() + _runtime->Reading(); }
         /**
          * @brief Says that a script was handed the resource node @p node makes — to write into, as a graphics script
          *        does. Another view of the graph (the editor's Game panel) shares those buffers rather than having its own.
@@ -454,6 +480,16 @@ namespace keditor
         /** @brief Where files named without their whole path are: a project's `assets` folder. Load and Save say it from the scene's own place. */
         /// The project's material kinds' Slang modules are written into its `cache/shaders`, beside it.
         void SetAssetDirectory(const std::filesystem::path& directory);
+        /**
+         * @brief Every asset of the project the asset directory is of: null when that is no project's (no `project.json`
+         *        beside it). Found — each given a meta when it has none — when the directory is said. How a model's
+         *        meshes are read and how a picture is kept are its meta's: a scene is given them when it is loaded, and
+         *        they are written back to the metas, not the scene, when it is saved.
+         */
+        [[nodiscard]] kasset::Database* Assets() { return _assets.get(); }
+        [[nodiscard]] const kasset::Database* Assets() const { return _assets.get(); }
+        /** @brief What was wrong of the project's assets when they were found: a sentence each. */
+        [[nodiscard]] const std::vector<std::string>& AssetProblems() const { return _assetProblems; }
 
         /**
          * @brief Makes the components the scripts under @p folder — or the one script file it is — declare known, as their
@@ -461,6 +497,8 @@ namespace keditor
          *        scene's project.
          */
         void DeclareScripts(const std::filesystem::path& folder);
+        /** @brief The scripts declared that take @p piece (`MeshGenerator`), by their components' names: what can make a mesh. */
+        [[nodiscard]] std::vector<std::string> ScriptsTaking(std::string_view piece) const;
         /**
          * @brief Makes a ResourceScript one a Script node can name, as its source declares it: what it makes, its fields,
          *        and what they start as. One a host runs already stays as the host made it.
@@ -492,6 +530,27 @@ namespace keditor
         /** @brief Every asset known now, by id. */
         [[nodiscard]] std::vector<std::string> MaterialAssetIds() const;
         /**
+         * @brief Makes a model's material @p id (`@ship.gltf#material:2`) one of the project's own: written to @p file (a
+         *        `.kmat`) as it is now, edits and all, and every entity that followed it follows that, keeping what it made
+         *        its own. The model's file read again changes it no more. Its id, or empty — and why in @p error — when
+         *        @p id is no model's material or the file cannot be written.
+         */
+        std::string ExtractMaterial(std::string_view id, const std::filesystem::path& file, std::string* error = nullptr);
+        /**
+         * @brief What each field of material kind @p kind takes of what model @p file reports of its materials, where it
+         *        does not take the value of its own name: field to the report's value (`tint` ← `albedo`). In the model's
+         *        meta, as `materialFields`. Empty for a model of no project, or that says nothing of it.
+         */
+        [[nodiscard]] std::map<std::string, std::string> MaterialFieldsOf(const std::filesystem::path& file, std::string_view kind) const;
+        /**
+         * @brief Says what field @p field of kind @p kind takes of model @p file 's report: @p reported, or — empty — the
+         *        report's value of its own name. Its materials are made again so, and every entity that follows one has
+         *        what it did not make its own as they are now.
+         */
+        bool SetMaterialField(const std::filesystem::path& file, std::string_view kind, const std::string& field, const std::string& reported, std::string* error = nullptr);
+        /** @brief What model material @p id 's file reports that none of its kind's fields takes: what is dropped. */
+        [[nodiscard]] std::vector<std::string> UnusedReported(std::string_view id);
+        /**
          * @brief Gives @p entity the material @p asset is — its kind, every field as the asset has it — following it from
          *        now on: what it had of that kind made its own is forgotten. False, with @p error saying why, for no asset.
          */
@@ -511,6 +570,13 @@ namespace keditor
         bool RevertMaterial(kecs::Entity entity, std::string_view kind);
         /** @brief Stops @p entity 's @p kind material following its asset: what it has is its own. */
         bool UnlinkMaterial(kecs::Entity entity, std::string_view kind);
+        /**
+         * @brief Has @p entity 's material follow the one its mesh has in its model file, once the model is read; what
+         *        it has of the fields a scene set before materials were their own (its colour, pictures, alpha) that is
+         *        not as the file says is kept as its own. Nothing for an entity not drawn with a model's mesh, or whose
+         *        material follows an asset already.
+         */
+        void FollowModelMaterial(kecs::Entity entity);
         /**
          * @brief Runs a ResourceScript: @p fill fills the images and buffers each Script node that names it makes, given
          *        that node's settings as @p type lays them out. What it makes is what @p type says, or — when it says
@@ -553,6 +619,19 @@ namespace keditor
         kscript::Scripts _scripts { _world };
         const kor::FrameGraph* _frameGraph = nullptr;
         std::unique_ptr<kgraph::Runtime> _runtime;
+        std::unique_ptr<kasset::Database> _assets;
+        std::vector<std::string> _assetProblems;
+        /** The import settings the project's metas hold, into @p graph: over what a scene saved before they were the assets' said. */
+        void ImportSettingsInto(kgraph::Graph& graph) const;
+        /** Every entity that follows a `.kgen` given what the file says now, but for what it made its own: a scene read, the file may have changed. */
+        void FollowGenerators();
+        /** The graph's import settings, into the metas of the assets they are of. */
+        void StoreImportSettings();
+        /**
+         * A model's meshes and materials, as @p model has them, given their parts' IDs by name: one the file now has in
+         * another place is the same part, and what holds it — an entity's Mesh, a material it follows — is led there.
+         */
+        void RecordModelParts(const std::filesystem::path& file, const kgraph::Model& model);
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
         std::vector<std::string> _notes;
@@ -572,8 +651,20 @@ namespace keditor
         void SyncAlphaTags(kecs::Entity entity);
         /** What a scene saved before materials were their own had in its pipelines' components, made each entity's PbrMaterial. */
         void MigrateMaterials(const kecs::json::Value& world, const std::vector<kecs::Entity>& entities);
+        /** FollowModelMaterial, its model read. */
+        void FollowedModel(kecs::Entity entity, const std::filesystem::path& file, const kgraph::Model& model);
         void Imported(const std::filesystem::path& file, kecs::Entity root, const kgraph::Model& model);
         std::vector<std::pair<std::filesystem::path, kecs::Entity>> _importing;     // a model being read, and the entity its things go under
+        /// Models placed as instances of the prefab made of each (ModelPrefabOf), and the model each prefab was last made
+        /// of: read again — written again, read with other settings — the prefab is made again, and its instances follow.
+        std::map<std::filesystem::path, const kgraph::Model*> _modelPrefabs;
+        /** Makes the things of @p read under @p root, placed as the file places them, each part its mesh and material, and the file's lights and cameras. */
+        void BuildModel(const std::filesystem::path& file, kecs::Entity root, const kgraph::Model& read);
+        /** Writes model @p file 's prefab again, of @p model as it is read now; when that changed it, every instance follows. */
+        void RemakeModelPrefab(const std::filesystem::path& file, const kgraph::Model& model);
+        std::set<std::filesystem::path> _partsToRecord;
+        std::map<std::string, std::vector<std::string>> _scriptPieces;      // each script declared, by name: the pieces it takes     // models a scene loaded has parts of, whose parts are given IDs once each is read
+        std::vector<std::pair<std::filesystem::path, kecs::Entity>> _toFollow;      // a model being read, and an entity to follow its material
         std::uint64_t _revision = 0, _saved = 0;
         std::uint64_t _moves = 0;                       // of _revision, the changes that were only an entity moved
         std::uint64_t _reported = 0;

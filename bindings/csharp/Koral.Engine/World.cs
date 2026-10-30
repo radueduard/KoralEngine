@@ -73,6 +73,8 @@ public sealed unsafe class World
     /// <summary>A new entity, named as the editor names one.</summary>
     /// <summary>The scene's meshes: made of any attributes a script likes, read back, and given to entities.</summary>
     public Meshes Meshes => _meshes ??= new Meshes(this);
+    /// <summary>The meshes generators made in this scene, by what they were made of: each made once, however many entities have it.</summary>
+    internal Dictionary<string, string> Generated { get; } = [];
     private Meshes? _meshes;
 
     public Entity Create(string name = "Entity") => Native.kengine_entity_create(Document, name);
@@ -197,15 +199,15 @@ public sealed unsafe class World
 
     /// <summary>Gives an entity a component, with its fields at their defaults. A script's is its class name.</summary>
     public bool Add(Entity entity, string component) => Native.kecs_add(Handle, entity, Id(component), null);
-    public bool Add<T>(Entity entity) where T : Script => Add(entity, ScriptLayout.NameOf(typeof(T)));
+    public bool Add<T>(Entity entity) where T : Setup => Add(entity, ScriptLayout.NameOf(typeof(T)));
     public bool Remove(Entity entity, string component) => Native.kecs_remove(Handle, entity, Id(component));
-    public bool Remove<T>(Entity entity) where T : Script => Remove(entity, ScriptLayout.NameOf(typeof(T)));
+    public bool Remove<T>(Entity entity) where T : Setup => Remove(entity, ScriptLayout.NameOf(typeof(T)));
     public bool Has(Entity entity, string component)
     {
         var id = Native.kecs_component_find(Handle, component);
         return id != Native.NoComponent && Native.kecs_has(Handle, entity, id);
     }
-    public bool Has<T>(Entity entity) where T : Script => Has(entity, ScriptLayout.NameOf(typeof(T)));
+    public bool Has<T>(Entity entity) where T : Setup => Has(entity, ScriptLayout.NameOf(typeof(T)));
     /// <summary>Switches a component off, or back on: off, the entity has it still and nothing runs for it.</summary>
     public bool SetEnabled(Entity entity, string component, bool enabled) => Native.kecs_set_enabled(Handle, entity, Id(component), enabled);
     public bool IsEnabled(Entity entity, string component) => Native.kecs_is_enabled(Handle, entity, Id(component));
@@ -281,7 +283,7 @@ public sealed unsafe class World
     /// What a script on <paramref name="entity"/> holds now, as an object of its class: read, not kept. Null when the
     /// entity has none. <see cref="Write{T}"/> puts one back.
     /// </summary>
-    public T? Read<T>(Entity entity) where T : Script, new()
+    public T? Read<T>(Entity entity) where T : Setup, new()
     {
         var layout = ScriptLayout.Of(typeof(T));
         var id = Native.kecs_component_find(Handle, layout.Name);
@@ -293,7 +295,7 @@ public sealed unsafe class World
     }
 
     /// <summary>Makes a script on <paramref name="entity"/> hold what <paramref name="script"/> does. False when the entity has none.</summary>
-    public bool Write<T>(Entity entity, T script) where T : Script
+    public bool Write<T>(Entity entity, T script) where T : Setup
     {
         var layout = ScriptLayout.Of(typeof(T));
         var id = Native.kecs_component_find(Handle, layout.Name);

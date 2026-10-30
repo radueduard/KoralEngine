@@ -221,6 +221,20 @@ KENGINE_API size_t kecs_query(KecsWorld* world, const uint32_t* all, size_t all_
 KENGINE_API const char* kengine_field_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field);
 KENGINE_API bool kengine_field_set_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field, const char* json);
 
+/* ---- pictures ----------------------------------------------------------------------------------------------- */
+
+/**
+ * Makes a picture of @p width × @p height texels, @p rgba four bytes each (red, green, blue, alpha), its smaller levels
+ * made of it, called `$script/<name>`, which is returned: what a material's picture field holds to have it. One so
+ * named already is replaced: what held it holds this one. Null, with why, when the bytes are not so many.
+ */
+KENGINE_API const char* kengine_image_create(KengineDocument* document, const char* name, uint32_t width, uint32_t height, const uint8_t* rgba);
+/**
+ * Gives @p entity picture @p picture in its picture field @p field, of whichever of its components has one so named (its
+ * material's `baseColorMap`). False when none has.
+ */
+KENGINE_API bool kengine_entity_give_picture(KengineDocument* document, KecsEntity entity, const char* field, const char* picture);
+
 /* ---- meshes ------------------------------------------------------------------------------------------------- */
 
 /** What an attribute's numbers are. Each is four bytes. */

@@ -393,8 +393,8 @@ namespace kscript
         const std::string where = file.empty() ? std::string() : std::format("{}: ", file);
         // A class, what it is said to be before its body, and its body.
         static const std::regex classes(R"(\bclass\s+(\w+)([^{;]*)\{)");
-        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript|Material)\b)");
-        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Script|GraphicsScript|ResourceScript|Material)\s*\(\s*\))");
+        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Setup|Script|GraphicsScript|ResourceScript|Material)\b)");
+        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Setup|Script|GraphicsScript|ResourceScript|Material)\s*\(\s*\))");
         static const std::regex named(R"rx(ScriptName\s*\(\s*(?:name\s*=\s*)?"([^"]*)"\s*\)\s*\]?\s*[\w\s]*$)rx");
         static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
         static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
@@ -413,6 +413,9 @@ namespace kscript
             type.makesResources = base[1].str() == "ResourceScript";
             type.material = base[1].str() == "Material";
             if (std::smatch name; std::regex_search(before, name, named)) type.name = name[1].str();
+            // The pieces it takes: the names after its base, as its source writes them.
+            static const std::regex piece(R"(\b(PerFrame|FixedStep|BeforeDraw|MeshGenerator|ImageGenerator)\b)");
+            for (auto p = std::sregex_iterator(header.begin(), header.end(), piece); p != std::sregex_iterator(); ++p) type.pieces.push_back((*p)[1].str());
 
             const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
             const std::size_t close = Closing(text, open);

@@ -3,6 +3,9 @@
 // there (a PPM), to be looked at.
 
 #include <gtest/gtest.h>
+#include <array>
+
+#include <kasset/parameters.h>
 
 #include <kui/icons.h>
 #include <functional>
@@ -1730,7 +1733,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_FALSE(Session().NewScript("Roller", "C#")) << "a project's scripts are in one language";
     EXPECT_NE(Session().Status().find("in Kotlin"), std::string::npos) << Session().Status();
     ASSERT_TRUE(Session().NewScript("Roller", "Kotlin")) << Session().Status();
-    EXPECT_NE(text(directory / "scripts", "Drifter.kt").find("class Drifter : Script()"), std::string::npos);
+    EXPECT_NE(text(directory / "scripts", "Drifter.kt").find("class Drifter : Setup(), PerFrame"), std::string::npos);
     for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew" })
         EXPECT_TRUE(std::filesystem::exists(directory / file)) << file << ": a Kotlin script comes with the build that compiles it";
     EXPECT_NE(Session().RunCommand().find("gradlew"), std::string::npos) << "scripts in Kotlin are run by the project's build: " << Session().RunCommand();
@@ -1805,7 +1808,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     std::filesystem::remove_all(csharp);
     ASSERT_TRUE(Session().NewProject(csharp)) << Session().Status();
     ASSERT_TRUE(Session().NewScript("Roller", "C#")) << Session().Status();
-    EXPECT_NE(text(csharp / "scripts", "Roller.cs").find("public sealed class Roller : Script"), std::string::npos);
+    EXPECT_NE(text(csharp / "scripts", "Roller.cs").find("public sealed class Roller : Setup, PerFrame"), std::string::npos);
     EXPECT_EQ(text(csharp / "scripts", "Roller.cs").find("$NAME"), std::string::npos);
     EXPECT_NE(Session().RunCommand().find("koral-engine-dotnet"), std::string::npos) << "scripts in C# are run by their runner: " << Session().RunCommand();
     EXPECT_NE(Session().EditCommand().find("--edit"), std::string::npos);
@@ -2144,9 +2147,472 @@ TEST_F(EditorTest, AnImportedAssetIsTheProjectsAndNotYetTheScenes) {
     EXPECT_EQ(Session().ImportAsset(models / "crate" / "crate.obj"), crate) << "one of the project's is only picked";
     EXPECT_TRUE(Session().ImportAsset(outside / "crate.mtl").empty()) << "a material file is no asset of its own";
 
+    // Each is known by an ID, kept beside it in its meta — what it names beside it (a material file, a buffer) is no asset.
+    kasset::Database* database = Session().AssetDatabase();
+    ASSERT_TRUE(database);
+    const kasset::Entry* imported = database->FindFile(models / "crate" / "crate.obj");
+    ASSERT_TRUE(imported) << "an imported file is an asset at once";
+    EXPECT_EQ(imported->meta.kind, kasset::Kind::eModel);
+    EXPECT_TRUE(std::filesystem::exists(models / "crate" / "crate.obj.meta"));
+    EXPECT_FALSE(std::filesystem::exists(models / "crate" / "crate.mtl.meta"));
+    EXPECT_FALSE(std::filesystem::exists(models / "lamp" / "data" / "lamp.bin.meta"));
+    EXPECT_EQ(database->FromLegacy(crate)->asset, imported->meta.id) << "its old name is that asset";
+    EXPECT_EQ(database->ToLegacy({ imported->meta.id, {} }), crate);
+    EXPECT_EQ(database->FromLegacy("$cube")->asset, kasset::Id::Named("mesh/cube")) << "the engine's own are known too";
+    // Opened again, the project's assets are as they were.
+    const kasset::Id id = imported->meta.id;
+    Open(project.directory);
+    database = Session().AssetDatabase();
+    ASSERT_TRUE(database && database->FindFile(models / "crate" / "crate.obj"));
+    EXPECT_EQ(database->FindFile(models / "crate" / "crate.obj")->meta.id, id);
+    EXPECT_TRUE(database->FindFile(project.directory / "scenes" / "main.scene.json")) << "a scene is an asset";
+
     // Dragged onto the scene, it is: entities of it, now.
     ASSERT_TRUE(Session().ImportModel(models / "crate" / "crate.obj")) << Session().Status();
     EXPECT_GT(Doc().World().EntityCount(), entities);
+}
+
+// How a model's meshes are read, how a picture is kept and what a model's materials are imported as are the asset's,
+// in its meta: every scene of the project reads it so, and a scene saves none of it.
+TEST_F(EditorTest, ImportSettingsAreTheAssetsNotTheScenes) {
+    const auto project = scene::MakeProject("settings");
+    Open(project.directory);
+    const auto models = project.directory / "assets" / "models" / "crate";
+    const auto textures = project.directory / "assets" / "textures";
+    std::filesystem::create_directories(models);
+    std::filesystem::create_directories(textures);
+    std::ofstream(models / "crate.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nf 1//1 2//1 3//1\n";
+    std::ofstream(textures / "wood.png") << "not looked at";
+    const std::string crate = Session().ImportAsset(models / "crate.obj");
+    const std::string wood = Session().ImportAsset(textures / "wood.png");
+    ASSERT_FALSE(crate.empty() || wood.empty()) << Session().Status();
+
+    kgraph::MeshImport import;
+    import.leaveOut = { "NORMAL" };
+    Doc().SetMeshImport(crate.substr(1), import);
+    Doc().SetTextureSettings({ { wood, { kgraph::TextureFormat::eBC1, kgraph::TextureQuality::eFast } } }, {});
+    Session().SetImportKind(kgraph::ModelMaterial::Model::eClassic, "PbrMaterial", models / "crate.obj");
+    ASSERT_TRUE(Session().Save()) << Session().Status();
+
+    // In the metas, and not in the scene.
+    kasset::Database* assets = Session().AssetDatabase();
+    ASSERT_TRUE(assets);
+    const kasset::Meta crateMeta = assets->FindFile(models / "crate.obj")->meta;
+    EXPECT_EQ(kasset::MeshImportFrom(kasset::ParameterOf(crateMeta, "mesh")), import);
+    EXPECT_EQ(kasset::KindsFrom(kasset::ParameterOf(crateMeta, "materialKinds")), (std::map<std::string, std::string> { { "classic", "PbrMaterial" } }));
+    EXPECT_EQ(kasset::TextureImportFrom(kasset::ParameterOf(assets->FindFile(textures / "wood.png")->meta, "texture")),
+              (kgraph::TextureImport { kgraph::TextureFormat::eBC1, kgraph::TextureQuality::eFast }));
+    std::ifstream saved(project.directory / "scenes" / "main.scene.json");
+    const std::string scene((std::istreambuf_iterator<char>(saved)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(scene.find("meshImports"), std::string::npos);
+    EXPECT_EQ(scene.find("textureImports"), std::string::npos);
+    std::ifstream projectFile(project.directory / "project.json");
+    const std::string projectText((std::istreambuf_iterator<char>(projectFile)), std::istreambuf_iterator<char>());
+    EXPECT_EQ(projectText.find("crate"), std::string::npos) << "a model's own kinds are not the project's";
+
+    // Opened again — any scene of it — it is read so.
+    Open(project.directory);
+    EXPECT_EQ(Doc().MeshImportOf(crate.substr(1)), import);
+    ASSERT_TRUE(Doc().Graph().textureImports.contains(wood));
+    EXPECT_EQ(Doc().Graph().textureImports.at(wood).format, kgraph::TextureFormat::eBC1);
+
+    // Back to how it is by default, its meta says nothing of it.
+    Doc().SetMeshImport(crate.substr(1), {});
+    ASSERT_TRUE(Session().Save());
+    EXPECT_EQ(kasset::ParameterOf(Session().AssetDatabase()->FindFile(models / "crate.obj")->meta, "mesh"), "");
+}
+
+// A scene saved when how its files were read was the scene's has it moved into the files' metas when it is saved.
+TEST_F(EditorTest, AnOldScenesImportSettingsMoveIntoTheMetas) {
+    const auto project = scene::MakeProject("old-settings");
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "old.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n";
+    Open(project.directory);
+    ASSERT_TRUE(Session().Save());
+    // As an old scene had it: in the graph, saved with the scene, and no meta saying anything.
+    kgraph::Graph graph = Doc().Graph();
+    graph.meshImports["models/old.obj"] = { { "TANGENT" }, {} };
+    std::ifstream in(project.directory / "scenes" / "main.scene.json");
+    std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    in.close();
+    const auto at = text.find("\"graph\": ") + 9;
+    const auto end = text.find("\n\"world\"");
+    text = text.substr(0, at) + graph.ToJson() + "," + text.substr(end);
+    std::ofstream(project.directory / "scenes" / "main.scene.json", std::ios::trunc) << text;
+
+    Open(project.directory);
+    EXPECT_EQ(Doc().MeshImportOf("models/old.obj").leaveOut, std::vector<std::string> { "TANGENT" }) << "read as the scene said";
+    ASSERT_TRUE(Session().Save());
+    EXPECT_EQ(kasset::MeshImportFrom(kasset::ParameterOf(Session().AssetDatabase()->FindFile(models / "old.obj")->meta, "mesh"))->leaveOut,
+              std::vector<std::string> { "TANGENT" }) << "and saved into its meta";
+}
+
+// An asset is known by its ID: renamed or moved from the Assets panel, every scene that has it still does — the one
+// open, and one that is not, saved before files were named by their IDs.
+TEST_F(EditorTest, AnAssetMovedIsStillWhatTheScenesHave) {
+    const auto project = scene::MakeProject("moving");
+    Open(project.directory);
+    const auto textures = project.directory / "assets" / "textures";
+    std::filesystem::create_directories(textures);
+    std::ofstream(textures / "wall.png") << "not looked at";
+    const std::string wall = Session().ImportAsset(textures / "wall.png");
+    ASSERT_EQ(wall, "@textures/wall.png");
+    const kecs::Entity crate = Doc().CreateEntity("Crate");
+    Doc().World().Add(crate, Doc().World().Find("PbrMaterial"));
+    ASSERT_TRUE(Doc().SetField(crate, "PbrMaterial", "baseColorMap", kgraph::Value(wall)));
+    ASSERT_TRUE(Session().Save());
+    // On disk it is named by its ID, not where it is.
+    {
+        std::ifstream in(project.directory / "scenes" / "main.scene.json");
+        const std::string saved((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_EQ(saved.find("@textures/wall.png"), std::string::npos);
+        EXPECT_NE(saved.find(Session().AssetDatabase()->FindFile(textures / "wall.png")->meta.id.Text()), std::string::npos);
+    }
+    // Another scene, saved before IDs, that names it by where it is.
+    std::filesystem::copy_file(project.directory / "scenes" / "main.scene.json", project.directory / "scenes" / "old.scene.json");
+    {
+        std::ifstream in(project.directory / "scenes" / "old.scene.json");
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        in.close();
+        const std::string id = Session().AssetDatabase()->FindFile(textures / "wall.png")->meta.id.Text();
+        text.replace(text.find(id), id.size(), "@textures/wall.png");
+        std::ofstream(project.directory / "scenes" / "old.scene.json", std::ios::trunc) << text;
+    }
+    EXPECT_EQ(Session().AssetUsers(wall), (std::vector<std::string> { "scenes/main.scene.json", "scenes/old.scene.json" }));
+
+    ASSERT_TRUE(Session().MoveAsset(wall, "assets/brick/red.png")) << Session().Status();
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "brick" / "red.png"));
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "brick" / "red.png.meta"));
+    EXPECT_FALSE(std::filesystem::exists(textures / "wall.png.meta"));
+    EXPECT_EQ(Session().selectedAsset, "@brick/red.png") << "picked where it is now";
+    const kecs::Entity again = Doc().World().FindEntity("Crate");
+    ASSERT_FALSE(again.IsNull());
+    EXPECT_EQ(Doc().Field(again, "PbrMaterial", "baseColorMap"), kgraph::Value("@brick/red.png")) << "the scene open has it where it is now";
+    ASSERT_TRUE(Session().OpenScene("old")) << Session().Status();
+    const kecs::Entity old = Doc().World().FindEntity("Crate");
+    ASSERT_FALSE(old.IsNull());
+    EXPECT_EQ(Doc().Field(old, "PbrMaterial", "baseColorMap"), kgraph::Value("@brick/red.png")) << "and so has one that named it by where it was";
+    EXPECT_FALSE(Session().MoveAsset("$cube", "assets/cube.obj")) << "the engine's own are of no file";
+}
+
+// A model's meshes are known by their names: written again with them in another order — as an export may — each entity
+// still has the mesh it had, now at its new place in the file.
+TEST_F(EditorTest, AModelsMeshesAreFoundByNameWhenTheFileReordersThem) {
+    const auto project = scene::MakeProject("reordered");
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    const auto write = [&](const bool swapped) {
+        const std::string tall = "o Tall\nv 0 0 0\nv 1 0 0\nv 0 3 0\nf 1 2 3\n";
+        const std::string wide = "o Wide\nv 0 0 0\nv 3 0 0\nv 0 1 0\nf 4 5 6\n";
+        std::ofstream(models / "pair.obj", std::ios::trunc) << (swapped ? std::string("o Wide\nv 0 0 0\nv 3 0 0\nv 0 1 0\nf 1 2 3\no Tall\nv 0 0 0\nv 1 0 0\nv 0 3 0\nf 4 5 6\n")
+                                                                        : tall + wide);
+    };
+    write(false);
+    Open(project.directory);
+    const std::string pair = Session().ImportAsset(models / "pair.obj");
+    ASSERT_FALSE(pair.empty()) << Session().Status();
+    const auto read = [&] {
+        for (int i = 0; i < 400 && (Doc().Runtime().Reading() > 0 || !Doc().Runtime().ModelOf(models / "pair.obj")); ++i) Frame();
+        for (int i = 0; i < 3; ++i) Frame();
+    };
+    read();
+    const kgraph::Model* model = Doc().Runtime().ModelOf(models / "pair.obj").get();
+    ASSERT_TRUE(model);
+    ASSERT_EQ(model->meshNames.size(), 2u);
+    const int tall = model->meshNames[0] == "Tall" ? 0 : 1;
+    const kecs::Entity holder = Doc().CreateEntity("Holder");
+    Doc().AddComponent(holder, "Mesh");
+    ASSERT_TRUE(Doc().SetField(holder, "Mesh", "mesh", kgraph::Value(std::format("{}#{}", pair, tall))));
+    ASSERT_TRUE(Session().Save());
+
+    write(true);
+    Open(project.directory);
+    read();
+    const kecs::Entity again = Doc().World().FindEntity("Holder");
+    ASSERT_FALSE(again.IsNull());
+    const kgraph::Model* now = Doc().Runtime().ModelOf(models / "pair.obj").get();
+    ASSERT_TRUE(now);
+    const int moved = now->meshNames[0] == "Tall" ? 0 : 1;
+    EXPECT_NE(moved, tall) << "the file has them the other way round";
+    const kgraph::Value mesh = Doc().Field(again, "Mesh", "mesh");
+    const std::string* held = mesh.String();
+    ASSERT_TRUE(held);
+    EXPECT_EQ(*held, std::format("{}#{}", pair, moved)) << "and the entity still has Tall";
+}
+
+// A model's material extracted is the project's own: a .kmat its entities follow, which the model's file no longer changes.
+TEST_F(EditorTest, AModelsMaterialExtractedIsTheProjectsOwn) {
+    const auto project = scene::MakeProject("extracted");
+    const auto models = project.directory / "assets" / "models" / "crate";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "crate.obj") << "mtllib crate.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nusemtl wood\nf 1//1 2//1 3//1\n";
+    std::ofstream(models / "crate.mtl") << "newmtl wood\nKd 0.5 0.25 0.125\n";
+    Open(project.directory);
+    const std::string crate = Session().ImportAsset(models / "crate.obj");
+    ASSERT_TRUE(Session().ImportModel(models / "crate.obj")) << Session().Status();
+    for (int i = 0; i < 400 && (Doc().Runtime().Reading() > 0 || !Doc().Runtime().ModelOf(models / "crate.obj")); ++i) Frame();
+    for (int i = 0; i < 5; ++i) Frame();
+    std::string material;
+    for (const auto& id : Doc().MaterialAssetIds())
+        if (id.starts_with(crate + "#material:") && Doc().MaterialAssetOf(id)->name == "wood") material = id;
+    ASSERT_FALSE(material.empty()) << "the model's wood is one of its materials";
+    std::size_t following = 0;
+    for (const kecs::Entity entity : Doc().World().All()) following += Doc().MaterialAssetOfEntity(entity, Doc().MaterialAssetOf(material)->kind) == material;
+    ASSERT_GT(following, 0u) << "the model's things follow its material";
+
+    const std::string own = Session().ExtractMaterial(material);
+    ASSERT_FALSE(own.empty()) << Session().Status();
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "materials" / "wood.kmat"));
+    EXPECT_EQ(Session().selectedAsset, own);
+    const std::string kind = Doc().MaterialAssetOf(own)->kind;
+    std::size_t now = 0;
+    for (const kecs::Entity entity : Doc().World().All()) now += Doc().MaterialAssetOfEntity(entity, kind) == own;
+    EXPECT_EQ(now, following) << "who followed the model's follows the project's own";
+    ASSERT_TRUE(Session().Save());
+    Open(project.directory);
+    now = 0;
+    for (const kecs::Entity entity : Doc().World().All()) now += Doc().MaterialAssetOfEntity(entity, kind) == own;
+    EXPECT_EQ(now, following) << "and does when the scene is opened again";
+    EXPECT_TRUE(Session().ExtractMaterial(own).empty()) << "what is the project's own is not a model's to extract";
+}
+
+// The game exported is what its scenes have and nothing more — its models read ahead into the cache — and opens on its own.
+TEST_F(EditorTest, TheGameExportedIsWhatItsScenesHave) {
+    const auto project = scene::MakeProject("exported");
+    const auto textures = project.directory / "assets" / "textures";
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(textures);
+    std::filesystem::create_directories(models);
+    std::ofstream(textures / "wall.png") << "not looked at";
+    std::ofstream(textures / "unused.png") << "not looked at";
+    std::ofstream(models / "tri.obj") << "v 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n";
+    Open(project.directory);
+    const std::string wall = Session().ImportAsset(textures / "wall.png");
+    const std::string tri = Session().ImportAsset(models / "tri.obj");
+    (void)Session().ImportAsset(textures / "unused.png");
+    const kecs::Entity thing = Doc().CreateEntity("Thing");
+    Doc().AddComponent(thing, "Mesh");
+    ASSERT_TRUE(Doc().SetField(thing, "Mesh", "mesh", kgraph::Value(tri + "#0")));
+    Doc().World().Add(thing, Doc().World().Find("PbrMaterial"));
+    ASSERT_TRUE(Doc().SetField(thing, "PbrMaterial", "baseColorMap", kgraph::Value(wall)));
+
+    const auto out = std::filesystem::temp_directory_path() / "keditor-exported-game";
+    std::filesystem::remove_all(out);
+    ASSERT_TRUE(Session().ExportGame(out)) << Session().Status();
+    for (const char* file : { "manifest.json", "project.json", "scenes/main.scene.json", "assets/textures/wall.png", "assets/textures/wall.png.meta", "assets/models/tri.obj" })
+        EXPECT_TRUE(std::filesystem::exists(out / file)) << file;
+    EXPECT_FALSE(std::filesystem::exists(out / "assets/textures/unused.png")) << "what no scene has is not the game's";
+    bool readAhead = false;
+    std::error_code none;
+    for (const auto& entry : std::filesystem::directory_iterator(out / ".koral/cache/models", none)) readAhead = readAhead || entry.path().extension() == ".kmodel";
+    EXPECT_TRUE(readAhead) << "its model read ahead into the cache";
+    EXPECT_FALSE(Session().ExportGame(out)) << "not into a folder with something in it";
+    EXPECT_FALSE(Session().ExportGame(project.directory / "assets" / "game")) << "not among the project's assets";
+
+    // Opened by itself, it has what it had.
+    Open(out);
+    const kecs::Entity again = Doc().World().FindEntity("Thing");
+    ASSERT_FALSE(again.IsNull());
+    const kgraph::Value given = Doc().Field(again, "PbrMaterial", "baseColorMap");
+    const std::string* map = given.String();
+    ASSERT_TRUE(map);
+    EXPECT_EQ(*map, wall);
+    std::filesystem::remove_all(out);
+}
+
+// A model put in the scene is an instance of the prefab made of it: written again — another mesh in it — every place it
+// was put follows, keeping what each made its own.
+TEST_F(EditorTest, AModelPutInTheSceneFollowsItsFile) {
+    const auto project = scene::MakeProject("followed");
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "kit.obj") << "o Box\nv 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\n";
+    Open(project.directory);
+    (void)Session().ImportAsset(models / "kit.obj");
+    // Everything under an entity, however deep.
+    std::function<std::size_t(kecs::Entity)> under = [&](const kecs::Entity entity) {
+        std::size_t count = 0;
+        for (const kecs::Entity child : Doc().World().ChildrenOf(entity)) count += 1 + under(child);
+        return count;
+    };
+    const auto settle = [&](const std::function<bool()>& done) {
+        for (int i = 0; i < 500 && !done(); ++i) { Frame(); std::this_thread::sleep_for(std::chrono::milliseconds(5)); }
+        for (int i = 0; i < 3; ++i) Frame();
+    };
+    const kecs::Entity first = Doc().ImportModel(models / "kit.obj");
+    const kecs::Entity second = Doc().ImportModel(models / "kit.obj");
+    settle([&] { return under(first) > 0 && under(second) > 0; });
+    const std::string prefab = Doc().PrefabOf(first);
+    EXPECT_TRUE(prefab.starts_with(".koral/cache/prefabs/")) << "an instance of the model's prefab: " << prefab;
+    EXPECT_EQ(Doc().PrefabOf(second), prefab);
+    const std::size_t before = under(first);
+    // One of them made its own: moved.
+    Doc().SetPosition(first, { 5.f, 0.f, 0.f });
+
+    // The file written again, with another mesh in it.
+    std::this_thread::sleep_for(std::chrono::milliseconds(1100));
+    std::ofstream(models / "kit.obj", std::ios::trunc) << "o Box\nv 0 0 0\nv 1 0 0\nv 1 1 0\nf 1 2 3\no Lid\nv 0 2 0\nv 1 2 0\nv 1 3 0\nf 4 5 6\n";
+    settle([&] { return under(first) > before && under(second) > before; });
+    EXPECT_GT(under(first), before) << "the place it was put has what the file has now";
+    EXPECT_GT(under(second), before) << "and so does the other";
+    EXPECT_FLOAT_EQ(Doc().World().PositionOf(first).x, 5.f) << "where it is is still its own";
+}
+
+// A model's materials imported as a kind that has no field of a name the file reports: each field is told which of the
+// file's values it takes, kept in the model's meta, and what follows the material has it at once.
+TEST_F(EditorTest, AMaterialsFieldsAreToldWhatOfTheFileEachTakes) {
+    const auto project = scene::MakeProject("mapped");
+    const auto models = project.directory / "assets" / "models" / "crate";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "crate.obj") << "mtllib crate.mtl\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nusemtl wood\nf 1//1 2//1 3//1\n";
+    std::ofstream(models / "crate.mtl") << "newmtl wood\nKd 1 0 0\n";
+    Open(project.directory);
+    const std::string crate = Session().ImportAsset(models / "crate.obj");
+    // Its classic materials as physical ones: PbrMaterial has no diffuse.
+    Session().SetImportKind(kgraph::ModelMaterial::Model::eClassic, "PbrMaterial", models / "crate.obj");
+    ASSERT_TRUE(Session().ImportModel(models / "crate.obj")) << Session().Status();
+    for (int i = 0; i < 400 && (Doc().Runtime().Reading() > 0 || !Doc().Runtime().ModelOf(models / "crate.obj")); ++i) Frame();
+    for (int i = 0; i < 5; ++i) Frame();
+    std::string wood;
+    for (const auto& id : Doc().MaterialAssetIds())
+        if (id.starts_with(crate + "#material:") && Doc().MaterialAssetOf(id)->name == "wood") wood = id;
+    ASSERT_FALSE(wood.empty());
+    ASSERT_EQ(Doc().MaterialAssetOf(wood)->kind, "PbrMaterial");
+    EXPECT_TRUE(std::ranges::contains(Doc().UnusedReported(wood), std::string("diffuse"))) << "the file's colour is taken by nothing";
+
+    std::string error;
+    ASSERT_TRUE(Doc().SetMaterialField(models / "crate.obj", "PbrMaterial", "baseColor", "diffuse", &error)) << error;
+    EXPECT_EQ(Doc().MaterialFieldsOf(models / "crate.obj", "PbrMaterial"), (std::map<std::string, std::string> { { "baseColor", "diffuse" } }));
+    EXPECT_FALSE(std::ranges::contains(Doc().UnusedReported(wood), std::string("diffuse")));
+    const keditor::MaterialAsset* asset = Doc().MaterialAssetOf(wood);
+    const auto colour = std::ranges::find(asset->values, std::string("baseColor"), &std::pair<std::string, kgraph::Value>::first);
+    ASSERT_NE(colour, asset->values.end());
+    EXPECT_NEAR(*colour->second.Items()->at(0).Number(), 1.0, 1e-4) << "red, as the file has it";
+    EXPECT_NEAR(*colour->second.Items()->at(1).Number(), 0.0, 1e-4);
+    std::size_t red = 0;
+    for (const kecs::Entity entity : Doc().World().All())
+        if (Doc().MaterialAssetOfEntity(entity, "PbrMaterial") == wood) {
+            const kgraph::Value has = Doc().Field(entity, "PbrMaterial", "baseColor");
+            red += has.Items() && has.Items()->at(1).Number() && std::abs(*has.Items()->at(1).Number()) < 1e-4;
+        }
+    EXPECT_GT(red, 0u) << "what follows it has it";
+    EXPECT_FALSE(kasset::ParameterOf(Session().AssetDatabase()->FindFile(models / "crate.obj")->meta, "materialFields").empty()) << "kept in the model's meta";
+}
+
+// A project's script that makes meshes is known for it, whether or not anything runs it: what an entity's Mesh offers.
+TEST_F(EditorTest, AScriptThatMakesMeshesIsOfferedForAMesh) {
+    const auto project = scene::MakeProject("generators");
+    std::filesystem::create_directories(project.directory / "scripts");
+    std::ofstream(project.directory / "scripts" / "Pyramid.cs") << "public sealed class Pyramid : Setup, MeshGenerator\n{\n    public float Height = 1;\n"
+                                                                    "    public void Initialize(MeshWriter mesh) { }\n}\n";
+    std::ofstream(project.directory / "scripts" / "Spin.cs") << "public sealed class Spin : Setup, PerFrame\n{\n    public float Speed;\n    public void Update(float delta) { }\n}\n";
+    Open(project.directory);
+    EXPECT_EQ(Doc().ScriptsTaking("MeshGenerator"), std::vector<std::string> { "Pyramid" });
+    EXPECT_EQ(Doc().ScriptsTaking("PerFrame"), std::vector<std::string> { "Spin" });
+}
+
+// A mesh's small picture is kept in the project's cache once it is drawn — by what the mesh is made of — and a material's
+// is a sphere of its colour.
+TEST_F(EditorTest, PicturesOfMeshesAreKeptAndMaterialsAreSpheres) {
+    const auto project = scene::MakeProject("pictured");
+    Open(project.directory);
+    (void)Session().Assets();       // what the panel lists, and asks to be drawn
+    for (int i = 0; i < 600 && !Session().MeshPicture("$cube").Get(); ++i) Frame();
+    ASSERT_TRUE(Session().MeshPicture("$cube").Get()) << "the cube is drawn";
+    const auto kept = project.directory / ".koral" / "cache" / "thumbnails";
+    std::size_t files = 0;
+    std::error_code none;
+    for (const auto& entry : std::filesystem::directory_iterator(kept, none)) files += entry.path().extension() == ".kthumb";
+    EXPECT_GT(files, 0u) << "kept in the project's cache";
+    for (int i = 0; i < 600 && !Session().MaterialPicture("material:Gold").Get(); ++i) Frame();
+    const auto gold = Session().MaterialPicture("material:Gold");
+    ASSERT_TRUE(gold.Get()) << "a material is a sphere of it";
+    EXPECT_NE(gold.Get(), Session().MaterialPicture("material:Red plastic").Get()) << "each its own colour";
+
+    // What is drawn is the material: read back from where it is kept, four bytes a texel, 96 by 96.
+    const auto middleOf = [&](std::set<std::filesystem::path>& seen) -> std::optional<std::array<int, 4>> {
+        for (const auto& entry : std::filesystem::directory_iterator(kept, none)) {
+            if (entry.path().extension() != ".kthumb" || !seen.insert(entry.path()).second) continue;
+            std::ifstream in(entry.path(), std::ios::binary);
+            std::vector<unsigned char> texels((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (texels.size() != 96 * 96 * 4) continue;
+            EXPECT_EQ(texels[3], 0) << "the corner is nothing: only the sphere is drawn";
+            const std::size_t at = (48 * 96 + 48) * 4;
+            return std::array<int, 4> { texels[at], texels[at + 1], texels[at + 2], texels[at + 3] };
+        }
+        return std::nullopt;
+    };
+    std::set<std::filesystem::path> seen;
+    for (const auto& entry : std::filesystem::directory_iterator(kept, none)) seen.insert(entry.path());
+    const auto settle = [&](const std::string& id) {
+        for (int i = 0; i < 600 && !Session().MaterialPicture(id).Get(); ++i) Frame();
+        for (int i = 0; i < 3; ++i) Frame();
+        return middleOf(seen);
+    };
+    const auto red = settle("material:Red plastic");
+    if (red) { EXPECT_GT((*red)[0], (*red)[1] + 40) << "red, in its colour"; EXPECT_EQ((*red)[3], 255); }
+    else { EXPECT_GT(files, 0u); }
+
+    // A material of a picture: what is drawn is the picture, not its colour.
+    const auto assets = project.directory / "assets";
+    std::filesystem::create_directories(assets);
+    {
+        std::ofstream file(assets / "blue.ppm", std::ios::binary);
+        file << "P6\n8 8\n255\n";
+        for (int i = 0; i < 64; ++i) file.put(static_cast<char>(10)).put(static_cast<char>(30)).put(static_cast<char>(230));
+    }
+    std::ofstream(assets / "Blue.kmat") << "{\n  \"koral-material\": 1,\n  \"kind\": \"PbrMaterial\",\n  \"values\": { \"baseColor\": [1, 1, 1, 1], \"baseColorMap\": \"@blue.ppm\", \"roughness\": 0.9 }\n}\n";
+    const auto blue = settle("@Blue.kmat");
+    ASSERT_TRUE(blue) << "drawn, and kept";
+    EXPECT_GT((*blue)[2], (*blue)[0] + 40) << "blue, in its picture";
+}
+
+// A generator saved — its fields as they are — is an asset: dropped on another entity, that one makes the same.
+TEST_F(EditorTest, AGeneratorSavedIsGivenToOthers) {
+    const auto project = scene::MakeProject("kgen");
+    std::filesystem::create_directories(project.directory / "scripts");
+    std::ofstream(project.directory / "scripts" / "Pyramid.cs") << "public sealed class Pyramid : Setup, MeshGenerator\n{\n    public float Height = 1;\n"
+                                                                    "    public void Initialize(MeshWriter mesh) { }\n}\n";
+    Open(project.directory);
+    const kecs::Entity tall = Doc().CreateEntity("Tall");
+    ASSERT_TRUE(Doc().AddComponent(tall, "Pyramid"));
+    ASSERT_TRUE(Doc().SetField(tall, "Pyramid", "Height", kgraph::Value(3.0)));
+    const std::string id = Session().SaveGenerator(tall);
+    ASSERT_FALSE(id.empty()) << Session().Status();
+    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "generators" / "Pyramid.kgen"));
+    const auto assets = Session().Assets();
+    const auto listed = std::ranges::find(assets, id, &keditor::Session::Asset::id);
+    ASSERT_NE(listed, assets.end()) << "listed among the assets";
+    EXPECT_EQ(listed->kind, keditor::Session::Asset::Kind::eGenerator);
+    EXPECT_TRUE(Session().AssetDatabase()->FindFile(project.directory / "assets" / "generators" / "Pyramid.kgen")) << "an asset, by its ID";
+
+    const kecs::Entity other = Doc().CreateEntity("Other");
+    ASSERT_TRUE(Session().GiveAsset(id, other)) << Session().Status();
+    const kgraph::Value height = Doc().Field(other, "Pyramid", "Height");
+    ASSERT_TRUE(height.Number());
+    EXPECT_FLOAT_EQ(static_cast<float>(*height.Number()), 3.f) << "with the fields it was saved with";
+
+    // It follows the file: changed there it changes, but for what an entity made its own — here and in the scene opened again.
+    const auto file = project.directory / "assets" / "generators" / "Pyramid.kgen";
+    const kecs::Entity mine = Doc().CreateEntity("Mine");
+    ASSERT_TRUE(Session().GiveAsset(id, mine));
+    ASSERT_TRUE(Doc().SetField(mine, "Pyramid", "Height", kgraph::Value(9.0)));
+    std::string error;
+    ASSERT_TRUE(Doc().SetGeneratorField(file, "Height", kgraph::Value(5.0), &error)) << error;
+    const auto heightOf = [&](const char* name) {
+        const kgraph::Value held = Doc().Field(Doc().World().FindEntity(name), "Pyramid", "Height");
+        return held.Number() ? static_cast<float>(*held.Number()) : 0.f;
+    };
+    EXPECT_FLOAT_EQ(heightOf("Other"), 5.f) << "what follows it has it";
+    EXPECT_FLOAT_EQ(heightOf("Tall"), 5.f) << "and so has the one it was saved from";
+    EXPECT_FLOAT_EQ(heightOf("Mine"), 9.f) << "what made it its own keeps it";
+    ASSERT_TRUE(Session().Save());
+    ASSERT_TRUE(Doc().SetGeneratorField(file, "Height", kgraph::Value(7.0), &error)) << error;
+    Open(project.directory);
+    EXPECT_FLOAT_EQ(heightOf("Other"), 7.f) << "the file changed since the scene was saved: opened, it has what the file says";
+    EXPECT_FLOAT_EQ(heightOf("Mine"), 9.f);
+    EXPECT_TRUE(Session().SaveGenerator(Doc().CreateEntity("Plain")).empty()) << "one with no generator saves none";
 }
 
 // A prefab is made by dragging an entity from the outliner into the Assets panel — or with the inspector's button, the

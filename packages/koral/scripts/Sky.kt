@@ -7,7 +7,7 @@ import koral.engine.Min
 import koral.engine.Range
 import koral.engine.Script
 
-class Sky : Script() {
+class Sky : Setup() {
     @Min(0f) var zenith = Vec3(0.22f, 0.42f, 0.78f)
     @Min(0f) var horizon = Vec3(0.72f, 0.8f, 0.9f)
     @Min(0f) var ground = Vec3(0.23f, 0.21f, 0.19f)

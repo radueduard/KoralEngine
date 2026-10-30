@@ -122,3 +122,123 @@ public sealed unsafe class Meshes
 
     private static string Result(byte* made) => made is null ? throw new EngineException(Native.LastError()) : Native.Text(made);
 }
+
+/// <summary>
+/// What a <see cref="MeshGenerator"/> writes a mesh into: its attributes by semantic — the usual ones, or its own — its
+/// indices, and, if it says, the buffers they are in. What it does not say is the engine's to choose.
+/// </summary>
+public sealed class MeshWriter
+{
+    internal readonly List<MeshAttribute> Attributes = [];
+    internal uint[]? IndexList;
+    internal string? BufferLayout;
+    /// <summary>How many vertices it has: as many as its positions.</summary>
+    public int VertexCount { get; private set; }
+
+    /// <summary>Where each vertex is: what makes it a mesh, and how many vertices it has.</summary>
+    public void Positions(ReadOnlySpan<Vec3> positions)
+    {
+        VertexCount = positions.Length;
+        Attribute(MeshAttribute.Floats("POSITION", 3, MemoryMarshal.Cast<Vec3, float>(positions).ToArray()));
+    }
+    /// <summary>Which way each vertex's surface faces.</summary>
+    public void Normals(ReadOnlySpan<Vec3> normals) => Attribute(MeshAttribute.Floats("NORMAL", 3, MemoryMarshal.Cast<Vec3, float>(normals).ToArray()));
+    /// <summary>Where on a picture each vertex is: <c>UV</c>, or <c>UV1</c> for <paramref name="set"/> 1.</summary>
+    public void Uvs(ReadOnlySpan<Vec2> uvs, int set = 0) => Attribute(MeshAttribute.Floats(set == 0 ? "UV" : $"UV{set}", 2, MemoryMarshal.Cast<Vec2, float>(uvs).ToArray()));
+    /// <summary>The way each vertex's u grows along its surface, and in w which side of it v does (1 or -1).</summary>
+    public void Tangents(ReadOnlySpan<Vec4> tangents) => Attribute(MeshAttribute.Floats("TANGENT", 4, MemoryMarshal.Cast<Vec4, float>(tangents).ToArray()));
+    /// <summary>Any attribute, by its semantic: in place of one of the same semantic written before.</summary>
+    public void Attribute(MeshAttribute attribute)
+    {
+        Attributes.RemoveAll(a => a.Semantic == attribute.Semantic);
+        Attributes.Add(attribute);
+    }
+    /// <summary>Its triangles, three indices each, counter-clockwise seen from outside. None: drawn in the order of its vertices.</summary>
+    public void Indices(ReadOnlySpan<uint> indices) => IndexList = indices.ToArray();
+    /// <summary>Which vertex buffer each attribute is in — <c>"POSITION; NORMAL UV"</c>, a buffer to each ';' — rather than the engine's choice.</summary>
+    public void Buffers(string layout) => BufferLayout = layout;
+}
+
+/// <summary>
+/// What a script takes to make an entity's mesh: a sphere of so many subdivisions, a terrain of a seed. Its public fields
+/// are what it is made of; whenever they change — in the inspector, while the scene plays or not — it is made again,
+/// and the entity's Mesh holds it. A generator is given only what it writes: what it makes is of its fields alone, so
+/// every entity with the same fields shares one mesh, and what was made is kept in the project's cache, there when the
+/// scene is opened without scripts.
+/// </summary>
+/// <remarks>
+/// <code>
+/// public sealed class Pyramid : Setup, MeshGenerator
+/// {
+///     [Range(0.1f, 10)] public float Height = 1;
+///     public void Initialize(MeshWriter mesh)
+///     {
+///         mesh.Positions([new(-0.5f, 0, -0.5f), new(0.5f, 0, -0.5f), new(0.5f, 0, 0.5f), new(-0.5f, 0, 0.5f), new(0, Height, 0)]);
+///         mesh.Indices([0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3]);
+///     }
+/// }
+/// </code>
+/// </remarks>
+public interface MeshGenerator
+{
+    /// <summary>Writes the mesh, of the fields as they are now.</summary>
+    void Initialize(MeshWriter mesh);
+}
+
+/// <summary>What an <see cref="ImageGenerator"/> writes a picture into: so many texels, four bytes each — red, green, blue, alpha.</summary>
+public sealed class ImageWriter
+{
+    internal byte[] Texels = [];
+    /// <summary>How many texels across and down: <see cref="Size"/> says, and it starts 256 by 256.</summary>
+    public int Width { get; private set; }
+    public int Height { get; private set; }
+
+    internal ImageWriter() => Size(256, 256);
+
+    /// <summary>How big it is: every texel black and see-through again.</summary>
+    public void Size(int width, int height)
+    {
+        if (width <= 0 || height <= 0) throw new ArgumentException("a picture has at least one texel");
+        (Width, Height) = (width, height);
+        Texels = new byte[width * height * 4];
+    }
+    /// <summary>The texel at <paramref name="x"/>, <paramref name="y"/> (from the top left): each of red, green, blue and alpha 0 to 1.</summary>
+    public void Set(int x, int y, Vec4 colour)
+    {
+        var at = (y * Width + x) * 4;
+        Texels[at] = (byte)Math.Clamp(colour.X * 255f + 0.5f, 0f, 255f);
+        Texels[at + 1] = (byte)Math.Clamp(colour.Y * 255f + 0.5f, 0f, 255f);
+        Texels[at + 2] = (byte)Math.Clamp(colour.Z * 255f + 0.5f, 0f, 255f);
+        Texels[at + 3] = (byte)Math.Clamp(colour.W * 255f + 0.5f, 0f, 255f);
+    }
+    /// <summary>Its texels as bytes, four a texel, a row after another from the top: there to be written whole.</summary>
+    public Span<byte> Bytes => Texels;
+}
+
+/// <summary>
+/// What a script takes to make a picture of its entity's material: a noise, a height map, a checker. Its public fields
+/// are what it is made of; whenever they change it is made again, and the entity's material field <see cref="Into"/>
+/// holds it. As a <see cref="MeshGenerator"/>, it is given only what it writes; every entity of the same fields shares one,
+/// and what was made is kept in the project's cache.
+/// </summary>
+/// <remarks>
+/// <code>
+/// public sealed class Checker : Setup, ImageGenerator
+/// {
+///     public int Squares = 8;
+///     public void Initialize(ImageWriter image)
+///     {
+///         for (var y = 0; y &lt; image.Height; ++y)
+///             for (var x = 0; x &lt; image.Width; ++x)
+///                 image.Set(x, y, (x * Squares / image.Width + y * Squares / image.Height) % 2 == 0 ? new Vec4(1, 1, 1, 1) : new Vec4(0, 0, 0, 1));
+///     }
+/// }
+/// </code>
+/// </remarks>
+public interface ImageGenerator
+{
+    /// <summary>The picture field of its entity's material that holds what it makes: <c>baseColorMap</c> unless it says.</summary>
+    string Into => "baseColorMap";
+    /// <summary>Writes the picture, of the fields as they are now.</summary>
+    void Initialize(ImageWriter image);
+}

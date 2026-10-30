@@ -7,7 +7,7 @@ import koral.engine.Min
 import koral.engine.Range
 import koral.engine.Script
 
-class SpotLight : Script() {
+class SpotLight : Setup() {
     @Min(0f) var color = Vec3(1f, 1f, 1f)
     @Min(0f) @Logarithmic var intensity = 3f
     @Min(0f) @Logarithmic var range = 8f

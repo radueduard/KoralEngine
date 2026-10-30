@@ -1,7 +1,8 @@
 import koral.Vec3
 import koral.engine.ResourceScript
 import koral.engine.Entity
-import koral.engine.GraphicsScript
+import koral.engine.BeforeDraw
+import koral.engine.Setup
 import koral.engine.Script
 
 class Spin : Script() {
@@ -34,7 +35,7 @@ class Watcher : Script() {
 }
 
 /** The graphics half: what a pass reads, written from an entity's data before anything is drawn. */
-class Feeder : GraphicsScript() {
+class Feeder : Setup(), BeforeDraw {
     var value = 0f
     var prepared = 0
     override fun prepare() {
@@ -56,5 +57,26 @@ class Ramp : ResourceScript() {
     override fun init() {
         for (i in 0 until table.bytes.capacity() / 4) table.bytes.putFloat(i * 4, i * step)
         for (y in 0 until rows.height) for (x in 0 until rows.width) rows.bytes.putFloat((y * rows.width + x) * 4, y * step)
+    }
+}
+
+/** A mesh made of its fields: made again when they change, and shared by every entity of the same ones. */
+class Pyramid : koral.engine.Setup(), koral.engine.MeshGenerator {
+    var height = 1f
+    override fun initialize(mesh: koral.engine.MeshWriter) {
+        mesh.positions(floatArrayOf(-0.5f, 0f, -0.5f, 0.5f, 0f, -0.5f, 0.5f, 0f, 0.5f, -0.5f, 0f, 0.5f, 0f, height, 0f))
+        mesh.indices(intArrayOf(0, 4, 1, 1, 4, 2, 2, 4, 3, 3, 4, 0, 0, 1, 2, 0, 2, 3))
+    }
+}
+
+/** A picture made of its fields, in its entity's material: made again when they change. */
+class Checker : koral.engine.Setup(), koral.engine.ImageGenerator {
+    var squares = 2
+    override fun initialize(image: koral.engine.ImageWriter) {
+        image.size(8, 8)
+        for (y in 0 until image.height) for (x in 0 until image.width) {
+            val white = (x * squares / image.width + y * squares / image.height) % 2 == 0
+            image.set(x, y, if (white) 1f else 0f, if (white) 1f else 0f, if (white) 1f else 0f)
+        }
     }
 }

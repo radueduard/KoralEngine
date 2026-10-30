@@ -273,3 +273,37 @@ TEST(Scripts, AScriptWithNoFieldsAndTheEndOfTheWorld) {
     world.Destroy(kecs::Entity { 0, 0 });
     EXPECT_TRUE(log.Take().empty());
 }
+
+// An entity running a script is given a tag for each thing the script does — what a Filter finds it by — and it is
+// taken away once no script of the entity's does that; none of it is saved.
+TEST(Scripts, WhatAScriptDoesIsATagOfItsEntities) {
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    Log log;
+    const kecs::ComponentId mover = scripts.Register(MoverType(log));
+    kscript::ScriptType drawn;
+    drawn.name = "Drawn";
+    drawn.callbacks.prepare = [](void*, kecs::Entity, void*) {};
+    const kecs::ComponentId preparer = scripts.Register(drawn);
+    const kecs::Entity e = world.Create();
+    world.Add(e, mover);
+    world.Add(e, preparer);
+    scripts.Update(0.1f);
+    const auto has = [&](const char* tag) { return world.Find(tag) != kecs::NoComponent && world.Has(e, world.Find(tag)); };
+    EXPECT_TRUE(has("PerFrame"));
+    EXPECT_TRUE(has("FixedStep"));
+    EXPECT_TRUE(has("BeforeDraw"));
+    EXPECT_FALSE(world.Describe(world.Find("PerFrame")).saved);
+
+    world.Remove(e, mover);
+    scripts.Update(0.1f);
+    EXPECT_FALSE(has("PerFrame")) << "no script of it updates any more";
+    EXPECT_FALSE(has("FixedStep"));
+    EXPECT_TRUE(has("BeforeDraw")) << "the other still prepares";
+
+    // Drawn in an editor that does not play: prepared, and never updated — tagged all the same.
+    const kecs::Entity f = world.Create();
+    world.Add(f, preparer);
+    scripts.Prepare();
+    EXPECT_TRUE(world.Has(f, world.Find("BeforeDraw")));
+}

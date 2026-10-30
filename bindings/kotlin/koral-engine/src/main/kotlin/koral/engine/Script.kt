@@ -16,10 +16,12 @@ import koral.Vec4
 
 /**
  * A script: a class added to entities. Its public `var`s are a component — data the engine keeps, shows in the
- * inspector, saves with the scene and carries across a reload — and its methods are called on each entity that has it.
+ * inspector, saves with the scene and carries across a reload. Every script is a Setup: it is initialised, switched on
+ * and off, and goes. What else it does it says by the pieces it takes — [PerFrame] to be called every frame, [FixedStep]
+ * on the game's steady step, [BeforeDraw] before the frame is drawn — and only what it takes is ever called on it.
  *
  * ```kotlin
- * class Spin : Script() {
+ * class Spin : Setup(), PerFrame {
  *     var speed = 0f          // shown in the inspector, saved, kept across a reload
  *     var angle = 0f
  *     private var frames = 0  // this run's only: not saved, and gone on a reload
@@ -30,9 +32,11 @@ import koral.Vec4
  *
  * A `var` can be a Float, a Double, an Int, a Long, a Boolean, a [Vec2], [Vec3], [Vec4], [Mat4], [Quat] or an
  * [Entity]. Before each call the properties hold what the engine has; after it, the engine has what they hold. Edit
- * the class while it runs and each entity keeps the properties whose name and type are the same.
+ * the class while it runs and each entity keeps the properties whose name and type are the same. An entity running a
+ * script is given a tag for each piece it takes — `PerFrame`, `FixedStep`, `BeforeDraw` — for a graph's Filter to find
+ * it by.
  */
-abstract class Script {
+abstract class Setup {
     /** The entity this is on. */
     var entity: Entity = Entity.Null
         internal set
@@ -42,32 +46,67 @@ abstract class Script {
     /** The keys, the mouse and the gamepads of the window the scene is in: `input.isKeyHeld(Key.eW)`. */
     val input: koral.Input get() = world.input
 
-    /** It was added to the entity: once, switched on or off. */
-    open fun onCreated() {}
+    /** Once, before anything else is called on it while the scene plays. */
+    open fun initialize() {}
     /** It was switched on, or added switched on. */
     open fun onEnabled() {}
-    /** Before its first update: once. */
-    open fun start() {}
-    /** A steady step of the game: 0 to 8 times a frame. */
-    open fun fixedUpdate(step: Float) {}
-    /** Once a frame, while it is switched on. */
-    open fun update(delta: Float) {}
-    /** After every script's update. */
-    open fun lateUpdate(delta: Float) {}
     /** It was switched off, or is about to go while on. */
     open fun onDisabled() {}
     /** It is about to go: removed, or its entity destroyed. */
     open fun onDestroyed() {}
+
+    internal open fun createdCore() {}
+    internal open fun initializeCore() = initialize()
+}
+
+/** What a script takes to be called every frame while the scene plays. */
+interface PerFrame {
+    /** Once a frame, while it is switched on. */
+    fun update(delta: Float)
+    /** After every script's update: what follows what the others did — a camera following its target. */
+    fun lateUpdate(delta: Float) {}
+}
+
+/** What a script takes to be called on the game's steady step: physics, what must not depend on the frame rate. */
+interface FixedStep {
+    /** A steady step of the game: 0 to 8 times a frame. */
+    fun fixedUpdate(step: Float)
 }
 
 /**
- * A script that makes what the graph's passes take and nothing else makes: a light turned into a camera, a table of
- * matrices. [prepare] runs after every script's updates and before anything is drawn, so what it writes is what this
- * frame's passes read.
+ * What a script takes to make what the graph's passes read and nothing else makes: a light turned into a camera, a table
+ * of matrices. [prepare] runs after every script's updates and before anything is drawn — in the editor too, whether or
+ * not the scene plays.
  */
-abstract class GraphicsScript : Script() {
+interface BeforeDraw {
     /** After the updates, before the passes: write what they read. */
-    open fun prepare() {}
+    fun prepare()
+}
+
+/**
+ * A script as one was written before [Setup] and its pieces: every hook there is, each overridden or not. It still runs,
+ * with only what it overrides called; a new script is a [Setup] with the pieces it uses.
+ */
+abstract class Script : Setup(), PerFrame, FixedStep {
+    /** It was added to the entity: once, switched on or off. */
+    open fun onCreated() {}
+    /** Before its first update: once. */
+    open fun start() {}
+    /** A steady step of the game: 0 to 8 times a frame. */
+    override fun fixedUpdate(step: Float) {}
+    /** Once a frame, while it is switched on. */
+    override fun update(delta: Float) {}
+    /** After every script's update. */
+    override fun lateUpdate(delta: Float) {}
+
+    internal final override fun createdCore() = onCreated()
+    internal final override fun initializeCore() = start()
+}
+
+/** A [Script] that prepares what is drawn, as one was written before [BeforeDraw]. A new one is a [Setup] that takes [BeforeDraw]. */
+abstract class GraphicsScript : Script(), BeforeDraw {
+    /** After the updates, before the passes: write what they read. */
+    override fun prepare() {}
 }
 
 /**
@@ -280,7 +319,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
     }
 
     /** The object's properties into the engine's bytes. */
-    fun store(script: Script, data: MemorySegment) {
+    fun store(script: Setup, data: MemorySegment) {
         for (p in properties) {
             val at = p.offset.toLong()
             fun f(i: Int, v: Float) = data.set(JAVA_FLOAT_UNALIGNED, at + i * 4L, v)
@@ -314,7 +353,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
 
         @Synchronized fun of(type: Class<*>): ScriptLayout = layouts.getOrPut(type) { ScriptLayout(type) }
         /** What a script derives from: none of its properties are the script's own. */
-        private val bases = setOf(Script::class.java, GraphicsScript::class.java, ResourceScript::class.java, Any::class.java)
+        private val bases = setOf(Setup::class.java, Script::class.java, GraphicsScript::class.java, ResourceScript::class.java, Any::class.java)
         /** Forgets every class [loader] loaded: it is being let go of. */
         @Synchronized fun forget(loader: ClassLoader) { layouts.keys.removeIf { it.classLoader === loader } }
 

@@ -231,6 +231,11 @@ internal static unsafe partial class Native
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_resource_script_unregister(IntPtr document, string name);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial byte* kengine_image_create(IntPtr document, string name, uint width, uint height, byte* rgba);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_entity_give_picture(IntPtr document, Entity entity, string field, string picture);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     public static partial byte* kengine_mesh_create(IntPtr document, string name, uint vertexCount, KengineAttribute* attributes, uint attributeCount,
                                                     uint* indices, uint indexCount, string? buffers);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]

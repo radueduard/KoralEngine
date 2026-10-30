@@ -55,3 +55,45 @@ _Avoid_: Material (for this), pipeline's component
 **Frame view**:
 The read-only picture of the graph as it runs: only its Passes, in the order the frame graph schedules them, with the resources between them and what each costs.
 _Avoid_: Timeline, profiler, overview (the overview is every node at once, laid out)
+
+## Assets
+
+**Asset**:
+Anything the project keeps that something else can name: a Resource or a Document. Known by an ID that survives renaming and moving, not by its path.
+_Avoid_: File (for this), item
+
+**Resource**:
+An Asset a pipeline uses as data on the GPU: a mesh, a material, a texture, a shader. Always made by a Producer.
+_Avoid_: Asset (for these alone), GPU object (that is what the runtime makes of one)
+
+**Document**:
+An Asset the editor opens and edits as a whole: a scene, a prefab, a function, a script.
+_Avoid_: Resource (for these)
+
+**Producer**:
+What makes a Resource from parameters: an Importer or a Generator. An asset's settings are its Producer's parameters.
+_Avoid_: Loader, processor
+
+**Importer**:
+A Producer whose input is a file: a model, a picture, a shader module.
+_Avoid_: Loader, reader
+
+**Generator**:
+A Producer that is a script (or a compute shader, for a texture) whose fields are its parameters: a sphere of so many subdivisions, a noise. Given only what it makes, never the world.
+_Avoid_: Procedural script, builder
+
+**Artifact**:
+What a Producer made, cached under a hash of what it was made from: the content of the source, the parameters, and the producer's version. What the runtime reads, never the source.
+_Avoid_: Cooked file, cache entry, import
+
+**Part**:
+A Resource inside another Asset: a model's mesh, material or texture, known by its own sub-ID.
+_Avoid_: Sub-asset, child, mesh index
+
+**Setup**:
+What every script is: `Initialize` and what follows its life. What it does each frame, at a fixed step, or as a Generator, it adds.
+_Avoid_: Script (for the base alone), behaviour
+
+**PerFrame**:
+What a script adds to be called every frame while playing (`Update`, `LateUpdate`), and the tag its entities carry for it.
+_Avoid_: Update script, ticking

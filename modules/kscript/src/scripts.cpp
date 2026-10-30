@@ -5,12 +5,22 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <ranges>
 #include <utility>
 
 namespace kscript
 {
     namespace {
         std::uint64_t KeyOf(const kecs::Entity entity) { return (std::uint64_t { entity.index } << 32) | entity.generation; }
+
+        /** Whether what a script type's callbacks are does piece @p piece (Scripts::Pieces). */
+        bool Does(const Callbacks& c, const std::string_view piece)
+        {
+            if (piece == "PerFrame") return c.update || c.lateUpdate;
+            if (piece == "FixedStep") return c.fixedUpdate;
+            if (piece == "BeforeDraw") return c.prepare;
+            return false;
+        }
 
         // What marks a component type as a script's: nothing else constructs one with this. It starts as its source
         // says (the description's context: its bytes), or as zeros.
@@ -116,6 +126,12 @@ namespace kscript
         }
         entry->description = std::move(type);
         entry->live = live;
+        // What it does may be other than it was (a script edited): each entity running it is looked at again.
+        for (const std::uint64_t key : entry->states | std::views::keys) {
+            const kecs::Entity entity { static_cast<std::uint32_t>(key >> 32), static_cast<std::uint32_t>(key) };
+            GiveTags(*entry, entity);
+            _untagged.push_back(entity);
+        }
         return id;
     }
 
@@ -153,8 +169,41 @@ namespace kscript
         return names;
     }
 
+    kecs::ComponentId Scripts::PieceTag(const std::string_view piece)
+    {
+        if (const kecs::ComponentId id = _world.Find(piece); id != kecs::NoComponent) return id;
+        kecs::ComponentDescription tag;
+        tag.name = std::string(piece);
+        tag.saved = false;      // worked out again from the scripts: a file would only repeat it
+        return _world.Register(std::move(tag));
+    }
+
+    void Scripts::GiveTags(const Type& type, const kecs::Entity entity)
+    {
+        if (!type.live) return;
+        for (const std::string_view piece : Pieces)
+            if (Does(type.description.callbacks, piece))
+                if (const kecs::ComponentId tag = PieceTag(piece); _world.Alive(entity) && !_world.Has(entity, tag)) _world.Add(entity, tag);
+    }
+
+    void Scripts::TakeTags()
+    {
+        for (const kecs::Entity entity : std::exchange(_untagged, {})) {
+            if (!_world.Alive(entity)) continue;
+            for (const std::string_view piece : Pieces) {
+                const kecs::ComponentId tag = _world.Find(piece);
+                if (tag == kecs::NoComponent || !_world.Has(entity, tag)) continue;
+                const bool still = std::ranges::any_of(_types, [&](const auto& type) {
+                    return type->live && Does(type->description.callbacks, piece) && _world.Has(entity, type->id);
+                });
+                if (!still) _world.Remove(entity, tag);
+            }
+        }
+    }
+
     void Scripts::Gone(Type& type, const kecs::Entity entity)
     {
+        _untagged.push_back(entity);    // looked at once the world is done changing: not while it takes a component away
         const auto state = type.states.find(KeyOf(entity));
         if (state == type.states.end()) return;
         const bool wasEnabled = state->second.enabled;
@@ -180,6 +229,8 @@ namespace kscript
                 seen.push_back({ entity, _world.IsEnabled(entity, type.id) });
             }
         });
+        // In the order they were made, whichever tags each has been given — and so wherever the world keeps it.
+        std::ranges::sort(seen, {}, [](const Seen& one) { return one.entity.index; });
 
         const Callbacks& callbacks = type.description.callbacks;
         const auto data = [&](const kecs::Entity entity) -> void* {
@@ -192,7 +243,9 @@ namespace kscript
                 void* bytes = data(entity);
                 if (!bytes) continue;   // gone already, by something called before it
                 type.states.emplace(key, State {});
-                if (callbacks.created) callbacks.created(callbacks.user, entity, bytes);
+                GiveTags(type, entity);
+                bytes = data(entity);   // given a tag, its data is somewhere else
+                if (callbacks.created && bytes) callbacks.created(callbacks.user, entity, bytes);
             }
             // Anything called may have taken it away: looked up again each time.
             auto state = type.states.find(key);
@@ -220,6 +273,7 @@ namespace kscript
     template <typename F, typename Has>
     void Scripts::Each(F&& call, Has&& has)
     {
+        TakeTags();
         // By index: something called may register a type.
         for (std::size_t i = 0; i < _types.size(); ++i) {
             Type& type = *_types[i];
@@ -256,6 +310,7 @@ namespace kscript
     // edited), so nothing is created, enabled or started here — that is the updates' to do, once it plays.
     void Scripts::Prepare()
     {
+        TakeTags();
         for (std::size_t i = 0; i < _types.size(); ++i) {
             Type& type = *_types[i];
             if (!type.live || !type.description.callbacks.prepare) continue;
@@ -268,6 +323,7 @@ namespace kscript
             for (const kecs::Entity entity : entities) {
                 if (!type.live) break;
                 if (!_world.Alive(entity) || !_world.IsEnabled(entity, type.id)) continue;     // gone, or switched off, since
+                GiveTags(type, entity);     // drawn in an editor that does not play: made, and never updated
                 const Callbacks& c = type.description.callbacks;
                 if (void* bytes = const_cast<void*>(std::as_const(_world).Get(entity, type.id))) c.prepare(c.user, entity, bytes);
             }

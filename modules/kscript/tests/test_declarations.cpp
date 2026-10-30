@@ -424,3 +424,34 @@ TEST(Declarations, ThePackagesMaterialsArePbrAndBlinnPhong) {
     EXPECT_EQ(materials[0].name, "BlinnPhongMaterial");
     EXPECT_EQ(materials[1].name, "PbrMaterial");
 }
+
+// A script is a Setup with the pieces it takes: its fields are its component as a Script's were, in either language,
+// and what it implements of a piece is no field.
+TEST(Declarations, ASetupWithItsPiecesIsAScript) {
+    const auto csharp = kscript::Declare(R"(
+        public sealed class Spin : Setup, PerFrame, FixedStep
+        {
+            public float Speed = 2f;
+            public float Angle;
+            public void Update(float delta) => Angle += Speed * delta;
+            public void FixedUpdate(float step) { }
+        }
+        public abstract class Base : Setup { public float Ignored; })", false);
+    ASSERT_EQ(csharp.types.size(), 1u);
+    EXPECT_EQ(csharp.types[0].name, "Spin");
+    EXPECT_EQ(csharp.types[0].fields.size(), 2u);
+    EXPECT_FLOAT_EQ(FloatAt(csharp.types[0], "Speed"), 2.f);
+    EXPECT_EQ(csharp.types[0].pieces, (std::vector<std::string> { "PerFrame", "FixedStep" }));
+    EXPECT_TRUE(csharp.problems.empty());
+
+    const auto kotlin = kscript::Declare(R"(
+        class Spin : Setup(), PerFrame {
+            var speed = 2f
+            var angle = 0f
+            override fun update(delta: Float) { angle += speed * delta }
+        })", true);
+    ASSERT_EQ(kotlin.types.size(), 1u);
+    EXPECT_EQ(kotlin.types[0].fields.size(), 2u);
+    EXPECT_FLOAT_EQ(FloatAt(kotlin.types[0], "speed"), 2.f);
+    EXPECT_EQ(kotlin.types[0].pieces, std::vector<std::string> { "PerFrame" });
+}

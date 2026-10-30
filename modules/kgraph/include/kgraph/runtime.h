@@ -301,6 +301,13 @@ namespace kgraph
         [[nodiscard]] std::optional<std::vector<Model::Attribute>> ModelAttributes(const std::filesystem::path& path, std::string* error = nullptr) const;
         bool MakeMesh(const std::string& id, const VertexData& data, std::string* error = nullptr);
         /**
+         * @brief Makes a picture of @p width × @p height texels, four bytes each (red, green, blue, alpha), its smaller
+         *        levels made of it — found by @p id from now on (a script's are `$script/<name>`). One there already by
+         *        that id is replaced: what held it holds this one. A generator's (`$script/gen/...`) is kept in the
+         *        project's cache, and is there when it is asked for again with nothing made of it.
+         */
+        bool MakeImage(const std::string& id, std::uint32_t width, std::uint32_t height, std::span<const std::byte> rgba, std::string* error = nullptr);
+        /**
          * @brief A mesh's numbers, read back from the device: every attribute it has (of four-byte numbers), in the
          *        buffers it has them in, and its indices — a part of a model's, only its own. Waits for the device.
          *        Nothing, and @p error says why, for what is no mesh, or is still being read.
@@ -340,7 +347,7 @@ namespace kgraph
          */
         void Cook(const std::vector<std::string>& ids);
         [[nodiscard]] const CookProgress& Cooking() const;
-        /** @brief Where pictures are cooked to: `cache/textures` in the folder the asset directory is in. Empty without one. */
+        /** @brief Where pictures are cooked to: `.koral/cache/textures` in the folder the asset directory is in. Empty without one. */
         [[nodiscard]] std::filesystem::path TextureCache() const;
         /** @brief Why each file that could not be read could not. */
         [[nodiscard]] std::vector<std::string> Unread() const;

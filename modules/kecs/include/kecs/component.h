@@ -99,6 +99,9 @@ namespace kecs
         /// Whether one can be copied at all: false for a type that can only be moved, which is then added by
         /// moving it in (World::Add<T>) and never by copying a value.
         bool copyable = true;
+        /// Whether a world saved has it: false for what is worked out again from what is saved — a tag a script's
+        /// entities are given for what the script does — which a file would only repeat.
+        bool saved = true;
         std::vector<FieldDescription> fields;
         std::shared_ptr<const void> context;    ///< Whatever the operations need of a type made at run time.
 

@@ -28,6 +28,7 @@ if(KORAL_ENGINE_BUILD_TESTS)
 endif()
 
 add_subdirectory(modules/kecs)
+add_subdirectory(modules/kasset)
 add_subdirectory(modules/kscript)
 add_subdirectory(modules/kphysics)
 
@@ -84,6 +85,7 @@ if(Koral_FOUND)
             COMMAND_EXPAND_LISTS
             VERBATIM)
     endfunction()
+    add_subdirectory(modules/kasset-import)
     add_subdirectory(modules/kgraph)
     add_subdirectory(modules/keditor)
     add_subdirectory(modules/kengine)

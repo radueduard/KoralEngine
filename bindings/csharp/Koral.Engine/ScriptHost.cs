@@ -11,14 +11,14 @@ using Microsoft.CodeAnalysis.Text;
 namespace Koral.Engine;
 
 /// <summary>
-/// A project's scripts, running in a scene: compiled from the <c>.cs</c> files of a folder, each <see cref="Script"/>
+/// A project's scripts, running in a scene: compiled from the <c>.cs</c> files of a folder, each <see cref="Setup"/>
 /// class registered with the engine as a component, and all of it compiled and registered again when a file changes.
 /// </summary>
 /// <remarks>
 /// <para>
 /// The scripts are compiled together, with <c>System</c>, <c>System.Linq</c>, <c>System.Collections.Generic</c>,
 /// <c>Koral</c> and <c>Koral.Engine</c> already in scope. Every public, concrete class deriving from
-/// <see cref="Script"/> is a script, named by its class (or its <see cref="ScriptNameAttribute"/>).
+/// <see cref="Setup"/> is a script, named by its class (or its <see cref="ScriptNameAttribute"/>).
 /// </para>
 /// <para>
 /// <see cref="Poll"/>, between frames, notices when the folder changed and has stopped changing, and loads it again.
@@ -183,34 +183,49 @@ public sealed unsafe class ScriptHost : IDisposable
     private sealed class Registered(World world, Type type, ScriptLayout layout)
     {
         public ScriptLayout Layout { get; } = layout;
-        private readonly Dictionary<Entity, Script> _instances = [];
+        private readonly Dictionary<Entity, Setup> _instances = [];
         private GCHandle _self;
         private uint _component = Native.NoComponent;
-        private readonly HashSet<Script.Hook> _reported = [];
+        private readonly HashSet<Setup.Hook> _reported = [];
+        private readonly bool _generator = typeof(MeshGenerator).IsAssignableFrom(type) || typeof(ImageGenerator).IsAssignableFrom(type);
+        private readonly Dictionary<Entity, ulong> _generated = [];      // each entity's fields when its mesh was made of them
 
         /// <summary>Whether <paramref name="type"/> does something of its own in the hook called <paramref name="name"/>.</summary>
         private static bool Overrides(Type type, string name, params Type[] parameters)
         {
             var method = type.GetMethod(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic, null, parameters, null);
-            return method is null || (method.DeclaringType != typeof(Script) && method.DeclaringType != typeof(GraphicsScript));
+            return method is not null && method.DeclaringType != typeof(Setup) && method.DeclaringType != typeof(Script) && method.DeclaringType != typeof(GraphicsScript);
+        }
+
+        /// <summary>Whether <paramref name="type"/> takes <paramref name="piece"/> and has its own <paramref name="name"/> of it, not the piece's own that does nothing.</summary>
+        private static bool Does(Type type, Type piece, string name)
+        {
+            if (!piece.IsAssignableFrom(type)) return false;
+            var map = type.GetInterfaceMap(piece);
+            for (var i = 0; i < map.InterfaceMethods.Length; ++i)
+                if (map.InterfaceMethods[i].Name == name) return map.TargetMethods[i].DeclaringType != piece;
+            return false;
         }
 
         public bool Register()
         {
             _self = GCHandle.Alloc(this);
-            // Only what the class does: a hook it leaves as Script has it is not called at all — for thousands of entities a
+            // Only what the class does: a hook it leaves as Setup has it — or a piece it does not take — is not called at all — for thousands of entities a
             // frame, a call each into a function that does nothing. Destroyed as well when anything is: it is when an entity's
             // object goes. A script that is only data — fields, and no hook — is called for nothing, and costs nothing a frame.
+            var legacy = typeof(Script).IsAssignableFrom(type);
             var callbacks = new KengineScriptCallbacks
             {
                 User = GCHandle.ToIntPtr(_self),
-                Created = Overrides(type, "OnCreated") ? &OnCreated : null,
+                Created = legacy && Overrides(type, "OnCreated") ? &OnCreated : null,
                 Enabled = Overrides(type, "OnEnabled") ? &OnEnabled : null,
-                Started = Overrides(type, "Start") ? &OnStarted : null,
-                FixedUpdate = Overrides(type, "FixedUpdate", typeof(float)) ? &OnFixedUpdate : null,
-                Update = Overrides(type, "Update", typeof(float)) ? &OnUpdate : null,
-                LateUpdate = Overrides(type, "LateUpdate", typeof(float)) ? &OnLateUpdate : null,
-                Prepare = typeof(GraphicsScript).IsAssignableFrom(type) && Overrides(type, "Prepare") ? &OnPrepare : null,
+                Started = Overrides(type, legacy ? "Start" : "Initialize") ? &OnStarted : null,
+                // A script as written before its pieces overrides what it does; one now takes the piece.
+                FixedUpdate = (legacy ? Overrides(type, "FixedUpdate", typeof(float)) : Does(type, typeof(FixedStep), "FixedUpdate")) ? &OnFixedUpdate : null,
+                Update = (legacy ? Overrides(type, "Update", typeof(float)) : Does(type, typeof(PerFrame), "Update")) ? &OnUpdate : null,
+                LateUpdate = (legacy ? Overrides(type, "LateUpdate", typeof(float)) : Does(type, typeof(PerFrame), "LateUpdate")) ? &OnLateUpdate : null,
+                // A generator is looked at before each frame is drawn too: made again when its fields have changed.
+                Prepare = (legacy ? typeof(GraphicsScript).IsAssignableFrom(type) && Overrides(type, "Prepare") : Does(type, typeof(BeforeDraw), "Prepare") || _generator) ? &OnPrepare : null,
                 Disabled = Overrides(type, "OnDisabled") ? &OnDisabled : null,
             };
             if (Overrides(type, "OnDestroyed") || callbacks.Created != null || callbacks.Enabled != null || callbacks.Started != null || callbacks.FixedUpdate != null
@@ -245,11 +260,11 @@ public sealed unsafe class ScriptHost : IDisposable
             if (_self.IsAllocated) _self.Free();
         }
 
-        private void Call(Script.Hook hook, Entity entity, IntPtr data, float time)
+        private void Call(Setup.Hook hook, Entity entity, IntPtr data, float time)
         {
             if (!_instances.TryGetValue(entity, out var script))
             {
-                script = (Script)Activator.CreateInstance(type)!;
+                script = (Setup)Activator.CreateInstance(type)!;
                 script.Entity = entity;
                 script.World = world;
                 _instances[entity] = script;
@@ -258,6 +273,7 @@ public sealed unsafe class ScriptHost : IDisposable
             try
             {
                 script.Call(hook, time);
+                if (_generator && hook == Setup.Hook.Prepare) Generate(script, entity, data);
             }
             catch (Exception e)
             {
@@ -265,32 +281,74 @@ public sealed unsafe class ScriptHost : IDisposable
                 if (_reported.Add(hook)) Log.Error($"[scripts] {Layout.Name}.{hook} threw on {entity}: {e}");
             }
             // What it did may have moved its data, or taken it away: found again before anything is put back.
-            if (hook == Script.Hook.Destroyed) { _instances.Remove(entity); return; }
+            if (hook == Setup.Hook.Destroyed) { _instances.Remove(entity); _generated.Remove(entity); return; }
             var now = Native.kecs_get(world.Handle, entity, _component);
             if (now is not null) Layout.Store(script, (IntPtr)now);
             else _instances.Remove(entity);
         }
 
+        /// <summary>
+        /// Makes <paramref name="entity"/>'s mesh of the generator's fields as they are, when they are not what it was made of:
+        /// named for the script and the fields, so that every entity of the same fields has the same one, made once.
+        /// </summary>
+        private void Generate(Setup script, Entity entity, IntPtr data)
+        {
+            var bytes = new ReadOnlySpan<byte>((void*)data, Layout.Size);
+            var hash = 14695981039346656037ul;
+            foreach (var b in bytes) hash = (hash ^ b) * 1099511628211ul;
+            if (_generated.TryGetValue(entity, out var was) && was == hash) return;
+            _generated[entity] = hash;
+            var name = $"gen/{Layout.Name}/{hash:x16}";
+            if (script is MeshGenerator generator)
+            {
+                if (!world.Generated.TryGetValue(name, out var made))
+                {
+                    var mesh = new MeshWriter();
+                    generator.Initialize(mesh);
+                    if (mesh.VertexCount == 0) throw new EngineException($"{Layout.Name} wrote no positions: a mesh is made of where its vertices are");
+                    world.Generated[name] = made = world.Meshes.Create(name, mesh.VertexCount, mesh.Attributes, mesh.IndexList, mesh.BufferLayout);
+                }
+                world.Meshes.Give(entity, made);
+            }
+            if (script is ImageGenerator painter)
+            {
+                var picture = name + "/picture";
+                if (!world.Generated.TryGetValue(picture, out var made))
+                {
+                    var image = new ImageWriter();
+                    painter.Initialize(image);
+                    fixed (byte* texels = image.Texels)
+                    {
+                        var created = Native.kengine_image_create(world.Document, picture, (uint)image.Width, (uint)image.Height, texels);
+                        if (created is null) throw new EngineException(Native.LastError());
+                        world.Generated[picture] = made = Native.Text(created);
+                    }
+                }
+                if (!Native.kengine_entity_give_picture(world.Document, entity, painter.Into, made))
+                    throw new EngineException($"{Layout.Name} makes its entity's {painter.Into}, and no material of it has a picture so named");
+            }
+        }
+
         private static Registered? From(IntPtr user) => GCHandle.FromIntPtr(user).Target as Registered;
 
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnCreated(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Created, e, data, 0);
+        private static void OnCreated(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Created, e, data, 0);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnEnabled(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Enabled, e, data, 0);
+        private static void OnEnabled(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Enabled, e, data, 0);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnStarted(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Started, e, data, 0);
+        private static void OnStarted(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Started, e, data, 0);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnFixedUpdate(IntPtr user, Entity e, IntPtr data, float step) => From(user)?.Call(Script.Hook.FixedUpdate, e, data, step);
+        private static void OnFixedUpdate(IntPtr user, Entity e, IntPtr data, float step) => From(user)?.Call(Setup.Hook.FixedUpdate, e, data, step);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnUpdate(IntPtr user, Entity e, IntPtr data, float delta) => From(user)?.Call(Script.Hook.Update, e, data, delta);
+        private static void OnUpdate(IntPtr user, Entity e, IntPtr data, float delta) => From(user)?.Call(Setup.Hook.Update, e, data, delta);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnLateUpdate(IntPtr user, Entity e, IntPtr data, float delta) => From(user)?.Call(Script.Hook.LateUpdate, e, data, delta);
+        private static void OnLateUpdate(IntPtr user, Entity e, IntPtr data, float delta) => From(user)?.Call(Setup.Hook.LateUpdate, e, data, delta);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnPrepare(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Prepare, e, data, 0);
+        private static void OnPrepare(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Prepare, e, data, 0);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnDisabled(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Disabled, e, data, 0);
+        private static void OnDisabled(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Disabled, e, data, 0);
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static void OnDestroyed(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Script.Hook.Destroyed, e, data, 0);
+        private static void OnDestroyed(IntPtr user, Entity e, IntPtr data) => From(user)?.Call(Setup.Hook.Destroyed, e, data, 0);
     }
 
     // ---- one script that makes resources, registered -----------------------------------------------------------
@@ -496,7 +554,7 @@ public sealed unsafe class ScriptHost : IDisposable
         pdb.Position = 0;
         var assembly = context.LoadFromStream(pe, pdb);
         var types = assembly.GetExportedTypes()
-            .Where(t => t.IsClass && !t.IsAbstract && (t.IsSubclassOf(typeof(Script)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
+            .Where(t => t.IsClass && !t.IsAbstract && (t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .ToList();
         return (context, types);

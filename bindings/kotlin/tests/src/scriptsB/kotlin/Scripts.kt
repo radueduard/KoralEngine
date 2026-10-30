@@ -1,4 +1,5 @@
-import koral.engine.GraphicsScript
+import koral.engine.BeforeDraw
+import koral.engine.Setup
 import koral.engine.Script
 
 // Spin, edited. Watcher is gone.
@@ -15,7 +16,7 @@ class Spin : Script() {
     }
 }
 
-class Feeder : GraphicsScript() {
+class Feeder : Setup(), BeforeDraw {
     var value = 0f
     var prepared = 0
     override fun prepare() {

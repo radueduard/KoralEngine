@@ -5,24 +5,29 @@ namespace Koral.Engine;
 
 /// <summary>
 /// A script: a class added to entities. Its public fields are a component — data the engine keeps, shows in the
-/// inspector, saves with the scene and carries across a reload — and its methods are called on each entity that has it.
+/// inspector, saves with the scene and carries across a reload. Every script is a Setup: it is initialised, switched on
+/// and off, and goes. What else it does it says by the pieces it takes — <see cref="PerFrame"/> to be called every frame,
+/// <see cref="FixedStep"/> on the game's steady step, <see cref="BeforeDraw"/> before the frame is drawn — and only what
+/// it takes is ever called on it.
 /// </summary>
 /// <remarks>
 /// <code>
-/// public sealed class Spin : Script
+/// public sealed class Spin : Setup, PerFrame
 /// {
 ///     public float Speed = 1;         // shown in the inspector, saved, kept across a reload
 ///     public float Angle;
 ///     private int _frames;            // this run's only: not saved, and gone on a reload
 ///
-///     protected override void Update(float delta) => Angle += Speed * delta;
+///     public void Update(float delta) => Angle += Speed * delta;
 /// }
 /// </code>
 /// A field can be a number, a <c>bool</c>, one of Koral's vectors, a <c>Mat4</c>, a <c>Quat</c> or an
 /// <see cref="Engine.Entity"/>. Before each call the fields hold what the engine has; after it, the engine has what they
-/// hold. Edit the class while it runs and each entity keeps the fields whose name and type are the same.
+/// hold. Edit the class while it runs and each entity keeps the fields whose name and type are the same. An entity
+/// running a script is given a tag for each piece it takes — <c>PerFrame</c>, <c>FixedStep</c>, <c>BeforeDraw</c> — for a
+/// graph's Filter to find it by.
 /// </remarks>
-public abstract class Script
+public abstract class Setup
 {
     /// <summary>The entity this is on.</summary>
     public Entity Entity { get; internal set; }
@@ -31,10 +36,82 @@ public abstract class Script
     /// <summary>The keys, the mouse and the gamepads it is steered by: <c>Input.IsKeyHeld(Key.eW)</c>.</summary>
     public Koral.Input Input => World.Input;
 
-    /// <summary>It was added to the entity: once, switched on or off.</summary>
-    protected virtual void OnCreated() { }
+    /// <summary>Once, before anything else is called on it while the scene plays.</summary>
+    protected virtual void Initialize() { }
     /// <summary>It was switched on, or added switched on.</summary>
     protected virtual void OnEnabled() { }
+    /// <summary>It was switched off, or is about to go while on.</summary>
+    protected virtual void OnDisabled() { }
+    /// <summary>It is about to go: removed, or its entity destroyed.</summary>
+    protected virtual void OnDestroyed() { }
+
+    private protected virtual void CreatedCore() { }
+    private protected virtual void InitializeCore() => Initialize();
+
+    internal enum Hook { Created, Enabled, Started, FixedUpdate, Update, LateUpdate, Prepare, Disabled, Destroyed }
+
+    internal void Call(Hook hook, float time)
+    {
+        switch (hook)
+        {
+            case Hook.Created: CreatedCore(); break;
+            case Hook.Enabled: OnEnabled(); break;
+            case Hook.Started: InitializeCore(); break;
+            case Hook.FixedUpdate: if (this is FixedStep fixedStep) fixedStep.FixedUpdate(time); break;
+            case Hook.Update: if (this is PerFrame perFrame) perFrame.Update(time); break;
+            case Hook.LateUpdate: if (this is PerFrame late) late.LateUpdate(time); break;
+            case Hook.Prepare: if (this is BeforeDraw draw) draw.Prepare(); break;
+            case Hook.Disabled: OnDisabled(); break;
+            case Hook.Destroyed: OnDestroyed(); break;
+        }
+    }
+}
+
+/// <summary>What a script takes to be called every frame while the scene plays.</summary>
+public interface PerFrame
+{
+    /// <summary>Once a frame, while it is switched on.</summary>
+    void Update(float delta);
+    /// <summary>After every script's Update: what follows what the others did — a camera following its target.</summary>
+    void LateUpdate(float delta) { }
+}
+
+/// <summary>What a script takes to be called on the game's steady step: physics, what must not depend on the frame rate.</summary>
+public interface FixedStep
+{
+    /// <summary>A steady step of the game: 0 to 8 times a frame.</summary>
+    void FixedUpdate(float step);
+}
+
+/// <summary>
+/// What a script takes to make what the graph's passes read and nothing else makes: a light turned into a camera, a
+/// table of matrices. <see cref="Prepare"/> runs after every script's updates and before anything is drawn — in the
+/// editor too, whether or not the scene plays.
+/// </summary>
+/// <remarks>
+/// <code>
+/// public sealed class LightCamera : Setup, BeforeDraw
+/// {
+///     public Vec3 Position;
+///     public void Prepare() =>
+///         World.Buffer("light camera")?.Write([KMath.LookAt(Position, Vec3.Zero, Vec3.UnitY)]);
+/// }
+/// </code>
+/// </remarks>
+public interface BeforeDraw
+{
+    /// <summary>After the updates, before the passes: write what they read.</summary>
+    void Prepare();
+}
+
+/// <summary>
+/// A script as one was written before <see cref="Setup"/> and its pieces: every hook there is, each overridden or not.
+/// It still runs, with only what it overrides called; a new script is a <see cref="Setup"/> with the pieces it uses.
+/// </summary>
+public abstract class Script : Setup, PerFrame, FixedStep
+{
+    /// <summary>It was added to the entity: once, switched on or off.</summary>
+    protected virtual void OnCreated() { }
     /// <summary>Before its first update: once.</summary>
     protected virtual void Start() { }
     /// <summary>A steady step of the game: 0 to 8 times a frame.</summary>
@@ -43,52 +120,23 @@ public abstract class Script
     protected virtual void Update(float delta) { }
     /// <summary>After every script's Update.</summary>
     protected virtual void LateUpdate(float delta) { }
-    /// <summary>It was switched off, or is about to go while on.</summary>
-    protected virtual void OnDisabled() { }
-    /// <summary>It is about to go: removed, or its entity destroyed.</summary>
-    protected virtual void OnDestroyed() { }
 
-    private protected virtual void PrepareCore() { }
-
-    internal enum Hook { Created, Enabled, Started, FixedUpdate, Update, LateUpdate, Prepare, Disabled, Destroyed }
-
-    internal void Call(Hook hook, float time)
-    {
-        switch (hook)
-        {
-            case Hook.Created: OnCreated(); break;
-            case Hook.Enabled: OnEnabled(); break;
-            case Hook.Started: Start(); break;
-            case Hook.FixedUpdate: FixedUpdate(time); break;
-            case Hook.Update: Update(time); break;
-            case Hook.LateUpdate: LateUpdate(time); break;
-            case Hook.Prepare: PrepareCore(); break;
-            case Hook.Disabled: OnDisabled(); break;
-            case Hook.Destroyed: OnDestroyed(); break;
-        }
-    }
+    private protected sealed override void CreatedCore() => OnCreated();
+    private protected sealed override void InitializeCore() => Start();
+    void PerFrame.Update(float delta) => Update(delta);
+    void PerFrame.LateUpdate(float delta) => LateUpdate(delta);
+    void FixedStep.FixedUpdate(float step) => FixedUpdate(step);
 }
 
 /// <summary>
-/// A script that makes what the graph's passes take and nothing else makes: a light turned into a camera, a table of
-/// matrices. <see cref="Prepare"/> runs after every script's updates and before anything is drawn, so what it writes
-/// is what this frame's passes read.
+/// A <see cref="Script"/> that prepares what is drawn, as one was written before <see cref="BeforeDraw"/>. A new one is a
+/// <see cref="Setup"/> that takes <see cref="BeforeDraw"/>.
 /// </summary>
-/// <remarks>
-/// <code>
-/// public sealed class LightCamera : GraphicsScript
-/// {
-///     public Vec3 Position;
-///     protected override void Prepare() =>
-///         World.Buffer("light camera")?.Write([KMath.LookAt(Position, Vec3.Zero, Vec3.UnitY)]);
-/// }
-/// </code>
-/// </remarks>
-public abstract class GraphicsScript : Script
+public abstract class GraphicsScript : Script, BeforeDraw
 {
     /// <summary>After the updates, before the passes: write what they read.</summary>
     protected virtual void Prepare() { }
-    private protected sealed override void PrepareCore() => Prepare();
+    void BeforeDraw.Prepare() => Prepare();
 }
 
 /// <summary>
@@ -298,7 +346,7 @@ internal sealed unsafe class ScriptLayout
 
     private static readonly Dictionary<Type, ScriptLayout> s_layouts = [];
     /// <summary>What a script derives from: none of its fields are the script's own.</summary>
-    private static readonly HashSet<Type> s_bases = [typeof(Script), typeof(GraphicsScript), typeof(ResourceScript), typeof(object)];
+    private static readonly HashSet<Type> s_bases = [typeof(Setup), typeof(Script), typeof(GraphicsScript), typeof(ResourceScript), typeof(object)];
 
     /// <summary>What a field type is called as a component's, and how big it is; null for one a script cannot keep.</summary>
     private static (string Type, int Size, int Alignment)? Describe(Type type)
@@ -386,7 +434,7 @@ internal sealed unsafe class ScriptLayout
     }
 
     /// <summary>The object's fields into the engine's bytes.</summary>
-    public void Store(Script script, IntPtr data)
+    public void Store(Setup script, IntPtr data)
     {
         foreach (var field in Fields)
         {

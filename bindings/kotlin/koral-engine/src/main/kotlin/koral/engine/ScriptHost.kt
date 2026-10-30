@@ -89,7 +89,7 @@ class ScriptHost(
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
-                if ((Script::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
+                if ((Setup::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
                     && type.constructors.any { it.parameterCount == 0 }) type else null
             }.sortedBy { it.name }
         } catch (e: LinkageError) {
@@ -125,7 +125,7 @@ class ScriptHost(
                 continue
             }
             @Suppress("UNCHECKED_CAST")
-            val script = Registered(world, type as Class<out Script>, layout)
+            val script = Registered(world, type as Class<out Setup>, layout)
             if (script.register()) registered[layout.name] = script else failed += "${layout.name}: ${Native.lastError}"
         }
         loader?.let { ScriptLayout.forget(it); it.close() }
@@ -203,8 +203,8 @@ class ScriptHost(
     // ---- one script type, registered ---------------------------------------------------------------------------
 
     /** A script class as the engine has it: the functions it calls, and the object each entity's calls are made on. */
-    internal class Registered(private val world: World, private val type: Class<out Script>, val layout: ScriptLayout) {
-        private val instances = HashMap<Entity, Script>()
+    internal class Registered(private val world: World, private val type: Class<out Setup>, val layout: ScriptLayout) {
+        private val instances = HashMap<Entity, Setup>()
         private val reported = HashSet<Hook>()
         private val key = nextKey++
         private var component = Native.NO_COMPONENT
@@ -245,6 +245,47 @@ class ScriptHost(
             instances.clear()
         }
 
+        private val generated = HashMap<Entity, Long>()     // each entity's fields when its mesh was made of them
+
+        /**
+         * Makes [entity]'s mesh of the generator's fields as they are, when they are not what it was made of: named for
+         * the script and the fields, so that every entity of the same fields has the same one, made once.
+         */
+        private fun generate(script: Setup, entity: Entity, data: MemorySegment) {
+            val bytes = data.reinterpret(maxOf(layout.size, 1).toLong())
+            var hash = -3750763034362895579L
+            for (i in 0 until layout.size) hash = (hash xor (bytes.get(java.lang.foreign.ValueLayout.JAVA_BYTE, i.toLong()).toLong() and 0xff)) * 1099511628211L
+            if (generated[entity] == hash) return
+            generated[entity] = hash
+            val name = "gen/${layout.name}/${java.lang.Long.toHexString(hash).padStart(16, '0')}"
+            if (script is MeshGenerator) {
+                val made = world.generated.getOrPut(name) {
+                    val mesh = MeshWriter()
+                    script.initialize(mesh)
+                    if (mesh.vertexCount == 0) throw EngineException("${layout.name} wrote no positions: a mesh is made of where its vertices are")
+                    world.meshes.create(name, mesh.vertexCount, mesh.attributes, mesh.indexList, mesh.bufferLayout)
+                }
+                world.meshes.give(entity, made)
+            }
+            if (script is ImageGenerator) {
+                val picture = "$name/picture"
+                val made = world.generated.getOrPut(picture) {
+                    val image = ImageWriter()
+                    script.initialize(image)
+                    java.lang.foreign.Arena.ofConfined().use { a ->
+                        val texels = a.allocateFrom(java.lang.foreign.ValueLayout.JAVA_BYTE, *image.texels)
+                        val created = Native.kengine_image_create.invokeExact(world.document, a.allocateFrom(picture), image.width, image.height, texels) as MemorySegment
+                        if (created == MemorySegment.NULL) throw EngineException(Native.lastError)
+                        Native.text(created)
+                    }
+                }
+                val given = java.lang.foreign.Arena.ofConfined().use { a ->
+                    Native.kengine_entity_give_picture.invokeExact(world.document, Native.entity(a, entity), a.allocateFrom(script.into), a.allocateFrom(made)) as Boolean
+                }
+                if (!given) throw EngineException("${layout.name} makes its entity's ${script.into}, and no material of it has a picture so named")
+            }
+        }
+
         fun call(hook: Hook, entity: Entity, data: MemorySegment, time: Float) {
             val script = instances.getOrPut(entity) {
                 type.getDeclaredConstructor().newInstance().also { it.entity = entity; it.world = world }
@@ -252,13 +293,16 @@ class ScriptHost(
             layout.load(script, data.reinterpret(maxOf(layout.size, 1).toLong()))
             try {
                 when (hook) {
-                    Hook.Created -> script.onCreated()
+                    Hook.Created -> script.createdCore()
                     Hook.Enabled -> script.onEnabled()
-                    Hook.Started -> script.start()
-                    Hook.FixedUpdate -> script.fixedUpdate(time)
-                    Hook.Update -> script.update(time)
-                    Hook.LateUpdate -> script.lateUpdate(time)
-                    Hook.Prepare -> (script as GraphicsScript).prepare()
+                    Hook.Started -> script.initializeCore()
+                    Hook.FixedUpdate -> (script as? FixedStep)?.fixedUpdate(time)
+                    Hook.Update -> (script as? PerFrame)?.update(time)
+                    Hook.LateUpdate -> (script as? PerFrame)?.lateUpdate(time)
+                    Hook.Prepare -> {
+                        (script as? BeforeDraw)?.prepare()
+                        if (script is MeshGenerator || script is ImageGenerator) generate(script, entity, data)
+                    }
                     Hook.Disabled -> script.onDisabled()
                     Hook.Destroyed -> script.onDestroyed()
                 }
@@ -267,7 +311,7 @@ class ScriptHost(
                 if (reported.add(hook)) Log.error("[scripts] ${layout.name}.$hook threw on $entity: ${e.stackTraceToString()}")
             }
             // What it did may have moved its data, or taken it away: found again before anything is put back.
-            if (hook == Hook.Destroyed) { instances.remove(entity); return }
+            if (hook == Hook.Destroyed) { instances.remove(entity); generated.remove(entity); return }
             Scratch.use { a ->
                 val now = Native.kecs_get.invokeExact(world.handle, Native.entity(a, entity), component) as MemorySegment
                 if (now == MemorySegment.NULL) instances.remove(entity)
@@ -419,22 +463,31 @@ class ScriptHost(
     private companion object {
         var nextKey = 1L
 
-        /** Whether [type] does something of its own for [hook]: a function of that hook that is not Script's or GraphicsScript's. */
+        /**
+         * Whether [type] does something of its own for [hook]. A script as written before its pieces: a function of that
+         * hook that is not Script's or GraphicsScript's. One now: the piece it takes, and a function of its own where the
+         * piece has one that does nothing.
+         */
         fun overrides(type: Class<*>, hook: Hook): Boolean {
-            val (name, timed) = when (hook) {
-                Hook.Created -> "onCreated" to false
-                Hook.Enabled -> "onEnabled" to false
-                Hook.Started -> "start" to false
-                Hook.FixedUpdate -> "fixedUpdate" to true
-                Hook.Update -> "update" to true
-                Hook.LateUpdate -> "lateUpdate" to true
-                Hook.Prepare -> "prepare" to false
-                Hook.Disabled -> "onDisabled" to false
-                Hook.Destroyed -> "onDestroyed" to false
+            val legacy = Script::class.java.isAssignableFrom(type)
+            val bases = setOf<Class<*>>(Setup::class.java, Script::class.java, GraphicsScript::class.java)
+            fun own(name: String, timed: Boolean): Boolean {
+                val method = runCatching { if (timed) type.getMethod(name, Float::class.javaPrimitiveType) else type.getMethod(name) }.getOrNull() ?: return false
+                return method.declaringClass !in bases && !method.declaringClass.isInterface
             }
-            if (hook == Hook.Prepare && !GraphicsScript::class.java.isAssignableFrom(type)) return false
-            val method = runCatching { if (timed) type.getMethod(name, Float::class.javaPrimitiveType) else type.getMethod(name) }.getOrNull() ?: return true
-            return method.declaringClass != Script::class.java && method.declaringClass != GraphicsScript::class.java
+            fun takes(piece: Class<*>) = piece.isAssignableFrom(type)
+            return when (hook) {
+                Hook.Created -> legacy && own("onCreated", false)
+                Hook.Enabled -> own("onEnabled", false)
+                Hook.Started -> own(if (legacy) "start" else "initialize", false)
+                Hook.FixedUpdate -> if (legacy) own("fixedUpdate", true) else takes(FixedStep::class.java)
+                Hook.Update -> if (legacy) own("update", true) else takes(PerFrame::class.java)
+                Hook.LateUpdate -> if (legacy) own("lateUpdate", true) else takes(PerFrame::class.java) && own("lateUpdate", true)
+                // A generator is looked at before each frame is drawn too: made again when its fields have changed.
+                Hook.Prepare -> if (legacy) GraphicsScript::class.java.isAssignableFrom(type) && own("prepare", false) else takes(BeforeDraw::class.java) || takes(MeshGenerator::class.java) || takes(ImageGenerator::class.java)
+                Hook.Disabled -> own("onDisabled", false)
+                Hook.Destroyed -> own("onDestroyed", false)
+            }
         }
         val live = HashMap<Long, Registered>()
         val resourcesLive = HashMap<Long, RegisteredResource>()

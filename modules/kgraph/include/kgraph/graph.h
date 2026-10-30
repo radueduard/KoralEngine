@@ -108,7 +108,7 @@ namespace kgraph
         std::map<std::string, MeshImport> meshImports;
         /**
          * How each picture file the scene reads is kept, by its asset id (`@wall.png`): block-compressed, cooked into the
-         * project's `cache/textures`, or — not here — as it is read. Changed, it is read again, cooked or not.
+         * project's `.koral/cache/textures`, or — not here — as it is read. Changed, it is read again, cooked or not.
          */
         std::map<std::string, TextureImport> textureImports;
         /**
