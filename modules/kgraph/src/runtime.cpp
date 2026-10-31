@@ -1527,8 +1527,16 @@ namespace kgraph
         std::filesystem::path generatedShaders;
         bool generatedOwned = true;     // false: the folder is another runtime's, which keeps what else is in it
         std::vector<std::string> materialNotes;
-        void WriteMaterials()
+        bool materialsToWrite = false;
+        /**
+         * What the kinds' modules are to say has changed: written once they are all known, before anything is built of
+         * them. Written a kind at a time, a kind not declared yet would be taken away and made again, and every shader
+         * that imports it built again, each time a project is opened.
+         */
+        void WriteMaterials() { materialsToWrite = true; }
+        void WriteMaterialsNow()
         {
+            if (!std::exchange(materialsToWrite, false)) return;
             materialNotes = WriteMaterialModules(GeneratedFolder(), materialKinds, generatedOwned);
         }
         const std::filesystem::path& GeneratedFolder()
@@ -9095,6 +9103,7 @@ namespace kgraph
     void Runtime::Set(Graph graph)
     {
         const kor::log::Quiet quiet;
+        _impl->WriteMaterialsNow();
         _graph = std::move(graph);
         ++_revision;
         _impl->SetMeshImports(_graph.meshImports);
@@ -9549,6 +9558,7 @@ namespace kgraph
     void Runtime::Update()
     {
         const kor::log::Quiet quiet;
+        _impl->WriteMaterialsNow();
         const Impl::Using using_(*_impl, std::string(Impl::EntitiesUse));
         // A frame, counted before anything can end it early: a buffer of instances this runtime did not fill in it — a
         // frame it was built again in — is filled by a runtime that follows it.
@@ -10255,7 +10265,11 @@ namespace kgraph
 
     const std::filesystem::path& Runtime::GeneratedShaderDirectory() const { return _impl->generatedShaders; }
 
-    const std::vector<std::string>& Runtime::MaterialNotes() const { return _impl->materialNotes; }
+    const std::vector<std::string>& Runtime::MaterialNotes() const
+    {
+        _impl->WriteMaterialsNow();
+        return _impl->materialNotes;
+    }
 
     std::vector<PassUse> Runtime::UsesOf(const std::string_view id, const std::string_view output) const
     {

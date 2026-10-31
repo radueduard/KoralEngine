@@ -327,8 +327,6 @@ namespace keditor
         const std::string name = kind.name;
         std::string error;
         if (_runtime->DeclareMaterialKind(std::move(kind), &error) == kecs::NoComponent) _notes.push_back(std::format("{}: {}", name, error));
-        for (const auto& note : _runtime->MaterialNotes())
-            if (std::ranges::find(_notes, note) == _notes.end()) _notes.push_back(note);
         Changed();
     }
 
@@ -966,6 +964,8 @@ namespace keditor
     void Document::Update()
     {
         _runtime->Update();
+        for (const auto& note : _runtime->MaterialNotes())
+            if (std::ranges::find(_notes, note) == _notes.end()) _notes.push_back(note);
         // A model that was being read, read: its things are made under the entity that stood for it.
         for (auto it = _importing.begin(); it != _importing.end();) {
             std::string why;

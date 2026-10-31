@@ -42,6 +42,7 @@ namespace {
                 std::string error;
                 EXPECT_NE(scene->runtime->DeclareMaterialKind(KindOf(std::move(type)), &error), kecs::NoComponent) << error;
             }
+            (void)scene->runtime->MaterialNotes();  // written by now, for what reads the files
         }
         void TearDown() override {
             if (scene) { support::App()->Close(*scene); Frame(); }
@@ -90,6 +91,28 @@ TEST_F(MaterialTest, AKindIsAComponentWhosePicturesStartAsItSays) {
     world.Destroy(entity);
     Frame();
     EXPECT_LT(white.use_count(), held) << "the pictures are let go of with what held them";
+}
+
+// A project opened again: what its kinds were written as last time is there, and its own kind is declared after the
+// engine's. Nothing is written or taken away on the way, or every shader that imports them is built again, every time.
+TEST_F(MaterialTest, KindsDeclaredOneAfterAnotherLeaveWhatIsWrittenAlone) {
+    kgraph::MaterialKind project = scene->runtime->MaterialKinds().front();
+    project.name = "ProjectMaterial";
+    std::vector<kgraph::MaterialKind> all = scene->runtime->MaterialKinds();
+    all.push_back(project);
+    std::ranges::sort(all, {}, &kgraph::MaterialKind::name);
+    const auto opened = directory / "opened again";
+    EXPECT_TRUE(kgraph::WriteMaterialModules(opened, all).empty());
+    const auto longAgo = std::filesystem::file_time_type::clock::now() - std::chrono::hours(24);
+    for (const auto& file : std::filesystem::directory_iterator(opened)) std::filesystem::last_write_time(file.path(), longAgo);
+
+    scene->runtime->SetGeneratedShaderDirectory(opened);
+    EXPECT_EQ(std::filesystem::last_write_time(opened / "ProjectMaterial.slang"), longAgo) << "not taken away for not being declared yet";
+    std::string error;
+    EXPECT_NE(scene->runtime->DeclareMaterialKind(project, &error), kecs::NoComponent) << error;
+    Frame();
+    for (const char* file : { "ProjectMaterial.slang", "PbrMaterial.slang", "koral_materials.slang" })
+        EXPECT_EQ(std::filesystem::last_write_time(opened / file), longAgo) << file;
 }
 
 // What a kind is to a shader: a module of its name with a struct of it — a picture as its bindless index — and the

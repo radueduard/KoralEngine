@@ -639,7 +639,8 @@ namespace kgraph
         /**
          * @brief Makes @p kind a component of the world — or gives the one so named its new shape, entities keeping
          *        the fields whose name and type are the same — each new one's pictures starting as the kind says, and
-         *        writes its Slang module (materials.h) where SetGeneratedShaderDirectory says. NoComponent, with
+         *        writes its Slang module (materials.h) where SetGeneratedShaderDirectory says, with the other kinds'
+         *        declared before the next frame or graph: nothing is built of a kind before then. NoComponent, with
          *        @p error saying why, when the name is a component's that is no material kind's, or there is no world.
          */
         kecs::ComponentId DeclareMaterialKind(MaterialKind kind, std::string* error = nullptr);
