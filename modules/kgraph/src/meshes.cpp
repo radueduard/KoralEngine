@@ -1,7 +1,7 @@
 //
-// kgraph: the default meshes, made in code. The first seven — cube to torus — and the quad and the triangle are, in
-// their shapes, sizes and how finely each is cut, those of the Kotlin engine project's Meshes, so that a scene means the
-// same in both; the rest are this engine's own.
+// kgraph: the procedural meshes, made in code from their parameters. At their initial values the first seven — cube to
+// torus — and the quad and the triangle are, in their shapes, sizes and how finely each is cut, those of the Kotlin
+// engine project's Meshes, so that a scene means the same in both; the rest are this engine's own.
 //
 
 #include <kgraph/meshes.h>
@@ -10,8 +10,10 @@
 #include <array>
 #include <map>
 #include <bit>
+#include <charconv>
 #include <format>
 #include <cmath>
+#include <ranges>
 
 namespace kgraph
 {
@@ -254,19 +256,6 @@ namespace kgraph
             return std::move(make.data);
         }
 
-        /** A square a unit across on the XZ plane, facing up. */
-        MeshData Plane()
-        {
-            Maker make;
-            const float h = 0.5f;
-            const V3 up { 0, 1, 0 };
-            const std::uint32_t a = make.Vertex({ -h, 0, h }, up, 0, 1), b = make.Vertex({ h, 0, h }, up, 1, 1);
-            const std::uint32_t c = make.Vertex({ h, 0, -h }, up, 1, 0), d = make.Vertex({ -h, 0, -h }, up, 0, 0);
-            make.Triangle(a, b, c);
-            make.Triangle(a, c, d);
-            return std::move(make.data);
-        }
-
         /** A cylinder about Y, closed at both ends. */
         MeshData Cylinder(const float radius = 0.5f, const float height = 1.f, const int segments = 48)
         {
@@ -397,15 +386,15 @@ namespace kgraph
             return std::move(make.data);
         }
 
-        /** The plane, cut in @p cells by as many: a unit square on the XZ plane facing up, for what is moved vertex by vertex. */
-        MeshData Grid(const int cells = 64)
+        /** A rectangle on the XZ plane facing up, cut in @p cells by as many: one, or for what is moved vertex by vertex, many. */
+        MeshData Grid(const float width, const float depth, const int cells)
         {
             Maker make;
             const auto row = static_cast<std::uint32_t>(cells + 1);
             for (int j = 0; j <= cells; ++j)
                 for (int i = 0; i <= cells; ++i) {
                     const float u = static_cast<float>(i) / static_cast<float>(cells), v = static_cast<float>(j) / static_cast<float>(cells);
-                    make.Vertex({ u - 0.5f, 0.f, v - 0.5f }, { 0.f, 1.f, 0.f }, u, v);
+                    make.Vertex({ (u - 0.5f) * width, 0.f, (v - 0.5f) * depth }, { 0.f, 1.f, 0.f }, u, v);
                 }
             for (std::uint32_t j = 0; j < static_cast<std::uint32_t>(cells); ++j)
                 for (std::uint32_t i = 0; i < static_cast<std::uint32_t>(cells); ++i) {
@@ -413,6 +402,22 @@ namespace kgraph
                     make.QuadFacing(a, a + 1, a + row + 1, a + row, { 0.f, 1.f, 0.f });
                 }
             return std::move(make.data);
+        }
+
+        /** A shape drawn out along its axes, its normals turned as that turns its surface, its picture stretched with it. */
+        MeshData Stretched(MeshData data, const float x, const float y, const float z)
+        {
+            if (x == 1.f && y == 1.f && z == 1.f) return data;
+            for (auto& vertex : data.vertices) {
+                vertex.position[0] *= x;
+                vertex.position[1] *= y;
+                vertex.position[2] *= z;
+                const V3 n = Normalize({ vertex.normal[0] / x, vertex.normal[1] / y, vertex.normal[2] / z });
+                vertex.normal[0] = n.x;
+                vertex.normal[1] = n.y;
+                vertex.normal[2] = n.z;
+            }
+            return data;
         }
 
         /** A shape seen from inside: its triangles turned over, its normals in, and its picture the right way round from there. */
@@ -503,11 +508,11 @@ namespace kgraph
             return std::move(make.data);
         }
 
-        /** A tube: a cylinder a unit across and tall with a hole down it, its wall @p wall thick. */
-        MeshData Pipe(const float wall = 0.15f, const int segments = 48)
+        /** A tube: a cylinder with a hole down it, its wall @p wall thick. */
+        MeshData Pipe(const float outer = 0.5f, const float height = 1.f, const float wall = 0.15f, const int segments = 48)
         {
             Maker make;
-            const float outer = 0.5f, inner = outer - wall, h = 0.5f;
+            const float inner = std::max(outer - wall, 0.001f), h = height / 2.f;
             make.Revolve({ { outer, h, 1.f, 0.f }, { outer, -h, 1.f, 0.f } }, segments);
             make.Revolve({ { inner, -h, -1.f, 0.f }, { inner, h, -1.f, 0.f } }, segments);   // up the inside: facing in
             make.Annulus(inner, outer, h, segments, true);
@@ -638,7 +643,7 @@ namespace kgraph
         }
 
         /** A trefoil knot: a tube round a (2, 3) torus knot, a unit across. */
-        MeshData Knot(const int samples = 256, const int sides = 16)
+        MeshData Knot(const float tube = 0.07f, const int samples = 256, const int sides = 16)
         {
             Maker make;
             std::vector<V3> path;
@@ -647,7 +652,7 @@ namespace kgraph
                 const float reach = 2.f + std::cos(3.f * t);
                 path.push_back(V3 { reach * std::cos(2.f * t), -std::sin(3.f * t), reach * std::sin(2.f * t) } * 0.14f);
             }
-            make.Tube(path, std::vector<float>(path.size(), 0.07f), sides, true);
+            make.Tube(path, std::vector<float>(path.size(), tube), sides, true);
             return std::move(make.data);
         }
 
@@ -699,42 +704,172 @@ namespace kgraph
         }
     }
 
+    namespace {
+        using Values = std::span<const float>;
+
+        /** A shape: its name, what it is made from, and how, of a value each of those in their order. */
+        struct Shape {
+            std::string name;
+            std::vector<MeshParameter> parameters;
+            MeshData (*make)(Values);
+        };
+
+        MeshParameter Length(std::string name, const float initial, std::string says, const float most = 100.f) { return { std::move(name), initial, 0.01f, most, false, std::move(says) }; }
+        MeshParameter Count(std::string name, const float initial, const float least, const float most, std::string says) { return { std::move(name), initial, least, most, true, std::move(says) }; }
+
+        int Whole(const float value) { return static_cast<int>(std::lround(value)); }
+
+        std::vector<MeshParameter> Sides(const float width = 1.f, const float height = 1.f, const float depth = 1.f)
+        {
+            return { Length("width", width, "How far across it is, along X."), Length("height", height, "How tall it is, along Y."), Length("depth", depth, "How far through it is, along Z.") };
+        }
+        std::vector<MeshParameter> Bands()
+        {
+            return { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 40.f, 3.f, 256.f, "How many bands it is cut in from pole to pole."),
+                     Count("segments", 80.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
+        }
+        std::vector<MeshParameter> Turned()
+        {
+            return { Length("radius", 0.5f, "How far out its base reaches."), Length("height", 1.f, "How tall it is, along Y."), Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
+        }
+
+        const std::vector<Shape>& Shapes()
+        {
+            static const std::vector<Shape> shapes {
+                { "cube", Sides(), [](const Values v) { return Stretched(Cube(), v[0], v[1], v[2]); } },
+                { "sphere", Bands(), [](const Values v) { return Sphere(v[0], Whole(v[1]), Whole(v[2])); } },
+                { "plane", { Length("width", 1.f, "How far across it is, along X."), Length("depth", 1.f, "How far through it is, along Z."), Count("cells", 1.f, 1.f, 512.f, "How many pieces each side is cut in.") },
+                  [](const Values v) { return Grid(v[0], v[1], Whole(v[2])); } },
+                { "cylinder", Turned(), [](const Values v) { return Cylinder(v[0], v[1], Whole(v[2])); } },
+                { "cone", Turned(), [](const Values v) { return Cone(v[0], v[1], Whole(v[2])); } },
+                { "capsule", { Length("radius", 0.25f, "How far from its axis its surface is, and how round its ends."), Length("height", 1.f, "How tall it is overall, its ends included."),
+                               Count("rings", 12.f, 1.f, 128.f, "How many bands each round end is cut in."), Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                  [](const Values v) { return Capsule(v[0], v[1], Whole(v[2]), Whole(v[3])); } },
+                { "torus", { Length("radius", 0.35f, "How far the middle of its tube is from its centre."), Length("tube", 0.15f, "How far from the middle of its tube its surface is."),
+                             Count("rings", 32.f, 3.f, 256.f, "How many pieces it is cut in going round its tube."), Count("segments", 64.f, 3.f, 512.f, "How many pieces it is cut in going round its centre.") },
+                  [](const Values v) { return Torus(v[0], v[1], Whole(v[2]), Whole(v[3])); } },
+                { "quad", { Length("width", 1.f, "How far across it is, along X."), Length("height", 1.f, "How tall it is, along Y.") }, [](const Values v) { return Stretched(Quad(), v[0], v[1], 1.f); } },
+                { "triangle", { Length("width", 1.f, "How far across its base is, along X."), Length("height", 1.f, "How tall it is, along Y.") }, [](const Values v) { return Stretched(OneTriangle(), v[0], v[1], 1.f); } },
+                { "icosphere", { Length("radius", 0.5f, "How far from its centre its surface is."), Count("cuts", 3.f, 0.f, 6.f, "How many times each triangle is cut in four: 1280 triangles at 3.") },
+                  [](const Values v) { return Icosphere(v[0], Whole(v[1])); } },
+                { "grid", { Length("width", 1.f, "How far across it is, along X."), Length("depth", 1.f, "How far through it is, along Z."), Count("cells", 64.f, 1.f, 512.f, "How many pieces each side is cut in.") },
+                  [](const Values v) { return Grid(v[0], v[1], Whole(v[2])); } },
+                { "insideCube", Sides(), [](const Values v) { return Inside(Stretched(Cube(), v[0], v[1], v[2])); } },
+                { "insideSphere", Bands(), [](const Values v) { return Inside(Sphere(v[0], Whole(v[1]), Whole(v[2]))); } },
+                { "roundedBox", { Length("radius", 0.1f, "How round its edges and corners are.", 0.5f), Count("steps", 6.f, 1.f, 32.f, "How many pieces each rounded edge is cut in.") },
+                  [](const Values v) { return RoundedBox(v[0], Whole(v[1])); } },
+                { "wedge", Sides(), [](const Values v) { return Stretched(Wedge(), v[0], v[1], v[2]); } },
+                { "pyramid", Sides(), [](const Values v) { return Stretched(Pyramid(), v[0], v[1], v[2]); } },
+                { "hemisphere", { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 20.f, 2.f, 128.f, "How many bands it is cut in from its top to its rim."),
+                                  Count("segments", 80.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                  [](const Values v) { return Hemisphere(v[0], Whole(v[1]), Whole(v[2])); } },
+                { "pipe", { Length("radius", 0.5f, "How far out its outside is."), Length("height", 1.f, "How tall it is, along Y."), Length("wall", 0.15f, "How thick its wall is."),
+                            Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                  [](const Values v) { return Pipe(v[0], v[1], v[2], Whole(v[3])); } },
+                { "arch", [] { auto all = Sides(1.f, 1.f, 0.5f); all.push_back(Count("segments", 24.f, 3.f, 128.f, "How many pieces its round is cut in.")); return all; }(),
+                  [](const Values v) { return Stretched(Arch(Whole(v[3])), v[0], v[1], v[2] / 0.5f); } },
+                { "stairs", [] { auto all = Sides(); all.push_back(Count("steps", 5.f, 1.f, 128.f, "How many stairs there are.")); return all; }(),
+                  [](const Values v) { return Stretched(Stairs(Whole(v[3])), v[0], v[1], v[2]); } },
+                { "teapot", {}, [](Values) { return Teapot(); } },
+                { "knot", { Length("tube", 0.07f, "How far from the middle of its tube its surface is.", 1.f), Count("samples", 256.f, 32.f, 2048.f, "How many pieces it is cut in along its length."),
+                            Count("sides", 16.f, 3.f, 128.f, "How many pieces it is cut in going round its tube.") },
+                  [](const Values v) { return Knot(v[0], Whole(v[1]), Whole(v[2])); } },
+                { "arrow", { Length("length", 1.f, "How long it is, tip to foot."), Length("shaft", 0.04f, "How far from its axis its shaft's surface is."), Length("head", 0.1f, "How far out its head reaches."),
+                             Length("headLength", 0.3f, "How long its head is."), Count("segments", 24.f, 3.f, 256.f, "How many pieces it is cut in going round it.") },
+                  [](const Values v) { return Arrow(-v[0] / 2.f, v[0] / 2.f, v[1], v[2], v[3], Whole(v[4])); } },
+                { "axes", {}, [](Values) { return Axes(); } },
+                { "skinnedCylinder", { Length("radius", 0.15f, "How far from its axis its surface is."), Count("bands", 16.f, 1.f, 128.f, "How many bands it is cut in along its length."),
+                                       Count("segments", 24.f, 3.f, 256.f, "How many pieces it is cut in going round it.") },
+                  [](const Values v) { return SkinnedCylinder(v[0], Whole(v[1]), Whole(v[2])); } },
+            };
+            return shapes;
+        }
+
+        /** The shape @p name is of: before any `?`. */
+        const Shape* Find(const std::string_view name)
+        {
+            const std::string_view shape = name.substr(0, name.find('?'));
+            const auto it = std::ranges::find(Shapes(), shape, &Shape::name);
+            return it == Shapes().end() ? nullptr : &*it;
+        }
+
+        /** Rounded as it is told apart: what shows the same is the same mesh, however it was dragged there. */
+        float Kept(const MeshParameter& parameter, const float value)
+        {
+            const float within = std::clamp(value, parameter.least, parameter.most);
+            return parameter.whole ? std::round(within) : std::round(within * 10000.f) / 10000.f;
+        }
+    }
+
     const std::vector<std::string>& DefaultMeshNames()
     {
-        static const std::vector<std::string> names { "cube", "sphere", "plane", "cylinder", "cone", "capsule", "torus", "quad", "triangle",
-            "icosphere", "grid", "insideCube", "insideSphere", "roundedBox", "wedge", "pyramid", "hemisphere", "pipe", "arch", "stairs",
-            "teapot", "knot", "arrow", "axes", "skinnedCylinder" };
+        static const std::vector<std::string> names = [] {
+            std::vector<std::string> all;
+            for (const Shape& shape : Shapes()) all.push_back(shape.name);
+            return all;
+        }();
         return names;
+    }
+
+    std::string_view ShapeOf(const std::string_view name)
+    {
+        const Shape* shape = Find(name);
+        return shape ? std::string_view(shape->name) : std::string_view();
+    }
+
+    const std::vector<MeshParameter>& ShapeParameters(const std::string_view name)
+    {
+        static const std::vector<MeshParameter> none;
+        const Shape* shape = Find(name);
+        return shape ? shape->parameters : none;
+    }
+
+    std::vector<float> ShapeValues(const std::string_view name)
+    {
+        const Shape* shape = Find(name);
+        if (!shape) return {};
+        std::vector<float> values;
+        for (const MeshParameter& parameter : shape->parameters) values.push_back(parameter.initial);
+        const std::size_t query = name.find('?');
+        if (query == std::string_view::npos) return values;
+        // `radius=0.8&rings=24`: what is not understood is left out, so that a name from a later engine still reads.
+        for (const auto part : std::views::split(name.substr(query + 1), '&')) {
+            const std::string_view said(part.begin(), part.end());
+            const std::size_t equals = said.find('=');
+            if (equals == std::string_view::npos) continue;
+            const auto parameter = std::ranges::find(shape->parameters, said.substr(0, equals), &MeshParameter::name);
+            if (parameter == shape->parameters.end()) continue;
+            float value = 0.f;
+            const std::string_view number = said.substr(equals + 1);
+            if (const auto [end, failed] = std::from_chars(number.data(), number.data() + number.size(), value); failed == std::errc {} && std::isfinite(value))
+                values[static_cast<std::size_t>(parameter - shape->parameters.begin())] = value;
+        }
+        for (std::size_t i = 0; i < values.size(); ++i) values[i] = Kept(shape->parameters[i], values[i]);
+        return values;
+    }
+
+    std::string ShapeName(const std::string_view shape, const std::span<const float> values)
+    {
+        const Shape* of = Find(shape);
+        if (!of) return {};
+        std::string name = of->name;
+        char separator = '?';
+        for (std::size_t i = 0; i < of->parameters.size() && i < values.size(); ++i) {
+            const MeshParameter& parameter = of->parameters[i];
+            const float value = Kept(parameter, values[i]);
+            if (value == parameter.initial) continue;
+            name += std::format("{}{}={}", separator, parameter.name, value);
+            separator = '&';
+        }
+        return name;
     }
 
     std::optional<MeshData> ShapeData(const std::string_view name)
     {
-        if (name == "cube") return Cube();
-        if (name == "sphere") return Sphere();
-        if (name == "plane") return Plane();
-        if (name == "cylinder") return Cylinder();
-        if (name == "cone") return Cone();
-        if (name == "capsule") return Capsule();
-        if (name == "torus") return Torus();
-        if (name == "quad") return Quad();
-        if (name == "triangle") return OneTriangle();
-        if (name == "icosphere") return Icosphere();
-        if (name == "grid") return Grid();
-        if (name == "insideCube") return Inside(Cube());
-        if (name == "insideSphere") return Inside(Sphere());
-        if (name == "roundedBox") return RoundedBox();
-        if (name == "wedge") return Wedge();
-        if (name == "pyramid") return Pyramid();
-        if (name == "hemisphere") return Hemisphere();
-        if (name == "pipe") return Pipe();
-        if (name == "arch") return Arch();
-        if (name == "stairs") return Stairs();
-        if (name == "teapot") return Teapot();
-        if (name == "knot") return Knot();
-        if (name == "arrow") return Arrow(-0.5f, 0.5f, 0.04f, 0.1f, 0.3f);
-        if (name == "axes") return Axes();
-        if (name == "skinnedCylinder") return SkinnedCylinder();
-        return std::nullopt;
+        const Shape* shape = Find(name);
+        if (!shape) return std::nullopt;
+        const std::vector<float> values = ShapeValues(name);
+        return shape->make(values);
     }
 
     std::string DefaultMeshId(const std::string_view name) { return "$" + std::string(name); }

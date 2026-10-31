@@ -1,3 +1,5 @@
+#include <map>
+#include <kscript/declarations.h>
 #include <keditor/project.h>
 
 #include <algorithm>
@@ -20,6 +22,26 @@ namespace keditor
 
     std::string Project::LanguageName(const char language) { return language == 'k' ? "kotlin" : language == 'c' ? "csharp" : std::string(); }
 
+    namespace {
+        /**
+         * Whether a script's file declares material kinds and nothing else: data, read from the file, with nothing to run,
+         * so that it is no reason for a project to need its scripts' runner. Kept by when the file was written, as this is
+         * asked often.
+         */
+        bool OnlyMaterialKinds(const std::filesystem::path& file)
+        {
+            struct Kept { std::filesystem::file_time_type written; bool only = false; };
+            static std::map<std::filesystem::path, Kept> kept;
+            std::error_code ignored;
+            const auto written = std::filesystem::last_write_time(file, ignored);
+            if (const auto it = kept.find(file); it != kept.end() && it->second.written == written) return it->second.only;
+            const auto declared = kscript::DeclareFiles(file);
+            const bool only = !declared.types.empty() && std::ranges::all_of(declared.types, [](const kscript::ScriptType& type) { return type.material; });
+            kept[file] = { written, only };
+            return only;
+        }
+    }
+
     char Project::Language() const
     {
         if (scripts == "kotlin") return 'k';
@@ -27,8 +49,10 @@ namespace keditor
         std::error_code ignored;
         bool kotlin = false, csharp = false;
         for (const auto& entry : std::filesystem::directory_iterator(directory / "scripts", ignored)) {
-            kotlin = kotlin || entry.path().extension() == ".kt";
-            csharp = csharp || entry.path().extension() == ".cs";
+            const auto ending = entry.path().extension();
+            if ((ending != ".kt" && ending != ".cs") || OnlyMaterialKinds(entry.path())) continue;
+            kotlin = kotlin || ending == ".kt";
+            csharp = csharp || ending == ".cs";
         }
         return kotlin ? 'k' : csharp ? 'c' : 0;
     }

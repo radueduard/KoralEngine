@@ -245,14 +245,31 @@ name is what it says instead.
 
 ### Default meshes and materials
 
-Every project's Assets panel has the editor's own, of no file: **Meshes/Primitives** holds the meshes there are
-without making any (`$cube`, `$sphere`, `$roundedBox`, `$wedge`, `$stairs`, `$teapot`... every one of
+Every project's Assets panel has the editor's own, of no file: **Resources, Meshes** lists the procedural meshes beside
+the meshes of models (`$cube`, `$sphere`, `$roundedBox`, `$wedge`, `$stairs`, `$teapot`... every one of
 [the default meshes](kgraph.md#default-meshes)), each pictured, dragged
-onto an entity's Mesh as any mesh is. Their inspector chooses their **tangents**, every default mesh alike: a `TANGENT` of
+onto an entity's Mesh as any mesh is. It starts with the shape's default parameters, and the Mesh card tunes them for
+that entity (**Back to how it starts** undoes it): entities with the same numbers share one mesh. Their inspector chooses their **tangents**, every default mesh alike: a `TANGENT` of
 four numbers (w the bitangent's side), a `TANGENT` and a `BITANGENT` of three, as a model's meshes have them, or
-neither — saved with the scene's graph, and undone as any change (see [Default meshes](kgraph.md#default-meshes)). **Materials/Defaults** holds materials (`material:Gold`, `material:Red plastic`,
-plastics, metals, wood, rubber, two that glow): each a PbrMaterial asset, dropped on an entity in the scene tree or
-the inspector, which it then follows (`Document::GiveMaterial`). The table is `Session::DefaultMaterials()`.
+neither — saved with the scene's graph, and undone as any change (see [Default meshes](kgraph.md#default-meshes)). **Materials/PBR** and **Materials/Blinn-Phong** hold the editor's materials, a list of each kind: metals, plastics and the like described physically, and the classic table of gems, metals, plastics and rubbers. **Resources, Materials** shows both lists, under their headings, before the project's own. Each is dropped on an entity in the scene tree or the inspector, which then follows it.
+
+### Looking round
+
+With the right button held over the Scene panel, the mouse is captured: its own movement turns the view, not the pointer's, and the pointer is back where it was on letting go. What the mouse did is taken over about 15 ms, so that the view turns smoothly however unevenly the movement arrives; all of it is taken, none lost.
+
+### A pipeline's shaders
+
+A pipeline's inspector shows its shaders as tiles, each the shape of a shader's file in the Assets panel, in a slot of its stage. Pressed, a slot lists the project's entry points of that stage and no other; dropped on it from the Assets panel, an entry point goes in if it is of that stage, and a module by its first entry point that is. Its right button opens the file, or takes the shader out.
+
+A graphics pipeline has a vertex shader and a fragment shader, which can be taken out for a depth-only pass. **Add tessellation** and **Add a geometry shader** bring in those stages' slots, hidden until then, or the task shader's on a mesh pipeline. A ray tracing pipeline has its ray generation shader, then **Miss**, **Hit groups** and **Callable** as lists to add to and take from; each hit group has a closest hit, an any hit and an intersection slot, an empty one faint.
+
+### Functions
+
+A `.kfunc` pressed twice in the Assets panel, or **Open in the graph** in its inspector, opens as a page of the graph: by a call of it the scene has, or with none, by a call made for the page that goes when it closes. What is done there is done for every call of it.
+
+### Looking at a material
+
+A material is viewed as an image or a buffer is: pressed twice in the Assets panel, or **Open in the viewer** in its inspector. The Viewer panel shows it on a mesh in the middle of a lit room, a cube map whose panels of light are what its highlights are the shape of. A drag orbits the camera, the wheel brings it nearer, and **Shown on** swaps the sphere for any mesh, procedural or a model's. Beside it, **Try it out** has the material's values and **Textures** to change and see: colours by a picker, numbers within their limits, a light's colour with how strong it is (it can be more than 1), and pictures chosen or dropped from the Assets panel. They are drawn in the viewer alone, and forgotten with it or by **Back to the material**. What a material is, its inspector changes. It is drawn by the kind's shading module, the same one the Assets panel's small pictures use, so a kind and a shading function of a project's work as the engine's do (see [Shading](scripts.md#shading)).
 
 ### Prefabs
 

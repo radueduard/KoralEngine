@@ -15,6 +15,8 @@
 
 #include <keditor/editor.h>
 
+#include "widgets.h"
+
 namespace keditor
 {
     namespace {
@@ -481,6 +483,86 @@ namespace keditor
             }
         };
 
+        /** The material, drawn as big as it is shown: a drag orbits it, the wheel brings it near. */
+        struct MaterialCanvas final : kui::StatefulWidget {
+            std::shared_ptr<Session> session;
+            explicit MaterialCanvas(std::shared_ptr<Session> s) : session(std::move(s)) {}
+            void DidUpdateWidget(const kui::StatefulWidget& newer) override { session = static_cast<const MaterialCanvas&>(newer).session; }
+            kui::Widget Build() override
+            {
+                MaterialPreview* preview = session->ViewedMaterial();
+                const auto picture = preview ? preview->Picture() : kor::ResourceRef<const kor::Image>();
+                const std::string problem = preview ? preview->Problem() : std::string();
+                kui::Widget shown = picture.Get() && problem.empty() ? kui::Image(picture, kui::ImageFit::eFill)
+                    : kui::Center(kui::Padding(kui::EdgeInsets::All(10.f), kgui::Muted(problem.empty() ? "Drawing it..." : problem)));
+                kui::GestureOptions gestures;
+                gestures.onPanUpdate = [this](const kor::Vec2 delta, kor::Vec2) { if (MaterialPreview* p = session->ViewedMaterial()) p->Turn(-delta.x * 0.01f, delta.y * 0.01f); };
+                gestures.onScroll = [this](const kor::Vec2 delta) { if (MaterialPreview* p = session->ViewedMaterial()) p->Zoom(delta.y); SetState(); return true; };
+                return kui::SizeObserver([preview](kor::Vec2, const kor::Vec2 pixels) {
+                    if (preview) preview->SetExtent({ static_cast<std::uint32_t>(std::max(pixels.x, 16.f)), static_cast<std::uint32_t>(std::max(pixels.y, 16.f)) });
+                }, kui::GestureDetector(std::move(gestures), kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x131417))), std::move(shown))));
+            }
+        };
+
+        /** A material's picture, to try another: shown small, picked from those there are, or dropped here from the Assets panel. */
+        kui::Widget TextureChoice(const std::shared_ptr<Session>& session, const MaterialPreview& preview, const std::string& kind, const kecs::FieldDescription& field,
+                                  std::function<void(const kgraph::Value&)> set)
+        {
+            const kgraph::Value now = preview.FieldOf(field.name);
+            const std::string holds = now.String() ? *now.String() : std::string();
+            std::vector<std::string> choices = session->FieldChoices(kind, "Image"), labels;
+            if (!holds.empty() && !std::ranges::contains(choices, holds)) choices.push_back(holds);
+            for (const auto& choice : choices) labels.push_back(choice.starts_with('$') ? choice.substr(1) : choice.starts_with('@') ? session->AssetLabel(choice) : choice);
+            const auto selected = std::ranges::find(choices, holds);
+            kui::Widget picked = kui::Dropdown(std::move(labels), selected == choices.end() ? 0 : static_cast<int>(selected - choices.begin()), [set, choices](const int index) {
+                set(kgraph::Value(choices[static_cast<std::size_t>(index)]));
+            });
+            if (const auto picture = preview.PictureOf(holds); picture.Get())
+                picked = kui::Row({ kui::SizedBox(36.f, 36.f, kui::Image(picture, kui::ImageFit::eContain)), kui::Expanded(std::move(picked)) },
+                                  kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+            return kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([session, set](const kui::DragData& dragged, kor::Vec2) {
+                const auto* id = dragged.As<std::string>();
+                if (!id) return;
+                const auto assets = session->Assets();
+                const auto asset = std::ranges::find(assets, *id, &Session::Asset::id);
+                if (asset != assets.end() && asset->kind == Session::Asset::Kind::eTexture) set(kgraph::Value(*id));
+            }), std::move(picked));
+        }
+
+        /** The material on a mesh, and its values to try out: drawn so here alone. What it is, its inspector changes. */
+        kui::Widget MaterialView(const std::shared_ptr<Session>& session)
+        {
+            std::vector<kui::Widget> rows;
+            std::vector<std::string> meshIds, meshLabels;
+            int shownOn = 0;
+            for (const auto& each : session->Assets()) {
+                if (each.kind != Session::Asset::Kind::eMesh) continue;
+                if (each.id == session->PreviewMesh()) shownOn = static_cast<int>(meshIds.size());
+                meshIds.push_back(each.id);
+                meshLabels.push_back(each.label);
+            }
+            rows.push_back(kgui::Labeled("Shown on", kui::Dropdown(meshLabels, shownOn, [session, meshIds](const int index) { session->SetPreviewMesh(meshIds[static_cast<std::size_t>(index)]); })));
+            if (const auto shown = session->MaterialToShow(session->Viewing())) {
+                rows.push_back(Fact("Kind", shown->kind.name));
+                if (!session->HasShading(shown->kind.name)) {
+                    rows.push_back(kgui::Muted(std::format("{} has no shading: a module {}Shading, of the project's shaders, says how it is lit.", shown->kind.name, shown->kind.name)));
+                    rows.push_back(Chip("Write its shading", [session, kind = shown->kind.name] { session->WriteShadingModule(kind); }));
+                }
+                rows.push_back(Heading("Try it out"));
+                rows.push_back(kgui::Muted("Only here: the material stays as it is, and is changed in its inspector."));
+                if (const MaterialPreview* preview = session->ViewedMaterial()) {
+                    const auto tried = [session](std::string name) { return [session, name = std::move(name)](const kgraph::Value& value) { session->TryMaterialField(name, value); }; };
+                    for (const auto& field : shown->kind.fields)
+                        if (field.type != "Image") rows.push_back(kgui::Labeled(field.name, widgets::ValueField(field, preview->FieldOf(field.name), tried(field.name))));
+                    rows.push_back(Heading("Textures"));
+                    for (const auto& field : shown->kind.fields)
+                        if (field.type == "Image") rows.push_back(kgui::Labeled(field.name, TextureChoice(session, *preview, shown->kind.name, field, tried(field.name))));
+                }
+                rows.push_back(Chip("Back to the material", [session] { session->ForgetMaterialTried(); }, session->MaterialTried()));
+            }
+            return Split(kui::Make<MaterialCanvas>(session), kui::ScrollView(Rows(std::move(rows), 6.f)));
+        }
+
         std::string ChannelTypeName(const kor::ChannelType type)
         {
             switch (type) {
@@ -581,14 +663,15 @@ namespace keditor
         if (kind == Session::ViewKind::eNone)
             return kui::Padding(kui::EdgeInsets::All(16.f), Rows({
                 Heading("Nothing is viewed"),
-                kgui::Muted("Open a texture, a buffer or a mesh here to look at all of it: a node's, from its inspector or its menu (Open in the viewer), "
+                kgui::Muted("Open a texture, a buffer, a mesh or a material here to look at all of it: a node's, from its inspector or its menu (Open in the viewer), "
                             "or a file's, pressed twice in the Assets panel."),
             }));
         const std::string& id = session->Viewing();
-        const char* what = kind == Session::ViewKind::eImage ? "Image" : kind == Session::ViewKind::eBuffer ? "Buffer" : "Mesh";
-        kui::Widget body = kind == Session::ViewKind::eImage ? ImageView(session) : kind == Session::ViewKind::eBuffer ? BufferView(session) : MeshView(session);
+        const char* what = kind == Session::ViewKind::eImage ? "Image" : kind == Session::ViewKind::eBuffer ? "Buffer" : kind == Session::ViewKind::eMaterial ? "Material" : "Mesh";
+        kui::Widget body = kind == Session::ViewKind::eImage ? ImageView(session) : kind == Session::ViewKind::eBuffer ? BufferView(session)
+            : kind == Session::ViewKind::eMaterial ? MaterialView(session) : MeshView(session);
         return kui::Padding(kui::EdgeInsets::All(10.f), Rows({
-            Bar({ kui::Expanded(Heading(std::format("{}   ·   {}", id.starts_with('@') ? session->AssetLabel(id) : id, what))),
+            Bar({ kui::Expanded(Heading(std::format("{}   ·   {}", id.starts_with('@') || kind == Session::ViewKind::eMaterial ? session->AssetLabel(id) : id, what))),
                   Chip("Stop viewing", [session] { session->StopViewing(); }) }),
             kui::Expanded(std::move(body)),
         }, 8.f));

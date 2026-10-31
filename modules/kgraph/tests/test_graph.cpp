@@ -284,6 +284,57 @@ TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
     EXPECT_EQ(kgraph::DefaultMeshId("cube"), "$cube");
 }
 
+// A shape as it starts is the same numbers it always was; tuned, one set of numbers has one name, whatever was written.
+TEST(DefaultMeshes, AreMadeFromTheirParameters) {
+    EXPECT_EQ(kgraph::ShapeData("sphere?rings=40&segments=80")->indices.size(), kgraph::ShapeData("sphere")->indices.size());
+    EXPECT_EQ(kgraph::ShapeData("sphere?rings=10&segments=20")->indices.size(), 10u * 20u * 6u);
+
+    const auto values = kgraph::ShapeValues("sphere?segments=20&radius=0.8&nonsense=3");
+    ASSERT_EQ(values.size(), 3u);
+    EXPECT_FLOAT_EQ(values[0], 0.8f);
+    EXPECT_FLOAT_EQ(values[1], 40.f);
+    EXPECT_FLOAT_EQ(values[2], 20.f);
+    EXPECT_EQ(kgraph::ShapeName("sphere", values), "sphere?radius=0.8&segments=20") << "in their order, the initial left out";
+    EXPECT_EQ(kgraph::ShapeName("sphere", kgraph::ShapeValues("sphere")), "sphere");
+    EXPECT_EQ(kgraph::ShapeName("sphere?rings=9", kgraph::ShapeValues("sphere?rings=9")), "sphere?rings=9");
+    EXPECT_EQ(kgraph::ShapeOf("sphere?rings=9"), "sphere");
+    EXPECT_EQ(kgraph::ShapeOf("blob?rings=9"), "");
+    EXPECT_EQ(kgraph::ShapeName("blob", values), "");
+    EXPECT_FALSE(kgraph::ShapeData("blob?rings=9").has_value());
+
+    EXPECT_EQ(kgraph::ShapeValues("sphere?rings=9999999")[1], 256.f) << "kept within its limits";
+    const std::vector<float> a { 0.73504f, 40.2f, 80.f }, b { 0.73501f, 39.8f, 80.f };
+    EXPECT_EQ(kgraph::ShapeName("sphere", a), kgraph::ShapeName("sphere", b)) << "what shows the same is the same mesh";
+
+    // Tuned, its surface goes with its numbers, and its normals still point out of it.
+    const auto box = kgraph::ShapeData("cube?width=2&height=0.5");
+    ASSERT_TRUE(box.has_value());
+    for (const auto& vertex : box->vertices) {
+        EXPECT_FLOAT_EQ(std::abs(vertex.position[0]), 1.f);
+        EXPECT_FLOAT_EQ(std::abs(vertex.position[1]), 0.25f);
+        EXPECT_FLOAT_EQ(vertex.normal[0] * vertex.normal[0] + vertex.normal[1] * vertex.normal[1] + vertex.normal[2] * vertex.normal[2], 1.f);
+    }
+    const auto ring = kgraph::ShapeData("torus?radius=1&tube=0.25");
+    float widest = 0.f;
+    for (const auto& vertex : ring->vertices) widest = std::max(widest, vertex.position[0]);
+    EXPECT_NEAR(widest, 1.25f, 1e-3f);
+
+    // Every shape's every parameter, at its limits: triangles of what is there.
+    for (const auto& name : kgraph::DefaultMeshNames()) {
+        const auto& parameters = kgraph::ShapeParameters(name);
+        for (const bool most : { false, true }) {
+            std::vector<float> ends;
+            for (const auto& parameter : parameters) ends.push_back(most ? std::min(parameter.most, 64.f) : parameter.least);
+            const auto data = kgraph::ShapeData(kgraph::ShapeName(name, ends));
+            ASSERT_TRUE(data.has_value()) << name;
+            EXPECT_FALSE(data->indices.empty()) << name;
+            for (const std::uint32_t index : data->indices) ASSERT_LT(index, data->vertices.size()) << name;
+            for (const auto& vertex : data->vertices)
+                for (const float n : vertex.position) ASSERT_TRUE(std::isfinite(n)) << name;
+        }
+    }
+}
+
 // A default mesh's tangents: at right angles to its normal, a unit long, along u; the bitangent along v.
 TEST(DefaultMeshes, HaveTangentsAlongTheirPicture) {
     const auto f = [](const kgraph::VertexAttribute& a, const std::size_t v, const std::size_t c) { return std::bit_cast<float>(a.words[v * a.count + c]); };

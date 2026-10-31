@@ -271,8 +271,9 @@ namespace keditor
         std::error_code ignored;
         for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "scripts", ignored)) {
             if (entry.path().extension() != ending) continue;
-            // A script is a component by its class's name, which the editor's own are named for their file.
-            if (const std::string name = entry.path().stem().string(); !Doc().Scripts().Registered(name)) idle.push_back(name);
+            // A script is a component by its class's name, which the editor's own are named for their file. A material
+            // kind is data, read from its file: there is nothing of it to run.
+            if (const std::string name = entry.path().stem().string(); !Doc().Scripts().Registered(name) && !Doc().Runtime().MaterialKindOf(name)) idle.push_back(name);
         }
         std::ranges::sort(idle);
         return idle;
@@ -586,6 +587,22 @@ namespace keditor
         return true;
     }
 
+    bool Session::OpenFunctionNamed(const std::string& name)
+    {
+        if (const auto& opened = Doc().Opened(); opened && opened->function == name) { ShowPass(opened->pass); return true; }
+        for (const auto& node : Doc().Graph().nodes) {
+            if (node.type != "Function") continue;
+            const auto function = node.inputs.find("function");
+            if (function != node.inputs.end() && function->second.value.String() && *function->second.value.String() == name) return OpenFunction(node.id);
+        }
+        // No call of it in this scene: one for as long as it is open.
+        const std::string call = Doc().AddNode(name, 0.0, 0.0);
+        if (call.empty()) { Say(std::format("'{}' could not be opened.", name), true); return false; }
+        if (!OpenFunction(call)) { Doc().RemoveNodes({ call }); return false; }
+        _callForOpening = call;
+        return true;
+    }
+
     bool Session::CloseFunction(const bool keep)
     {
         const auto opened = Doc().Opened();
@@ -593,7 +610,8 @@ namespace keditor
         std::string error;
         if (!Doc().CloseFunction(keep, &error)) { Say(error, true); return false; }
         if (!opened->call.pass.empty()) ShowPass(opened->call.pass);
-        Select(opened->call.id);
+        if (std::exchange(_callForOpening, {}) == opened->call.id) Doc().RemoveNodes({ opened->call.id });
+        else Select(opened->call.id);
         Say(keep ? std::format("Kept: functions/{}.kfunc is what its page was, and every call follows.", opened->function)
                  : std::format("{} is as it was.", opened->function));
         return true;
@@ -981,9 +999,7 @@ namespace keditor
         if (drag == kor::MouseButton::eRight) {
             // Looked round from where it is, and flown with the keys while the button is held — as a scene's own
             // FlyCamera is: W A S D along and across the way it looks, E and Q up and down, Shift faster.
-            const kor::Vec3 eye = view.Position();
-            view.Orbit(delta.x, delta.y);
-            view.target += eye - view.Position();
+            view.turnLeft += delta * 0.5f;      // (the mouse's own counts while it is captured: finer than a screen's pixels)
             const auto key = [&](const kor::Key held) { return !input.InterfaceWantsKeyboard() && input.IsKeyHeld(held) ? 1.f : 0.f; };
             const float along = key(kor::Key::eW) - key(kor::Key::eS), across = key(kor::Key::eD) - key(kor::Key::eA), up = key(kor::Key::eE) - key(kor::Key::eQ);
             if (along != 0.f || across != 0.f || up != 0.f) {
@@ -995,6 +1011,16 @@ namespace keditor
             }
         }
         else if (drag == kor::MouseButton::eMiddle) view.Pan(delta.x, delta.y, static_cast<float>(std::max(size.y, 1u)));
+        // Looked round from where it is, a little of what the mouse did at a time: over about 15 ms, whatever a frame takes.
+        if (view.turnLeft != kor::Vec2(0.f)) {
+            const float taken = drag == kor::MouseButton::eRight ? 1.f - std::exp(-seconds / 0.015f) : 1.f;
+            const kor::Vec2 turn = view.turnLeft * taken;
+            view.turnLeft -= turn;
+            if (std::abs(view.turnLeft.x) + std::abs(view.turnLeft.y) < 0.01f) view.turnLeft = kor::Vec2(0.f);
+            const kor::Vec3 eye = view.Position();
+            view.Orbit(turn.x, turn.y);
+            view.target += eye - view.Position();
+        }
         // The wheel zooms — or, flying, makes the flight faster or slower.
         if (port.Hovered())
             if (const float wheel = input.MouseScrollDelta().y; wheel != 0.f) {
@@ -1073,30 +1099,6 @@ namespace keditor
             }
             ++_changes;
         }
-        // A scene read, with pictures not compressed: asked, once, whether to compress them.
-        if (_hasProject && _project.askToCompress && !InPlayMode() && Doc().Reading() == 0) {
-            const std::string scene = (_project.directory / _scene).generic_string();
-            if (scene != _compressAskedFor) {
-                const auto pictures = Doc().Runtime().Pictures();
-                if (!pictures.empty()) {
-                    _compressAskedFor = scene;
-                    const kgraph::Graph& graph = Doc().Graph();
-                    const auto packed = [&](const std::string& id) {
-                        return std::ranges::any_of(graph.texturePacks | std::views::values, [&](const kgraph::TexturePack& pack) {
-                            return std::ranges::any_of(pack.channels, [&](const auto& channel) { return channel.from == id; });
-                        });
-                    };
-                    // Not kept compressed — or kept so, with nothing cooked of it here: the cache is each machine's own,
-                    // and a project just cloned has none.
-                    _askToCompress = std::ranges::any_of(pictures, [&](const std::string& id) {
-                        if (!kgraph::TextureCompressible(id)) return false;
-                        if (kgraph::IsTexturePack(id)) return graph.texturePacks.contains(id) && !Doc().Runtime().Cooked(id);
-                        if (graph.textureImports.contains(id)) return !Doc().Runtime().Cooked(id);
-                        return !packed(id);
-                    });
-                }
-            }
-        }
         // The one it shows meanwhile is kept until it has stopped showing it, a few frames on.
         std::erase_if(_overBefore, [](auto& kept) { return --kept.second <= 0; });
         const auto hold = [this](std::shared_ptr<kgraph::Resource>& showing, std::shared_ptr<kgraph::Resource> held) {
@@ -1127,8 +1129,11 @@ namespace keditor
         hold(_gridHeld, over ? over->GridHeld() : nullptr);
 
         // The view, moved by the mouse over the scene's panel: how far it went since the last frame, from where it was.
+        // Looking round, the mouse is captured (Aiming), which moves where it says it is: not taken for movement.
         const kor::Vec2 mouse = input.MousePosition();
-        const kor::Vec2 delta = _lastMouse ? mouse - *_lastMouse : kor::Vec2(0.f);
+        if (const bool aiming = _viewDrag == kor::MouseButton::eRight; aiming != _aiming) { _aiming = aiming; _lookSettling = 2; }
+        const kor::Vec2 delta = _lastMouse && _lookSettling == 0 ? mouse - *_lastMouse : kor::Vec2(0.f);
+        if (_lookSettling > 0) --_lookSettling;
         _lastMouse = mouse;
         const auto pointer = viewport->PointerPosition();
         const kor::UVec2 size = viewport->Size();
@@ -2143,6 +2148,93 @@ class $NAME : ResourceScript() {
         return modules;
     }
 
+    bool Session::IsStage(const std::string_view stage, const std::string_view slotStage)
+    {
+        const auto same = [](const std::string_view s) { return s == "pixel" ? std::string_view("fragment") : s == "amplification" ? std::string_view("task") : s; };
+        return same(stage) == same(slotStage);
+    }
+
+    std::vector<Session::ShaderPick> Session::ShadersOf(const std::string_view stage) const
+    {
+        std::vector<ShaderPick> choices;
+        for (const auto& module : ShaderModules())
+            for (const auto& entry : ShaderEntries(module))
+                if (IsStage(entry.stage, stage)) choices.push_back({ module, entry.name });
+        return choices;
+    }
+
+    namespace {
+        /** The input of a shader's slot: `vertex.module`; a ComputePass's own, `module`. */
+        std::string SlotInput(const std::string& slot, const char* part) { return slot.empty() ? std::string(part) : std::format("{}.{}", slot, part); }
+    }
+
+    void Session::SetShader(const std::string& node, const std::string& slot, const std::string& module, const std::string& entry)
+    {
+        Doc().SetInput(node, SlotInput(slot, "module"), kgraph::Value(module));
+        Doc().SetInput(node, SlotInput(slot, "entry"), kgraph::Value(entry));
+        ++_changes;
+    }
+
+    bool Session::DropShader(const std::string& node, const std::string& slot, const std::string_view stage, const std::string& asset)
+    {
+        if (!asset.starts_with("shader:")) { Say("Only a shader goes here.", true); return false; }
+        const std::string named = asset.substr(7);
+        const auto hash = named.find('#');
+        const std::string module = named.substr(0, hash);
+        const auto entries = ShaderEntries(module);
+        const auto fits = [&](const ShaderEntry& entry) { return IsStage(entry.stage, stage) && (hash == std::string::npos || entry.name == named.substr(hash + 1)); };
+        const auto found = std::ranges::find_if(entries, fits);
+        if (found == entries.end()) {
+            Say(hash == std::string::npos ? std::format("{} has no {} shader.", module, stage) : std::format("{} is no {} shader.", named.substr(hash + 1), stage), true);
+            return false;
+        }
+        SetShader(node, slot, module, found->name);
+        return true;
+    }
+
+    void Session::ClearShader(const std::string& node, const std::string& slot)
+    {
+        Doc().ClearInput(node, SlotInput(slot, "module"));
+        Doc().ClearInput(node, SlotInput(slot, "entry"));
+        ++_changes;
+    }
+
+    int Session::ShaderListSize(const std::string& node, const std::string_view list) const
+    {
+        int size = 0;
+        const auto noted = [&](const std::string_view name) {
+            if (name.size() <= list.size() + 2 || !name.starts_with(list) || name[list.size()] != '[') return;
+            size = std::max(size, std::atoi(name.data() + list.size() + 1) + 1);
+        };
+        if (const kgraph::Node* found = _play.Doc().Graph().Find(node))
+            for (const auto& name : found->inputs | std::views::keys) noted(name);
+        if (const auto asked = _asked.find(node); asked != _asked.end())
+            for (const auto& name : asked->second) noted(name);
+        return size;
+    }
+
+    void Session::AddToShaderList(const std::string& node, const std::string_view list)
+    {
+        Show(node, std::format("{}[{}]", list, ShaderListSize(node, list)));
+    }
+
+    void Session::RemoveFromShaderList(const std::string& node, const std::string_view list, const int index)
+    {
+        const kgraph::Node* found = Doc().Graph().Find(node);
+        if (!found) return;
+        const int size = ShaderListSize(node, list);
+        const std::string opening = std::format("{}[", list);
+        // What each input of the list is: read first, as taking them away moves the node's inputs.
+        std::vector<std::tuple<int, std::string, kgraph::Value>> items;
+        for (const auto& [name, input] : found->inputs)
+            if (name.starts_with(opening) && !input.link) items.emplace_back(std::atoi(name.c_str() + opening.size()), name.substr(name.find(']') + 1), input.value);
+        for (const auto& [at, rest, value] : items) Doc().ClearInput(node, std::format("{}{}]{}", opening, at, rest));
+        for (const auto& [at, rest, value] : items)
+            if (at != index) Doc().SetInput(node, std::format("{}{}]{}", opening, at > index ? at - 1 : at, rest), value);
+        for (int at = 0; at < size; ++at) Hide(node, std::format("{}{}]", opening, at));
+        for (int at = 0; at + 1 < size; ++at) Show(node, std::format("{}{}]", opening, at));
+    }
+
     // What is done is counted by the document; a state is kept once the doing stops — the mouse let go, nothing changed
     // for a moment — so that a drag, or a number dragged through fifty values, is one thing to take back.
     void Session::TrackUndo(const float seconds, const bool busy)
@@ -2993,12 +3085,7 @@ class $NAME : ResourceScript() {
         case Asset::Kind::eMaterial: {
             // A Material asset: the entity follows it from now on — one of the editor's, a model's, a project's file.
             if (const Material* material = MaterialOf(id); material && !doc.MaterialAssetOf(id)) {
-                using kgraph::Value;
-                const float* c = material->albedo;
-                const float* e = material->emission;
-                doc.AddMaterialAsset({ .id = id, .name = material->name, .kind = "PbrMaterial",
-                                       .values = { { "baseColor", Value(Value::List { c[0], c[1], c[2], 1.0 }) }, { "metallic", Value(material->metallic) },
-                                                   { "roughness", Value(material->roughness) }, { "emission", Value(Value::List { e[0], e[1], e[2] }) } } });
+                doc.AddMaterialAsset({ .id = id, .name = material->label, .kind = material->kind, .values = ValuesOf(*material) });
             }
             std::string error;
             if (!doc.GiveMaterial(entity, id, &error)) { Say(std::format("{} could not be given {}: {}.", name, asset->label, error), true); return false; }
@@ -3023,29 +3110,212 @@ class $NAME : ResourceScript() {
 
     const std::vector<Session::Material>& Session::DefaultMaterials()
     {
-        // Colours as they are picked; metals by what they reflect (their colour), and smooth to rough.
-        // (Each named: MSVC 19.51 crashes on a list of bare braces for an aggregate with arrays given defaults.)
+        // Colours as they are picked; metals by what they reflect (their colour), and smooth to rough. Blinn-Phong's are
+        // the classic table's (McReynolds and Blythe), each by its name in that list.
+        const auto pbr = [](const char* name, const std::array<float, 3> colour, const float metallic, const float roughness, const std::array<float, 3> emission = {}) {
+            Material material;
+            material.name = material.label = name;
+            std::ranges::copy(colour, material.albedo);
+            material.metallic = metallic;
+            material.roughness = roughness;
+            std::ranges::copy(emission, material.emission);
+            return material;
+        };
+        const auto classic = [](const char* name, const std::array<float, 3> diffuse, const std::array<float, 3> specular, const float shininess) {
+            Material material;
+            material.name = std::format("Blinn-Phong {}", name);
+            material.label = name;
+            material.kind = "BlinnPhongMaterial";
+            std::ranges::copy(diffuse, material.albedo);
+            std::ranges::copy(specular, material.specular);
+            material.shininess = shininess;
+            return material;
+        };
         static const std::vector<Material> materials {
-            Material { "White", { 0.92f, 0.92f, 0.92f }, 0.f, 0.5f },
-            Material { "Grey", { 0.5f, 0.5f, 0.52f }, 0.f, 0.6f },
-            Material { "Black", { 0.05f, 0.05f, 0.05f }, 0.f, 0.5f },
-            Material { "Rubber", { 0.08f, 0.08f, 0.09f }, 0.f, 0.95f },
-            Material { "Clay", { 0.72f, 0.45f, 0.33f }, 0.f, 0.9f },
-            Material { "Wood", { 0.55f, 0.36f, 0.2f }, 0.f, 0.7f },
-            Material { "Red plastic", { 0.8f, 0.1f, 0.08f }, 0.f, 0.35f },
-            Material { "Orange plastic", { 0.95f, 0.45f, 0.08f }, 0.f, 0.35f },
-            Material { "Yellow plastic", { 0.95f, 0.82f, 0.15f }, 0.f, 0.35f },
-            Material { "Green plastic", { 0.15f, 0.65f, 0.2f }, 0.f, 0.35f },
-            Material { "Blue plastic", { 0.12f, 0.3f, 0.85f }, 0.f, 0.35f },
-            Material { "Purple plastic", { 0.5f, 0.2f, 0.75f }, 0.f, 0.35f },
-            Material { "Gold", { 1.f, 0.78f, 0.34f }, 1.f, 0.25f },
-            Material { "Copper", { 0.95f, 0.64f, 0.54f }, 1.f, 0.3f },
-            Material { "Chrome", { 0.95f, 0.95f, 0.95f }, 1.f, 0.05f },
-            Material { "Steel", { 0.6f, 0.6f, 0.62f }, 1.f, 0.45f },
-            Material { "Glowing white", { 0.9f, 0.9f, 0.9f }, 0.f, 0.5f, { 4.f, 4.f, 4.f } },
-            Material { "Glowing orange", { 1.f, 0.5f, 0.15f }, 0.f, 0.5f, { 4.f, 1.6f, 0.4f } },
+            pbr("White", { 0.92f, 0.92f, 0.92f }, 0.f, 0.5f),
+            pbr("Grey", { 0.5f, 0.5f, 0.52f }, 0.f, 0.6f),
+            pbr("Black", { 0.05f, 0.05f, 0.05f }, 0.f, 0.5f),
+            pbr("Rubber", { 0.08f, 0.08f, 0.09f }, 0.f, 0.95f),
+            pbr("Clay", { 0.72f, 0.45f, 0.33f }, 0.f, 0.9f),
+            pbr("Wood", { 0.55f, 0.36f, 0.2f }, 0.f, 0.7f),
+            pbr("Concrete", { 0.55f, 0.54f, 0.52f }, 0.f, 0.92f),
+            pbr("Ceramic", { 0.9f, 0.88f, 0.84f }, 0.f, 0.15f),
+            pbr("Red plastic", { 0.8f, 0.1f, 0.08f }, 0.f, 0.35f),
+            pbr("Orange plastic", { 0.95f, 0.45f, 0.08f }, 0.f, 0.35f),
+            pbr("Yellow plastic", { 0.95f, 0.82f, 0.15f }, 0.f, 0.35f),
+            pbr("Green plastic", { 0.15f, 0.65f, 0.2f }, 0.f, 0.35f),
+            pbr("Blue plastic", { 0.12f, 0.3f, 0.85f }, 0.f, 0.35f),
+            pbr("Purple plastic", { 0.5f, 0.2f, 0.75f }, 0.f, 0.35f),
+            pbr("Gold", { 1.f, 0.78f, 0.34f }, 1.f, 0.25f),
+            pbr("Silver", { 0.97f, 0.96f, 0.91f }, 1.f, 0.15f),
+            pbr("Copper", { 0.95f, 0.64f, 0.54f }, 1.f, 0.3f),
+            pbr("Brass", { 0.91f, 0.78f, 0.42f }, 1.f, 0.35f),
+            pbr("Chrome", { 0.95f, 0.95f, 0.95f }, 1.f, 0.05f),
+            pbr("Steel", { 0.6f, 0.6f, 0.62f }, 1.f, 0.45f),
+            pbr("Aluminium", { 0.91f, 0.92f, 0.92f }, 1.f, 0.55f),
+            pbr("Glowing white", { 0.9f, 0.9f, 0.9f }, 0.f, 0.5f, { 4.f, 4.f, 4.f }),
+            pbr("Glowing orange", { 1.f, 0.5f, 0.15f }, 0.f, 0.5f, { 4.f, 1.6f, 0.4f }),
+
+            classic("Emerald", { 0.076f, 0.614f, 0.076f }, { 0.633f, 0.728f, 0.633f }, 77.f),
+            classic("Jade", { 0.54f, 0.89f, 0.63f }, { 0.316f, 0.316f, 0.316f }, 13.f),
+            classic("Obsidian", { 0.183f, 0.17f, 0.225f }, { 0.333f, 0.329f, 0.346f }, 38.f),
+            classic("Pearl", { 1.f, 0.829f, 0.829f }, { 0.297f, 0.297f, 0.297f }, 11.f),
+            classic("Ruby", { 0.614f, 0.041f, 0.041f }, { 0.728f, 0.627f, 0.627f }, 77.f),
+            classic("Turquoise", { 0.396f, 0.742f, 0.691f }, { 0.297f, 0.308f, 0.307f }, 13.f),
+            classic("Brass", { 0.78f, 0.569f, 0.114f }, { 0.992f, 0.942f, 0.808f }, 28.f),
+            classic("Bronze", { 0.714f, 0.428f, 0.181f }, { 0.394f, 0.272f, 0.167f }, 26.f),
+            classic("Chrome", { 0.4f, 0.4f, 0.4f }, { 0.775f, 0.775f, 0.775f }, 77.f),
+            classic("Copper", { 0.704f, 0.27f, 0.083f }, { 0.257f, 0.138f, 0.086f }, 13.f),
+            classic("Gold", { 0.752f, 0.606f, 0.226f }, { 0.628f, 0.556f, 0.366f }, 51.f),
+            classic("Silver", { 0.508f, 0.508f, 0.508f }, { 0.508f, 0.508f, 0.508f }, 51.f),
+            classic("Black plastic", { 0.01f, 0.01f, 0.01f }, { 0.5f, 0.5f, 0.5f }, 32.f),
+            classic("Cyan plastic", { 0.f, 0.51f, 0.51f }, { 0.502f, 0.502f, 0.502f }, 32.f),
+            classic("Green plastic", { 0.1f, 0.35f, 0.1f }, { 0.45f, 0.55f, 0.45f }, 32.f),
+            classic("Red plastic", { 0.5f, 0.f, 0.f }, { 0.7f, 0.6f, 0.6f }, 32.f),
+            classic("White plastic", { 0.55f, 0.55f, 0.55f }, { 0.7f, 0.7f, 0.7f }, 32.f),
+            classic("Yellow plastic", { 0.5f, 0.5f, 0.f }, { 0.6f, 0.6f, 0.5f }, 32.f),
+            classic("Black rubber", { 0.01f, 0.01f, 0.01f }, { 0.4f, 0.4f, 0.4f }, 10.f),
+            classic("Green rubber", { 0.4f, 0.5f, 0.4f }, { 0.04f, 0.7f, 0.04f }, 10.f),
+            classic("Red rubber", { 0.5f, 0.4f, 0.4f }, { 0.7f, 0.04f, 0.04f }, 10.f),
+            classic("White rubber", { 0.5f, 0.5f, 0.5f }, { 0.7f, 0.7f, 0.7f }, 10.f),
         };
         return materials;
+    }
+
+    std::vector<std::pair<std::string, kgraph::Value>> Session::ValuesOf(const Material& material)
+    {
+        using kgraph::Value;
+        const auto three = [](const float* v) { return Value(Value::List { v[0], v[1], v[2] }); };
+        const auto four = [](const float* v) { return Value(Value::List { v[0], v[1], v[2], 1.0 }); };
+        if (material.kind == "BlinnPhongMaterial")
+            return { { "diffuse", four(material.albedo) }, { "specular", three(material.specular) }, { "shininess", Value(material.shininess) }, { "emission", three(material.emission) } };
+        return { { "baseColor", four(material.albedo) }, { "metallic", Value(material.metallic) }, { "roughness", Value(material.roughness) }, { "emission", three(material.emission) } };
+    }
+
+    std::optional<MaterialShown> Session::MaterialToShow(const std::string& id)
+    {
+        std::string kind;
+        std::vector<std::pair<std::string, kgraph::Value>> values;
+        if (const MaterialAsset* asset = Doc().MaterialAssetOf(id)) { kind = asset->kind; values = asset->values; }
+        else if (const Material* material = MaterialOf(id)) { kind = material->kind; values = ValuesOf(*material); }
+        else return std::nullopt;
+        const kgraph::MaterialKind* declared = Doc().Runtime().MaterialKindOf(kind);
+        if (!declared) return std::nullopt;
+        return MaterialShown { *declared, std::move(values), Doc().Runtime().GeneratedShaderDirectory() };
+    }
+
+    void Session::SetPreviewMesh(std::string id)
+    {
+        _previewMesh = std::move(id);
+        ++_changes;
+    }
+
+    std::filesystem::path Session::ShadingModuleOf(const std::string& kind) const
+    {
+        return _hasProject ? _project.ShaderDirectory() / (kind + "Shading.slang") : std::filesystem::path();
+    }
+
+    bool Session::HasShading(const std::string& kind) const
+    {
+        std::error_code ignored;
+        return std::filesystem::exists(kscript::PackageDirectory() / "shaders" / (kind + "Shading.slang"), ignored)
+            || (_hasProject && std::filesystem::exists(ShadingModuleOf(kind), ignored));
+    }
+
+    bool Session::WriteShadingModule(const std::string& kind)
+    {
+        const std::filesystem::path file = ShadingModuleOf(kind);
+        if (file.empty()) { Say("A shading is written to a project: File, New project.", true); return false; }
+        if (std::error_code ignored; std::filesystem::exists(file, ignored)) { Say(std::format("{} has its shading already.", kind), true); return false; }
+        std::ofstream out(file, std::ios::binary);
+        out << std::format(R"slang(// How a {0} is lit. The material inspector and the Assets panel draw every {0} through this; a shader of the
+// project's does too, with KoralLit (see koral_shading in the engine's package).
+
+module {0}Shading;
+
+__exported import koral_shading;
+__exported import {0};
+
+/** What is at a point of the surface, read, and how it answers light. */
+public struct {0}Lit : IKoralShading {{
+    public float3 normal;
+    public float3 colour;
+
+    public float3 Reflected(float3 toEye, float3 toLight, float3 light) {{ return colour / KoralPi * light * saturate(dot(normal, toLight)); }}
+    public float3 Ambient<E : IKoralEnvironment>(E environment, float3 toEye) {{ return colour * environment.Diffuse(normal); }}
+    public float3 Emitted() {{ return 0.0; }}
+    public float Opacity() {{ return 1.0; }}
+}};
+
+/** How a {0}'s fields are read at a point. */
+public extension {0} : IKoralMaterial {{
+    public typealias Shading = {0}Lit;
+
+    public {0}Lit Read(KoralSurface at)
+    {{
+        {0}Lit lit;
+        lit.normal = at.normal;
+        lit.colour = float3(0.8);     // from the fields of the {0}
+        return lit;
+    }}
+}};
+)slang", kind);
+        if (!out) { Say(std::format("{} could not be written.", file.generic_string()), true); return false; }
+        out.close();
+        Say(std::format("{} is written: its {} is what is drawn.", file.filename().string(), kind));
+        ++_changes;
+        return true;
+    }
+
+    void Session::TryMaterialField(const std::string& field, kgraph::Value value)
+    {
+        const auto it = std::ranges::find(_materialTried, field, &std::pair<std::string, kgraph::Value>::first);
+        if (it != _materialTried.end()) it->second = std::move(value);
+        else _materialTried.emplace_back(field, std::move(value));
+        ++_changes;
+    }
+
+    void Session::ForgetMaterialTried()
+    {
+        _materialTried.clear();
+        ++_changes;
+    }
+
+    void Session::UpdateMaterialPreview()
+    {
+        if (_viewKind != ViewKind::eMaterial) {
+            if (_materialPreview) {
+                if (!_previewedAs.empty()) { _previewedAs.clear(); _materialPreview->Show(std::nullopt); }
+                _materialPreview->Update();
+            }
+            return;
+        }
+        if (!_materialPreview) {
+            _materialPreview = std::make_unique<MaterialPreview>(_play.Graph(), kor::UVec2(512, 384), true);
+            _materialPreview->SetFind([this](const std::string& name) { return Doc().Runtime().ResourceOf(name); });
+        }
+        _materialPreview->SetAssetDirectory(Doc().Runtime().AssetDirectory());
+        // Drawn again only when what it is drawn with is another: the material as it is, and over it what is tried out.
+        if (auto shown = MaterialToShow(_viewing)) {
+            for (const auto& [field, value] : _materialTried) {
+                const auto it = std::ranges::find(shown->values, field, &std::pair<std::string, kgraph::Value>::first);
+                if (it != shown->values.end()) it->second = value;
+                else shown->values.emplace_back(field, value);
+            }
+            std::string as = shown->kind.name;
+            for (const auto& [field, value] : shown->values) as += std::format("\n{}={}", field, value.ToJson());
+            if (as != _previewedAs) {
+                _previewedAs = std::move(as);
+                _materialPreview->Show(std::move(shown));
+            }
+        }
+        _materialPreview->SetMesh(Doc().Runtime().ResourceOf(_previewMesh));
+        _materialPreview->Update();
+        if (auto picture = _materialPreview->PictureHeld(); picture != _previewPictureHeld) {
+            if (_previewPictureHeld) _overBefore.emplace_back(std::move(_previewPictureHeld), 4);
+            _previewPictureHeld = std::move(picture);
+            ++_changes;
+        }
     }
 
     const Session::Material* Session::MaterialOf(const std::string_view id)
@@ -3281,13 +3551,6 @@ class $NAME : ResourceScript() {
         return made;
     }
 
-    void Session::DontAskToCompress()
-    {
-        _project.askToCompress = false;
-        std::string error;
-        if (_hasProject && !_project.Save(error)) Say(error, true);
-    }
-
     const kgraph::Runtime::CookProgress& Session::Cooking() { return Doc().Runtime().Cooking(); }
 
     bool Session::OpenInCode(const std::filesystem::path& file, const int line)
@@ -3370,6 +3633,15 @@ class $NAME : ResourceScript() {
     bool Session::View(std::string id)
     {
         if (id.empty()) { StopViewing(); return false; }
+        // A material is no resource: it is viewed on a mesh, and what is tried out there is forgotten with another.
+        if (MaterialToShow(id)) {
+            if (id != _viewing) { StopViewing(); _materialTried.clear(); }
+            _viewing = std::move(id);
+            _viewKind = ViewKind::eMaterial;
+            ++_viewAsked;
+            ++_changes;
+            return true;
+        }
         kgraph::Runtime& runtime = Doc().Runtime();
         std::shared_ptr<kgraph::Resource> held = runtime.ResourceOf(id);
         if (!held && id.starts_with('@')) held = AssetHeld(id);
@@ -3403,7 +3675,10 @@ class $NAME : ResourceScript() {
     void Session::StopViewing()
     {
         if (_viewing.empty()) return;
-        if (_viewKind != ViewKind::eMesh && !_looks.contains(_viewing)) Doc().Runtime().Unwatch(_viewing);
+        if (_viewKind != ViewKind::eMesh && _viewKind != ViewKind::eMaterial && !_looks.contains(_viewing)) Doc().Runtime().Unwatch(_viewing);
+        _materialTried.clear();
+        if (_previewPictureHeld) _overBefore.emplace_back(std::move(_previewPictureHeld), 4);
+        _previewPictureHeld.reset();
         if (_viewImage.Valid()) _viewBefore.emplace_back(std::move(_viewImage), 4);
         if (_viewPictureHeld) _overBefore.emplace_back(std::move(_viewPictureHeld), 4);
         _viewPictureHeld.reset();
@@ -3444,9 +3719,10 @@ class $NAME : ResourceScript() {
     void Session::UpdateView(const float seconds)
     {
         std::erase_if(_viewBefore, [](auto& kept) { return --kept.second <= 0; });
+        UpdateMaterialPreview();
         // A mesh no longer viewed: its passes go here, at the start of a frame (StopViewing may have been pressed in one).
         if (_meshViewer && _viewKind != ViewKind::eMesh) _meshViewer->Update();
-        if (_viewKind == ViewKind::eNone) return;
+        if (_viewKind == ViewKind::eNone || _viewKind == ViewKind::eMaterial) return;
         kgraph::Runtime& runtime = Doc().Runtime();
         if (_viewKind == ViewKind::eMesh) {
             const auto held = ViewedMeshHeld();
@@ -4272,24 +4548,6 @@ class $NAME : ResourceScript() {
                 }), std::move(picker)));
         }
 
-        kui::Widget ColorOf(const Value& value, const std::function<void(Value)>& set, const bool alpha = true)
-        {
-            kui::Color color(0.f, 0.f, 0.f, 1.f);
-            if (const auto* c = value.Items(); c && c->size() >= 3) color = kui::Color(NumberOf((*c)[0]), NumberOf((*c)[1]), NumberOf((*c)[2]), c->size() > 3 ? NumberOf((*c)[3]) : 1.f);
-            return kui::ColorEdit(color, [set, alpha](const kui::Color picked) {
-                set(alpha ? Value(Value::List { picked.r, picked.g, picked.b, picked.a }) : Value(Value::List { picked.r, picked.g, picked.b }));
-            }, {}, kui::ColorPickerOptions {}.SetAlpha(alpha));
-        }
-
-        /** Whether a name says a vector is a colour: what an entity's field is called is all there is to go by. */
-        bool NamesAColor(std::string name)
-        {
-            std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            // A sky's colours are named for where in the sky they are.
-            return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos
-                || name.find("albedo") != std::string::npos || name.find("emission") != std::string::npos || name.find("emissive") != std::string::npos || name == "zenith" || name == "horizon" || name == "ground";
-        }
-
         /** What an output of a kind is called on a node: a vertex layout for `struct KoralVertexLayout`, and other types as they are. */
         std::string TypeLabel(const std::string& type)
         {
@@ -4987,6 +5245,7 @@ class $NAME : ResourceScript() {
                     // From before the pass flow was a panel: a tab beside the graph.
                     if (text.str().find("\"flow\"") == std::string::npos) { _layout->Dock("flow", kui::DockSide::eCenter, "graph"); _layout->Activate("graph"); }
                 }
+                _layout->Activate("scene");     // what it opens on, however it was left
             }
 
             /** Where the panels are before anybody has moved them. */
@@ -5042,8 +5301,6 @@ class $NAME : ResourceScript() {
                         }
                         SetState();
                     }
-                    // A scene read with pictures that are not compressed: asked, once, whether to compress them.
-                    if (_session->TakeAskToCompress() && _dialog == Dialog::eNone) _assets.OpenCompressTextures(true);
                     // A node gone to — found, or pressed among the problems — is brought into the graph's view.
                     if (const auto went = _session->Went(); went != _went) { _went = went; _view->Reveal(_session->selectedNode); SetState(); }
                     // A model to be imported, while what its meshes have is read: shown when it is known.
@@ -5506,6 +5763,7 @@ class $NAME : ResourceScript() {
 
             /** Every one of the Scene panel's popups shut: one is open at a time. */
             void ClosePopups() { _viewModesOpen = _gridOpen = _snapOpen = _viewsOpen = false; }
+            std::string _shaderPicking;     // the slot of a pipeline whose list of shaders is open: `<node>/<slot>`
 
             /** A heading over a group of lines in one of the Scene panel's popups. */
             static kui::Widget PopupHeading(const std::string& text)
@@ -5665,7 +5923,7 @@ class $NAME : ResourceScript() {
                         { "New shader...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; }); }) },
                         { "New script...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewScript; _newId.clear(); _newKind = 0; }); }) },
                         { .separator = true },
-                        { "Compress textures...", needsProject([this] { _assets.OpenCompressTextures(false); }) },
+                        { "Compress textures...", needsProject([this] { _assets.OpenCompressTextures(); }) },
                     } },
                     { "Scene", {
                         _session->IsPlaying() ? kui::MenuItem { "Pause", [this] { _session->Pause(); } }
@@ -7172,12 +7430,15 @@ class $NAME : ResourceScript() {
                 // and of the graph only what is made before the pass that would use it.
                 std::vector<std::string> choices { std::string() };
                 int selected = 0;
+                const std::string holds = value.String() ? *value.String() : std::string();
+                // A procedural mesh, however it is tuned, is the one choice of its shape.
+                const std::string shape = type == "Mesh" && holds.starts_with('$') ? std::string(kgraph::ShapeOf(std::string_view(holds).substr(1))) : std::string();
+                const std::string chosen = shape.empty() ? holds : kgraph::DefaultMeshId(shape);
                 for (const auto& choice : _session->FieldChoices(component, type)) {
-                    if (value.String() && *value.String() == choice) selected = static_cast<int>(choices.size());
+                    if (value.String() && chosen == choice) selected = static_cast<int>(choices.size());
                     choices.push_back(choice);
                 }
                 // What it holds that is none of those is listed all the same: it is what is so.
-                const std::string holds = value.String() ? *value.String() : std::string();
                 if (selected == 0 && !holds.empty()) { selected = static_cast<int>(choices.size()); choices.push_back(holds); }
                 // An entity's mesh can be made by a generator of the project's: picked, the entity is given it, and it
                 // makes the mesh — the one it gave before is taken away.
@@ -7201,8 +7462,9 @@ class $NAME : ResourceScript() {
                 kui::Widget shownBeside;
                 if (type == "Mesh") {
                     // By its kind until its picture is drawn.
+                    // (A tuned one by its shape's: a picture for every number it is dragged through would fill the cache.)
                     if (!holds.empty())
-                        shownBeside = kui::Make<MeshThumbnail>(_session, [session = _session, holds] { return session->MeshPicture(holds); }, [](const kor::ResourceRef<const kor::Image> picture) {
+                        shownBeside = kui::Make<MeshThumbnail>(_session, [session = _session, chosen] { return session->MeshPicture(chosen); }, [](const kor::ResourceRef<const kor::Image> picture) {
                             return picture.Get() ? kui::Image(picture, kui::ImageFit::eContain) : kui::Icon("view_in_ar", kui::IconStyle::eFilled, kui::Color::Hex(0x6FA87A).WithAlpha(0.55f));
                         });
                 } else if (!holds.empty()) {
@@ -7213,7 +7475,7 @@ class $NAME : ResourceScript() {
                 }
                 if (holds.starts_with('@')) editor = kui::Tooltip(holds, std::move(editor));
                 if (shownBeside)
-                    editor = kui::Row({ kui::SizedBox(24.f, 24.f, std::move(shownBeside)), kui::Expanded(std::move(editor)) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                    editor = kui::Row({ kui::SizedBox(48.f, 48.f, std::move(shownBeside)), kui::Expanded(std::move(editor)) }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
                 // And what is dropped on it from the Assets panel is what it holds from then on — when it is
                 // the kind of thing the field holds.
                 editor = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([this, set, type, fieldName](const kui::DragData& dragged, kor::Vec2) {
@@ -7224,6 +7486,22 @@ class $NAME : ResourceScript() {
                     if (type == "Mesh" ? mesh : type == "Image" && picture) set(Value(*id));
                     else _session->Say(std::format("'{}' holds a {}, and {} is not one.", fieldName, type == "Mesh" ? "mesh" : type == "Image" ? "picture" : type, asset->label), true);
                 }), std::move(editor));
+                if (const auto& parameters = kgraph::ShapeParameters(shape); !parameters.empty()) {
+                    // What this entity's is made from: tuned, it holds another mesh, shared with any of the same numbers.
+                    const std::vector<float> values = kgraph::ShapeValues(std::string_view(holds).substr(1));
+                    std::vector<kui::Widget> rows { std::move(editor) };
+                    for (std::size_t i = 0; i < parameters.size(); ++i) {
+                        const kgraph::MeshParameter& parameter = parameters[i];
+                        const kui::NumberType number = parameter.whole ? kui::NumberType::eUInt : kui::NumberType::eFloat;
+                        rows.push_back(kui::Tooltip(parameter.says, kgui::Labeled(parameter.name, kui::DragValue(values[i], [set, shape, values, i](const double v) {
+                            auto tuned = values;
+                            tuned[i] = static_cast<float>(v);
+                            set(Value(kgraph::DefaultMeshId(kgraph::ShapeName(shape, tuned))));
+                        }, Dragging({ parameter.least, parameter.most, false }, number)), LabelWidth)));
+                    }
+                    if (holds != chosen) rows.push_back(Chip("Back to how it starts", [set, chosen] { set(Value(chosen)); }));
+                    return kui::Column(std::move(rows), kui::FlexOptions {}.SetGap(4.f));
+                }
                 return editor;
             }
 
@@ -7679,6 +7957,117 @@ class $NAME : ResourceScript() {
                 return port.builder ? TypeEditor(*port.builder, value, set, key, LimitsOfPort(port)) : NamedEditor(port.type, value, set, key, LimitsOfPort(port), NumberTypeOf(port));
             }
 
+            /** Whether an input of a node is one of its shaders: shown as a slot, and not among its other inputs. */
+            static bool IsShaderInput(const kgraph::Node& node, const std::string_view name)
+            {
+                if (node.type == "ComputePass") return name == "module" || name == "entry";
+                if (node.type != "GraphicsPipeline" && node.type != "ComputePipeline" && node.type != "RayTracingPipeline") return false;
+                return name.ends_with(".module") || name.ends_with(".entry");
+            }
+
+            /**
+             * A slot of a pipeline for a shader of @p stage: shown as a shader's file is. Pressed, the entry points of that
+             * stage to pick from, and only those; what is dropped on it from the Assets panel goes in when it is of that stage.
+             */
+            kui::Widget ShaderSlot(const kgraph::Node& node, const std::string& slot, const std::string& stage, const std::string& empty, std::vector<kui::MenuItem> menu = {})
+            {
+                const auto input = [&](const char* part) -> std::string {
+                    const auto it = node.inputs.find(slot.empty() ? std::string(part) : std::format("{}.{}", slot, part));
+                    return it != node.inputs.end() && it->second.value.String() ? *it->second.value.String() : std::string();
+                };
+                const std::string module = input("module"), entry = input("entry"), id = node.id, key = std::format("{}/{}", id, slot);
+                const bool given = !module.empty();
+                const bool open = _shaderPicking == key;
+                std::vector<kui::Widget> lines;
+                const auto choices = _session->ShadersOf(stage);
+                for (const auto& [from, name] : choices)
+                    lines.push_back(kui::Button(kui::Row({ AssetsView::StageIcon(stage, 16.f), kui::Text(name, kui::TextStyle {}.SetSize(13.f)), kgui::Muted(from, 11.f) },
+                                                         kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                                                [this, id, slot, from, name] { _session->SetShader(id, slot, from, name); SetState([&] { _shaderPicking.clear(); }); },
+                                                kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+                if (choices.empty()) lines.push_back(kgui::Muted(std::format("No {} shader in the project's shaders.", AssetsView::StageOf(stage).name), 12.f));
+                if (given) {
+                    if (const std::filesystem::path file = _session->CurrentProject().ShaderDirectory() / (module + ".slang"); std::filesystem::exists(file))
+                        menu.insert(menu.begin(), { "Open in Visual Studio Code", [this, file] { _session->OpenInCode(file); } });
+                }
+                kui::Widget tile = _assets.ShaderTile(key, stage, given ? (entry.empty() ? std::format("{}Main", stage) : entry) : empty, module, given,
+                                                      [this, key] { SetState([&] { _shaderPicking = _shaderPicking == key ? std::string() : key; }); }, std::move(menu));
+                tile = kui::Tooltip(given ? AssetsView::StageOf(stage).name : std::format("{}: pick one, or drop one here from the Assets panel.", AssetsView::StageOf(stage).name), std::move(tile));
+                tile = kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("asset").OnDrop([this, id, slot, stage](const kui::DragData& dragged, kor::Vec2) {
+                    if (const auto* asset = dragged.As<std::string>()) _session->DropShader(id, slot, stage, *asset);
+                }), std::move(tile));
+                return kui::Column({ std::move(tile),
+                                     kui::PopupAnchor(open, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(2.f)), 260.f),
+                                                      [this] { SetState([&] { _shaderPicking.clear(); }); }) },
+                                   kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart));
+            }
+
+            /** What a pipeline is made of, as slots: VTG's optional stages hidden until asked for, a ray tracer's in lists. */
+            kui::Widget ShaderSlots(const kgraph::Node& node)
+            {
+                const std::string id = node.id;
+                const auto clear = [this, id](std::vector<std::string> slots, std::string asked) {
+                    return [this, id, slots = std::move(slots), asked = std::move(asked)] {
+                        for (const auto& slot : slots) _session->ClearShader(id, slot);
+                        if (!asked.empty()) _session->Hide(id, asked);
+                    };
+                };
+                const auto given = [&](const char* slot) { return node.inputs.contains(std::format("{}.module", slot)); };
+                const auto wrap = [](std::vector<kui::Widget> tiles) { return kui::Wrap(std::move(tiles), 6.f, 6.f); };
+                std::vector<kui::Widget> rows { Heading("Shaders") };
+                if (node.type == "ComputePipeline") rows.push_back(wrap({ ShaderSlot(node, "compute", "compute", "No compute shader") }));
+                else if (node.type == "ComputePass") rows.push_back(wrap({ ShaderSlot(node, "", "compute", "No compute shader") }));
+                else if (node.type == "GraphicsPipeline") {
+                    std::vector<kui::Widget> tiles, offers;
+                    const auto fragment = [&] {
+                        return ShaderSlot(node, "fragment", "fragment", "Depth only", given("fragment") ? std::vector<kui::MenuItem> { { "Depth only: no fragment shader", clear({ "fragment" }, {}) } } : std::vector<kui::MenuItem> {});
+                    };
+                    if (kgraph::StagesOf(node) == "eMesh") {
+                        if (given("task") || _session->Asked(id, "task")) tiles.push_back(ShaderSlot(node, "task", "task", "No task shader", { { "Remove the task shader", clear({ "task" }, "task") } }));
+                        else offers.push_back(Chip("Add a task shader", [this, id] { _session->Show(id, "task"); }));
+                        tiles.push_back(ShaderSlot(node, "mesh", "mesh", "No mesh shader"));
+                    } else {
+                        tiles.push_back(ShaderSlot(node, "vertex", "vertex", "No vertex shader"));
+                        if (given("tessellationControl") || given("tessellationEvaluation") || _session->Asked(id, "tessellation")) {
+                            std::vector<kui::MenuItem> remove { { "Remove tessellation", clear({ "tessellationControl", "tessellationEvaluation" }, "tessellation") } };
+                            tiles.push_back(ShaderSlot(node, "tessellationControl", "hull", "No hull shader", remove));
+                            tiles.push_back(ShaderSlot(node, "tessellationEvaluation", "domain", "No domain shader", remove));
+                        } else offers.push_back(Chip("Add tessellation", [this, id] { _session->Show(id, "tessellation"); }));
+                        if (given("geometry") || _session->Asked(id, "geometry")) tiles.push_back(ShaderSlot(node, "geometry", "geometry", "No geometry shader", { { "Remove the geometry shader", clear({ "geometry" }, "geometry") } }));
+                        else offers.push_back(Chip("Add a geometry shader", [this, id] { _session->Show(id, "geometry"); }));
+                    }
+                    tiles.push_back(fragment());
+                    rows.push_back(wrap(std::move(tiles)));
+                    if (!offers.empty()) rows.push_back(kui::Wrap(std::move(offers), 6.f, 4.f));
+                } else {
+                    rows.push_back(wrap({ ShaderSlot(node, "raygen", "raygeneration", "No ray generation shader") }));
+                    const auto list = [&](const char* title, const std::string& name, const char* stage, const char* empty) {
+                        rows.push_back(kgui::Muted(title, 12.f));
+                        std::vector<kui::Widget> tiles;
+                        const int size = _session->ShaderListSize(id, name);
+                        for (int i = 0; i < size; ++i)
+                            tiles.push_back(ShaderSlot(node, std::format("{}[{}]", name, i), stage, empty,
+                                                       { { "Remove from the list", [this, id, name, i] { _session->RemoveFromShaderList(id, name, i); } } }));
+                        if (!tiles.empty()) rows.push_back(wrap(std::move(tiles)));
+                        rows.push_back(Chip(std::format("Add a {} shader", name), [this, id, name] { _session->AddToShaderList(id, name); }));
+                    };
+                    list("Miss", "miss", "miss", "No miss shader");
+                    rows.push_back(kgui::Muted("Hit groups", 12.f));
+                    for (int group = 0; group < _session->ShaderListSize(id, "hitGroup"); ++group) {
+                        std::vector<kui::MenuItem> remove { { "Remove this hit group", [this, id, group] { _session->RemoveFromShaderList(id, "hitGroup", group); } } };
+                        rows.push_back(kui::Row({ kui::Expanded(kui::Text(std::format("Group {}", group), kui::TextStyle {}.SetSize(12.f))),
+                                                  Chip("Remove", [this, id, group] { _session->RemoveFromShaderList(id, "hitGroup", group); }) },
+                                                kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                        rows.push_back(wrap({ ShaderSlot(node, std::format("hitGroup[{}].closestHit", group), "closesthit", "No closest hit", remove),
+                                              ShaderSlot(node, std::format("hitGroup[{}].anyHit", group), "anyhit", "No any hit", remove),
+                                              ShaderSlot(node, std::format("hitGroup[{}].intersection", group), "intersection", "Triangles", remove) }));
+                    }
+                    rows.push_back(Chip("Add a hit group", [this, id] { _session->AddToShaderList(id, "hitGroup"); }));
+                    list("Callable", "callable", "callable", "No callable shader");
+                }
+                return Rows(std::move(rows), 6.f);
+            }
+
             kui::Widget NodeInspector(const kgraph::Node& node)
             {
                 // A Reference is what it stands for, brought in: what it is here, and under that the thing itself, to set
@@ -7772,9 +8161,16 @@ class $NAME : ResourceScript() {
                                                            Doc().World().Describe(component).name)));
                 rows.push_back(kui::Separator());
 
+                // Its shaders, each in a slot of its stage.
+                if (node.type == "GraphicsPipeline" || node.type == "ComputePipeline" || node.type == "RayTracingPipeline" || node.type == "ComputePass") {
+                    rows.push_back(ShaderSlots(node));
+                    rows.push_back(kui::Separator());
+                }
+
                 // Every input it has, given or not — one not given as it starts, its name dimmed — and every output.
                 const kgraph::NodeType* nodeType = kgraph::FindType(node.type);
                 auto inputs = InputsOf(runtime, node, [](const std::string&) { return true; });
+                std::erase_if(inputs, [&](const Shown& shown) { return IsShaderInput(node, shown.port.name); });
                 // An input given in parts is shown in its parts: the whole is there only once it is given — wired.
                 std::erase_if(inputs, [&](const Shown& shown) {
                     return !shown.given && nodeType && !kgraph::PartsOf(*nodeType, shown.port.name).empty();
@@ -7974,6 +8370,7 @@ class $NAME : ResourceScript() {
                 {
                     std::vector<kgraph::Port> idle;
                     (void)InputsOf(runtime, node, [](const std::string&) { return true; }, &idle);
+                    std::erase_if(idle, [&](const kgraph::Port& port) { return IsShaderInput(node, port.name); });
                     std::vector<std::tuple<std::string, std::string, int>> left;     // a part, why, and how many: in the order they come
                     for (const auto& port : idle) {
                         if (port.when.input.empty() || node.inputs.contains(port.name)) continue;
@@ -8068,7 +8465,7 @@ class $NAME : ResourceScript() {
                 if (id == "$black") return "black (plain)";
                 if (id == "$normal") return "flat normal (plain)";
                 if (id.starts_with('@') || id.starts_with("$script/gen/")) return _session->AssetLabel(id);
-                if (id.starts_with('$')) return std::format("{} (built in)", id.substr(1));
+                if (id.starts_with('$')) return id.substr(1);
                 if (Doc().Graph().Find(id)) return std::format("{}   ·   graph", id);
                 return _session->AssetLabel(id);
             }
@@ -9670,6 +10067,12 @@ class $NAME : ResourceScript() {
 
     void EditorScene::Update()
     {
+        // Gone to another window: what was held is let go, as the letting go will not be heard. Looking round, above all.
+        if (const bool focused = SceneWindow().IsFocused(); focused != _focused) {
+            if (std::exchange(_focused, focused)) SceneInput().ReleaseAll();
+        }
+        // Looking round, the mouse's own movement: not the pointer's, a pixel of the screen at a time and sped up.
+        SceneInput().SetCursorMode(_session->Aiming() ? kor::Input::CursorMode::eCaptured : kor::Input::CursorMode::eNormal);
         _session->UpdateHandOver();
         _session->UpdateLook(static_cast<float>(Time::FrameTime()));
         _session->UpdateThumbnails(static_cast<float>(Time::FrameTime()));

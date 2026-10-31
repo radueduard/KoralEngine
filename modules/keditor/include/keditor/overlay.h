@@ -12,6 +12,8 @@
 
 #pragma once
 
+#include <kgraph/materials.h>
+
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -124,6 +126,81 @@ namespace keditor
         std::uint32_t _frames = 0;
     };
 
+    /** @brief A material to be drawn: its kind, and the values it has of its fields. What it has not is as the kind starts. */
+    struct MaterialShown {
+        kgraph::MaterialKind kind;
+        std::vector<std::pair<std::string, kgraph::Value>> values;
+        /// Where the kinds' modules are (kgraph::Runtime::GeneratedShaderDirectory): the scene's, and not another folder of
+        /// the same, or every shader that imports one would find it in a new place, and be built again.
+        std::filesystem::path modules;
+    };
+
+    /**
+     * @brief A material on a mesh, in the middle of a cube map's light, looked at from wherever it is orbited to: what the
+     *        material inspector shows, and what small pictures of materials are drawn by. Any kind that has a shading
+     *        module (`<Kind>Shading`, see koral_shading.slang) is drawn: a module of a few lines is generated that names it
+     *        and the shading, and the rest is koral_material_preview. Its passes and its world are its own, as MeshViewer's.
+     */
+    class MaterialPreview {
+    public:
+        /** @brief What gives the resource of an id that is no file's, nor one of the engine's: a node of the scene's graph. */
+        using Find = std::function<std::shared_ptr<kgraph::Resource>(const std::string&)>;
+
+        /** @brief @p showAround: what is behind the mesh is the cube map; otherwise nothing, for a small picture on a panel. */
+        MaterialPreview(kor::FrameGraph& frameGraph, kor::UVec2 extent, bool showAround);
+        ~MaterialPreview();
+        MaterialPreview(const MaterialPreview&) = delete;
+        MaterialPreview& operator=(const MaterialPreview&) = delete;
+
+        /** @brief Shows this material; nothing shows nothing. Its passes are made by Update, as MeshViewer's are. */
+        void Show(std::optional<MaterialShown> shown);
+        /** @brief What it is on; null, the sphere. */
+        void SetMesh(std::shared_ptr<kgraph::Resource> mesh);
+        void SetFind(Find find) { _find = std::move(find); }
+        void SetAssetDirectory(std::filesystem::path directory);
+        void SetExtent(kor::UVec2 extent);
+        /** @brief Orbits it, by @p across (about the up axis) and @p up (over it), in radians. */
+        void Turn(float across, float up);
+        /** @brief Nearer (more than 0) or further. */
+        void Zoom(float steps);
+        /** @brief What the material shown holds of @p field, as it is drawn: what it was given, or what its kind starts it as. */
+        [[nodiscard]] kgraph::Value FieldOf(std::string_view field) const;
+        /** @brief The picture of @p id as this reads it: for a field that holds one to show it. */
+        [[nodiscard]] kor::ResourceRef<const kor::Image> PictureOf(std::string_view id) const;
+        /** @brief Each frame, before the frame graph runs. */
+        void Update();
+        /** @brief Whether what was asked for is what is being drawn: built, and its pictures read. */
+        [[nodiscard]] bool Settled() const;
+        [[nodiscard]] kor::ResourceRef<const kor::Image> Picture() const;
+        [[nodiscard]] std::shared_ptr<kgraph::Resource> PictureHeld() const;
+        /** @brief The picture's texels, as last read back, four bytes each; null until they are. Read back only with SetReadBack. */
+        [[nodiscard]] std::optional<std::vector<std::byte>> Texels() const;
+        void SetReadBack(bool read) { _readBack = read; }
+        [[nodiscard]] std::string Problem() const;
+
+    private:
+        void Build();
+        void Apply();
+
+        struct Cube;
+        kor::FrameGraph& _frameGraph;
+        kecs::World _world;
+        kecs::Entity _entity = kecs::NullEntity;
+        std::unique_ptr<kgraph::Runtime> _runtime;
+        std::shared_ptr<Cube> _cube;
+        std::optional<MaterialShown> _shown;
+        std::shared_ptr<kgraph::Resource> _mesh, _drawn;
+        std::vector<std::shared_ptr<kgraph::Resource>> _pictures;
+        std::filesystem::path _assets;
+        Find _find;
+        kor::UVec2 _extent, _wanted;
+        int _settling = 0;      // frames the size asked for has held: a panel being dragged is not made again at each
+        float _yaw = 0.785f, _pitch = 0.5f, _distance = 1.f;
+        bool _showAround, _readBack = false, _dirty = true, _changed = false, _emptied = false;
+        std::string _kind;
+        std::string _problem;
+    };
+
     /**
      * @brief Small pictures of meshes, for a list of them to show: each mesh drawn by itself, seen from a corner far
      *        enough off to see all of it, a few frames a mesh while there are any still to draw. The editor's own
@@ -144,15 +221,22 @@ namespace keditor
         void Want(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, const std::string& kept = {});
         /** @brief Where pictures are kept between runs: a project's `.koral/cache/thumbnails`. Empty: nowhere. */
         void SetCache(std::filesystem::path directory);
-        /** @brief What a material looks like, as a small picture of it is drawn: the editor's own light on its values. */
-        struct Look {
-            kor::Vec4 colour { 0.8f, 0.8f, 0.8f, 1.f };
-            float metallic = 0.f, roughness = 0.5f;
-            kor::Vec3 emission { 0.f, 0.f, 0.f };
-            std::shared_ptr<kgraph::Resource> picture;      ///< Its colour's; none, plain.
-        };
-        /** @brief Asks for a picture of @p mesh — a sphere — made of @p look, found by @p id; kept as Want keeps one. */
-        void WantMaterial(const std::string& id, std::shared_ptr<kgraph::Resource> mesh, Look look, const std::string& kept = {});
+        /** @brief Where a file named without its whole path is: a project's `assets` folder. What is read for a picture is read from here, apart from the scene. */
+        void SetAssetDirectory(std::filesystem::path directory);
+        /**
+         * @brief Asks for a picture of a sphere (@p sphere, its mesh) of the material @p shown, found by @p id; kept as Want
+         *        keeps one. Drawn by the material's kind's own shading, as the material inspector draws it.
+         */
+        void WantMaterial(const std::string& id, std::shared_ptr<kgraph::Resource> sphere, MaterialShown shown, const std::string& kept = {});
+        /**
+         * @brief Asks for a picture of all of the model file @p file, seen from a corner; kept as Want keeps one. Read for
+         *        it here, and let go: the scene has nothing of it.
+         */
+        void WantModel(const std::string& id, std::filesystem::path file, const std::string& kept = {});
+        /** @brief Asks for a picture of the picture file @p file, read off the frame and made small; kept as Want keeps one. */
+        void WantFile(const std::string& id, std::filesystem::path file, const std::string& kept = {});
+        /** @brief Whether @p id has a picture, or one was kept under @p kept (which it now has): nothing has to be read to show it. */
+        bool Has(const std::string& id, const std::string& kept);
         /** @brief Each frame, before the frame graph runs. True when a picture was made since the last call. */
         bool Update();
         /** @brief The picture of the mesh asked for by @p id; empty until it is made. */

@@ -5,6 +5,8 @@
 
 #include "widgets.h"
 
+#include <cmath>
+
 #include <capiInterop.h>
 #include <kecs/json.h>
 
@@ -128,6 +130,62 @@ namespace keditor::widgets
         const bool whole = type == kui::NumberType::eInt || type == kui::NumberType::eUInt;
         return kui::DragValueOptions {}.SetRange(limits.min, limits.max).SetLogarithmic(limits.logarithmic).SetType(type)
             .SetSpeed(limits.logarithmic || !whole ? 0.01f : 0.1f).SetDecimals(whole ? 0 : limits.logarithmic ? 3 : 2);
+    }
+    kui::Widget ColorOf(const Value& value, const std::function<void(Value)>& set, const bool alpha)
+    {
+        const auto number = [](const Value& v) { return v.Number() ? static_cast<float>(*v.Number()) : 0.f; };
+        kui::Color color(0.f, 0.f, 0.f, 1.f);
+        if (const auto* c = value.Items(); c && c->size() >= 3) color = kui::Color(number((*c)[0]), number((*c)[1]), number((*c)[2]), c->size() > 3 ? number((*c)[3]) : 1.f);
+        return kui::ColorEdit(color, [set, alpha](const kui::Color picked) {
+            set(alpha ? Value(Value::List { picked.r, picked.g, picked.b, picked.a }) : Value(Value::List { picked.r, picked.g, picked.b }));
+        }, {}, kui::ColorPickerOptions {}.SetAlpha(alpha));
+    }
+
+    bool NamesAColor(std::string name)
+    {
+        std::ranges::transform(name, name.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        // A sky's colours are named for where in the sky they are.
+        return name.find("color") != std::string::npos || name.find("colour") != std::string::npos || name.find("tint") != std::string::npos
+            || name.find("albedo") != std::string::npos || name.find("emission") != std::string::npos || name.find("emissive") != std::string::npos
+            || name == "diffuse" || name == "specular" || name == "zenith" || name == "horizon" || name == "ground";
+    }
+
+    kui::Widget ValueField(const kecs::FieldDescription& field, const Value& now, const std::function<void(const Value&)>& set)
+    {
+        if (!field.choices.empty()) {
+            const int selected = now.Number() ? static_cast<int>(*now.Number()) : 0;
+            return kui::Dropdown(field.choices, selected, [set](const int index) { set(Value(index)); });
+        }
+        if (const auto* items = now.Items()) {
+            std::vector<float> numbers;
+            for (const auto& item : *items) numbers.push_back(item.Number() ? static_cast<float>(*item.Number()) : 0.f);
+            if (numbers.size() >= 3 && numbers.size() <= 4 && NamesAColor(field.name)) {
+                const bool alpha = numbers.size() == 4;
+                if (alpha || std::isfinite(field.max)) return ColorOf(now, set, alpha);
+                // Light: its colour, a number at most 1, and by how much.
+                const float strength = std::max({ numbers[0], numbers[1], numbers[2], 1.f });
+                const Value colour(Value::List { numbers[0] / strength, numbers[1] / strength, numbers[2] / strength });
+                return kui::Row({ ColorOf(colour, [set, strength](const Value& picked) {
+                                      Value::List scaled;
+                                      for (const auto& item : *picked.Items()) scaled.emplace_back(*item.Number() * strength);
+                                      set(Value(std::move(scaled)));
+                                  }, false),
+                                  kui::Tooltip("How strong it is: more than 1 is brighter than any colour can say.",
+                                      kui::DragValue(strength, [set, numbers, strength](const double to) {
+                                          Value::List scaled;
+                                          for (const float n : numbers) scaled.emplace_back(n / strength * to);
+                                          set(Value(std::move(scaled)));
+                                      }, Dragging({ 0.f, 1000.f, false }, kui::NumberType::eFloat))) },
+                                kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+            }
+            return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, kgraph::NumberLimits { field.min, field.max, field.logarithmic }, field.type.starts_with('i') || field.type.starts_with('u') ? kui::NumberType::eInt : kui::NumberType::eFloat);
+        }
+        if (const bool* on = now.Bool()) return kui::Checkbox(*on, [set](const bool changed) { set(Value(changed)); });
+        if (const double* number = now.Number()) {
+            const kui::NumberType type = field.type.starts_with('i') || field.type.starts_with('u') ? kui::NumberType::eInt : kui::NumberType::eFloat;
+            return kui::DragValue(*number, [set](const double v) { set(Value(v)); }, Dragging({ field.min, field.max, field.logarithmic }, type));
+        }
+        return kgui::Muted("as its kind starts it", 11.f);
     }
     /**
      * A few controls that are one thing's — a vector's numbers — side by side where they fit, and where they do not, a

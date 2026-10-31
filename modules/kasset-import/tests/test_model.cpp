@@ -38,6 +38,23 @@ TEST_F(Folder, WhatAModelNamesBesideIt)
     EXPECT_EQ(NamedBeside(Crate()), (std::vector<fs::path> { "crate.mtl", "textures/wood.png" }));
 }
 
+// An FBX names its pictures as text among what it holds, as Windows writes them, and where it was exported from too.
+TEST_F(Folder, WhatAnFbxNamesBesideIt)
+{
+    const auto string = [](const std::string_view text) {
+        const auto length = static_cast<std::uint32_t>(text.size());
+        std::string bytes = "S";
+        bytes.append(reinterpret_cast<const char*>(&length), sizeof length);
+        return bytes.append(text);
+    };
+    std::ofstream(root / "bistro.fbx", std::ios::binary) << "Kaydara FBX Binary  " << string("Model::Lamp") << string("Textures\\Lamp_BaseColor.dds")
+                                                         << string("Textures/Lamp_BaseColor.dds") << string("C:\\Bistro\\Textures\\Lamp_Normal.dds")
+                                                         << string("..\\outside.png");
+    EXPECT_EQ(NamedBeside(root / "bistro.fbx"), (std::vector<fs::path> { "Textures/Lamp_BaseColor.dds" }));
+    std::ofstream(root / "plain.fbx") << "; FBX 7.4.0 project file\nRelativeFilename: \"maps\\wood.png\"\nModel: \"Crate\"\n";
+    EXPECT_EQ(NamedBeside(root / "plain.fbx"), (std::vector<fs::path> { "maps/wood.png" }));
+}
+
 TEST_F(Folder, AModelIsReadAsTheFileHasIt)
 {
     const auto read = ReadModel(Crate(), {});

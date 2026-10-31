@@ -170,6 +170,42 @@ user's temporary folder) whenever the kind is declared: a struct of it — a pic
 as a `uint`, a field of no GPU form (`Entity`) left out and said — and the attribute a shader takes one of its fields by,
 `[Toon("tint")]`. `import koral_materials;` imports every kind there is.
 
+### Shading
+
+What a kind looks like is a Slang module of the same name with `Shading` after it, built on the two interfaces of
+`koral_shading`: `IKoralMaterial` says how a kind's fields are read at a point of a surface, and what that gives is an
+`IKoralShading`, which holds what was read and answers light (`Reflected`, `Ambient`, `Emitted`, `Opacity`).
+`PbrMaterialShading` (GGX) and `BlinnPhongMaterialShading` are the engine's. A shader gets the lit colour with one call:
+
+```slang
+import PbrMaterialShading;
+
+const KoralSurface surface = KoralSurfaceAt(world, normal, uv, smooth);     // normals, and how to read a picture
+const float3 lit = KoralLit(material, surface, KoralCamera(eye), KoralLightBuffer(lights, count), environment);
+```
+
+`environment` is optional: anything `IKoralEnvironment`, such as `KoralCubeEnvironment`. Lights are `KoralLight`s,
+as the Lights function lays them out, or any `IKoralLights`. The result is light, not yet tone mapped. Shadows are the
+shader's: call `Reflected` itself with each `KoralArrivalAt` scaled by what reaches the point.
+
+A project's kind `Toon` is shaded by `shaders/ToonShading.slang`. It extends the generated struct:
+
+```slang
+module ToonShading;
+__exported import koral_shading;
+__exported import Toon;
+
+public struct ToonLit : IKoralShading { /* its values, and the four answers */ };
+public extension Toon : IKoralMaterial {
+    public typealias Shading = ToonLit;
+    public ToonLit Read(KoralSurface at) { /* the fields, pictures read */ }
+};
+```
+
+`Shading` can be `KoralPbr` or `KoralBlinnPhong` instead, to read a kind of your own into the engine's function. The
+editor finds the module by its name, and draws the kind's small pictures and its material viewer through it; a kind
+without one says so in the viewer, whose **Write its shading** starts one.
+
 ## The scene from a script
 
 `World` is the scene the script is in:

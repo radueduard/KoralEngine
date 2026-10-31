@@ -194,6 +194,8 @@ works on 32-bit uints, in buffers with `eStorage`:
 |---|---|---|
 | **Scan** | `values`, `count` (up to 1,048,576) | `values`, each the sum of those before it (an exclusive prefix sum), in place; `total`, a buffer whose first uint is the sum of them all |
 | **RadixSort** | `keys`, `values`, `count` (up to 16,777,216) | both sorted by key, in place: stable — the same keys keep their values in order — four bits a turn, eight turns |
+| **BitonicSort** | `elements`, `type` (`uint`), `count` (up to 4,194,304), `passes` (253, given on the call) | `elements` sorted in place, of any type that is IComparable (see below): not stable, in log2(count) × (log2(count) + 1) / 2 passes, log2 rounded up — 153 for 2¹⁷. `passes` is how many are written out: 253 covers any count, those not needed cost a little each frame, and with too few the elements are left unsorted |
+| **OddEvenSort** | `elements`, `type` (`uint`), `count`, `phases` (2, given on the call, up to 256), `start` | `elements` nearer sorted in place, of any type that is IComparable (see below), and stably: each phase meets each element with its neighbour. For what is nearly sorted already, a few phases a frame; sorted whole, it takes `count` phases. Wire `start` from a count of frames when `phases` is odd, or the same pairs are met each frame |
 | **Compact** | `flags`, `values`, `count` | `kept`: the values whose flag is not 0, one after another, in their order; `count`, a buffer of how many |
 | **IndirectArgs** | `counter` (a buffer), `offset` (which uint of it), `groupSize` | `args`: the groups that cover that count, for a Dispatch's `indirect` |
 | **SpheresStep** | `bodies` (64 bytes each: position and inverse mass, velocity and radius, spin and inverse inertia, orientation), `materials` (16 bytes each: friction, restitution, linear and angular damping), `count`, `dt`, `gravity`, `cell` (the largest diameter), `ground` (a height) | one fixed step of the spheres, in place: kphysics' sequential impulses, one colour of contacts at a time — a hashed grid sorted with RadixSort, the contacts, colours worked out on the GPU (each contact proposes the lowest colour its bodies have free; twelve, and what is left one more), ten iterations — and `contacts`, a buffer whose first uint is how many touch |
@@ -209,6 +211,31 @@ works on 32-bit uints, in buffers with `eStorage`:
 | **HiZ** | `depth`, `reversed` (0) | `pyramid`: 512 by 256, nine levels of R32F, each texel the farthest depth of what it covers (`koral_hiz`): of a reversed depth, the least |
 | **InstanceCull** | `instances`, `stride`, `matrixOffset`, `ranges`, `drawCount`, `viewProjection` (as CullInSight's), `early`, `earlyVisible`, `late`, `lateVisible` (two IndirectDraws in eGPU), `depth` (what the early draw draws into), `reversed`, `count` (65536: how many instances at most) | two phases of an indirect draw, on the GPU (`koral_occlusion`): `early` draws what was seen the frame before and is in sight; a HiZ of what it drew; `late` what is in sight, was not seen and is not behind it. Whether each is seen is kept for the next frame. Two Draws of the commands — the late one `load` — and each draw's shader finds its instance through its own `visible`. Also `pyramid` |
 | **Lights** | — | `lights`: every DirectionalLight, then PointLight, then SpotLight of the scene as koral_lights.slang's `KoralLight` (64 bytes: position and range, direction and kind, linear colour times intensity and the cosine of the spot's inner angle, of its outer); `count`, and `directional`, `points` and `spots` |
+
+BitonicSort and OddEvenSort sort what a shader says how to compare, where RadixSort, which reads a key's bits, sorts
+uints alone. `type` is `float`, `uint` and the like, or a struct as `module.Type`, conforming to Slang's `IComparable`:
+
+```slang
+// shaders/fluid.slang
+struct Entry : IComparable {
+    uint hash; uint index;
+    bool equals(Entry other) { return hash == other.hash; }
+    bool lessThan(Entry other) { return hash < other.hash; }
+    bool lessThanOrEquals(Entry other) { return hash <= other.hash; }
+};
+```
+
+```json
+{ "id": "sort", "type": "Function", "inputs": { "function": "BitonicSort", "type": "fluid.Entry", "passes": 153,
+    "elements": { "$link": ["entries", "out"] }, "count": 131072 } }
+```
+
+A comparison sees the two elements and nothing else, so what it goes by — a distance from the camera — is written into
+them first. Each swap copies a whole element: what is large is better sorted as a small `{ key, index }`. `type`,
+`passes` and `phases` are given on the call, not wired. Under them is a ComputePipeline's `compute.element`: with the
+module `koral_compare_sort`, the type it sorts, for which a module (`koral_sort_of_<type>`) is generated beside the
+material kinds' and built as any other, again when the type's own module is written. A type that does not conform is
+said on the call, in the shader compiler's words.
 
 A scene runs its RigidBodies on the GPU with no PhysicsSimulation: XpbdRigidBodies on a setup page; FixedStep and XpbdStep
 (wired from it) on a page of the fixed step; and a WriteBack of XpbdStep's `bodies` (stride 112, `position` 96,
@@ -971,9 +998,15 @@ pass that draws a hundred of them binds one.
 
 ### Default meshes
 
-An entity's `kgraph::Mesh` can hold one of the default meshes without the graph having a node for it:
+An entity's `kgraph::Mesh` can hold a procedural mesh without the graph having a node for it:
 `runtime.ResourceOf("$cube")`, and likewise each of `kgraph::DefaultMeshNames()` (`kgraph::DefaultMeshId(name)`).
-Each is about a unit across and centred on the origin:
+Each shape is made from parameters of its own (`kgraph::ShapeParameters`), and its id says the ones that are not
+at their initial value: `$sphere?radius=0.8&rings=24`. One set of numbers has one id (`kgraph::ShapeName`: in the
+parameters' order, each within its limits, a length to four decimals), so entities with the same numbers hold the one
+mesh, and are batched as such. A tuned mesh nothing holds is let go of; `$sphere` as it starts is kept. An old scene's
+`$sphere` is the same mesh it always was.
+
+At its initial values each is about a unit across and centred on the origin:
 
 | Mesh | What it is |
 |---|---|

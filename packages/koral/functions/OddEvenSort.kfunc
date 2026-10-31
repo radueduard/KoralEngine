@@ -1,0 +1,232 @@
+{
+  "koral-function": 1,
+  "purpose": "Sort and scan",
+  "description": "Elements of any type that is IComparable a little nearer sorted on the GPU, in place, and stably: each phase meets each element with its neighbour. What is nearly sorted stays so with a few phases a frame; sorted whole, it takes as many phases as there are elements, and a call has 256 at most. phases is given on the call. Wire start from a count of frames when phases is odd, or the same pairs are met each frame. type is what the buffer holds: a shader's float or uint, or a module's struct as module.Type.",
+  "tags": [
+    "sort",
+    "odd",
+    "even",
+    "transposition",
+    "order",
+    "comparable",
+    "incremental"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "elements",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          0
+        ],
+        "inputs": {
+          "name": "elements",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "type",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "type",
+          "kind": "eValue",
+          "default": "uint"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 256
+        }
+      },
+      {
+        "id": "phases",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "phases",
+          "kind": "eValue",
+          "default": 2
+        }
+      },
+      {
+        "id": "start",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "start",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "idle",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          300
+        ],
+        "inputs": {
+          "name": "idle",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "over",
+        "type": "Divide",
+        "at": [
+          320,
+          120
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "blocks",
+        "type": "Ceil",
+        "at": [
+          640,
+          120
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "over",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "turns",
+        "type": "Repeat",
+        "at": [
+          0,
+          360
+        ],
+        "inputs": {
+          "count": {
+            "$link": [
+              "phases",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sorting",
+        "type": "ComputePipeline",
+        "at": [
+          960,
+          0
+        ],
+        "inputs": {
+          "compute.module": "koral_compare_sort",
+          "compute.element": {
+            "$link": [
+              "type",
+              "out"
+            ]
+          },
+          "compute.entry": "oddEven",
+          "param.koralSorted": {
+            "$link": [
+              "elements",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run",
+        "type": "Dispatch",
+        "at": [
+          1600,
+          0
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "sorting",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.turn": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "push.start": {
+            "$link": [
+              "start",
+              "out"
+            ]
+          },
+          "idle": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sorted",
+        "type": "FunctionOutput",
+        "at": [
+          2240,
+          0
+        ],
+        "inputs": {
+          "name": "elements",
+          "value": {
+            "$link": [
+              "elements",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

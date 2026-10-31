@@ -638,8 +638,8 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
             }
         session.assetFolder = whole->folder;
         session.OpenAsset(*whole);
-        EXPECT_TRUE(session.assetsOpened.contains(whole->id));
-        EXPECT_TRUE(shows(mesh->label)) << "its meshes, after it";
+        EXPECT_EQ(session.assetModel, whole->id);
+        EXPECT_TRUE(shows(mesh->label)) << "its meshes, in it";
         session.assetKind = static_cast<int>(Kind::eMesh);
         session.SelectAsset(texture->id);
         EXPECT_TRUE(shows(mesh->label));

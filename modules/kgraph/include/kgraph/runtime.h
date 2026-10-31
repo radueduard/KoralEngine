@@ -543,7 +543,7 @@ namespace kgraph
 
         /**
          * @brief What node @p id 's @p output is, when it is a resource; null otherwise. A default mesh is found
-         *        the same way, with no node for it: `$cube`, `$sphere` (kgraph::DefaultMeshId), made when first asked for.
+         *        the same way, with no node for it: `$cube`, `$sphere?rings=24` (kgraph::DefaultMeshId), made when first asked for.
          *        So are three pictures of one texel — `$white`, `$black`, `$normal` — and what is in a file: `@wall.png`
          *        is that picture, and `@model.gltf#3` the fourth mesh of that model. @see assets.h
          *        No @p output is the one the node is looked at by: ShownOutput.
@@ -650,9 +650,10 @@ namespace kgraph
         /**
          * @brief Where the material kinds' Slang modules are written, and shaders find them (`import PbrMaterial;`,
          *        `import koral_materials;`): a project's generated shaders. Until it is set, a folder of the user's
-         *        temporary files. Every kind's is written there at once.
+         *        temporary files. Every kind's is written there at once. With @p own false the folder is another runtime's,
+         *        which has other kinds: only this one's are written there, and nothing of it is taken away.
          */
-        void SetGeneratedShaderDirectory(std::filesystem::path directory);
+        void SetGeneratedShaderDirectory(std::filesystem::path directory, bool own = true);
         [[nodiscard]] const std::filesystem::path& GeneratedShaderDirectory() const;
         /** @brief What writing the kinds' modules last said: fields of no GPU form, a file that could not be written. */
         [[nodiscard]] const std::vector<std::string>& MaterialNotes() const;

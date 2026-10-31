@@ -40,6 +40,15 @@ namespace keditor::widgets
     float NumberOf(const Value& value, float fallback = 0.f);
     /** A value typed as JSON: for what has no editor of its own. Nothing typed is no value. */
     kui::Widget JsonField(const Value& value, const std::function<void(Value)>& set, const std::string& key);
+    /** A swatch of a colour of three numbers, or with @p alpha four, that opens a picker: each number from 0 to 1. */
+    kui::Widget ColorOf(const Value& value, const std::function<void(Value)>& set, bool alpha = true);
+    /** Whether a name says a vector is a colour: what an entity's field is called is all there is to go by. */
+    bool NamesAColor(std::string name);
+    /**
+     * A control for a value of a field, by what it holds: one of its choices, a colour, numbers within the field's limits,
+     * true or false. A colour of no upper limit is light (an emission): a picker and how strong it is, so that it can be more than 1.
+     */
+    kui::Widget ValueField(const kecs::FieldDescription& field, const Value& now, const std::function<void(const Value&)>& set);
     /** How a number is dragged, wherever it is (DragNumbers). */
     kui::DragValueOptions Dragging(const kgraph::NumberLimits& limits, kui::NumberType type);
     /** A few controls that are one thing's — a vector's numbers — side by side where they fit, a line each where they do not. */

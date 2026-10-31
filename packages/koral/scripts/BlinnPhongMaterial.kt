@@ -17,7 +17,7 @@ class BlinnPhongMaterial : Material() {
     var normalMap = Texture.Normal
     var emissiveMap = Texture.White
     var diffuse = Vec4(0.8f, 0.8f, 0.8f, 1f)        // a: how opaque.
-    @Min(0f) var specular = Vec3(0.2f, 0.2f, 0.2f)
+    @Range(0f, 1f) var specular = Vec3(0.2f, 0.2f, 0.2f)
     @Min(1f) @Logarithmic var shininess = 32f       // The Phong exponent: higher, a smaller and sharper highlight.
     @Min(0f) var emission = Vec3(0f, 0f, 0f)
     @Choices("Opaque", "Masked", "Blended") var alphaMode = 0

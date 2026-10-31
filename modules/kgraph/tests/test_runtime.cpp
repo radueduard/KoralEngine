@@ -345,6 +345,26 @@ TEST_F(RuntimeTest, ADefaultMeshIsMadeAgainWithTheTangentsAskedFor) {
     EXPECT_TRUE(first->replacedBy != nullptr) << "what held the old one is led to the new";
 }
 
+// Who names the same numbers holds the one mesh; another's are another mesh; one nobody holds is let go of.
+TEST_F(RuntimeTest, TheSameParametersShareAMesh) {
+    auto& runtime = *scene->runtime;
+    auto tuned = runtime.ResourceOf("$sphere?rings=10&segments=20");
+    ASSERT_TRUE(tuned);
+    EXPECT_EQ(tuned->node, "$sphere?rings=10&segments=20") << "saved by what it is";
+    EXPECT_EQ(runtime.ResourceOf("$sphere?segments=20&rings=10"), tuned) << "however it is written";
+    EXPECT_NE(runtime.ResourceOf("$sphere?rings=11&segments=20"), tuned);
+    EXPECT_EQ(runtime.ResourceOf("$sphere?rings=40"), runtime.ResourceOf("$sphere")) << "the numbers it starts with are the mesh it starts as";
+    EXPECT_EQ(runtime.ReadMesh("$sphere?rings=10&segments=20")->indices.size(), 10u * 20u * 6u);
+    EXPECT_FALSE(runtime.ResourceOf("$blob?rings=10"));
+
+    const std::weak_ptr<kgraph::Resource> weak = tuned;
+    const std::weak_ptr<kgraph::Resource> plain = runtime.ResourceOf("$sphere");
+    tuned.reset();
+    for (int frame = 0; frame < 4; ++frame) { runtime.Update(); Frame(); }
+    EXPECT_TRUE(weak.expired()) << "a tuned mesh nothing holds is not kept";
+    EXPECT_FALSE(plain.expired()) << "the one it starts as is";
+}
+
 // A pipeline names its shaders: no node for each, and no wire to it.
 TEST_F(RuntimeTest, APipelineNamesItsShadersByModuleAndEntryPoint) {
     auto& runtime = *scene->runtime;
@@ -1373,6 +1393,123 @@ TEST_F(RuntimeTest, TheEnginesFunctionsSortCompactAndCountOnTheGpu) {
     EXPECT_EQ(args[0], (n + 63) / 64);
     EXPECT_EQ(args[1], 1u);
     EXPECT_EQ(args[2], 1u);
+}
+
+namespace {
+    /** What a comparing sort is tried on: sortable.slang's seeds of @p n elements, in `structs` and `floats`, and copies to look at. */
+    void AddSortables(kgraph::Graph& graph, const std::uint32_t n, const std::uint32_t reach)
+    {
+        using kgraph::Value;
+        const Value storage = Value::List { "eStorage", "eTransferSrc", "eTransferDst" };
+        graph.Add("structs", "Buffer").Set("instanceCount", n * 16).Set("usage", storage);
+        graph.Add("floats", "Buffer").Set("instanceCount", n * 4).Set("usage", storage);
+        graph.Add("seeding", "ComputePipeline").Set("compute.module", "sortable").Set("compute.entry", "computeMain").Wire("param.structs", "structs").Wire("param.floats", "floats");
+        graph.Add("seed", "Dispatch").Wire("pipeline", "seeding").Set("groups.x", (n + 255) / 256).Set("push.count", n).Set("push.reach", reach);
+        graph.Add("out structs", "Buffer").Set("instanceCount", n * 16).Set("usage", storage);
+        graph.Add("out floats", "Buffer").Set("instanceCount", n * 4).Set("usage", storage);
+    }
+    struct Sortable { std::uint32_t key, index; float rest[2]; };
+    std::uint32_t SortableKey(const std::uint32_t i, const std::uint32_t reach) { return SeedHash(i) % reach; }
+}
+
+// A bitonic sort of any type that is IComparable, on the GPU: of a shader's struct, at a count that is no power of two
+// and in the passes that count takes, and of a float, in the same graph.
+TEST_F(RuntimeTest, ABitonicSortSortsWhatIsComparable) {
+    auto& runtime = *scene->runtime;
+    constexpr std::uint32_t n = 70000, reach = 1u << 20;
+    kgraph::Graph graph;
+    graph.functions["BitonicSort"] = EngineFunction("BitonicSort");
+    AddSortables(graph, n, reach);
+    graph.Add("sort", "Function").Set("function", "BitonicSort").Set("type", "sortable.Sortable").Wire("elements", "structs").Set("count", n).Set("passes", 153);
+    graph.Add("sort floats", "Function").Set("function", "BitonicSort").Set("type", "float").Wire("elements", "floats").Set("count", n);
+    graph.Add("copy structs", "CopyBuffer").Wire("source", "sort", "elements").Wire("destination", "out structs");
+    graph.Add("copy floats", "CopyBuffer").Wire("source", "sort floats", "elements").Wire("destination", "out floats");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    runtime.Watch("out structs");
+    runtime.Watch("out floats");
+    for (int i = 0; i < 5; ++i) Frame();
+    const auto peek = runtime.Watched("out structs");
+    ASSERT_TRUE(peek && peek->bytes.size() >= n * sizeof(Sortable));
+    std::vector<Sortable> sorted(n);
+    std::memcpy(sorted.data(), peek->bytes.data(), n * sizeof(Sortable));
+    std::vector<bool> seen(n, false);
+    std::size_t unsorted = 0, wrong = 0;
+    for (std::uint32_t k = 0; k < n; ++k) {
+        if (k > 0 && sorted[k - 1].key > sorted[k].key) ++unsorted;
+        const auto& made = sorted[k];
+        if (made.index >= n || seen[made.index] || made.key != SortableKey(made.index, reach) || made.rest[0] != static_cast<float>(made.index) || made.rest[1] != 1.f) ++wrong;
+        else seen[made.index] = true;
+    }
+    EXPECT_EQ(unsorted, 0u) << "sorted";
+    EXPECT_EQ(wrong, 0u) << "each element whole, and each once";
+
+    const auto floats = runtime.Watched("out floats");
+    ASSERT_TRUE(floats && floats->bytes.size() >= n * 4);
+    std::vector<float> numbers(n);
+    std::memcpy(numbers.data(), floats->bytes.data(), n * 4);
+    EXPECT_TRUE(std::ranges::is_sorted(numbers)) << "a shader's own float is comparable";
+    EXPECT_LT(numbers.front(), numbers.back());
+}
+
+// An odd-even transposition sort: whole in as many phases as there are elements, and stable; and nearer sorted with fewer.
+TEST_F(RuntimeTest, AnOddEvenSortSortsStablyAndALittleAtATime) {
+    auto& runtime = *scene->runtime;
+    constexpr std::uint32_t n = 200, reach = 8;
+    const auto sortedAfter = [&](const int phases, const int start = 0) {
+        kgraph::Graph graph;
+        graph.functions["OddEvenSort"] = EngineFunction("OddEvenSort");
+        AddSortables(graph, n, reach);
+        graph.Add("sort", "Function").Set("function", "OddEvenSort").Set("type", "sortable.Sortable").Wire("elements", "structs").Set("count", n).Set("phases", phases).Set("start", start);
+        graph.Add("copy structs", "CopyBuffer").Wire("source", "sort", "elements").Wire("destination", "out structs");
+        runtime.Set(graph);
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        runtime.Watch("out structs");
+        for (int i = 0; i < 5; ++i) Frame();
+        const auto peek = runtime.Watched("out structs");
+        std::vector<Sortable> sorted(n);
+        if (peek && peek->bytes.size() >= n * sizeof(Sortable)) std::memcpy(sorted.data(), peek->bytes.data(), n * sizeof(Sortable));
+        else ADD_FAILURE() << "nothing to look at";
+        return sorted;
+    };
+    // How many pairs are the wrong way round: what each phase takes from, and never adds to.
+    const auto outOfOrder = [](const std::vector<Sortable>& made) {
+        std::size_t count = 0;
+        for (std::size_t a = 0; a < made.size(); ++a)
+            for (std::size_t b = a + 1; b < made.size(); ++b) count += made[a].key > made[b].key ? 1 : 0;
+        return count;
+    };
+    const auto whole = sortedAfter(n);
+    EXPECT_EQ(outOfOrder(whole), 0u) << "sorted";
+    std::size_t unstable = 0;
+    for (std::size_t k = 1; k < n; ++k) if (whole[k - 1].key == whole[k].key && whole[k - 1].index > whole[k].index) ++unstable;
+    EXPECT_EQ(unstable, 0u) << "the same keys keep their order";
+
+    std::vector<Sortable> seeds(n);
+    for (std::uint32_t i = 0; i < n; ++i) seeds[i].key = SortableKey(i, reach);
+    EXPECT_LT(outOfOrder(sortedAfter(6)), outOfOrder(seeds)) << "a few phases leave it nearer sorted";
+    EXPECT_EQ(sortedAfter(1, 1)[0].index, 0u) << "started on the odd ones, the first element meets nothing";
+}
+
+// What cannot be sorted is said on the call, by what it is.
+TEST_F(RuntimeTest, ASortSaysWhatItCannotSort) {
+    auto& runtime = *scene->runtime;
+    const auto failure = [&](const std::string& type) {
+        kgraph::Graph graph;
+        graph.functions["BitonicSort"] = EngineFunction("BitonicSort");
+        graph.Add("elements", "Buffer").Set("instanceCount", 1024).Set("usage", kgraph::Value::List { "eStorage", "eTransferDst" });
+        graph.Add("sort", "Function").Set("function", "BitonicSort").Set("type", type).Wire("elements", "elements").Set("count", 16);
+        runtime.Set(graph);
+        return runtime.Status("sort") ? runtime.Status("sort")->error : std::string();
+    };
+    const std::string unsortable = failure("sortable.Unsortable");
+    EXPECT_NE(unsortable.find("sortable.Unsortable"), std::string::npos) << unsortable;
+    EXPECT_NE(unsortable.find("IComparable"), std::string::npos) << unsortable;
+    const std::string missing = failure("nowhere.Thing");
+    EXPECT_NE(missing.find("nowhere"), std::string::npos) << missing;
+    const std::string malformed = failure("a b; evil");
+    EXPECT_NE(malformed.find("is no type"), std::string::npos) << malformed;
 }
 
 // A Reference on a setup page is what setup made before its page, though setup is made only now and then.

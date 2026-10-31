@@ -167,7 +167,7 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
     Session().Select(std::string("lit"));
     EXPECT_TRUE(Shows("Lit")) << "the components a ForEach asks for, to tick";
     Session().Select(std::string("stamp"));
-    EXPECT_TRUE(Shows("compute.module")) << "a pipeline names its shader";
+    EXPECT_FALSE(Shows("compute.module")) << "a pipeline's shader is a slot, not an input";
     EXPECT_TRUE(Shows("computeMain")) << "and the entry point in it";
     EXPECT_TRUE(Shows("backdrop")) << "a pipeline's inputs are its shader's, by the shader's own names";
     EXPECT_FALSE(Shows("param.backdrop")) << "what kind of input it is is no part of what it is called";
@@ -182,15 +182,16 @@ TEST_F(EditorTest, ThePanelsShowTheSceneAndFollowIt) {
 
     // A graphics pipeline is drawn one of two ways, and shows the inputs of the one it is.
     Session().Select(std::string("show"));
-    for (const char* input : { "stages", "eVertex", "vertex.module", "vertex.layout", "fragment.entry", "framebuffer", "source" }) EXPECT_TRUE(Shows(input)) << input;
-    EXPECT_TRUE(Shows("geometry.module") && Shows("rasterizationState")) << "what it can do without, as it starts";
-    EXPECT_FALSE(Shows("mesh.module")) << "and nothing of the other way of drawing";
+    for (const char* input : { "stages", "eVertex", "vertex.layout", "framebuffer", "source" }) EXPECT_TRUE(Shows(input)) << input;
+    EXPECT_TRUE(Shows("Add a geometry shader") && Shows("rasterizationState")) << "what it can do without, as it starts";
+    EXPECT_FALSE(Shows("vertex.module") || Shows("fragment.entry")) << "its shaders are slots, not inputs";
+    EXPECT_FALSE(Shows("No mesh shader")) << "and nothing of the other way of drawing";
     const std::string drawn = Doc().AddNode("GraphicsPipeline", 900, 40, "drawn");
     Session().Select(drawn);
-    EXPECT_TRUE(Shows("vertex.module"));
+    EXPECT_TRUE(Shows("No vertex shader"));
     Doc().SetInput(drawn, "stages", "eMesh");
-    EXPECT_TRUE(Shows("mesh.module")) << "with mesh shaders, it has a mesh shader";
-    EXPECT_FALSE(Shows("vertex.module") || Shows("geometry.module")) << "and no vertex shader";
+    EXPECT_TRUE(Shows("No mesh shader")) << "with mesh shaders, it has a mesh shader";
+    EXPECT_FALSE(Shows("No vertex shader") || Shows("Add a geometry shader")) << "and no vertex shader";
     Doc().RemoveNodes({ drawn });
 
     // An entity picked: its components and their fields.
@@ -859,8 +860,17 @@ TEST_F(EditorTest, EntitiesAreATreeEachWithATransform) {
     std::string error;
     EXPECT_TRUE(Doc().SetField(barrel, "Mesh", "mesh", kgraph::Value("$cylinder"), &error)) << error;
     Session().Select(barrel);
-    EXPECT_TRUE(Shows("cylinder (built in)"));
+    EXPECT_TRUE(Shows("cylinder"));
     Sheet("tree");
+
+    // What it is made from is shown under it, and tuned, it is still that shape, and can go back to how it starts.
+    EXPECT_TRUE(Shows("segments"));
+    EXPECT_FALSE(Shows("Back to how it starts"));
+    EXPECT_TRUE(Doc().SetField(barrel, "Mesh", "mesh", kgraph::Value("$cylinder?radius=0.2&segments=12"), &error)) << error;
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(Shows("cylinder"));
+    EXPECT_TRUE(Shows("Back to how it starts"));
+    Sheet("mesh-parameters");
 
     // Deleted, what is under it goes too.
     Doc().DestroyEntity(ship);
@@ -1906,6 +1916,15 @@ TEST_F(EditorTest, AFunctionIsMadeOpenedAndClosedFromTheEditor) {
     Doc().SetInput(another, "a", 10);
     EXPECT_EQ(Doc().Runtime().ValueOf(another, "times"), kgraph::Value(30)) << "a call of it, made from the menu";
 
+    // A `.kfunc` opened from the Assets panel is its page: by a call there is, or by one that goes with the page.
+    keditor::Session::Asset file;
+    file.kind = keditor::Session::Asset::Kind::eFunction;
+    file.file = Doc().FunctionsDirectory() / "Triple.kfunc";
+    Session().OpenAsset(file);
+    ASSERT_TRUE(Doc().Opened().has_value()) << Session().Status();
+    EXPECT_EQ(Doc().Opened()->function, "Triple");
+    ASSERT_TRUE(Session().CloseFunction(false));
+
     ASSERT_TRUE(Session().OpenFunction(call)) << Session().Status();
     EXPECT_TRUE(Shows("Function Triple is open"));
     EXPECT_TRUE(Shows("Discard"));
@@ -1918,6 +1937,16 @@ TEST_F(EditorTest, AFunctionIsMadeOpenedAndClosedFromTheEditor) {
     ASSERT_TRUE(Session().OpenFunction(call));
     ASSERT_TRUE(Session().Save()) << Session().Status();
     EXPECT_FALSE(Doc().Opened().has_value());
+
+    // With no call of it in the scene, one is made for the page and goes with it.
+    std::vector<std::string> calls;
+    for (const auto& node : Doc().Graph().nodes) if (node.type == "Function") calls.push_back(node.id);
+    Doc().RemoveNodes(calls);
+    const std::size_t without = Doc().Graph().nodes.size();
+    Session().OpenAsset(file);
+    ASSERT_TRUE(Doc().Opened().has_value()) << Session().Status();
+    ASSERT_TRUE(Session().CloseFunction(true)) << Session().Status();
+    EXPECT_EQ(Doc().Graph().nodes.size(), without) << "the call made to open it is gone";
 }
 
 TEST_F(EditorTest, TheProjectToStartWithIsTheUsersChoice) {
@@ -2568,6 +2597,248 @@ TEST_F(EditorTest, PicturesOfMeshesAreKeptAndMaterialsAreSpheres) {
     EXPECT_GT((*blue)[2], (*blue)[0] + 40) << "blue, in its picture";
 }
 
+// What a material looks like is drawn by its kind's own shading, in the light of a room, whatever the kind: the engine's
+// two, and one of the project's with a function of its own. What has no shading says so, and can be given one.
+TEST_F(EditorTest, MaterialsAreDrawnByTheirKindsShading) {
+    const auto project = scene::MakeProject("shaded");
+    Open(project.directory);
+    const auto drawn = [&](const std::string& id) {
+        (void)Session().MaterialPicture(id);
+        for (int i = 0; i < 900 && !Session().MaterialPicture(id).Get(); ++i) Frame();
+        return Session().MaterialPicture(id);
+    };
+    ASSERT_TRUE(drawn("material:Gold").Get()) << "PBR";
+    ASSERT_TRUE(drawn("material:Blinn-Phong Ruby").Get()) << "Blinn-Phong";
+    EXPECT_NE(drawn("material:Gold").Get(), drawn("material:Blinn-Phong Ruby").Get());
+
+    // A kind of the project's, and its shading.
+    kgraph::MaterialKind toon = *Doc().Runtime().MaterialKindOf("PbrMaterial");
+    toon.name = "Toon";
+    std::string error;
+    ASSERT_NE(Doc().Runtime().DeclareMaterialKind(toon, &error), kecs::NoComponent) << error;
+    Doc().AddMaterialAsset({ .id = "@Green.kmat", .name = "Green", .kind = "Toon", .values = { { "baseColor", kgraph::Value(kgraph::Value::List { 0.f, 1.f, 0.f, 1.f }) } } });
+    EXPECT_FALSE(Session().HasShading("Toon"));
+    ASSERT_TRUE(Session().WriteShadingModule("Toon")) << Session().Status();
+    EXPECT_TRUE(Session().HasShading("Toon"));
+    EXPECT_FALSE(Session().WriteShadingModule("Toon")) << "what is there is left";
+    {
+        std::ifstream in(Session().ShadingModuleOf("Toon"));
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const std::string from = "lit.colour = float3(0.8);";
+        text.replace(text.find(from), from.size(), "lit.colour = KoralLinear(baseColor.rgb);");
+        std::ofstream(Session().ShadingModuleOf("Toon"), std::ios::trunc) << text;
+    }
+    const auto toonPicture = drawn("@Green.kmat");
+    ASSERT_TRUE(toonPicture.Get()) << "a kind of the project's is drawn by its own function";
+
+    // Picked, it runs nothing: it is the viewer that draws one, and is opened for it.
+    Session().SelectAsset("material:Gold");
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(Session().ViewedMaterial(), nullptr);
+    ASSERT_TRUE(Session().View("material:Gold"));
+    EXPECT_EQ(Session().Viewed(), keditor::Session::ViewKind::eMaterial);
+    for (int i = 0; i < 60 && !(Session().ViewedMaterial() && Session().ViewedMaterial()->Settled()); ++i) Frame();
+    ASSERT_NE(Session().ViewedMaterial(), nullptr);
+    EXPECT_EQ(Session().ViewedMaterial()->Problem(), "");
+    EXPECT_TRUE(Session().ViewedMaterial()->Picture().Get());
+    Sheet("material-gold");
+    Session().SetPreviewMesh("$torus");
+    Session().ViewedMaterial()->Turn(1.f, 0.3f);
+    for (int i = 0; i < 20; ++i) Frame();
+    EXPECT_EQ(Session().ViewedMaterial()->Problem(), "");
+    Sheet("material-torus");
+    Session().SetPreviewMesh("$sphere");
+
+    // Tried out, it is drawn so, and the material is as it was: in the document, and in what an entity would be given.
+    const auto number = [&](const char* field) { const kgraph::Value held = Session().ViewedMaterial()->FieldOf(field); return held.Number() ? *held.Number() : -1.0; };
+    EXPECT_NEAR(number("roughness"), 0.25, 1e-5);
+    Session().TryMaterialField("roughness", kgraph::Value(0.9));
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_NEAR(number("roughness"), 0.9, 1e-5) << "drawn with what is tried out";
+    EXPECT_TRUE(Session().MaterialTried());
+    const auto values = keditor::Session::ValuesOf(*keditor::Session::MaterialOf("material:Gold"));
+    EXPECT_FLOAT_EQ(static_cast<float>(*std::ranges::find(values, std::string("roughness"), &std::pair<std::string, kgraph::Value>::first)->second.Number()), 0.25f);
+    Sheet("material-tried");
+    Session().ForgetMaterialTried();
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_NEAR(number("roughness"), 0.25, 1e-5) << "back to the material";
+    EXPECT_FALSE(Session().MaterialTried());
+
+    // Dragged with the mouse, a number goes down, and up no further than its limit: metallic, in the viewer's list.
+    {
+        auto& input = editor->SceneInput();
+        const auto drag = [&](const float by) {
+            input.FeedMousePosition({ 1010.f, 587.f });
+            Frame();
+            Frame();
+            input.FeedMouseButton(kor::MouseButton::eLeft, true);
+            Frame();
+            for (int i = 1; i <= 10; ++i) { input.FeedMousePosition({ 1010.f + by * static_cast<float>(i) / 10.f, 587.f }); Frame(); }
+            input.FeedMouseButton(kor::MouseButton::eLeft, false);
+            for (int i = 0; i < 4; ++i) Frame();
+        };
+        drag(-60.f);
+        EXPECT_TRUE(Session().MaterialTried()) << "a drag tries it out";
+        EXPECT_LT(number("metallic"), 1.0);
+        EXPECT_GE(number("metallic"), 0.0);
+        drag(400.f);
+        EXPECT_NEAR(number("metallic"), 1.0, 1e-5) << "and no further than it goes";
+        Session().ForgetMaterialTried();
+        for (int i = 0; i < 4; ++i) Frame();
+    }
+
+    // Its pictures are tried out as its numbers are, and a light keeps being more than a colour can say.
+    Session().TryMaterialField("baseColorMap", kgraph::Value("$black"));
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(*Session().ViewedMaterial()->FieldOf("baseColorMap").String(), "$black");
+    Sheet("material-textures");
+    Session().ForgetMaterialTried();
+    ASSERT_TRUE(Session().View("material:Glowing white"));
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_NEAR(*(*Session().ViewedMaterial()->FieldOf("emission").Items())[0].Number(), 4.0, 1e-5);
+    ASSERT_TRUE(Session().View("material:Blinn-Phong Gold"));
+    for (int i = 0; i < 6; ++i) Frame();
+    const auto fields = Doc().Runtime().MaterialKindOf("BlinnPhongMaterial")->fields;
+    EXPECT_EQ(std::ranges::find(fields, std::string("specular"), &kecs::FieldDescription::name)->max, 1.f) << "a classic specular colour is at most 1";
+
+    // A project's material, in its own kind: what its asset says stays, and what is tried goes with the viewer.
+    ASSERT_TRUE(Session().View("@Green.kmat"));
+    for (int i = 0; i < 20; ++i) Frame();
+    EXPECT_EQ(Session().ViewedMaterial()->Problem(), "") << "a project's kind in the viewer too";
+    Session().TryMaterialField("metallic", kgraph::Value(1.0));
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(std::ranges::contains(Doc().MaterialAssetOf("@Green.kmat")->values, std::string("metallic"), &std::pair<std::string, kgraph::Value>::first)) << "the asset is as it was";
+    Session().StopViewing();
+    EXPECT_FALSE(Session().MaterialTried());
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_EQ(Session().ViewedMaterial(), nullptr);
+
+    Session().assetKind = static_cast<int>(keditor::Session::Asset::Kind::eMaterial);
+    Session().ViewChanged();
+    for (int i = 0; i < 240; ++i) Frame();
+    EXPECT_TRUE(Shows("PBR  ·  23"));
+    EXPECT_TRUE(Shows("Blinn-Phong  ·  22"));
+    Sheet("materials-tab");
+    Session().assetKind = -1;
+}
+
+// The view is looked round smoothly: what the mouse did is spread over a few frames, and none of it is lost.
+TEST_F(EditorTest, LookingRoundIsSmoothAndLosesNothing) {
+    const auto project = scene::MakeProject("looking");
+    Open(project.directory);
+    for (int i = 0; i < 6; ++i) Frame();
+    auto& input = editor->SceneInput();
+    auto& camera = Session().camera;
+    const kor::Vec2 over = Session().viewport->Size().x > 0 ? kor::Vec2(1000.f, 300.f) : kor::Vec2(1000.f, 300.f);
+    input.FeedMousePosition(over);
+    Frame();
+    Frame();
+    input.FeedMouseButton(kor::MouseButton::eRight, true);
+    Frame();
+    Frame();
+    ASSERT_TRUE(Session().Aiming()) << "the right button on the scene";
+    EXPECT_EQ(input.CurrentCursorMode(), kor::Input::CursorMode::eNormal) << "or it is captured the frame after: Update comes first";
+    Frame();
+    EXPECT_EQ(input.CurrentCursorMode(), kor::Input::CursorMode::eCaptured) << "the mouse's own movement, while looking";
+    Frame();
+    Frame();
+    const float before = camera.yaw;
+    input.FeedMousePosition(over + kor::Vec2(40.f, 0.f));   // a jump of 40, in one frame
+    Frame();
+    const float first = before - camera.yaw;
+    EXPECT_GT(first, 0.f) << "it turns at once";
+    EXPECT_LT(first, 40.f * 0.15f * 0.99f) << "but not all of it in one frame";
+    for (int i = 0; i < 60; ++i) Frame();
+    EXPECT_NEAR(before - camera.yaw, 40.f * 0.15f, 0.05f) << "and all of it, in the end";
+    input.FeedMouseButton(kor::MouseButton::eRight, false);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Session().Aiming());
+    EXPECT_EQ(input.CurrentCursorMode(), kor::Input::CursorMode::eNormal) << "let go, the pointer is back";
+}
+
+// A pipeline's shaders are slots of their stage: what is offered, and what can be dropped, is of that stage alone.
+TEST_F(EditorTest, APipelinesShadersAreSlotsOfTheirStage) {
+    const auto project = scene::MakeProject("slots");
+    std::ofstream(project.ShaderDirectory() / "many.slang") << R"(struct V { float4 p : SV_Position; };
+[shader("vertex")] V plainVertex(float3 p : POSITION) { V v; v.p = float4(p, 1.0); return v; }
+[shader("vertex")] V otherVertex(float3 p : POSITION) { V v; v.p = float4(p, 1.0); return v; }
+[shader("fragment")] float4 plainFragment(V v) : SV_Target { return 1.0; }
+[shader("geometry")] [maxvertexcount(3)] void plainGeometry(triangle V c[3], inout TriangleStream<V> o) { o.Append(c[0]); }
+)";
+    std::ofstream(project.ShaderDirectory() / "traced.slang") << R"(struct P { float3 c; };
+[shader("raygeneration")] void makeRays() {}
+[shader("miss")] void firstMiss(inout P p) {}
+[shader("miss")] void secondMiss(inout P p) {}
+[shader("closesthit")] void surface(inout P p, BuiltInTriangleIntersectionAttributes a) {}
+[shader("anyhit")] void cutOut(inout P p, BuiltInTriangleIntersectionAttributes a) {}
+)";
+    Open(project.directory);
+    const std::string pipeline = Doc().AddNode("GraphicsPipeline", 0, 0, "drawn");
+    ASSERT_FALSE(pipeline.empty());
+    Session().Select(pipeline);
+    for (int i = 0; i < 4; ++i) Frame();
+
+    // What each stage offers, and only that.
+    const auto of = [&](const char* stage, const char* module) { return std::ranges::count(Session().ShadersOf(stage), std::string(module), &keditor::Session::ShaderPick::module); };
+    EXPECT_EQ(of("vertex", "many"), 2);
+    EXPECT_EQ(of("fragment", "many"), 1);
+    EXPECT_EQ(of("geometry", "many"), 1);
+    EXPECT_EQ(of("miss", "traced"), 2);
+    EXPECT_EQ(of("vertex", "traced"), 0);
+    EXPECT_TRUE(keditor::Session::IsStage("pixel", "fragment"));
+    EXPECT_TRUE(keditor::Session::IsStage("amplification", "task"));
+
+    // Dropped: of the stage it goes in; another's does not, and what was there stays.
+    EXPECT_TRUE(Session().DropShader(pipeline, "vertex", "vertex", "shader:many#otherVertex"));
+    const auto text = [&](const char* input) { const auto* value = Doc().Graph().Find(pipeline)->inputs.at(input).value.String(); return value ? *value : std::string(); };
+    EXPECT_EQ(text("vertex.module"), "many");
+    EXPECT_EQ(text("vertex.entry"), "otherVertex");
+    EXPECT_FALSE(Session().DropShader(pipeline, "vertex", "vertex", "shader:many#plainFragment"));
+    EXPECT_EQ(text("vertex.entry"), "otherVertex") << "as it was";
+    EXPECT_TRUE(Session().DropShader(pipeline, "fragment", "fragment", "shader:many")) << "a module, by its entry of that stage";
+    EXPECT_EQ(text("fragment.entry"), "plainFragment");
+    EXPECT_FALSE(Session().DropShader(pipeline, "fragment", "fragment", "@wall.png"));
+    EXPECT_FALSE(Session().DropShader(pipeline, "fragment", "fragment", "shader:traced")) << "a module with none of that stage";
+
+    // VTG: tessellation and geometry hidden until asked for; fragment can go.
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("otherVertex"));
+    EXPECT_TRUE(Shows("plainFragment"));
+    EXPECT_TRUE(Shows("Add tessellation"));
+    EXPECT_TRUE(Shows("Add a geometry shader"));
+    EXPECT_FALSE(Shows("No geometry shader"));
+    Sheet("slots-graphics");
+    Session().ClearShader(pipeline, "fragment");
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_FALSE(Doc().Graph().Find(pipeline)->inputs.contains("fragment.module"));
+    EXPECT_TRUE(Shows("Depth only"));
+    Session().Show(pipeline, "geometry");
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("No geometry shader"));
+    EXPECT_FALSE(Shows("Add a geometry shader"));
+
+    // Ray tracing: the hit groups a list, an item taken out moving the rest up.
+    const std::string traced = Doc().AddNode("RayTracingPipeline", 0, 300, "traced pipeline");
+    Session().Select(traced);
+    Session().SetShader(traced, "raygen", "traced", "makeRays");
+    Session().SetShader(traced, "hitGroup[0].closestHit", "traced", "surface");
+    Session().SetShader(traced, "hitGroup[1].closestHit", "traced", "surface");
+    Session().SetShader(traced, "hitGroup[1].anyHit", "traced", "cutOut");
+    Session().SetShader(traced, "miss[0]", "traced", "firstMiss");
+    EXPECT_EQ(Session().ShaderListSize(traced, "hitGroup"), 2);
+    Session().AddToShaderList(traced, "hitGroup");
+    EXPECT_EQ(Session().ShaderListSize(traced, "hitGroup"), 3);
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("Group 2"));
+    Sheet("slots-rays");
+    Session().RemoveFromShaderList(traced, "hitGroup", 0);
+    EXPECT_EQ(Session().ShaderListSize(traced, "hitGroup"), 2);
+    const kgraph::Node& after = *Doc().Graph().Find(traced);
+    ASSERT_TRUE(after.inputs.contains("hitGroup[0].anyHit.entry")) << "the second is the first now";
+    EXPECT_EQ(*after.inputs.at("hitGroup[0].anyHit.entry").value.String(), "cutOut");
+    EXPECT_FALSE(after.inputs.contains("hitGroup[1].closestHit.module"));
+}
+
 // A generator saved — its fields as they are — is an asset: dropped on another entity, that one makes the same.
 TEST_F(EditorTest, AGeneratorSavedIsGivenToOthers) {
     const auto project = scene::MakeProject("kgen");
@@ -2613,6 +2884,67 @@ TEST_F(EditorTest, AGeneratorSavedIsGivenToOthers) {
     EXPECT_FLOAT_EQ(heightOf("Other"), 7.f) << "the file changed since the scene was saved: opened, it has what the file says";
     EXPECT_FLOAT_EQ(heightOf("Mine"), 9.f);
     EXPECT_TRUE(Session().SaveGenerator(Doc().CreateEntity("Plain")).empty()) << "one with no generator saves none";
+}
+
+// The Assets panel has a model as what it is: gone into, it shows what it is made of, by kind; and everything of the
+// project is found under Resources and Documents, each with its picture on its tile.
+TEST_F(EditorTest, TheAssetsPanelShowsWhatThingsAreMadeOf) {
+    const auto project = scene::MakeProject("panel");
+    const auto models = project.directory / "assets" / "models" / "kit";
+    std::filesystem::create_directories(models);
+    std::ofstream(models / "kit.obj") << "mtllib kit.mtl\no Box\nv 0 0 0\nv 1 0 0\nv 1 1 0\nvn 0 0 1\nusemtl wood\nf 1//1 2//1 3//1\n"
+                                         "o Lid\nv 0 2 0\nv 1 2 0\nv 1 3 0\nvn 0 0 1\nusemtl metal\nf 4//2 5//2 6//2\n";
+    std::ofstream(models / "kit.mtl") << "newmtl wood\nKd 0.7 0.4 0.1\nmap_Kd stripes.bmp\nnewmtl metal\nKd 0.2 0.4 0.9\n";
+    {
+        // A picture of stripes: sixteen by sixteen, three bytes a texel, as a BMP lays them out.
+        std::ofstream file(models / "stripes.bmp", std::ios::binary);
+        const auto word = [&](const std::uint32_t value, const int bytes) { for (int i = 0; i < bytes; ++i) file.put(static_cast<char>((value >> (8 * i)) & 0xff)); };
+        file << "BM";
+        word(54 + 16 * 16 * 3, 4); word(0, 4); word(54, 4); word(40, 4); word(16, 4); word(16, 4); word(1, 2); word(24, 2); word(0, 4); word(16 * 16 * 3, 4); word(2835, 4); word(2835, 4); word(0, 4); word(0, 4);
+        for (int i = 0; i < 16 * 16; ++i) { const char c = (i / 2) % 2 ? char(230) : char(20); file.put(c).put(char(120)).put(char(255 - c)); }
+    }
+    Open(project.directory);
+    Session().assetTileSize = 64.f;     // what fits the panel at this window's size
+    const auto assets = Session().Assets();
+    const auto kit = std::ranges::find(assets, std::string("@models/kit/kit.obj"), &keditor::Session::Asset::id);
+    ASSERT_NE(kit, assets.end());
+    Session().assetFolder = "assets/models/kit";
+    for (int i = 0; i < 600 && !Session().ModelPicture(kit->id).Get(); ++i) Frame();
+    EXPECT_TRUE(Session().ModelPicture(kit->id).Get()) << "a model that is in no scene has its picture";
+    for (int i = 0; i < 60; ++i) Frame();
+    EXPECT_TRUE(Shows("Resources"));
+    EXPECT_TRUE(Shows("Documents"));
+    Sheet("assets-folder");
+
+    Session().OpenAsset(*kit);
+    EXPECT_EQ(Session().assetModel, kit->id);
+    const auto partsOf = [&](const keditor::Session::Asset::Kind kind) {
+        const auto now = Session().Assets();
+        return std::ranges::count_if(now, [&](const keditor::Session::Asset& asset) { return asset.kind == kind && asset.parent == kit->id; });
+    };
+    for (int i = 0; i < 400 && partsOf(keditor::Session::Asset::Kind::eMaterial) < 2; ++i) Frame();
+    EXPECT_TRUE(Shows("Meshes  ·  2"));
+    EXPECT_GE(partsOf(keditor::Session::Asset::Kind::eMaterial), 2) << "what it is made of, whether or not the scene has it (the importer may add one of its own)";
+    EXPECT_TRUE(Shows("Textures  ·  1"));
+    for (int i = 0; i < 60; ++i) Frame();
+    Sheet("assets-model");
+    Session().assetKind = static_cast<int>(keditor::Session::Asset::Kind::eMaterial);
+    for (int i = 0; i < 200; ++i) Frame();
+    Sheet("assets-materials");
+    Session().assetKind = -1;
+
+    // And each picture kept has something in it: a mesh, a material, a texture, the model.
+    std::size_t kept = 0;
+    std::error_code none;
+    for (const auto& entry : std::filesystem::directory_iterator(project.directory / ".koral" / "cache" / "thumbnails", none)) {
+        std::ifstream in(entry.path(), std::ios::binary);
+        const std::vector<unsigned char> texels((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::size_t shown = 0;
+        for (std::size_t at = 3; at < texels.size(); at += 4) shown += texels[at] != 0;
+        EXPECT_GT(shown, 100u) << entry.path().filename() << " is blank";
+        ++kept;
+    }
+    EXPECT_GT(kept, 4u);
 }
 
 // A prefab is made by dragging an entity from the outliner into the Assets panel — or with the inspector's button, the
@@ -3034,17 +3366,29 @@ TEST_F(EditorTest, TheDefaultMeshesAndMaterialsAreAssetsOfEveryProject) {
         const auto it = std::ranges::find(assets, kgraph::DefaultMeshId(name), &keditor::Session::Asset::id);
         ASSERT_NE(it, assets.end()) << name;
         EXPECT_EQ(it->kind, keditor::Session::Asset::Kind::eMesh);
-        EXPECT_EQ(it->folder, "Meshes/Primitives");
+        EXPECT_TRUE(it->folder.empty()) << "listed with the other meshes, in no folder of its own";
         EXPECT_TRUE(it->builtIn);
     }
     EXPECT_EQ(std::ranges::count(assets, keditor::Session::Asset::Kind::eModel, &keditor::Session::Asset::kind), 0) << "a default mesh is of no model";
     const auto folders = Session().AssetFolders(assets);
-    EXPECT_TRUE(std::ranges::contains(folders, "Meshes/Primitives"));
-    EXPECT_TRUE(std::ranges::contains(folders, "Materials/Defaults"));
-    EXPECT_TRUE(Session().AssetFolderPath("Meshes/Primitives").empty()) << "of no folder on disk";
+    EXPECT_FALSE(std::ranges::contains(folders, "Meshes/Primitives"));
+    EXPECT_TRUE(std::ranges::contains(folders, "Materials/PBR"));
+    EXPECT_TRUE(std::ranges::contains(folders, "Materials/Blinn-Phong"));
     const auto gold = std::ranges::find(assets, "material:Gold", &keditor::Session::Asset::id);
     ASSERT_NE(gold, assets.end());
-    EXPECT_EQ(gold->folder, "Materials/Defaults");
+    EXPECT_EQ(gold->folder, "Materials/PBR");
+    const auto classic = std::ranges::find(assets, "material:Blinn-Phong Gold", &keditor::Session::Asset::id);
+    ASSERT_NE(classic, assets.end());
+    EXPECT_EQ(classic->folder, "Materials/Blinn-Phong");
+    EXPECT_EQ(classic->label, "Gold");
+
+    // In the same tab as a model's meshes, and in no tab of their own.
+    Session().assetKind = static_cast<int>(keditor::Session::Asset::Kind::eMesh);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(Shows("torus"));
+    EXPECT_FALSE(Shows("Primitives"));
+    Sheet("meshes-tab");
+    Session().assetKind = -1;
 
     // Dropped on an entity, a default material is a PbrMaterial asset it follows: its colour the material's. A light's
     // colour is no material's.
@@ -3154,17 +3498,22 @@ TEST_F(EditorTest, TheEnginesFunctionsAreThereInEveryProjectAndAProjectsOwnComes
     Open();
     ASSERT_TRUE(Session().NewProject(directory));
     const auto names = Doc().Functions();
-    for (const char* name : { "Scan", "RadixSort", "Compact", "IndirectArgs" }) {
+    for (const char* name : { "Scan", "RadixSort", "BitonicSort", "OddEvenSort", "Compact", "IndirectArgs" }) {
         EXPECT_TRUE(std::ranges::contains(names, std::string(name))) << name;
         EXPECT_TRUE(Doc().IsEngineFunction(name)) << name;
     }
     kgraph::Graph graph = Doc().Graph();
     graph.Add("numbers", "Buffer").Set("instanceCount", 4096).Set("usage", kgraph::Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
     graph.Add("sums", "Function").Set("function", "Scan").Wire("values", "numbers").Set("count", 1024);
+    graph.Add("sorted", "Function").Set("function", "BitonicSort").Set("type", "float").Set("passes", 55).Wire("elements", "numbers").Set("count", 1024);
+    graph.Add("nearer sorted", "Function").Set("function", "OddEvenSort").Wire("elements", "numbers").Set("count", 1024);
     Doc().SetGraph(graph);
     for (int i = 0; i < 3; ++i) Frame();
-    ASSERT_NE(Doc().Runtime().Status("sums"), nullptr);
-    EXPECT_TRUE(Doc().Runtime().Status("sums")->ok) << Doc().Runtime().Status("sums")->error;
+    for (const char* call : { "sums", "sorted", "nearer sorted" }) {
+        ASSERT_NE(Doc().Runtime().Status(call), nullptr) << call;
+        EXPECT_TRUE(Doc().Runtime().Status(call)->ok) << call << ": " << Doc().Runtime().Status(call)->error;
+    }
+    EXPECT_TRUE(std::filesystem::exists(Doc().Runtime().GeneratedShaderDirectory() / "koral_sort_of_float.slang")) << "with the project's generated shaders";
 
     // The project's own of the same name is called in its place.
     std::filesystem::create_directories(Doc().FunctionsDirectory());
@@ -3324,10 +3673,8 @@ TEST_F(EditorTest, TheScenesTexturesAreCompressedWhenItAsks) {
         ASSERT_NE(Doc().Runtime().ResourceOf(id), nullptr) << id;
     for (int i = 0; i < 200 && Doc().Reading() > 0; ++i) Frame();
 
-    EXPECT_TRUE(Shows("Compress textures")) << "asked, once the scene is read";
-    EXPECT_TRUE(Shows("wall_ORM.pack  (suggested)"));
-    EXPECT_TRUE(Shows("5 textures in this scene, 0 compressed"));
-    Sheet("compress-textures");
+    for (int i = 0; i < 10; ++i) Frame();
+    EXPECT_FALSE(Shows("5 textures in this scene, 0 compressed")) << "nothing is asked on opening a scene: the menu has it";
 
     const auto textures = Session().SceneTextures();
     ASSERT_EQ(textures.size(), 5u);
@@ -3357,7 +3704,6 @@ TEST_F(EditorTest, TheScenesTexturesAreCompressedWhenItAsks) {
     EXPECT_EQ(ignored, "assets/\ncache/\n") << "the cache is the machine's own";
     EXPECT_EQ(Doc().Graph().textureImports, imports) << "kept in the scene's graph";
     EXPECT_EQ(Doc().Graph().texturePacks.size(), 1u);
-    EXPECT_FALSE(Session().TakeAskToCompress()) << "asked once a scene";
 }
 
 // The Frame panel: how long a frame takes against the time one has, then a line for each pass node with its GPU and CPU

@@ -66,6 +66,14 @@ _Avoid_: File (for this), item
 An Asset a pipeline uses as data on the GPU: a mesh, a material, a texture, a shader. Always made by a Producer.
 _Avoid_: Asset (for these alone), GPU object (that is what the runtime makes of one)
 
+**Procedural mesh**:
+A mesh the engine makes from a shape and its parameters, named by them (`$sphere?radius=0.8`): each entity tunes its own, and those with the same numbers share one mesh. Native, so it is there without a script host; a script's mesh comes from a Generator.
+_Avoid_: Default mesh (for the fixed ones there used to be), primitive
+
+**Shading**:
+What a material is at a point, its pictures read, and how that answers light (`IKoralShading`). A kind `K`'s comes from its module `KShading`.
+_Avoid_: Shader (the program), lighting model
+
 **Document**:
 An Asset the editor opens and edits as a whole: a scene, a prefab, a function, a script.
 _Avoid_: Resource (for these)

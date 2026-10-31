@@ -1,7 +1,7 @@
 {
   "koral-function": 1,
   "purpose": "Camera",
-  "description": "The scene's camera: the first entity with a Camera, seen from where it is the way it faces, through a perspective of its field of view, near and far at the window's aspect. It is the main View and lens, which an editor looks through in its place. Gives every matrix of it, and all of them as one Bundle by the names a camera block has.",
+  "description": "The scene's camera: the first entity with a Camera, seen from where it is the way it faces — through a perspective of its field of view, or, orthographic, a box of its height — near and far at the window's aspect. Its perspective is the main View and lens, which an editor looks through in its place. Gives every matrix of it, and all of them as one Bundle by the names a camera block has.",
   "tags": [
     "camera",
     "view",
@@ -9,7 +9,8 @@
     "perspective",
     "eye",
     "main view",
-    "matrices"
+    "matrices",
+    "orthographic"
   ],
   "graph": {
     "kgraph": 1,
@@ -121,6 +122,180 @@
         }
       },
       {
+        "id": "box",
+        "type": "Orthographic",
+        "at": [
+          500,
+          460
+        ],
+        "inputs": {
+          "size": {
+            "$link": [
+              "eye",
+              "field.height"
+            ]
+          },
+          "aspect": {
+            "$link": [
+              "screen",
+              "aspect"
+            ]
+          },
+          "near": {
+            "$link": [
+              "eye",
+              "field.near"
+            ]
+          },
+          "far": {
+            "$link": [
+              "eye",
+              "field.far"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens of it out",
+        "type": "Select",
+        "at": [
+          750,
+          380
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "eye",
+              "field.orthographic"
+            ]
+          },
+          "a": {
+            "$link": [
+              "box",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "lens",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens of it projection",
+        "type": "Select",
+        "at": [
+          750,
+          470
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "eye",
+              "field.orthographic"
+            ]
+          },
+          "a": {
+            "$link": [
+              "box",
+              "projection"
+            ]
+          },
+          "b": {
+            "$link": [
+              "lens",
+              "projection"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens of it inverseProjection",
+        "type": "Select",
+        "at": [
+          750,
+          560
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "eye",
+              "field.orthographic"
+            ]
+          },
+          "a": {
+            "$link": [
+              "box",
+              "inverseProjection"
+            ]
+          },
+          "b": {
+            "$link": [
+              "lens",
+              "inverseProjection"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens of it near",
+        "type": "Select",
+        "at": [
+          750,
+          650
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "eye",
+              "field.orthographic"
+            ]
+          },
+          "a": {
+            "$link": [
+              "box",
+              "near"
+            ]
+          },
+          "b": {
+            "$link": [
+              "lens",
+              "near"
+            ]
+          }
+        }
+      },
+      {
+        "id": "lens of it far",
+        "type": "Select",
+        "at": [
+          750,
+          740
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "eye",
+              "field.orthographic"
+            ]
+          },
+          "a": {
+            "$link": [
+              "box",
+              "far"
+            ]
+          },
+          "b": {
+            "$link": [
+              "lens",
+              "far"
+            ]
+          }
+        }
+      },
+      {
         "id": "seen",
         "type": "MatrixMultiply",
         "at": [
@@ -130,7 +305,7 @@
         "inputs": {
           "a": {
             "$link": [
-              "lens",
+              "lens of it out",
               "out"
             ]
           },
@@ -168,8 +343,8 @@
           },
           "field.projection": {
             "$link": [
-              "lens",
-              "projection"
+              "lens of it projection",
+              "out"
             ]
           },
           "field.inverseView": {
@@ -180,8 +355,8 @@
           },
           "field.inverseProjection": {
             "$link": [
-              "lens",
-              "inverseProjection"
+              "lens of it inverseProjection",
+              "out"
             ]
           },
           "field.viewProjection": {
@@ -198,14 +373,14 @@
           },
           "field.zNear": {
             "$link": [
-              "lens",
-              "near"
+              "lens of it near",
+              "out"
             ]
           },
           "field.zFar": {
             "$link": [
-              "lens",
-              "far"
+              "lens of it far",
+              "out"
             ]
           }
         }
@@ -258,7 +433,7 @@
           "kind": "eValue",
           "value": {
             "$link": [
-              "lens",
+              "lens of it out",
               "out"
             ]
           }

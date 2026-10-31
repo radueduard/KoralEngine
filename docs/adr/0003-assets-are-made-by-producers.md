@@ -62,7 +62,9 @@ We decided:
   the project's own, which a re-import then leaves alone.
 - Every script is rewritten once from `Script` to Setup with the pieces it uses, and `GraphicsScript.Prepare` becomes
   the Prepare piece.
-- The `$` default meshes stay native, with fixed IDs: a generator needs a script host, and they must be there without one.
+- The `$` procedural meshes stay native: a generator needs a script host, and they must be there without one. An entity
+  tunes its own, and the numbers are part of the ID (`$sphere?radius=0.8`), so the same numbers are the same mesh with
+  no component or file for them, and they stay pure functions of their fields as a generator is.
 - A material's small picture is drawn from its values by the editor's own shader: a project's shader needs what the
   project's graph makes (its lights, camera and shadows), which a small picture has none of.
 - A texture's colour space and compression are inferred from the first material field that uses it, and can be

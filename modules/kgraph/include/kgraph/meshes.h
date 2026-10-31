@@ -2,9 +2,10 @@
 
 /**
  * @file meshes.h
- * @brief The meshes there are without making any: a cube, a sphere, a plane, a cylinder, a cone, a capsule, a torus.
+ * @brief The procedural meshes: a cube, a sphere, a plane, a cylinder, a cone, a capsule, a torus and more, each made
+ *        from parameters of its own.
  *
- * Each is centred on the origin and about a unit across, its triangles counter-clockwise seen from outside. A
+ * At its initial parameters each is centred on the origin and about a unit across, its triangles counter-clockwise seen from outside. A
  * vertex is a position, a normal and a texture coordinate; on the device, with the directions of its picture's u and v
  * along the surface too, as the graph asks (Tangents), all in one buffer: POSITION, NORMAL, TANGENT, UV.
  */
@@ -14,6 +15,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,7 +38,8 @@ namespace kgraph
     };
 
     /**
-     * @brief The default meshes, by name. Each about a unit across and centred on the origin (but for `axes`, from it):
+     * @brief The procedural meshes' shapes, by name. Each, as it starts, about a unit across and centred on the origin
+     *        (but for `axes`, from it):
      *
      *   cube, sphere, plane (facing up), cylinder, cone, capsule, torus, quad (facing +z), triangle
      *   icosphere        a sphere of even triangles
@@ -51,13 +54,33 @@ namespace kgraph
      *   skinnedCylinder  of three bones, with BONE_IDS and BONE_WEIGHTS: laid out apart from the rest
      */
     [[nodiscard]] const std::vector<std::string>& DefaultMeshNames();
+    /** @brief One number a shape is made from. Each entity tunes its own: see ShapeName. */
+    struct MeshParameter {
+        std::string name;
+        float initial, least, most;
+        bool whole;             ///< A count: rings, segments.
+        std::string says;       ///< What it does, for a tooltip.
+    };
     /**
-     * @brief The mesh so named: one of DefaultMeshNames. Nothing for a name that is none of them.
+     * @brief The name of one mesh of a shape, by @p values: a value of each of its ShapeParameters. Those at their
+     *        initial value are left out, in their order, so that one set of numbers has one name, and what has the same
+     *        name is the same mesh: `sphere`, `sphere?radius=0.8&rings=24`. Empty for what is no shape.
+     */
+    [[nodiscard]] std::string ShapeName(std::string_view shape, std::span<const float> values);
+    /** @brief The shape a name is of (`sphere`, of `sphere?rings=24`). Empty for what is none. */
+    [[nodiscard]] std::string_view ShapeOf(std::string_view name);
+    /** @brief What a shape is made from, in order. @p name may carry values; none for what is no shape. */
+    [[nodiscard]] const std::vector<MeshParameter>& ShapeParameters(std::string_view name);
+    /** @brief The value of each of ShapeParameters that a name says, the rest initial, each within its limits. */
+    [[nodiscard]] std::vector<float> ShapeValues(std::string_view name);
+    /**
+     * @brief The mesh so named: as ShapeName has it, or one of DefaultMeshNames, at its initial values. Nothing for a
+     *        name of no shape.
      */
     [[nodiscard]] std::optional<MeshData> ShapeData(std::string_view name);
     /**
-     * @brief What a default mesh is called where a resource is named by the node that made it: `$cube`. An
-     *        entity's Mesh holds one without the graph having a node for it. @see Runtime::ResourceOf
+     * @brief What a procedural mesh is called where a resource is named by the node that made it: `$cube`,
+     *        `$sphere?rings=24`. An entity's Mesh holds one without the graph having a node for it. @see Runtime::ResourceOf
      */
     [[nodiscard]] std::string DefaultMeshId(std::string_view name);
 

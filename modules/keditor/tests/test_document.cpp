@@ -8,6 +8,7 @@
 #include <set>
 #include <ranges>
 
+#include <kgraph/entities.h>
 #include <kgraph/meshes.h>
 #include <keditor/editor.h>
 #include <keditor/play.h>
@@ -210,6 +211,55 @@ template <> struct kecs::Name<prefabs::Follows> { static constexpr std::string_v
 KECS_FIELDS(prefabs::Follows, target)
 
 // A prefab is made of an entity and what is under it; its instances follow it, but for what each made its own.
+// A project is opened through its scripts' runner only when it has something to run: a material kind is data.
+TEST_F(DocumentTest, MaterialKindsNeedNoRunner) {
+    keditor::Project project = scene::MakeProject("kinds");
+    const auto scripts = project.directory / "scripts";
+    std::filesystem::create_directories(scripts);
+    EXPECT_EQ(project.Language(), 0);
+    std::ofstream(scripts / "Toon.cs") << "public sealed class Toon : Material\n{\n    public float softness = 0.2f;\n}\n";
+    EXPECT_EQ(project.Language(), 0) << "a kind alone";
+    EXPECT_FALSE(keditor::RunThroughScripts(project).has_value()) << "so it is opened by the editor itself";
+    std::ofstream(scripts / "Mover.cs") << "public sealed class Mover : Setup\n{\n    public float speed = 1f;\n}\n";
+    EXPECT_EQ(project.Language(), 'c') << "a script beside it";
+}
+
+// A procedural mesh starts as it is, each entity tunes its own, and those with the same numbers hold the one mesh.
+TEST_F(DocumentTest, EntitiesTuneAProceduralMeshAndShareWhatIsTheSame) {
+    const keditor::Project project = scene::MakeProject("tuned");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    scene::BuildGraph(doc);
+    const auto made = [&](const char* name, const std::string& mesh) {
+        const kecs::Entity entity = doc.CreateEntity(name);
+        doc.AddComponent(entity, "Mesh");
+        std::string error;
+        EXPECT_TRUE(doc.SetField(entity, "Mesh", "mesh", kgraph::Value(mesh), &error)) << error;
+        return entity;
+    };
+    const auto meshOf = [&](const kecs::Entity entity) { return doc.World().Get<kgraph::Mesh>(entity)->mesh; };
+    const kecs::Entity plain = made("Plain", "$sphere"), one = made("One", "$sphere?radius=0.8"), two = made("Two", "$sphere?radius=0.8"), other = made("Other", "$sphere?radius=0.9");
+    EXPECT_EQ(meshOf(one), meshOf(two));
+    EXPECT_NE(meshOf(one), meshOf(plain));
+    EXPECT_NE(meshOf(one), meshOf(other));
+
+    // Tuned to what another has, it holds that one; back as it started, the mesh everything else that started so holds.
+    std::string error;
+    EXPECT_TRUE(doc.SetField(other, "Mesh", "mesh", kgraph::Value("$sphere?radius=0.8"), &error)) << error;
+    EXPECT_EQ(meshOf(other), meshOf(one));
+    EXPECT_TRUE(doc.SetField(two, "Mesh", "mesh", kgraph::Value("$sphere"), &error)) << error;
+    EXPECT_EQ(meshOf(two), meshOf(plain));
+
+    // Saved and read again, each is what it was.
+    const auto path = project.ScenePath("main");
+    ASSERT_TRUE(doc.Save(path, error)) << error;
+    ASSERT_TRUE(doc.Load(path, error)) << error;
+    const auto again = [&](const char* name) { return doc.World().FindEntity(name); };
+    EXPECT_EQ(meshOf(again("One"))->node, "$sphere?radius=0.8");
+    EXPECT_EQ(meshOf(again("One")), meshOf(again("Other")));
+    EXPECT_EQ(meshOf(again("Two")), meshOf(again("Plain")));
+}
+
 TEST_F(DocumentTest, APrefabsInstancesFollowItButForWhatEachMadeItsOwn) {
     using kgraph::Value;
     const keditor::Project project = scene::MakeProject("prefabs");

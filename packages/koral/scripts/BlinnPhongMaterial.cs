@@ -9,7 +9,7 @@ public sealed class BlinnPhongMaterial : Material
     public Texture normalMap = Texture.Normal;
     public Texture emissiveMap = Texture.White;
     public Vec4 diffuse = new(0.8f, 0.8f, 0.8f, 1f);        // a: how opaque.
-    [Min(0f)] public Vec3 specular = new(0.2f, 0.2f, 0.2f);
+    [Range(0f, 1f)] public Vec3 specular = new(0.2f, 0.2f, 0.2f);
     [Min(1f), Logarithmic] public float shininess = 32f;    // The Phong exponent: higher, a smaller and sharper highlight.
     [Min(0f)] public Vec3 emission = new(0f, 0f, 0f);
     [Choices("Opaque", "Masked", "Blended")] public int alphaMode = 0;

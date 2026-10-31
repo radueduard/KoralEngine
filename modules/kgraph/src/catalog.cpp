@@ -569,6 +569,12 @@ namespace kgraph
                         entry.editor = "entry";
                         add(std::move(module), mode);
                         add(std::move(entry), mode);
+                        if (description.name == "ComputePipeline") {
+                            Port element { name + ".element", PortKind::eValue, "string", false,
+                                           "What the elements of koral_compare_sort are: a shader's float or uint, or a struct of a module that is IComparable, as module.Type.", nullptr };
+                            element.optional = true;
+                            add(std::move(element), mode);
+                        }
                     }
                 }
                 type.outputs.push_back(ResourcePort("out", std::string(description.result)));

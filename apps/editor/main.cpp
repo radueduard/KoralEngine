@@ -92,7 +92,11 @@ int main(const int argc, char** argv)
         kor::App app(kor::AppSettings { .platform = platform });
         auto scene = std::make_unique<keditor::EditorScene>(project, true);
         keditor::EditorScene* editor = scene.get();
-        app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = { 1600, 950 }, .vsync = vsync });
+        // As this user last left it — not for a run of so many frames, or one that arranges and saves.
+        const bool kept = keditor::Session::keepsWindow = frames <= 0 && !arrange;
+        const keditor::Session::SavedWindow last = kept ? keditor::Session::LastWindow() : keditor::Session::SavedWindow {};
+        app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = last.extent, .vsync = vsync, .position = last.position });
+        if (last.maximized) editor->SceneWindow().ToggleMaximize();
         if (arrange) {
             // Drawn a few times first, so that each node is as big as it comes out; then each page in turn, then saved.
             for (int i = 0; i < 30; ++i) app.Frame();

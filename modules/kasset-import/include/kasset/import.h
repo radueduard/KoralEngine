@@ -23,7 +23,7 @@
 namespace kasset
 {
     /** @brief The model importer, as a producer: its name and version. Up whenever what it makes changes. */
-    inline constexpr std::string_view ModelProducer = "model@2";
+    inline constexpr std::string_view ModelProducer = "model@4";
     /** @brief What a model's artifact is kept by: the file, what it names beside it that is not a picture, and @p import. */
     [[nodiscard]] Key ModelKey(const std::filesystem::path& file, const MeshImport& import);
     /** @brief Reads model @p file with its importer, as @p import says: what it holds, or why it could not be. */

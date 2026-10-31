@@ -70,7 +70,7 @@ public struct Instance {
     [PbrMaterial] public float metallic;
     [PbrMaterial] public float3 emission;     // the light it gives off itself, as light: above 1 it blooms
     [PbrMaterial] public float roughness;
-    [PbrMaterial] public uint alphaMode;      // 0 opaque; 1 cut out, where its albedoMap is less opaque than alphaCutoff; 2 drawn over what is behind it — glass
+    [PbrMaterial] public int alphaMode;       // 0 opaque; 1 cut out, where its albedoMap is less opaque than alphaCutoff; 2 drawn over what is behind it — glass
     [PbrMaterial] public float alphaCutoff;
     [PbrMaterial("baseColorMap")] public uint albedoMap;            // its colour; a: how opaque
     [PbrMaterial] public uint normalMap;                            // which way its surface faces, texel by texel, relative to the mesh's own
@@ -95,7 +95,7 @@ public struct RayMaterial {
     [PbrMaterial] public float metallic;
     [PbrMaterial] public float3 emission;     // the light it gives off itself
     [PbrMaterial] public float roughness;
-    [PbrMaterial] public uint alphaMode;      // 1: cut out — where its albedoMap is less opaque than alphaCutoff, rays pass through
+    [PbrMaterial] public int alphaMode;       // 1: cut out — where its albedoMap is less opaque than alphaCutoff, rays pass through
     [PbrMaterial] public float alphaCutoff;
     public float reflectionBlur;       // how much more its reflection rays spread than its roughness says: 0 as rough as it is
     [PbrMaterial("baseColorMap")] public uint albedoMap;

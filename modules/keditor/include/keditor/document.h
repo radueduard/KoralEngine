@@ -10,6 +10,7 @@
 
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <set>
 #include <string>
@@ -316,6 +317,16 @@ namespace keditor
          */
         [[nodiscard]] kgraph::Value Field(kecs::Entity entity, std::string_view component, std::string_view field) const;
         /** @brief Sets one. False, with @p error saying why, when there is no such field or the value is not one it takes. */
+        /** @brief What field @p field of component @p id of @p entity in @p world holds; what Field reads, of a world of no document. */
+        [[nodiscard]] static kgraph::Value ReadField(const kecs::World& world, kecs::Entity entity, kecs::ComponentId id, std::string_view field);
+        /**
+         * @brief Writes @p value into field @p field of component @p id of @p entity in @p world: what SetField does to the
+         *        bytes, and nothing of what it does to a document. A resource's id is made one by @p resolve, and what the
+         *        field held is handed to @p retire, when given. For a world of no document: a preview's.
+         */
+        static bool WriteField(kecs::World& world, kecs::Entity entity, kecs::ComponentId id, std::string_view field, const kgraph::Value& value,
+                               const std::function<std::shared_ptr<kgraph::Resource>(const std::string&)>& resolve,
+                               const std::function<void(std::shared_ptr<kgraph::Resource>)>& retire, std::string* error = nullptr);
         bool SetField(kecs::Entity entity, std::string_view component, std::string_view field, const kgraph::Value& value, std::string* error = nullptr);
         /** @brief The nodes whose output a resource field of type @p fieldType can hold, by id. */
         [[nodiscard]] std::vector<std::string> NodesFor(std::string_view fieldType) const;
@@ -349,7 +360,7 @@ namespace keditor
         [[nodiscard]] std::filesystem::path FunctionsDirectory() const;
         /**
          * @brief Where the engine's functions are, in every project: its package's `functions` folder — Scan,
-         *        RadixSort, Compact, IndirectArgs. A project's function of the same name is called in its place, and one
+         *        RadixSort, BitonicSort, OddEvenSort, Compact, IndirectArgs. A project's function of the same name is called in its place, and one
          *        of the engine's opened and changed is saved as the project's own.
          */
         [[nodiscard]] static std::filesystem::path EngineFunctionsDirectory();
@@ -619,6 +630,7 @@ namespace keditor
         kscript::Scripts _scripts { _world };
         const kor::FrameGraph* _frameGraph = nullptr;
         std::unique_ptr<kgraph::Runtime> _runtime;
+        std::uint32_t _reportsAsked = 0;     // frames since the start: Update's digest of the reports, every few
         std::unique_ptr<kasset::Database> _assets;
         std::vector<std::string> _assetProblems;
         /** The import settings the project's metas hold, into @p graph: over what a scene saved before they were the assets' said. */

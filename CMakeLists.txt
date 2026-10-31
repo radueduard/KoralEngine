@@ -165,6 +165,10 @@ if(Koral_FOUND)
 
     add_executable(koral-editor apps/editor/main.cpp)
     target_link_libraries(koral-editor PRIVATE keditor)
+    # What it hands a project with scripts to: built with it, or an old one opens the project instead of this editor.
+    if(TARGET koral-engine-dotnet)
+        add_dependencies(koral-editor koral-engine-dotnet)
+    endif()
     add_executable(koral-play apps/player/main.cpp)
     target_link_libraries(koral-play PRIVATE keditor)
     # The project either opens when it is given none: Forward+, made with nodes, in the projects folder (forward-plus).

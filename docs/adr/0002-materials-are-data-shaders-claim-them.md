@@ -25,3 +25,8 @@ a mapping from what the importer reports (PBR or classic) to a kind. That mappin
   unlinked PBR material per entity on first load.
 - The `Masked` and `Blended` tags are kept in step with a material's `alphaMode`, because a filter can't see inside a
   field.
+- How a kind is lit is a Slang module of its own, `<Kind>Shading`, over the interfaces of `koral_shading`: a material read at
+  a point gives a shading that answers light. The editor finds the module by name and generates a few lines per kind to
+  draw it, so its preview and small pictures need no project graph, and a project's kind and function are drawn like the
+  engine's. A generated struct is extended rather than generated with the interface, so the kind's module needs no
+  shading and a shader that only takes fields compiles without any.

@@ -67,17 +67,17 @@ namespace kgraph
                                kind.declaredIn.empty() ? std::string() : std::format(" ({})", kind.declaredIn));
         }
 
-        /** Writes @p text to @p file when it does not hold it already. */
-        bool WriteIfChanged(const std::filesystem::path& file, const std::string& text)
+    }
+
+    bool WriteIfChanged(const std::filesystem::path& file, const std::string& text)
+    {
         {
-            {
-                std::ifstream in(file, std::ios::binary);
-                if (in && std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()) == text) return true;
-            }
-            std::ofstream out(file, std::ios::binary | std::ios::trunc);
-            out << text;
-            return static_cast<bool>(out);
+            std::ifstream in(file, std::ios::binary);
+            if (in && std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>()) == text) return true;
         }
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out << text;
+        return static_cast<bool>(out);
     }
 
     const Value* ReportedMaterial::Find(const std::string_view value) const
@@ -234,7 +234,7 @@ namespace kgraph
         return s;
     }
 
-    std::vector<std::string> WriteMaterialModules(const std::filesystem::path& directory, const std::span<const MaterialKind> kinds)
+    std::vector<std::string> WriteMaterialModules(const std::filesystem::path& directory, const std::span<const MaterialKind> kinds, const bool whole)
     {
         std::vector<std::string> problems;
         std::error_code ec;
@@ -248,6 +248,7 @@ namespace kgraph
             if (!WriteIfChanged(directory / file, module.source)) problems.push_back(std::format("{} could not be written", (directory / file).generic_string()));
             written.insert(file);
         }
+        if (!whole) return problems;
         if (!WriteIfChanged(directory / "koral_materials.slang", MaterialsModuleOf(kinds))) problems.push_back(std::format("{} could not be written", (directory / "koral_materials.slang").generic_string()));
         // A kind that is no longer: what was generated of it goes, so that nothing imports what is not there.
         for (const auto& entry : std::filesystem::directory_iterator(directory, ec)) {

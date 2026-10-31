@@ -104,7 +104,10 @@ namespace kgraph
     /**
      * @brief Writes every kind's module, and `koral_materials`, into @p directory — a file only when what it holds
      *        changed, so that nothing that imports it is built again for nothing — and takes away a kind's that is no
-     *        longer. What could not be written, and the fields left out, are returned.
+     *        longer. What could not be written, and the fields left out, are returned. With @p whole false, @p kinds are
+     *        some of those of a folder another keeps: theirs alone are written, and nothing else is touched.
      */
-    std::vector<std::string> WriteMaterialModules(const std::filesystem::path& directory, std::span<const MaterialKind> kinds);
+    std::vector<std::string> WriteMaterialModules(const std::filesystem::path& directory, std::span<const MaterialKind> kinds, bool whole = true);
+    /** @brief Writes @p text to @p file when it does not hold it already: what imports it is not built again for nothing. */
+    bool WriteIfChanged(const std::filesystem::path& file, const std::string& text);
 }

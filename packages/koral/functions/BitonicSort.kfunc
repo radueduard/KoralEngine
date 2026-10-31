@@ -1,0 +1,362 @@
+{
+  "koral-function": 1,
+  "purpose": "Sort and scan",
+  "description": "Elements of any type that is IComparable sorted on the GPU, in place, by a bitonic sorting network. Not stable: what is to keep its order says so in lessThan. type is what the buffer holds: a shader's float or uint, or a module's struct as module.Type. Up to 4,194,304 elements, in log2(count) x (log2(count) + 1) / 2 passes, log2 rounded up. passes, given on the call, is how many there can be: 253 covers any count; the ones not needed still cost a little each frame, and with too few the elements are left unsorted.",
+  "tags": [
+    "sort",
+    "bitonic",
+    "order",
+    "comparable",
+    "network"
+  ],
+  "graph": {
+    "kgraph": 1,
+    "nodes": [
+      {
+        "id": "elements",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          0
+        ],
+        "inputs": {
+          "name": "elements",
+          "kind": "eBuffer"
+        }
+      },
+      {
+        "id": "type",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          60
+        ],
+        "inputs": {
+          "name": "type",
+          "kind": "eValue",
+          "default": "uint"
+        }
+      },
+      {
+        "id": "count",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          120
+        ],
+        "inputs": {
+          "name": "count",
+          "kind": "eValue",
+          "default": 256
+        }
+      },
+      {
+        "id": "most passes",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          180
+        ],
+        "inputs": {
+          "name": "passes",
+          "kind": "eValue",
+          "default": 253
+        }
+      },
+      {
+        "id": "idle",
+        "type": "FunctionInput",
+        "at": [
+          0,
+          240
+        ],
+        "inputs": {
+          "name": "idle",
+          "kind": "eValue",
+          "default": 0
+        }
+      },
+      {
+        "id": "over",
+        "type": "Divide",
+        "at": [
+          320,
+          120
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 256
+        }
+      },
+      {
+        "id": "blocks",
+        "type": "Ceil",
+        "at": [
+          640,
+          120
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "over",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "least",
+        "type": "Max",
+        "at": [
+          320,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "b": 1
+        }
+      },
+      {
+        "id": "log",
+        "type": "Log2",
+        "at": [
+          640,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "least",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "levels",
+        "type": "Ceil",
+        "at": [
+          960,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "log",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "next",
+        "type": "Add",
+        "at": [
+          1280,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "levels",
+              "out"
+            ]
+          },
+          "b": 1
+        }
+      },
+      {
+        "id": "doubled",
+        "type": "Multiply",
+        "at": [
+          1600,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "levels",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "next",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "passes",
+        "type": "Divide",
+        "at": [
+          1920,
+          240
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "doubled",
+              "out"
+            ]
+          },
+          "b": 2
+        }
+      },
+      {
+        "id": "turns",
+        "type": "Repeat",
+        "at": [
+          0,
+          360
+        ],
+        "inputs": {
+          "count": {
+            "$link": [
+              "most passes",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "past",
+        "type": "GreaterOrEqual",
+        "at": [
+          320,
+          360
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "b": {
+            "$link": [
+              "passes",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "resting",
+        "type": "Select",
+        "at": [
+          640,
+          360
+        ],
+        "inputs": {
+          "condition": {
+            "$link": [
+              "past",
+              "out"
+            ]
+          },
+          "a": 1,
+          "b": {
+            "$link": [
+              "idle",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sorting",
+        "type": "ComputePipeline",
+        "at": [
+          960,
+          0
+        ],
+        "inputs": {
+          "compute.module": "koral_compare_sort",
+          "compute.element": {
+            "$link": [
+              "type",
+              "out"
+            ]
+          },
+          "compute.entry": "bitonic",
+          "param.koralSorted": {
+            "$link": [
+              "elements",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "run",
+        "type": "Dispatch",
+        "at": [
+          1600,
+          0
+        ],
+        "inputs": {
+          "pipeline": {
+            "$link": [
+              "sorting",
+              "out"
+            ]
+          },
+          "groups.x": {
+            "$link": [
+              "blocks",
+              "out"
+            ]
+          },
+          "push.count": {
+            "$link": [
+              "count",
+              "out"
+            ]
+          },
+          "push.turn": {
+            "$link": [
+              "turns",
+              "index"
+            ]
+          },
+          "push.start": 0,
+          "idle": {
+            "$link": [
+              "resting",
+              "out"
+            ]
+          }
+        }
+      },
+      {
+        "id": "sorted",
+        "type": "FunctionOutput",
+        "at": [
+          2240,
+          0
+        ],
+        "inputs": {
+          "name": "elements",
+          "value": {
+            "$link": [
+              "elements",
+              "out"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

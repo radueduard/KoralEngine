@@ -10,6 +10,8 @@
 
 #include <keditor/editor.h>
 
+#include <kgraph/meshes.h>
+
 #include <kui/icons.h>
 #include <kgui/layout.h>
 #include <koralUI.h>
@@ -24,6 +26,8 @@
 #include <set>
 #include <string>
 #include <vector>
+
+#include <kgraph/meshes.h>
 
 namespace keditor
 {
@@ -121,6 +125,9 @@ namespace keditor
                 return StageIcon(asset.stage, size);
             }
             const char* icon = asset.kind == Session::Asset::Kind::eModel ? "category" : asset.kind == Session::Asset::Kind::eMesh ? "view_in_ar"
+                             : asset.kind == Session::Asset::Kind::eLight ? "lightbulb" : asset.kind == Session::Asset::Kind::eCamera ? "videocam"
+                             : asset.kind == Session::Asset::Kind::eGenerator ? "auto_awesome" : asset.kind == Session::Asset::Kind::eFunction ? "functions"
+                             : asset.kind == Session::Asset::Kind::eMaterial ? "palette"
                              : asset.kind == Session::Asset::Kind::eTexture ? "image"
                              : asset.kind == Session::Asset::Kind::eScene ? "landscape" : asset.kind == Session::Asset::Kind::ePrefab ? "widgets" : "description";
             const kui::Color tint = asset.kind == Session::Asset::Kind::eScript ? kui::Color::Hex(0x5B9BD5)
@@ -135,8 +142,11 @@ namespace keditor
         {
             if (!pictured) {}
             else if (asset.kind == Session::Asset::Kind::eTexture) {
-                if (const auto picture = PictureOf(_session->AssetHeld(asset.id).get()); picture.Get())
-                    return kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain));
+                // Its small picture, whether or not the scene has it: by its kind until that is read.
+                return kui::Make<MeshThumbnail>(_session, [session = _session, file = asset.file] { return session->FilePicture(file); },
+                    [size, kind = KindIcon(asset, size)](const kor::ResourceRef<const kor::Image> picture) {
+                        return picture.Get() ? kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain)) : kind;
+                    });
             }
             else if (asset.kind == Session::Asset::Kind::eMesh) {
                 // A mesh's small picture, once it is drawn; by its kind until then.
@@ -146,8 +156,8 @@ namespace keditor
                     });
             }
             else if (asset.kind == Session::Asset::Kind::eModel) {
-                // A model by its first mesh, once that is drawn: what it is by its kind until then.
-                return kui::Make<MeshThumbnail>(_session, [session = _session, id = asset.id + "#0"] { return session->MeshPicture(id); },
+                // All of a model, once it is drawn: what it is by its kind until then.
+                return kui::Make<MeshThumbnail>(_session, [session = _session, id = asset.id] { return session->ModelPicture(id); },
                     [size, kind = KindIcon(asset, size)](const kor::ResourceRef<const kor::Image> picture) {
                         return picture.Get() ? kui::SizedBox(size, size, kui::Image(picture, kui::ImageFit::eContain)) : kind;
                     });
@@ -180,7 +190,7 @@ namespace keditor
         /** Goes to a folder of the Assets panel: what it shows is what is in it. */
         void ShowFolder(std::string folder)
         {
-            SetState([&] { _session->assetFolder = std::move(folder); _session->assetFilter.clear(); _session->assetKind = -1; _folderPicked.clear(); });
+            SetState([&] { _session->assetFolder = std::move(folder); _session->assetModel.clear(); _session->assetFilter.clear(); _session->assetKind = -1; _folderPicked.clear(); });
         }
 
         /** Pressed once a thing is picked; pressed again at once, it is opened. */
@@ -228,6 +238,19 @@ namespace keditor
             kui::Widget tile = kui::Button(std::move(face), std::move(pressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain));
             if (!menu.empty()) tile = kui::ContextMenu(std::move(menu), std::move(tile));
             return std::move(tile).Key(key);
+        }
+
+        /**
+         * A pipeline's shader as a shader's file is shown in the panel: its stage's icon over its entry's name and its module;
+         * with none in it, the icon faint over what it would be.
+         */
+        kui::Widget ShaderTile(const std::string& key, const std::string_view stage, const std::string& label, const std::string& module, const bool given,
+                               std::function<void()> pressed, std::vector<kui::MenuItem> menu)
+        {
+            constexpr float Size = 64.f;
+            kui::Widget icon = StageIcon(stage, Size);
+            if (!given) icon = kui::Opacity(0.3f, std::move(icon));
+            return Tile(key, std::move(icon), label, false, !given, Size, std::move(pressed), std::move(menu), 260.f, module);
         }
 
         /** What the right button offers of a file or a folder that is on disk. */
@@ -297,7 +320,7 @@ namespace keditor
             int pictures = 0;
             const auto tileOf = [&](const Session::Asset& asset) {
                 // The interface shows 256 pictures at once and no more: the first of what is listed have theirs.
-                const bool pictured = (asset.kind == Kind::eTexture || asset.kind == Kind::eMesh) && pictures < 160;
+                const bool pictured = (asset.kind == Kind::eTexture || asset.kind == Kind::eMesh || asset.kind == Kind::eMaterial || asset.kind == Kind::eModel) && pictures < 160;
                 if (pictured) ++pictures;
                 const bool code = asset.kind == Kind::eShader || asset.kind == Kind::eScript;
                 const bool ofProject = !asset.folder.starts_with(Session::OutsideFolder);
@@ -315,7 +338,7 @@ namespace keditor
                     menu.push_back({ "Edit prefab", [this, id = asset.id] { _session->OpenPrefab(id); } });
                     menu.push_back({ "Make an instance", [this, id = asset.id] { _session->PlacePrefab(id); }, _session->PrefabOpen().empty() });
                 }
-                    menu.push_back({ _session->assetsOpened.contains(asset.id) ? "Hide its meshes" : "Show its meshes", [this, asset] { _session->OpenAsset(asset); }, asset.loaded });
+                    menu.push_back({ "Open", [this, asset] { _session->OpenAsset(asset); } });
                 }
                 if (asset.kind != Kind::eMesh && !asset.builtIn) for (auto& item : FileMenu(asset.file, ofProject, asset.id)) menu.push_back(std::move(item));
                 // A shader entry is named with its module: the one it is of, unless it is that module, of none.
@@ -323,11 +346,10 @@ namespace keditor
                 kui::Widget tile = Tile("asset " + asset.id, AssetPreview(asset, preview, pictured), label, asset.id == _session->selectedAsset, !asset.loaded && !code && asset.kind != Kind::eScene, size,
                                         [this, asset] { Pressed("asset " + asset.id, [&] { _folderPicked.clear(); _session->SelectAsset(asset.id); }, [&] { _session->OpenAsset(asset); }); }, std::move(menu),
                                         260.f, under);
-                // A model that is in the scene has its meshes: an arrow on it shows them after it, and hides them.
-                // A shader module of entries, the same: its entries after it.
-                if (((asset.kind == Kind::eModel && asset.loaded) || entries) && !searching) {
+                // A shader module of entries: an arrow on it shows them after it, and hides them.
+                if (entries && !searching) {
                     const bool open = _session->assetsOpened.contains(asset.id);
-                    const char* what = entries ? (open ? "Hide its entries" : "Show its entries") : (open ? "Hide its meshes" : "Show its meshes");
+                    const char* what = open ? "Hide its entries" : "Show its entries";
                     tile = kui::Stack({ std::move(tile), kui::Positioned(kui::PositionedOptions { .top = size <= ListSize ? 0.f : size * 0.5f - 8.f, .right = 0.f },
                                                                          Tool(open ? "chevron_left" : "chevron_right", what, open, [this, asset] { _session->OpenAsset(asset); })) });
                 }
@@ -336,14 +358,56 @@ namespace keditor
                 if (asset.kind != Kind::eScene) tile = kui::Draggable({ "asset", asset.id }, std::move(tile));
                 tiles.push_back(std::move(tile));
             };
+            // In a model: what it is made of, each kind under its heading.
+            const auto within = std::ranges::find(assets, _session->assetModel, &Session::Asset::id);
+            if (within == assets.end() || _session->assetModel.empty()) _session->assetModel.clear();
+            const std::string& model = _session->assetModel;
+            std::vector<kui::Widget> sections;
             if (searching) {
                 for (const auto& asset : assets) {
                     if (_session->assetKind >= 0 && static_cast<int>(asset.kind) != _session->assetKind) continue;
                     // A mesh is found by what is typed, or asked for by its kind: not listed with everything else.
                     if (asset.kind == Kind::eMesh && wanted.empty() && _session->assetKind != static_cast<int>(Kind::eMesh)) continue;
                     if (!wanted.empty() && lower(asset.label).find(wanted) == std::string::npos && lower(asset.group).find(wanted) == std::string::npos) continue;
+                    // The materials, a list of each kind the engine has and then the project's.
+                    if (asset.kind == Kind::eMaterial && _session->assetKind == static_cast<int>(Kind::eMaterial) && asset.builtIn) continue;
                     tileOf(asset);
                 }
+                if (_session->assetKind == static_cast<int>(Kind::eMaterial)) {
+                    auto ownTiles = std::exchange(tiles, {});
+                    const auto listed = [&](const std::string& title, std::vector<kui::Widget> shownTiles) {
+                        if (shownTiles.empty()) return;
+                        const std::size_t count = shownTiles.size();
+                        sections.push_back(ListHeading(std::format("{}  ·  {}", title, count)));
+                        sections.push_back(size <= ListSize ? Rows(std::move(shownTiles), 1.f) : kui::Wrap(std::move(shownTiles), 6.f, 6.f));
+                    };
+                    for (const auto& [title, kind] : { std::pair<const char*, const char*> { "PBR", "PbrMaterial" }, { "Blinn-Phong", "BlinnPhongMaterial" } }) {
+                        for (const auto& asset : assets)
+                            if (asset.kind == Kind::eMaterial && asset.builtIn && asset.group == kind
+                                && (wanted.empty() || lower(asset.label).find(wanted) != std::string::npos)) tileOf(asset);
+                        listed(title, std::exchange(tiles, {}));
+                    }
+                    listed("The project's", std::move(ownTiles));
+                }
+            } else if (!model.empty()) {
+                std::set<std::string> pictures_;
+                if (const auto read = Doc().Runtime().ModelOf(within->file))
+                    for (const auto& material : read->materials)
+                        for (const std::string* map : { &material.albedoMap, &material.normalMap, &material.roughnessMap, &material.emissiveMap, &material.occlusionMap, &material.specularMap, &material.shininessMap, &material.alphaMap })
+                            if (!map->empty()) pictures_.insert(*map);
+                const auto section = [&](const char* title, const std::function<bool(const Session::Asset&)>& of) {
+                    for (const auto& asset : assets) if (of(asset)) tileOf(asset);
+                    if (tiles.empty()) return;
+                    const std::size_t count = tiles.size();
+                    sections.push_back(ListHeading(std::format("{}  ·  {}", title, count)));
+                    sections.push_back(size <= ListSize ? Rows(std::exchange(tiles, {}), 1.f) : kui::Wrap(std::exchange(tiles, {}), 6.f, 6.f));
+                };
+                const auto part = [&](const Kind kind) { return [&, kind](const Session::Asset& asset) { return asset.kind == kind && asset.parent == model; }; };
+                section("Meshes", part(Kind::eMesh));
+                section("Materials", part(Kind::eMaterial));
+                section("Textures", [&](const Session::Asset& asset) { return asset.kind == Kind::eTexture && pictures_.contains(asset.id); });
+                section("Lights", part(Kind::eLight));
+                section("Cameras", part(Kind::eCamera));
             } else {
                 for (const auto& folder : folders) {
                     const auto slash = folder.rfind('/');
@@ -362,15 +426,18 @@ namespace keditor
                 const auto named = [&](const Session::Asset& asset) { return lower(asset.kind == Kind::eShader ? asset.group : asset.label); };
                 std::ranges::stable_sort(assets, [&](const Session::Asset& a, const Session::Asset& b) { return named(a) < named(b); });
                 for (const auto& asset : assets) {
-                    if (asset.folder != shown || (asset.kind == Kind::eMesh && !asset.builtIn) || (asset.kind == Kind::eShader && !asset.parent.empty())) continue;
+                    // What is of a model is in the model; a module's entries, after it.
+                    if (asset.folder != shown || asset.kind == Kind::eMesh || (asset.kind == Kind::eShader && !asset.parent.empty())
+                        || (asset.kind == Kind::eMaterial && !asset.parent.empty())) continue;
                     tileOf(asset);
-                    // A model's meshes, a module's entries: after it, when it is open.
-                    if ((asset.kind == Kind::eModel || asset.kind == Kind::eShader) && _session->assetsOpened.contains(asset.id))
+                    if (asset.kind == Kind::eShader && _session->assetsOpened.contains(asset.id))
                         for (const auto& inner : assets)
                             if (inner.kind != Kind::eModel && inner.parent == asset.id) tileOf(inner);
                 }
             }
-            kui::Widget content = tiles.empty()
+            kui::Widget content = !sections.empty() ? kui::Padding(kui::EdgeInsets::All(8.f), Rows(std::move(sections), 4.f))
+                : !model.empty() ? kui::Padding(kui::EdgeInsets::All(12.f), kgui::Muted("Being read: what it is made of is shown here."))
+                : tiles.empty()
                 ? kui::Padding(kui::EdgeInsets::All(12.f), kgui::Muted(searching ? "Nothing of the project's is called that." : assets.empty() && folders.empty()
                     ? "Nothing yet. A model is imported with Assets, Import model; a project's shaders, scripts and the files in its folders are shown here." : "This folder is empty."))
                 : kui::Padding(kui::EdgeInsets::All(8.f), size <= ListSize ? Rows(std::move(tiles), 1.f) : kui::Wrap(std::move(tiles), 6.f, 6.f));
@@ -384,17 +451,18 @@ namespace keditor
                 if (!last) crumbs.push_back(kgui::Muted(">", 12.f));
             };
             if (searching) {
-                const char* kinds[] { "models", "meshes", "textures", "shaders", "scripts", "scenes", "prefabs", "materials" };
-                const std::string what = _session->assetKind >= 0 ? std::string("All ") + kinds[std::clamp(_session->assetKind, 0, 7)] : std::string("Everything");
+                const char* kinds[] { "models", "meshes", "textures", "shaders", "scripts", "scenes", "prefabs", "materials", "generators", "functions" };
+                const std::string what = _session->assetKind >= 0 ? std::string("All ") + kinds[std::clamp(_session->assetKind, 0, 9)] : std::string("Everything");
                 crumbs.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(wanted.empty() ? std::format("{}, in every folder", what) : std::format("{} called '{}', in every folder", what, _session->assetFilter), 12.f)));
             } else {
-                crumb(root, {}, shown.empty());
+                crumb(root, {}, shown.empty() && model.empty());
                 for (std::size_t at = 0; at < shown.size();) {
                     const auto slash = shown.find('/', at);
                     const std::size_t end = slash == std::string::npos ? shown.size() : slash;
-                    crumb(shown.substr(at, end - at), shown.substr(0, end), end == shown.size());
+                    crumb(shown.substr(at, end - at), shown.substr(0, end), end == shown.size() && model.empty());
                     at = end + 1;
                 }
+                if (!model.empty()) crumb(within->label, shown, true);
             }
 
             // ---- the folders, down the side
@@ -405,10 +473,23 @@ namespace keditor
                 for (const auto& other : folders) {
                     const auto slash = other.rfind('/');
                     if ((slash == std::string::npos ? std::string() : other.substr(0, slash)) != folder) continue;
+                    if (other == "Materials" || other == "Meshes" || other.starts_with("Materials/") || other.starts_with("Meshes/")) continue;    // of no file: under Built in
                     any = true;
                     if (open) under.push_back(branch(other));
                 }
-                const bool here = !searching && folder == shown;
+                // The models in it, each gone into as a folder is.
+                for (const auto& asset : assets) {
+                    if (asset.kind != Kind::eModel || asset.folder != folder) continue;
+                    any = true;
+                    if (!open) continue;
+                    const bool inside = !searching && asset.id == _session->assetModel;
+                    kui::Widget line = kui::Row({ kui::SizedBox(14.f, 14.f, kui::Icon("category", kui::IconStyle::eFilled, kui::Color::Hex(0x7DBB4B))),
+                                                  kui::Expanded(kui::Text(asset.label, kui::TextStyle {}.SetSize(13.f).SetColor(inside ? t.primary : t.text), kui::TextAlign::eStart, false, 1, true)) },
+                                                kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                    under.push_back(kui::TreeNode({}, false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(inside).SetIndent(14.f)
+                        .OnTap([this, asset] { SetState([&] { _session->OpenAsset(asset); }); }).SetTitle(std::move(line))));
+                }
+                const bool here = !searching && folder == shown && _session->assetModel.empty();
                 kui::Widget title = kui::Row({ kui::SizedBox(14.f, 14.f, kui::Icon(open && any ? "folder_open" : "folder", kui::IconStyle::eFilled, kui::Color::Hex(0xC9A227))),
                                                kui::Expanded(kui::Text(folder.empty() ? root : FolderName(folder), kui::TextStyle {}.SetSize(13.f).SetColor(here ? t.primary : t.text), kui::TextAlign::eStart, false, 1, true)) },
                                              kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
@@ -417,23 +498,35 @@ namespace keditor
             };
             // The project's folders first; under them, everything of one kind, wherever it is.
             std::vector<kui::Widget> side;
+            const auto group = [&](const char* title, const char* shut, const std::vector<std::pair<const char*, Kind>>& members) {
+                std::vector<kui::Widget> lines;
+                for (const auto& [label, kind] : members) {
+                    const bool on = _session->assetKind == static_cast<int>(kind);
+                    const auto count = std::ranges::count(assets, kind, &Session::Asset::kind);
+                    lines.push_back(kui::TreeNode(std::format("{}  ·  {}", label, count), false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(on).SetIndent(14.f).OnTap([this, kind, on] {
+                        SetState([&] { _session->assetKind = on ? -1 : static_cast<int>(kind); });
+                    })));
+                }
+                side.push_back(kui::TreeNode(title, !_foldersShut.contains(shut), [this, shut = std::string(shut)](const bool open) { SetState([&] { if (open) _foldersShut.erase(shut); else _foldersShut.insert(shut); }); },
+                                             std::move(lines), kui::TreeNodeOptions {}.SetIndent(14.f)));
+            };
+            // What a pipeline uses as data, and what is opened and edited as a whole: wherever each is.
+            group("Resources", "*resources", { { "Models", Kind::eModel }, { "Meshes", Kind::eMesh }, { "Materials", Kind::eMaterial }, { "Textures", Kind::eTexture },
+                                               { "Shaders", Kind::eShader }, { "Generators", Kind::eGenerator } });
+            group("Documents", "*documents", { { "Scenes", Kind::eScene }, { "Prefabs", Kind::ePrefab }, { "Functions", Kind::eFunction }, { "Scripts", Kind::eScript } });
+            // Then where it all is on disk.
+            side.push_back(ListHeading("FOLDERS"));
             side.push_back(branch({}));
-            std::vector<kui::Widget> kinds;
-            const std::pair<const char*, Kind> every[] { { "All models", Kind::eModel }, { "All meshes", Kind::eMesh }, { "All textures", Kind::eTexture },
-                                                         { "All shaders", Kind::eShader }, { "All scripts", Kind::eScript }, { "All prefabs", Kind::ePrefab },
-                                                         { "All materials", Kind::eMaterial } };
-            for (const auto& [label, kind] : every) {
-                const bool on = _session->assetKind == static_cast<int>(kind);
-                kinds.push_back(kui::TreeNode(label, false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(on).SetIndent(14.f).OnTap([this, kind, on] {
-                    SetState([&] { _session->assetKind = on ? -1 : static_cast<int>(kind); });
-                })));
+            // And what every project has, of no file.
+            side.push_back(ListHeading("BUILT IN"));
+            for (const auto& [label, folder] : { std::pair<const char*, const char*> { "PBR materials", "Materials/PBR" }, { "Blinn-Phong materials", "Materials/Blinn-Phong" } }) {
+                const bool here = !searching && _session->assetFolder == folder;
+                side.push_back(kui::TreeNode(label, false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(here).SetIndent(14.f).OnTap([this, folder = std::string(folder)] { ShowFolder(folder); })));
             }
-            side.push_back(kui::TreeNode("Everything, by kind", !_foldersShut.contains("*kinds"), [this](const bool open) { SetState([&] { if (open) _foldersShut.erase("*kinds"); else _foldersShut.insert("*kinds"); }); },
-                                         std::move(kinds), kui::TreeNodeOptions {}.SetIndent(14.f)));
 
             // ---- over it all: something made, something looked for; under it: what is picked, and how big things are shown
             const std::vector<std::string> made { "Folder...", "Shader...", "Script...", "Import a model or a picture...", "Prefab of the picked entity", "Prefab...", "Material" };
-            const std::vector<std::string> kindNames { "Every kind", "Models", "Meshes", "Textures", "Shaders", "Scripts", "Scenes", "Prefabs", "Materials" };
+            const std::vector<std::string> kindNames { "Every kind", "Models", "Meshes", "Textures", "Shaders", "Scripts", "Scenes", "Prefabs", "Materials", "Generators", "Functions" };
             kui::Widget bar = kui::Row({
                 kui::Tooltip("Makes something in the project: a folder here, a shader, a script, a prefab of the picked entity; or brings a model's or a picture's file in.",
                     kui::Dropdown(made, -1, [this](const int index) {
@@ -724,8 +817,7 @@ namespace keditor
         std::vector<PackChoice> _packChoices;
         std::array<kgraph::TextureFormat, 4> _offered {};      // by kind
         kgraph::TextureQuality _textureQuality = kgraph::TextureQuality::eNormal;
-        bool _compressAsked = false, _dontAskToCompress = false;
-
+        
         static constexpr std::array<kgraph::TextureKind, 4> TextureKinds { kgraph::TextureKind::eColor, kgraph::TextureKind::eNormal, kgraph::TextureKind::eMask, kgraph::TextureKind::eData };
         static const char* KindLabel(const kgraph::TextureKind kind)
         {
@@ -766,7 +858,7 @@ namespace keditor
         }
 
         /** Opens the dialog with the scene's pictures as the graph keeps them, and the packs it has and those their names suggest. */
-        void OpenCompressTextures(const bool asked)
+        void OpenCompressTextures()
         {
             const kgraph::Graph& graph = Doc().Graph();
             _textureChoices.clear();
@@ -782,8 +874,6 @@ namespace keditor
             for (auto& [id, pack] : kgraph::SuggestTexturePacks(ids))
                 if (!graph.texturePacks.contains(id)) _packChoices.push_back({ id, std::move(pack), true, true });
             for (std::size_t k = 0; k < TextureKinds.size(); ++k) _offered[k] = _session->OfferedFormat(TextureKinds[k]);
-            _compressAsked = asked;
-            _dontAskToCompress = false;
             SetState([&] { _dialog = Dialog::eCompressTextures; });
         }
 
@@ -815,7 +905,6 @@ namespace keditor
                 packs[choice.id] = std::move(choice.pack);
             }
             for (std::size_t k = 0; k < TextureKinds.size(); ++k) _session->SetOfferedFormat(TextureKinds[k], _offered[k]);
-            if (_dontAskToCompress) _session->DontAskToCompress();
             _session->KeepTextures(std::move(imports), std::move(packs), cook);
             SetState([&] { _dialog = Dialog::eNone; });
         }
@@ -941,14 +1030,11 @@ namespace keditor
                 }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
             }
 
-            if (_compressAsked)
-                rows.push_back(kui::Checkbox(_dontAskToCompress, [this](const bool on) { SetState([&] { _dontAskToCompress = on; }); }, "Don't ask again for this project"));
             rows.push_back(kui::Row({
                 kui::Button("Compress", [this] { KeepTextureChoices(true); }),
                 kui::Tooltip("Keep these settings in the scene; nothing is compressed until you press Compress.",
                              kui::Button("Keep settings only", [this] { KeepTextureChoices(false); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary))),
-                kui::Button(_compressAsked ? "Not now" : "Cancel", [this] {
-                    if (_dontAskToCompress) _session->DontAskToCompress();
+                kui::Button("Cancel", [this] {
                     SetState([&] { _dialog = Dialog::eNone; });
                 }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
             }, kui::FlexOptions {}.SetGap(8.f)));
@@ -1028,7 +1114,7 @@ namespace keditor
                     else if (const auto it = graph.textureImports.find(asset.id); it != graph.textureImports.end())
                         kept = std::format("{}, {}", kgraph::TextureFormatName(it->second.format), Doc().Runtime().Cooked(asset.id) ? "compressed" : "not compressed yet");
                     rows.push_back(kgui::Labeled("Kept", kgui::Line(kept), LabelWidth));
-                    rows.push_back(Small("Compress textures...", [this] { OpenCompressTextures(false); }));
+                    rows.push_back(Small("Compress textures...", [this] { OpenCompressTextures(); }));
                 }
                 rows.push_back(kgui::Muted("Drag it from the Assets panel onto a picture field of an entity: an albedoMap, a normalMap."));
                 break;
@@ -1045,6 +1131,11 @@ namespace keditor
                 if (!asset.pending) rows.push_back(Small("Open in the viewer", [this, id = asset.id] { _session->View(id); }));
                 rows.push_back(kgui::Labeled("Held as", kgui::Line(asset.id), LabelWidth));
                 if (asset.builtIn) {
+                    // What it is made from, as it starts: each entity that holds it tunes its own, in its Mesh.
+                    const auto& parameters = kgraph::ShapeParameters(kgraph::ShapeOf(std::string_view(asset.id).substr(1)));
+                    if (!parameters.empty()) rows.push_back(Heading("Parameters"));
+                    for (const auto& parameter : parameters)
+                        rows.push_back(kui::Tooltip(parameter.says, kgui::Labeled(parameter.name, kgui::Line(std::format("{}", parameter.initial)), LabelWidth)));
                     // Every default mesh alike, as the scene's graph says: what its shaders read of the surface's directions.
                     const std::vector<std::string> forms { "TANGENT, 4 numbers (w: the bitangent's side)", "TANGENT and BITANGENT, 3 numbers each", "Neither" };
                     const auto now = static_cast<int>(Doc().Graph().defaultMeshTangents);
@@ -1056,7 +1147,8 @@ namespace keditor
                         kui::Dropdown(forms, now, [this](const int index) { Doc().SetDefaultMeshTangents(static_cast<kgraph::Tangents>(index)); SetState(); },
                                       kui::DropdownOptions {}.SetWidth(260.f))), LabelWidth));
                 }
-                rows.push_back(kgui::Muted("Drag it from the Assets panel onto an entity's Mesh."));
+                rows.push_back(kgui::Muted(asset.builtIn ? "Drag it from the Assets panel onto an entity's Mesh: it starts as this, and the entity tunes it there. Entities with the same numbers share one mesh."
+                                                         : "Drag it from the Assets panel onto an entity's Mesh."));
                 break;
             case Session::Asset::Kind::eModel:
                 rows.push_back(kgui::Muted("A model: imported, each thing in it is an entity with its mesh and its material's pictures."));
@@ -1079,13 +1171,22 @@ namespace keditor
                 break;
             }
             case Session::Asset::Kind::eMaterial: {
-                rows.push_back(AssetPreview(asset, 72.f));
+                rows.push_back(AssetPreview(asset, 160.f));
+                rows.push_back(Small("Open in the viewer", [this, id = asset.id] { _session->View(id); }));
+                if (const auto toShow = _session->MaterialToShow(asset.id); toShow && !_session->HasShading(toShow->kind.name)) {
+                    rows.push_back(kgui::Muted(std::format("{} has no shading: a module {}Shading, of the project's shaders, says how it is lit.", toShow->kind.name, toShow->kind.name)));
+                    rows.push_back(Small("Write its shading", [this, kind = toShow->kind.name] { _session->WriteShadingModule(kind); SetState(); }));
+                }
                 if (const Session::Material* material = Session::MaterialOf(asset.id); material && !Doc().MaterialAssetOf(asset.id)) {
-                    const auto three = [](const float* v) { return std::format("{:.2f}, {:.2f}, {:.2f}", v[0], v[1], v[2]); };
-                    rows.push_back(kgui::Labeled("Base colour", kgui::Line(three(material->albedo)), LabelWidth));
-                    rows.push_back(kgui::Labeled("Metallic", kgui::Line(std::format("{:.2f}", material->metallic)), LabelWidth));
-                    rows.push_back(kgui::Labeled("Roughness", kgui::Line(std::format("{:.2f}", material->roughness)), LabelWidth));
-                    rows.push_back(kgui::Labeled("Emission", kgui::Line(three(material->emission)), LabelWidth));
+                    rows.push_back(kgui::Labeled("Kind", kgui::Line(material->kind), LabelWidth));
+                    const auto said = [](const Value& value) {
+                        if (const double* number = value.Number()) return std::format("{:.2f}", *number);
+                        std::string text;
+                        if (const auto* items = value.Items())
+                            for (const auto& item : *items) if (const double* number = item.Number()) text += std::format("{}{:.2f}", text.empty() ? "" : ", ", *number);
+                        return text;
+                    };
+                    for (const auto& [field, value] : Session::ValuesOf(*material)) rows.push_back(kgui::Labeled(field, kgui::Line(said(value)), LabelWidth));
                 } else if (const MaterialAsset* material = Doc().MaterialAssetOf(asset.id)) {
                     // Its fields, as its kind has them: set here, they are set in every entity that follows it, but
                     // for what one made its own.
@@ -1182,6 +1283,10 @@ namespace keditor
                 rows.push_back(Small("Make an instance", [this, id = asset.id] { _session->PlacePrefab(id); }));
                 break;
             }
+            case Session::Asset::Kind::eFunction:
+                rows.push_back(kgui::Muted("A function: nodes that a graph calls as one. Opened, it is a page of the graph, and what is done there is done for every call of it."));
+                rows.push_back(Small("Open in the graph", [this, asset] { _session->OpenAsset(asset); SetState(); }));
+                break;
             default:
                 rows.push_back(kgui::Muted(asset.file.extension() == ".kt" ? "A Kotlin script: a component of its class's name, once the project runs with its scripts."
                                                                           : "A C# script: a component of its class's name, once the project runs with its scripts."));
@@ -1192,22 +1297,6 @@ namespace keditor
         }
 
         /** The control a field of @p field 's kind is set with, by what it holds now: a choice, numbers, a box to tick. */
-        static kui::Widget ValueField(const kecs::FieldDescription& field, const Value& now, const std::function<void(const Value&)>& set)
-        {
-            if (!field.choices.empty()) {
-                const int selected = now.Number() ? static_cast<int>(*now.Number()) : 0;
-                return kui::Dropdown(field.choices, selected, [set](const int index) { set(Value(index)); });
-            }
-            if (const auto* items = now.Items()) {
-                std::vector<float> numbers;
-                for (const auto& item : *items) numbers.push_back(item.Number() ? static_cast<float>(*item.Number()) : 0.f);
-                return DragNumbers(numbers, [set](const std::vector<float>& changed) { set(Value(Value::List(changed.begin(), changed.end()))); }, kgraph::NumberLimits { field.min, field.max, field.logarithmic }, field.type.starts_with("i") ? kui::NumberType::eInt : kui::NumberType::eFloat);
-            }
-            if (const bool* on = now.Bool()) return kui::Checkbox(*on, [set](const bool changed) { set(Value(changed)); });
-            if (const double* number = now.Number()) return kui::DragValue(*number, [set](const double v) { set(Value(v)); });
-            return kgui::Muted("as its kind starts it", 11.f);
-        }
-
         // ---- what it keeps --------------------------------------------------------------------------------------
 
         std::string _folderPicked, _tapped;

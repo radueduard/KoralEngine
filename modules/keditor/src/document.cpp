@@ -999,7 +999,9 @@ namespace keditor
             _notes.push_back(std::format("'{}' was taken off: its shader no longer has it", taken));
             Changed();
         }
-        // What the passes say of the entities: it changes with the world, a frame after whatever changed it.
+        // What the passes say of the entities: it changes with the world, a frame after whatever changed it. Worked out
+        // every few frames: it hashes what every node says, for panels that only need to hear of it soon.
+        if ((++_reportsAsked & 3u) != 0u) return;
         std::size_t digest = 0;
         const auto mix = [&](const std::size_t value) { digest ^= value + 0x9e3779b97f4a7c15ull + (digest << 6) + (digest >> 2); };
         for (const auto& node : Graph().nodes) {
@@ -1848,9 +1850,14 @@ namespace keditor
     Value Document::Field(const kecs::Entity entity, const std::string_view component, const std::string_view field) const
     {
         const kecs::ComponentId id = _world.Find(component);
-        if (id == kecs::NoComponent || !_world.Alive(entity)) return {};
-        const auto* bytes = static_cast<const std::byte*>(_world.Get(entity, id));
-        const kecs::FieldDescription* found = _world.Describe(id).FindField(field);
+        return id == kecs::NoComponent ? Value {} : ReadField(_world, entity, id, field);
+    }
+
+    Value Document::ReadField(const kecs::World& world, const kecs::Entity entity, const kecs::ComponentId id, const std::string_view field)
+    {
+        if (!world.Alive(entity)) return {};
+        const auto* bytes = static_cast<const std::byte*>(world.Get(entity, id));
+        const kecs::FieldDescription* found = world.Describe(id).FindField(field);
         if (!bytes || !found) return {};
         const std::byte* at = bytes + found->offset;
         if (found->type == "string") return Value(*reinterpret_cast<const std::string*>(at));
@@ -1867,13 +1874,14 @@ namespace keditor
         return Value(std::move(list));
     }
 
-    bool Document::SetField(const kecs::Entity entity, const std::string_view component, const std::string_view field, const Value& value, std::string* error)
+    bool Document::WriteField(kecs::World& world, const kecs::Entity entity, const kecs::ComponentId id, const std::string_view field, const Value& value,
+                              const std::function<std::shared_ptr<kgraph::Resource>(const std::string&)>& resolve,
+                              const std::function<void(std::shared_ptr<kgraph::Resource>)>& retire, std::string* error)
     {
         const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
-        const kecs::ComponentId id = _world.Find(component);
-        if (id == kecs::NoComponent || !_world.Alive(entity) || !_world.Has(entity, id)) return fail(std::format("the entity has no '{}'", component));
-        auto* bytes = static_cast<std::byte*>(const_cast<void*>(std::as_const(_world).Get(entity, id)));
-        const kecs::FieldDescription* found = _world.Describe(id).FindField(field);
+        const std::string component = world.Describe(id).name;
+        auto* bytes = static_cast<std::byte*>(const_cast<void*>(std::as_const(world).Get(entity, id)));
+        const kecs::FieldDescription* found = world.Describe(id).FindField(field);
         if (!found) return fail(std::format("'{}' has no field '{}'", component, field));
         std::byte* at = bytes + found->offset;
         Numbers numbers;
@@ -1884,17 +1892,18 @@ namespace keditor
             // Another entity of this scene, or none.
             const auto other = EntityOfValue(value);
             if (!other) return fail(std::format("'{}' is an entity: one of the scene's, or nothing", field));
-            if (!other->IsNull() && !_world.Alive(*other)) return fail(std::format("'{}' is given an entity that is not in the scene", field));
+            if (!other->IsNull() && !world.Alive(*other)) return fail(std::format("'{}' is given an entity that is not in the scene", field));
             *reinterpret_cast<kecs::Entity*>(at) = *other;
         } else if (HoldsResource(found->type)) {
             Held held;
             if (!value.IsNull()) {
                 if (!value.String()) return fail(std::format("'{}' holds a resource: the id of the node that makes it", field));
-                held = _runtime->ResourceOf(*value.String());
+                held = resolve(*value.String());
                 if (!held) return fail(std::format("there is no node '{}' that makes a resource", *value.String()));
             }
             // What it held may be in what this frame has drawn with: let go of once that is done.
-            _runtime->Retire(std::exchange(*reinterpret_cast<Held*>(at), std::move(held)));
+            auto old = std::exchange(*reinterpret_cast<Held*>(at), std::move(held));
+            if (retire) retire(std::move(old));
         } else if (NumbersOf(found->type, numbers)) {
             if (numbers.count == 1) {
                 if (const bool* flag = value.Bool()) WriteNumber(numbers, at, *flag ? 1.0 : 0.0);
@@ -1922,7 +1931,19 @@ namespace keditor
         } else {
             return fail(std::format("'{}' is a {}, which cannot be set here", field, found->type));
         }
-        _world.MarkChanged(entity, id);
+        world.MarkChanged(entity, id);
+        return true;
+    }
+
+    bool Document::SetField(const kecs::Entity entity, const std::string_view component, const std::string_view field, const Value& value, std::string* error)
+    {
+        const kecs::ComponentId id = _world.Find(component);
+        if (id == kecs::NoComponent || !_world.Alive(entity) || !_world.Has(entity, id)) {
+            if (error) *error = std::format("the entity has no '{}'", component);
+            return false;
+        }
+        if (!WriteField(_world, entity, id, field, value, [this](const std::string& name) { return _runtime->ResourceOf(name); },
+                        [this](Held old) { _runtime->Retire(std::move(old)); }, error)) return false;
         Override(entity, std::format("{}.{}", component, field));
         // A material that follows an asset, set on the entity itself: that field is the entity's own from now on.
         if (!_following && !MaterialAssetOfEntity(entity, component).empty()) {

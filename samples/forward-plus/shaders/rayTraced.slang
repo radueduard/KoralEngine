@@ -109,7 +109,7 @@ Instance instanceOf(uint pack, uint instance)
     made.metallic = own.metallic;
     made.emission = own.emission;
     made.roughness = own.roughness;
-    made.alphaMode = min(own.alphaMode, 1u);      // the solid scene's: none drawn over what is behind it
+    made.alphaMode = min(own.alphaMode, 1);       // the solid scene's: none drawn over what is behind it
     made.alphaCutoff = own.alphaCutoff;
     made.albedoMap = own.albedoMap;
     made.normalMap = own.normalMap;

@@ -144,14 +144,13 @@ namespace keditor
             listed.insert(id);
             assets.push_back(std::move(asset));
         }
-        // The editor's own, whatever the project: the meshes there are without making any, and materials.
+        // The editor's own, whatever the project: the procedural meshes, listed with the other meshes, and materials.
         for (const auto& name : kgraph::DefaultMeshNames()) {
             Asset asset;
             asset.kind = Asset::Kind::eMesh;
             asset.id = kgraph::DefaultMeshId(name);
             if (!listed.insert(asset.id).second) continue;
             asset.label = name;
-            asset.folder = "Meshes/Primitives";
             asset.builtIn = true;
             asset.loaded = true;
             if (const auto held = runtime.ResourceOf(asset.id)) {
@@ -164,8 +163,9 @@ namespace keditor
             Asset asset;
             asset.kind = Asset::Kind::eMaterial;
             asset.id = "material:" + material.name;
-            asset.label = material.name;
-            asset.folder = "Materials/Defaults";
+            asset.label = material.label;
+            asset.group = material.kind;
+            asset.folder = material.kind == "BlinnPhongMaterial" ? "Materials/Blinn-Phong" : "Materials/PBR";
             asset.builtIn = true;
             asset.loaded = true;
             assets.push_back(std::move(asset));
@@ -221,6 +221,7 @@ namespace keditor
             files(_project.ShaderDirectory(), Asset::Kind::eShader, "shader:", { ".slang" });
             files(_project.directory / "scripts", Asset::Kind::eScript, "script:", { ".cs", ".kt" });
             files(_project.directory / "prefabs", Asset::Kind::ePrefab, "prefab:", { ".prefab" });
+            files(_project.directory / "functions", Asset::Kind::eFunction, "function:", { ".kfunc" });
             // The scenes it has: listed, like everything else it is made of.
             if (const auto folder = _project.directory / "scenes"; std::filesystem::is_directory(folder, ignored))
                 for (const auto& entry : std::filesystem::directory_iterator(folder, ignored)) {
@@ -279,10 +280,28 @@ namespace keditor
                     for (std::string line; std::getline(lines, line);)
                         if (const auto space = line.find(' '); space != std::string::npos) (void)doc.MaterialAssetOf(line.substr(space + 1));
                 }
+            // (And the model the panel is in, read to show what it is made of.)
             for (const auto& asset : std::vector<Asset>(assets))
-                if (asset.kind == Asset::Kind::eModel && asset.loaded) (void)doc.MaterialAssetOf(asset.id + "#material:0");
+                if (asset.kind == Asset::Kind::eModel && (asset.loaded || asset.id == assetModel)) (void)doc.MaterialAssetOf(asset.id + "#material:0");
+            if (const auto model = std::ranges::find(assets, assetModel, &Asset::id); !assetModel.empty() && model != assets.end())
+                if (const auto read = doc.Runtime().ModelOf(model->file)) {
+                    const Asset of = *model;
+                    const auto part = [&](const Asset::Kind kind, const char* word, const std::size_t i, const std::string& name) {
+                        Asset asset;
+                        asset.kind = kind;
+                        asset.id = std::format("{}#{}:{}", of.id, word, i);
+                        asset.label = name.empty() ? std::format("{} {}", word, i) : name;
+                        asset.parent = asset.group = of.id;
+                        asset.folder = of.folder;
+                        asset.file = of.file;
+                        asset.loaded = true;
+                        assets.push_back(std::move(asset));
+                    };
+                    for (std::size_t i = 0; i < read->lights.size(); ++i) part(Asset::Kind::eLight, "light", i, read->lights[i].name);
+                    for (std::size_t i = 0; i < read->cameras.size(); ++i) part(Asset::Kind::eCamera, "camera", i, read->cameras[i].name);
+                }
             for (const auto& id : doc.MaterialAssetIds()) {
-                // The editor's own are listed under Materials/Defaults; a project's file with its folder.
+                // The editor's own are listed by their kind; a project's file with its folder.
                 if (id.starts_with("material:") || id.ends_with(".kmat") || !listed.insert(id).second) continue;
                 const MaterialAsset* material = doc.MaterialAssetOf(id);
                 if (!material) continue;
@@ -338,7 +357,7 @@ namespace keditor
     {
         if (!_hasProject || folder.starts_with(OutsideFolder)) return {};
         if (folder.empty()) return _project.directory;
-        // The editor's own (Meshes/Primitives, Materials/Defaults) are of no folder on disk, unless the project has one so called.
+        // The editor's own (Materials/PBR, Materials/Blinn-Phong) are of no folder on disk, unless the project has one so called.
         std::error_code ignored;
         if ((folder.starts_with("Meshes") || folder.starts_with("Materials")) && !std::filesystem::is_directory(_project.directory / folder, ignored)) return {};
         return _project.directory / folder;
@@ -373,12 +392,19 @@ namespace keditor
             break;
         }
         case Asset::Kind::eScript: OpenInCode(asset.file); break;
+        case Asset::Kind::eFunction: OpenFunctionNamed(asset.file.stem().string()); break;
         case Asset::Kind::eModel:
-            if (!assetsOpened.erase(asset.id)) assetsOpened.insert(asset.id);
+            // Gone into, as a folder is: what it is made of, read if it has not been.
+            assetModel = asset.id;
+            assetFolder = asset.folder;
+            assetFilter.clear();
+            assetKind = -1;
+            selectedAsset = asset.id;
             ++_changes;
             break;
         case Asset::Kind::eTexture:
-        case Asset::Kind::eMesh: View(asset.id); break;
+        case Asset::Kind::eMesh:
+        case Asset::Kind::eMaterial: View(asset.id); break;
         case Asset::Kind::ePrefab: OpenPrefab(asset.id); break;     // edited by itself; dragged into the scene, placed
         case Asset::Kind::eScene: OpenScene(asset.label); break;
         default: break;
@@ -412,6 +438,9 @@ namespace keditor
             const std::string_view rest = std::string_view(id).substr(12);
             return std::format("{}, generated", rest.substr(0, rest.find('/')));
         }
+        // A material is no resource, and is not looked for as one: its file is no picture.
+        if (const Material* material = MaterialOf(id)) return material->label;
+        if (const MaterialAsset* material = _play.Doc().MaterialAssetOf(id)) return material->name;
         if (!id.starts_with('@')) return id;
         if (const auto held = _play.Doc().Runtime().ResourceOf(id); held && !held->label.empty()) return held->label;
         const auto mesh = id.rfind('#');
@@ -694,6 +723,7 @@ namespace keditor
     {
         if (!_thumbnails) _thumbnails = std::make_unique<Thumbnails>(_play.Graph());
         _thumbnails->SetCache(_hasProject ? kasset::CacheDirectoryOf(_project.directory) / "thumbnails" : std::filesystem::path());
+        _thumbnails->SetAssetDirectory(_hasProject ? _project.directory / "assets" : std::filesystem::path());
         return *_thumbnails;
     }
 
@@ -716,64 +746,50 @@ namespace keditor
         return key.Text();
     }
 
+    kor::ResourceRef<const kor::Image> Session::ModelPicture(const std::string& id)
+    {
+        if (!id.starts_with('@')) return {};
+        const std::filesystem::path named(id.substr(1));
+        const std::filesystem::path file = named.is_absolute() || Doc().Runtime().AssetDirectory().empty() ? named : Doc().Runtime().AssetDirectory() / named;
+        kasset::Key key("model thumbnail@1");
+        key.Add(kasset::ModelKey(file, {}).Text());
+        if (!key.Valid()) return {};
+        const std::string name = "model " + key.Text();
+        Thumbnails& thumbnails = ThumbnailsHere();
+        thumbnails.WantModel(name, file, key.Text());
+        return thumbnails.Of(name);
+    }
+
+    kor::ResourceRef<const kor::Image> Session::FilePicture(const std::filesystem::path& file)
+    {
+        kasset::Key key("picture thumbnail@1");
+        if (!key.AddFile(file)) return {};
+        const std::string name = "file " + key.Text();
+        Thumbnails& thumbnails = ThumbnailsHere();
+        thumbnails.WantFile(name, file, key.Text());
+        return thumbnails.Of(name);
+    }
+
     kor::ResourceRef<const kor::Image> Session::MaterialPicture(const std::string& id)
     {
-        // What it looks like: a default's values, or an asset's — physical, or the classic way.
-        Thumbnails::Look look;
-        std::string picture;
-        kasset::Key key("material thumbnail@1");
-        if (const Material* material = MaterialOf(id)) {
-            look.colour = { material->albedo[0], material->albedo[1], material->albedo[2], 1.f };
-            look.metallic = material->metallic;
-            look.roughness = material->roughness;
-            look.emission = { material->emission[0], material->emission[1], material->emission[2] };
-        } else if (const MaterialAsset* asset = Doc().MaterialAssetOf(id)) {
-            const auto value = [&](const char* field) -> const kgraph::Value* {
-                const auto at = std::ranges::find(asset->values, std::string(field), &std::pair<std::string, kgraph::Value>::first);
-                return at == asset->values.end() ? nullptr : &at->second;
-            };
-            const auto number = [&](const char* field, float& into) {
-                if (const kgraph::Value* held = value(field)) if (const double* n = held->Number()) into = static_cast<float>(*n);
-            };
-            const auto numbers = [&](const char* field, float* into, const int count) {
-                const kgraph::Value* held = value(field);
-                const auto* items = held ? held->Items() : nullptr;
-                if (!items) return false;
-                for (int c = 0; c < count && c < static_cast<int>(items->size()); ++c)
-                    if (const double* n = (*items)[static_cast<std::size_t>(c)].Number()) into[c] = static_cast<float>(*n);
-                return true;
-            };
-            float colour[3] { look.colour.x, look.colour.y, look.colour.z }, glow[3] { 0.f, 0.f, 0.f };
-            if (!numbers("baseColor", colour, 3)) numbers("diffuse", colour, 3);
-            numbers("emission", glow, 3);
-            look.colour = { colour[0], colour[1], colour[2], 1.f };
-            look.emission = { glow[0], glow[1], glow[2] };
-            number("metallic", look.metallic);
-            number("roughness", look.roughness);
-            if (const kgraph::Value* shininess = value("shininess"); shininess && shininess->Number())
-                look.roughness = std::sqrt(2.f / (static_cast<float>(*shininess->Number()) + 2.f));
-            for (const char* field : { "baseColorMap", "diffuseMap" })
-                if (const kgraph::Value* held = value(field); held && held->String() && !held->String()->empty() && *held->String() != "$white") picture = *held->String();
-        } else {
-            return {};
-        }
-        const std::string sphere = kgraph::DefaultMeshId("sphere");
-        const auto held = Doc().Runtime().ResourceOf(sphere);
+        auto shown = MaterialToShow(id);
+        if (!shown) return {};
+        const auto held = Doc().Runtime().ResourceOf(kgraph::DefaultMeshId("sphere"));
         if (!held) return {};
-        // Its picture, once it is read: what holds a stand-in is led on to it.
-        if (!picture.empty()) {
-            auto read = Doc().Runtime().ResourceOf(picture);
-            while (read && read->replacedBy) read = read->replacedBy;
-            if (!read || read->pending) return {};
-            look.picture = std::move(read);
-            const std::filesystem::path file = Doc().Runtime().AssetDirectory() / picture.substr(std::min<std::size_t>(1, picture.size()));
-            if (!picture.starts_with('@') || !key.AddFile(file)) key.Add(picture);
+        // By what it looks like: its kind, its values, the pictures they name and what shades them. Another of any of
+        // these is another picture; materials that look alike share one.
+        kasset::Key key("material thumbnail@3");
+        key.Add(shown->kind.name);
+        for (const auto& [field, value] : shown->values) {
+            key.Add(std::format("{}={}", field, value.ToJson()));
+            if (const std::string* name = value.String(); name && name->starts_with('@')) (void)key.AddFile(Doc().Runtime().AssetDirectory() / name->substr(1));
         }
-        // By what it looks like: another look is another picture, and materials that look alike share one.
-        key.Add(std::format("{} {} {} {} {} {} {} {}", look.colour.x, look.colour.y, look.colour.z, look.metallic, look.roughness, look.emission.x, look.emission.y, look.emission.z));
+        const std::filesystem::path package = kscript::PackageDirectory() / "shaders";
+        for (const char* file : { "koral_shading.slang", "koral_material_preview.slang" }) (void)key.AddFile(package / file);
+        if (const auto own = package / (shown->kind.name + "Shading.slang"); !key.AddFile(own)) (void)key.AddFile(ShadingModuleOf(shown->kind.name));
         const std::string name = "material " + key.Text();
         Thumbnails& thumbnails = ThumbnailsHere();
-        thumbnails.WantMaterial(name, held, std::move(look), key.Text());
+        thumbnails.WantMaterial(name, held, std::move(*shown), key.Text());
         return thumbnails.Of(name);
     }
 
