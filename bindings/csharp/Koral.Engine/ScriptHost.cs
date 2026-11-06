@@ -260,8 +260,44 @@ public sealed unsafe class ScriptHost : IDisposable
             if (_self.IsAllocated) _self.Free();
         }
 
+        /// <summary>What it starts over for, and each entity's bytes of it as the script last left them.</summary>
+        private ScriptLayout.Field[] Restarting => _restarting ??= Layout.Fields.Where(f => f.Reinitializes).ToArray();
+        private ScriptLayout.Field[]? _restarting;
+        private readonly Dictionary<Entity, byte[]> _seen = [];
+
+        private byte[] Watched(IntPtr data)
+        {
+            var bytes = new byte[Restarting.Sum(f => f.Size)];
+            var at = 0;
+            foreach (var field in Restarting)
+            {
+                Marshal.Copy(data + field.Offset, bytes, at, field.Size);
+                at += field.Size;
+            }
+            return bytes;
+        }
+
+        /// <summary>Something else changed what it starts over for: it goes, and is added again.</summary>
+        private void StartOverIfChanged(Entity entity, IntPtr data)
+        {
+            if (!_seen.TryGetValue(entity, out var last) || last.AsSpan().SequenceEqual(Watched(data))) return;
+            foreach (var hook in new[] { Setup.Hook.Disabled, Setup.Hook.Destroyed, Setup.Hook.Created, Setup.Hook.Enabled, Setup.Hook.Started })
+            {
+                var now = Native.kecs_get(world.Handle, entity, _component);
+                if (now is null) return;
+                Call(hook, entity, (IntPtr)now, 0f);
+            }
+        }
+
         private void Call(Setup.Hook hook, Entity entity, IntPtr data, float time)
         {
+            if (Restarting.Length > 0 && hook is Setup.Hook.Update or Setup.Hook.FixedUpdate)
+            {
+                StartOverIfChanged(entity, data);
+                var moved = Native.kecs_get(world.Handle, entity, _component);
+                if (moved is null) return;
+                data = (IntPtr)moved;
+            }
             if (!_instances.TryGetValue(entity, out var script))
             {
                 script = (Setup)Activator.CreateInstance(type)!;
@@ -281,10 +317,18 @@ public sealed unsafe class ScriptHost : IDisposable
                 if (_reported.Add(hook)) Log.Error($"[scripts] {Layout.Name}.{hook} threw on {entity}: {e}");
             }
             // What it did may have moved its data, or taken it away: found again before anything is put back.
-            if (hook == Setup.Hook.Destroyed) { _instances.Remove(entity); _generated.Remove(entity); return; }
+            if (hook == Setup.Hook.Destroyed) { _instances.Remove(entity); _generated.Remove(entity); _seen.Remove(entity); return; }
             var now = Native.kecs_get(world.Handle, entity, _component);
-            if (now is not null) Layout.Store(script, (IntPtr)now);
-            else _instances.Remove(entity);
+            if (now is not null)
+            {
+                Layout.Store(script, (IntPtr)now);
+                if (Restarting.Length > 0) _seen[entity] = Watched((IntPtr)now);
+            }
+            else
+            {
+                _instances.Remove(entity);
+                _seen.Remove(entity);
+            }
         }
 
         /// <summary>
@@ -499,10 +543,13 @@ public sealed unsafe class ScriptHost : IDisposable
     private IEnumerable<string> SourceFiles()
     {
         var package = Path.Combine(Native.PackageDirectory(), "scripts");
-        var own = !System.IO.Directory.Exists(Directory) ? [] :
-            System.IO.Directory.EnumerateFiles(Directory, "*.cs", SearchOption.AllDirectories)
+        static List<string> SourcesIn(string folder) => !System.IO.Directory.Exists(folder) ? [] :
+            System.IO.Directory.EnumerateFiles(folder, "*.cs", SearchOption.AllDirectories)
                 .Where(f => !f.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}") && !f.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}"))
                 .Order(StringComparer.Ordinal).ToList();
+        // The project's, and its modules': what a module has is the project's too.
+        var modules = (Native.Text(Native.kengine_module_scripts(_world.Document)) ?? "").Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        var own = SourcesIn(Directory).Concat(modules.SelectMany(SourcesIn)).ToList();
         if (own.Count == 0 || !System.IO.Directory.Exists(package)) return own;     // no scripts: nothing to run, the package's data being the engine's already
         return System.IO.Directory.EnumerateFiles(package, "*.cs").Order(StringComparer.Ordinal).Concat(own);
     }

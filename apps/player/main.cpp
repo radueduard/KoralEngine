@@ -1,6 +1,7 @@
 // Runs a Koral Engine project on its own: `koral-play <project folder | scene file> [--frames N] [--no-vsync] [--validate] [--timings]
 // [--capture <node>[:<output>] <file>] [--debug-view <node>]`: an image captured as a .ppm, a buffer (or any .bin) as its bytes.
-// The same scene, run by the same code, as the editor shows in its Scene panel.
+// The same scene, run by the same code, as the editor shows in its Scene panel — its project's scripts, in C# or in
+// Kotlin, run inside this program (khost), as they do in the editor.
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +20,9 @@
 #include <keditor/editor.h>
 #include <keditor/play.h>
 #include <keditor/project.h>
+#include <khost/scripts.h>
+
+#include <frames.h>
 
 int main(const int argc, char** argv)
 {
@@ -72,6 +76,7 @@ int main(const int argc, char** argv)
 #else
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
 #endif
+    khost::Scripts scripts;
     kor::App app(kor::AppSettings { .platform = platform });
     if (!project.directory.empty()) project.Use();
     auto play = std::make_unique<keditor::PlayScene>(scene);
@@ -79,15 +84,13 @@ int main(const int argc, char** argv)
     app.Open("Play", std::move(play), { .title = title, .vsync = vsync });
     if (!running->Error().empty()) { std::fprintf(stderr, "koral-play: %s\n", running->Error().c_str()); return 1; }
     if (!debugView.empty()) running->Doc().Runtime().ShowDebugView(debugView);
-    if (frames <= 0) return app.Run();
+    const auto document = [&]() -> keditor::Document* { return &running->Doc(); };
+    if (frames <= 0) { apps::RunFrames(app, scripts, document); return 0; }
     const auto began = std::chrono::steady_clock::now();
     // The last few hundred are timed apart: by then whatever the scene had to read from files is read.
     const long settled = std::max(frames - 300, 0L);
     auto settledAt = began;
-    for (long i = 0; i < frames; ++i) {
-        if (i == settled) settledAt = std::chrono::steady_clock::now();
-        app.Frame();
-    }
+    apps::RunFrames(app, scripts, document, frames, [&](const long i) { if (i == settled) settledAt = std::chrono::steady_clock::now(); });
     if (timings) {
         const double total = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
         const double last = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - settledAt).count() / static_cast<double>(frames - settled);

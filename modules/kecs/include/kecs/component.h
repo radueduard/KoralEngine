@@ -102,6 +102,14 @@ namespace kecs
         /// Whether a world saved has it: false for what is worked out again from what is saved — a tag a script's
         /// entities are given for what the script does — which a file would only repeat.
         bool saved = true;
+        /// The kinds it is one of, by name, nearest first: the abstract types it derives from — a PerspectiveCamera is a
+        /// Camera. An entity with it is of each of them: a query for the kind finds it, and the kind's fields are read
+        /// from it (World::Get with the kind's id is this one's value).
+        std::vector<std::string> kinds;
+        /// A kind: what no entity has itself, and an entity is of by having a component that is one of it (@ref kinds).
+        /// Its fields are where each of those has them — at the front, in the same places — so that its id reads them
+        /// from whichever of them an entity has. Not added, removed or saved; its size is of its fields alone.
+        bool abstract = false;
         std::vector<FieldDescription> fields;
         std::shared_ptr<const void> context;    ///< Whatever the operations need of a type made at run time.
 

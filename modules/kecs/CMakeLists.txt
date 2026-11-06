@@ -13,7 +13,8 @@ if(KORAL_ENGINE_BUILD_TESTS)
             tests/test_commands_hierarchy.cpp
             tests/test_reshape.cpp
             tests/test_serialize.cpp
-            tests/test_scale.cpp)
+            tests/test_scale.cpp
+            tests/test_kinds.cpp)
     target_link_libraries(kecs_tests PRIVATE kecs GTest::gtest GTest::gtest_main)
     gtest_discover_tests(kecs_tests DISCOVERY_MODE PRE_TEST)
 endif()

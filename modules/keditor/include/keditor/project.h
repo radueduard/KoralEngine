@@ -1,6 +1,8 @@
 //
 // keditor: a project on disk. A folder with `project.json`, its scenes under `scenes/` and its shaders under
-// `shaders/`.
+// `shaders/`. A project is a set of scenes, scripts, shaders, functions, objects, prefabs and assets; a module is the
+// same, minus the scenes — what it has is for the projects that import it, and its one scene, `test`, is only for
+// trying it out. A project, or a module, imports modules whose scripts are in its language: what they have is its too.
 //
 
 #pragma once
@@ -35,9 +37,18 @@ namespace keditor
          * `project.json` when it is not as it starts.
          */
         std::map<std::string, std::map<std::string, std::string>> importKinds;
+        /** A module: what it has is for the projects that import it, and its one scene is `test`. In `project.json` as `"kind": "module"`. */
+        bool module = false;
+        /** The modules it imports, each its folder from this one's (`../physics`), or whole. In `project.json` as `"modules"`. */
+        std::vector<std::string> modules;
 
-        /** @brief Makes a project in @p directory, which is made too: one empty scene, "main", and a `shaders` folder. */
-        static bool Create(const std::filesystem::path& directory, std::string name, Project& out, std::string& error);
+        /**
+         * @brief Makes a project in @p directory, which is made too: one empty scene, "main" — "test", for a module —
+         *        and a `shaders` folder. Its scripts are in @p language from the start (Language): 0 leaves that to its
+         *        first script. It imports @p modules (their folders: kept from this one's where they can be).
+         */
+        static bool Create(const std::filesystem::path& directory, std::string name, Project& out, std::string& error, char language = 0,
+                           bool module = false, const std::vector<std::filesystem::path>& modules = {});
         /** @brief Opens the project in @p directory, or the one a `project.json` given directly is of. */
         static bool Open(const std::filesystem::path& directory, Project& out, std::string& error);
         /** @brief Writes `project.json`. */
@@ -54,7 +65,20 @@ namespace keditor
         /** @brief "kotlin" or "csharp", from 'k' or 'c'; empty for anything else. */
         [[nodiscard]] static std::string LanguageName(char language);
         [[nodiscard]] std::filesystem::path ShaderDirectory() const { return directory / "shaders"; }
-        /** @brief Makes its shaders the ones found first: before a scene of it is loaded. */
+        /** @brief Makes its shaders the ones found first, then its modules': before a scene of it is loaded. */
         void Use() const;
+
+        /**
+         * @brief The modules it imports, and those they import, each once: the nearest first, in the order each says them.
+         *        One that is not there, is no module, or has its scripts in another language than this one is left out
+         *        and said in @p problems — as is one that imports, round about, what imports it.
+         */
+        [[nodiscard]] std::vector<Project> Imported(std::vector<std::string>* problems = nullptr) const;
+        /** @brief The folders of Imported: where what the modules have is. */
+        [[nodiscard]] std::vector<std::filesystem::path> ImportedDirectories(std::vector<std::string>* problems = nullptr) const;
+        /** @brief The modules found in @p folder, one level down: those a project made there is offered to import. */
+        [[nodiscard]] static std::vector<Project> ModulesIn(const std::filesystem::path& folder);
+        /** @brief @p module 's folder as this one keeps it: from its own folder where the two share a drive, or whole. */
+        [[nodiscard]] std::string Reference(const std::filesystem::path& module) const;
     };
 }

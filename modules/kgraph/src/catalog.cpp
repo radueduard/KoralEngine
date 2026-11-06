@@ -880,7 +880,7 @@ namespace kgraph
                     Port stride { "stride", PortKind::eValue, "number", false, "How many bytes an element is.", nullptr };
                     Port position { "position", PortKind::eValue, "number", false, "Where in an element its position is, in bytes: three floats, where the entity is relative to what it is under.", nullptr };
                     Port rotation { "rotation", PortKind::eValue, "number", false, "Where in an element its rotation is, in bytes: a quaternion of four floats, x y z w.", nullptr };
-                    Port fields { "fields", PortKind::eValue, "struct", false, "Fields of components it writes, by `Component.field`, each where it is in an element, in bytes: { \"RigidBody.velocity\": 32 }.", nullptr };
+                    Port fields { "fields", PortKind::eValue, "struct", false, "Fields of components it writes, by `Component.field`, each where it is in an element, in bytes: { \"Spin.velocity\": 32 }.", nullptr };
                     Port idle { "idle", PortKind::eValue, "number", false, "While not zero (or true), it writes nothing back: a simulation another runs, for now.", nullptr };
                     Port follows { "follows", PortKind::eValue, "number", false, "Where in an element a float says it follows its entity, in bytes: where it is not 0, the "
                                    "entity says where it is — a kinematic body a script moves — so it is not written back, nor taken as moved by something else.", nullptr };

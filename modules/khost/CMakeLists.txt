@@ -1,0 +1,22 @@
+# khost: a project's scripts run inside the program — .NET or a JVM started in its own process, as the project's
+# scripts are in C# or in Kotlin. What koral-editor and koral-play are linked with; the engine's library is not.
+add_library(khost STATIC src/scripts.cpp src/dotnet.cpp src/jvm.cpp src/platform.cpp)
+add_library(KoralEngine::khost ALIAS khost)
+target_include_directories(khost PUBLIC include)
+target_link_libraries(khost PUBLIC keditor kscript)
+if(NOT WIN32)
+    target_link_libraries(khost PRIVATE ${CMAKE_DL_LIBS})
+endif()
+# Kotlin, where there is a JDK to build with: its JNI headers, and it as the JVM looked for last.
+if(KORAL_ENGINE_JAVA_HOME AND EXISTS "${KORAL_ENGINE_JAVA_HOME}/include/jni.h")
+    if(WIN32)
+        set(KHOST_JNI_PLATFORM win32)
+    elseif(APPLE)
+        set(KHOST_JNI_PLATFORM darwin)
+    else()
+        set(KHOST_JNI_PLATFORM linux)
+    endif()
+    target_include_directories(khost PRIVATE "${KORAL_ENGINE_JAVA_HOME}/include" "${KORAL_ENGINE_JAVA_HOME}/include/${KHOST_JNI_PLATFORM}")
+    target_compile_definitions(khost PRIVATE KHOST_JNI KHOST_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}")
+endif()
+target_compile_options(khost PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>)

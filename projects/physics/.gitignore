@@ -1,0 +1,5 @@
+# What the editor and the script hosts write as the project is opened and run: made again from what is here.
+.koral/
+.vscode/
+cache/
+*.Scripts.csproj

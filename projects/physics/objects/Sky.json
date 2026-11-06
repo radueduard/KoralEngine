@@ -1,0 +1,8 @@
+{
+  "template": "Sky",
+  "icon": "cloud",
+  "name": "Sky",
+  "components": {
+    "Sky": { "zenith": [0.22, 0.42, 0.78], "horizon": [0.72, 0.8, 0.9], "ground": [0.23, 0.21, 0.19], "ambient": 0.35, "sunSize": 1.5 }
+  }
+}

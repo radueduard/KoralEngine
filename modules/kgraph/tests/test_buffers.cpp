@@ -50,7 +50,7 @@ namespace {
                 .Wire("field.color", "tinted").Set("field.kind", 1);
             buffer("light data", "lights").Wire("after", "lamp data").Wire("field.color", "spots", "field.color").Set("field.kind", 2)
                 .Set("field.cone", Value::List { 0.5, 0.25 });
-            graph.Add("eye", "Entity").Set("component", "Camera");
+            graph.Add("eye", "Entity").Set("component", "PerspectiveCamera");
             graph.Add("camera", "View").Wire("position", "eye", "worldPosition").Set("main", true);
             graph.Add("lens", "Perspective").Set("main", true).Wire("fieldOfView", "eye", "field.fieldOfView");
             graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");

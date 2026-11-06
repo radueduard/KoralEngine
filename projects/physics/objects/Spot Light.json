@@ -1,0 +1,10 @@
+{
+  "template": "Spot Light",
+  "icon": "flashlight_on",
+  "name": "Spot Light",
+  "position": [0, 3, 0],
+  "rotation": [-90, 0, 0],
+  "components": {
+    "SpotLight": { "color": [1, 1, 1], "intensity": 3, "range": 8, "innerAngle": 20, "outerAngle": 30 }
+  }
+}

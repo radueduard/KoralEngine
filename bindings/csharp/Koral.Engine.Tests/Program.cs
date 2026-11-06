@@ -56,6 +56,18 @@ Write("Roller.cs", """
         }
     }
     """);
+Write("Restarter.cs", """
+    // Starts over when its size is changed, and not for what else changes.
+    public sealed class Restarter : Setup, PerFrame
+    {
+        [Reinitialize] public int Size;
+        public int Other, Made, Gone, MadeOf, Kept;
+        private int _frames;
+        protected override void Initialize() { ++Made; MadeOf = Size; }
+        protected override void OnDestroyed() { World.Set(Entity, "Restarter", "Gone", Gone + 1); }
+        public void Update(float delta) { Kept = ++_frames; if (Other == 7) Size = 99; }
+    }
+    """);
 Write("Spin.cs", """
     public sealed class Spin : Script
     {
@@ -152,15 +164,19 @@ Write("Watcher.cs", """
     """);
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
-// The project's, and the engine's package's: compiled with them, so that a script reads a light as it reads its own.
-Check(host.Scripts.Order().SequenceEqual(["Camera", "Checker", "DirectionalLight", "Feeder", "Instancer", "PointLight", "Pyramid", "Roller", "Sky", "Spin", "SpotLight", "Watcher"]),
-      $"each is a script, the package's among them: {string.Join(", ", host.Scripts)}");
+// The project's: the engine's package is compiled with them, so that a script reads a light as it reads its own, but
+// its cameras, lights and sky are Data, which no host runs.
+Check(host.Scripts.Order().SequenceEqual(["Checker", "Feeder", "Pyramid", "Restarter", "Roller", "Spin", "Watcher"]),
+      $"each is a script, and the package's data none: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 {
-    // Registered by the host, a package's component still starts as its source says: the engine read it first.
+    // A package's Data starts as its source says, the engine having read it: its own fields and its kinds'.
     var lamp = world.Create("Lamp");
     Check(world.Add(lamp, "PointLight"), "a point light is a component");
     Check(world.FieldJson(lamp, "PointLight", "range") == "5", $"it starts as its source says: {world.FieldJson(lamp, "PointLight", "range")}");
+    Check(world.FieldJson(lamp, "PointLight", "intensity") == "1", $"with what its kind, Light, says: {world.FieldJson(lamp, "PointLight", "intensity")}");
+    Check(!world.Add(lamp, "Light"), "a kind is had by no entity itself");
+    Check(world.With("Light").Contains(lamp) && world.With("LocalLight").Contains(lamp), "and is found by each of its kinds");
     world.Destroy(lamp);
 }
 
@@ -236,6 +252,30 @@ var wheel = world.Create("Wheel");
     Check(world.ToJson().Contains("\"name\": \"Car\""), "and the scene's file has it");
     world.Destroy(car);
 }
+// What Initialize reads, changed from outside: the script starts over, a new object, once. Nothing else does that.
+{
+    var restarted = world.Create("Restarted");
+    Check(world.Add(restarted, "Restarter"), "an entity is given a script that starts over");
+    int Field(string name) => int.Parse(world.FieldJson(restarted, "Restarter", name));
+    Frames(3);
+    Check(Field("Made") == 1, "initialized once");
+    world.Set(restarted, "Restarter", "Size", 5);
+    Frames(1);
+    Check(Field("Made") == 2, "changed: initialized again");
+    Check(Field("Gone") == 1, "what the old one held let go of first");
+    Check(Field("MadeOf") == 5, "and of what it is now");
+    Check(Field("Kept") == 1, "a new object: nothing private is left of the old");
+    Frames(3);
+    Check(Field("Made") == 2, "once for a change, not once a frame");
+    world.Set(restarted, "Restarter", "Other", 3);
+    Frames(2);
+    Check(Field("Made") == 2, "a field not marked starts nothing over");
+    world.Set(restarted, "Restarter", "Other", 7);
+    Frames(3);
+    Check(Field("Size") == 99 && Field("Made") == 2, "and what the script changes itself is its own to do");
+    world.Destroy(restarted);
+}
+
 Check(world.Add(wheel, "Spin"), "an entity is given a script");
 world.Set(wheel, "Spin", "Speed", 2);
 world.Set(wheel, "Spin", "Angle", 10);

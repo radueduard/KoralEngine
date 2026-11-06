@@ -42,3 +42,15 @@ tasks.test {
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
 }
+
+// Kotlin's compiler, as the engine's programs have it: what the scripts are compiled with in the process.
+val kotlinCompiler by configurations.creating
+dependencies { kotlinCompiler("org.jetbrains.kotlin:kotlin-compiler-embeddable:${org.jetbrains.kotlin.gradle.plugin.getKotlinPluginVersion(logger)}") }
+val compilerJars = tasks.register<Sync>("compilerJars") {
+    from(kotlinCompiler)
+    into(layout.buildDirectory.dir("compiler"))
+}
+tasks.test {
+    dependsOn(compilerJars)
+    systemProperty("koral.engine.test.compiler", layout.buildDirectory.dir("compiler").get().asFile.absolutePath)
+}

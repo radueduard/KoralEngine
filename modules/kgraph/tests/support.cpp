@@ -1,12 +1,47 @@
 #include "support.h"
 
+#include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <format>
 #include <stdexcept>
+#include <system_error>
+
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 
 #include <gtest/gtest.h>
 
 namespace {
+    /**
+     * A temporary folder of this program's own, before anything asks for one: what is generated where there is no
+     * project — material modules, the editor's own shaders, the folders tests make — is written there. Run side by side
+     * (`ctest -j`), two programs would otherwise write the same files at once, and each read what the other half wrote.
+     * Gone when the program ends.
+     */
+    const std::filesystem::path s_temporary = [] {
+        std::error_code ignored;
+#ifdef _WIN32
+        const int id = _getpid();
+#else
+        const int id = static_cast<int>(getpid());
+#endif
+        const std::filesystem::path folder = std::filesystem::temp_directory_path(ignored) / "koral-tests" / std::to_string(id);
+        std::filesystem::remove_all(folder, ignored);       // one a program of this id left
+        std::filesystem::create_directories(folder, ignored);
+#ifdef _WIN32
+        _putenv_s("TMP", folder.string().c_str());
+        _putenv_s("TEMP", folder.string().c_str());
+#else
+        setenv("TMPDIR", folder.c_str(), 1);
+#endif
+        std::atexit([] { std::error_code gone; std::filesystem::remove_all(s_temporary, gone); });
+        return folder;
+    }();
+
     std::unique_ptr<kor::App> s_app;
     std::string s_reason = "no device";
 

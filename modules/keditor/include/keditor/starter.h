@@ -38,18 +38,10 @@ namespace keditor
     std::vector<std::string> WriteStandardObjects(const std::filesystem::path& directory);
 
     /**
-     * @brief Gives a project what its Kotlin scripts are built and run with: a Gradle build at its root whose sources
-     *        are its `scripts` folder, with `play` and `edit` tasks, and a `gradle.properties` saying where this
-     *        machine's SDK, engine and JDK are. A file that is there is left as it is, but for gradle.properties,
-     *        which is this machine's and is written again. What was written, by name.
-     */
-    std::vector<std::string> WriteKotlinBuild(const std::filesystem::path& project, const std::string& name);
-
-    /**
      * @brief Gives a project what an editor of code needs to know it — Visual Studio Code, by what it reads: where a
      *        shader's `import` is looked for, which extensions its files want, and for C# scripts a project file
      *        naming the engine's own assemblies, so that a script is written with the engine's names offered and
-     *        checked. (Kotlin scripts have that of the Gradle build, WriteKotlinBuild.) What says where this
+     *        checked. What says where this
      *        machine's engine is is written again each time; the rest only where there is none. What was written.
      */
     std::vector<std::string> WriteEditorSetup(const std::filesystem::path& project, const std::string& name);

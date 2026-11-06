@@ -17,9 +17,10 @@ import koral.interop.Native as Koral
  * A project's scripts, running in a scene: every [Script] class among the compiled classes of a folder, registered
  * with the engine as a component, and all of them loaded again when they change.
  *
- * Kotlin is compiled by a build, not by this: [classes] is where the build writes its `.class` files. Given the
- * [sources] and the [compile] command that builds them, [poll] runs the command when a source is saved, and loads
- * what it made. Given neither, it watches [classes] for an IDE or a continuous build to write into.
+ * Given the [sources] and a [compiler] — Kotlin's own, in this process, as the engine's programs have it — [poll]
+ * compiles them on a thread of its own when a source is saved, each build into a folder of its own under [classes],
+ * and loads it once it is done. Given a [compile] command instead, it runs that and loads what it wrote into
+ * [classes]. Given neither, it watches [classes] for an IDE or a continuous build to write into.
  *
  * The data is the engine's, so it stays across a reload: each entity keeps the properties whose name and type are
  * the same, a new property starts at zero, and a script that was started is not started again. Scripts that do not
@@ -31,8 +32,22 @@ class ScriptHost(
     val sources: Path? = null,
     val compile: List<String>? = null,
     private val parent: ClassLoader = ScriptHost::class.java.classLoader,
+    /**
+     * What compiles [sources] in this process instead, on a thread of its own, so that frames carry on as it does: each
+     * build into a folder of its own under [classes], loaded once it is done. A build of the sources as they are is
+     * not made again: the one from before is loaded at once.
+     */
+    val compiler: ScriptCompiler? = null,
 ) : AutoCloseable {
     private var loader: URLClassLoader? = null
+    /** Where the classes being run are: [classes], or with a [compiler], its last build that succeeded. */
+    private var current: Path = classes
+    private var compiling: java.util.concurrent.Future<Built>? = null
+    private var compileAgain = false
+    private var closed = false
+
+    /** A build of the [compiler]'s: where it went, of the sources as they were, and what was wrong when it failed. */
+    private class Built(val into: Path, val sources: String, val errors: List<String>?)
     private val registered = LinkedHashMap<String, Registered>()
     private val resources = LinkedHashMap<String, RegisteredResource>()
     private var snapshot = ""
@@ -58,20 +73,97 @@ class ScriptHost(
     /** Builds (when there is a command to) and registers the scripts. False, with [errors], when that fails. */
     fun load(): Boolean {
         snapshot = snapshot()
+        if (compiler != null) {
+            // Built already, of the sources as they are: loaded now. Otherwise built, and loaded once it is.
+            val stamp = classes.resolve("built")
+            val kept = runCatching { Files.readString(stamp) }.getOrNull()?.split('\n', limit = 2)
+            if (kept != null && kept.size == 2 && kept[1] == snapshot && Files.isDirectory(classes.resolve(kept[0]))) {
+                current = classes.resolve(kept[0])
+                return reload()
+            }
+            startCompile()
+            return true
+        }
         return reload()
+    }
+
+    /** Whether the [compiler] is building the scripts now. */
+    val isCompiling: Boolean get() = compiling != null
+
+    /** Waits for the build the [compiler] is making, and loads it: what a test, or a program on its last frame, does. */
+    fun awaitCompile(): Boolean {
+        val running = compiling ?: return false
+        compiling = null
+        return applyBuild(running.get())
+    }
+
+    private fun startCompile() {
+        val compiler = compiler ?: return
+        if (compiling != null) { compileAgain = true; return }
+        val sources = snapshot()
+        val into = classes.resolve("b" + java.lang.Long.toString(System.currentTimeMillis(), 36))
+        Log.info("[scripts] compiling...")
+        compiling = compileThread.submit<Built> {
+            val errors = try {
+                Files.createDirectories(into)
+                compiler.compile(into)
+            } catch (e: Throwable) {
+                listOf("the compiler failed: $e")
+            }
+            Built(into, sources, errors)
+        }
+    }
+
+    private fun applyBuild(built: Built): Boolean {
+        if (closed) return false
+        val ok = if (built.errors != null) {
+            errors = built.errors
+            Log.error("[scripts] they did not compile; what was running carries on.\n" + built.errors.joinToString("\n"))
+            deleteBuild(built.into)
+            false
+        } else {
+            val before = current
+            current = built.into
+            if (reload()) {
+                runCatching { Files.writeString(classes.resolve("built"), built.into.fileName.toString() + "\n" + built.sources) }
+                // What earlier builds left: gone, now that nothing loads from them.
+                runCatching {
+                    Files.list(classes).use { all -> all.filter { Files.isDirectory(it) && it != current }.toList() }.forEach { deleteBuild(it) }
+                }
+                true
+            } else {
+                current = before
+                deleteBuild(built.into)
+                false
+            }
+        }
+        if (compileAgain) { compileAgain = false; startCompile() }
+        return ok
+    }
+
+    private fun deleteBuild(folder: Path) {
+        runCatching {
+            Files.walk(folder).use { files -> files.sorted(Comparator.reverseOrder()).toList() }.forEach { Files.deleteIfExists(it) }
+        }
     }
 
     /** Between frames: loads the scripts again when the files changed and have settled. True when it did. */
     fun poll(): Boolean {
+        compiling?.let { running ->
+            if (!running.isDone) return@let
+            compiling = null
+            return applyBuild(running.get())
+        }
         val now = System.nanoTime() / 1_000_000
         if (now - lastPoll < pollInterval) return false
         lastPoll = now
-        val current = snapshot()
-        if (current == snapshot) { pending = ""; return false }
-        if (current != pending) { pending = current; pendingSince = now; return false }
+        val seen = snapshot()
+        if (seen == snapshot) { pending = ""; return false }
+        if (seen != pending) { pending = seen; pendingSince = now; return false }
         if (now - pendingSince < settleTime) return false
-        snapshot = current
+        snapshot = seen
         pending = ""
+        if (compiler != null) { startCompile(); return false }
         return reload().also { if (compile != null) snapshot = snapshot() }
     }
 
@@ -85,7 +177,7 @@ class ScriptHost(
                 return false
             }
         }
-        val next = ScriptLoader(classes, parent)
+        val next = ScriptLoader(current, parent)
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
@@ -147,6 +239,7 @@ class ScriptHost(
     }
 
     override fun close() {
+        closed = true
         registered.values.forEach { it.unregister() }
         registered.clear()
         resources.values.forEach { it.unregister() }
@@ -170,17 +263,17 @@ class ScriptHost(
     }
 
     private fun classNames(): List<String> {
-        if (!Files.isDirectory(classes)) return emptyList()
-        return Files.walk(classes).use { files ->
+        if (!Files.isDirectory(current)) return emptyList()
+        return Files.walk(current).use { files ->
             files.filter { it.toString().endsWith(".class") }
-                .map { classes.relativize(it).toString().removeSuffix(".class").replace(java.io.File.separatorChar, '.') }
+                .map { current.relativize(it).toString().removeSuffix(".class").replace(java.io.File.separatorChar, '.') }
                 .filter { '$' !in it }      // a lambda's, an inner class's: none is a script by itself
                 .sorted().toList()
         }
     }
 
     private fun snapshot(): String {
-        val watched = sources?.takeIf { compile != null } ?: classes
+        val watched = sources?.takeIf { compile != null || compiler != null } ?: classes
         if (!Files.isDirectory(watched)) return ""
         return Files.walk(watched).use { files ->
             files.filter { Files.isRegularFile(it) && (it.toString().endsWith(".kt") || it.toString().endsWith(".class")) }
@@ -286,7 +379,39 @@ class ScriptHost(
             }
         }
 
-        fun call(hook: Hook, entity: Entity, data: MemorySegment, time: Float) {
+        /** The bytes of what it starts over for, and each entity's as the script last left them. */
+        private val restarting = layout.properties.filter { it.reinitializes }
+        private val seen = HashMap<Entity, ByteArray>()
+
+        private fun watched(data: MemorySegment): ByteArray {
+            val bytes = data.reinterpret(maxOf(layout.size, 1).toLong())
+            val out = ByteArray(restarting.sumOf { it.size })
+            var at = 0
+            for (p in restarting) {
+                MemorySegment.copy(bytes, java.lang.foreign.ValueLayout.JAVA_BYTE, p.offset.toLong(), out, at, p.size)
+                at += p.size
+            }
+            return out
+        }
+
+        private fun dataOf(entity: Entity): MemorySegment? = Scratch.use { a ->
+            val now = Native.kecs_get.invokeExact(world.handle, Native.entity(a, entity), component) as MemorySegment
+            if (now == MemorySegment.NULL) null else now
+        }
+
+        /** Something else changed what it starts over for: it goes, and is added again. */
+        private fun startOverIfChanged(entity: Entity, data: MemorySegment) {
+            val last = seen[entity] ?: return
+            if (last.contentEquals(watched(data))) return
+            for (hook in listOf(Hook.Disabled, Hook.Destroyed, Hook.Created, Hook.Enabled, Hook.Started)) call(hook, entity, dataOf(entity) ?: return, 0f)
+        }
+
+        fun call(hook: Hook, entity: Entity, given: MemorySegment, time: Float) {
+            var data = given
+            if (restarting.isNotEmpty() && (hook == Hook.Update || hook == Hook.FixedUpdate)) {
+                startOverIfChanged(entity, data)
+                data = dataOf(entity) ?: return
+            }
             val script = instances.getOrPut(entity) {
                 type.getDeclaredConstructor().newInstance().also { it.entity = entity; it.world = world }
             }
@@ -311,11 +436,14 @@ class ScriptHost(
                 if (reported.add(hook)) Log.error("[scripts] ${layout.name}.$hook threw on $entity: ${e.stackTraceToString()}")
             }
             // What it did may have moved its data, or taken it away: found again before anything is put back.
-            if (hook == Hook.Destroyed) { instances.remove(entity); generated.remove(entity); return }
+            if (hook == Hook.Destroyed) { instances.remove(entity); generated.remove(entity); seen.remove(entity); return }
             Scratch.use { a ->
                 val now = Native.kecs_get.invokeExact(world.handle, Native.entity(a, entity), component) as MemorySegment
-                if (now == MemorySegment.NULL) instances.remove(entity)
-                else layout.store(script, now.reinterpret(maxOf(layout.size, 1).toLong()))
+                if (now == MemorySegment.NULL) { instances.remove(entity); seen.remove(entity) }
+                else {
+                    layout.store(script, now.reinterpret(maxOf(layout.size, 1).toLong()))
+                    if (restarting.isNotEmpty()) seen[entity] = watched(now)
+                }
             }
         }
     }

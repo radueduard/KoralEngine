@@ -1,7 +1,7 @@
 #include <keditor/editor.h>
+#include <keditor/scripting.h>
 #include <keditor/viewer.h>
 
-#include "physics.h"
 
 #include <kasset/import.h>
 #include <kasset/parameters.h>
@@ -34,6 +34,10 @@
 #include <cerrno>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#ifdef _WIN32
+// Where this program is, for the player beside it: declared as Windows has it, rather than all of windows.h here.
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void* module, wchar_t* path, unsigned long size);
 #endif
 #include <builderDescriptions.h>
 #include <koralUI.h>
@@ -101,12 +105,23 @@ namespace keditor
         ++_changes;
     }
 
-    bool Session::NewProject(const std::filesystem::path& directory)
+    bool Session::NewProject(const std::filesystem::path& directory, const char language, const bool module, const std::vector<std::filesystem::path>& modules)
     {
         if (_prefab) ClosePrefab(true);
         std::string error;
         Project project;
-        if (!Project::Create(directory, directory.filename().string(), project, error)) { Say(error, true); return false; }
+        // What it imports is in its language: one in another would run nowhere.
+        for (const auto& folder : modules) {
+            Project imported;
+            if (!Project::Open(folder, imported, error)) { Say(error, true); return false; }
+            if (!imported.module) { Say(std::format("{} is a project, not a module: only a module is imported.", imported.name), true); return false; }
+            if (const char theirs = imported.Language(); theirs != 0 && language != 0 && theirs != language) {
+                Say(std::format("{}'s scripts are in {}, and these are to be in {}: what is imported is in the same language.", imported.name,
+                                theirs == 'k' ? "Kotlin" : "C#", language == 'k' ? "Kotlin" : "C#"), true);
+                return false;
+            }
+        }
+        if (!Project::Create(directory, directory.filename().string(), project, error, language, module, modules)) { Say(error, true); return false; }
         // A new project has nothing in it: not the scene of the project that was open when it was made. Only a scene
         // that was in no project yet — made here, and not saved anywhere — goes into it: this is where it is saved.
         const bool another = _hasProject;
@@ -116,8 +131,6 @@ namespace keditor
         _project.Use();
         WriteStandardObjects(_project.directory / "objects");
         WriteEditorSetup(_project.directory, _project.name);
-        LoadObjects();
-        ScanAssets();
         if (another) {
             Look({});
             _play.New();
@@ -125,8 +138,49 @@ namespace keditor
             selectedEntity = kecs::NullEntity;
             _pass.clear();
         }
+        // Its folder, and what it imports: their scripts' components, objects and assets are its from the start.
         Doc().SetAssetDirectory(_project.directory / "assets");
+        Doc().DeclareScripts(_project.directory / "scripts");
+        LoadObjects();
+        ScanAssets();
         return Save();
+    }
+
+    bool Session::ImportModule(const std::filesystem::path& folder)
+    {
+        if (!_hasProject) { Say("A module is imported into a project: File, New project.", true); return false; }
+        Project module;
+        std::string error;
+        if (!Project::Open(folder, module, error)) { Say(error, true); return false; }
+        if (!module.module) { Say(std::format("{} is a project, not a module: only a module is imported.", module.name), true); return false; }
+        if (std::filesystem::equivalent(module.directory, _project.directory)) { Say("A module does not import itself.", true); return false; }
+        if (const char theirs = module.Language(), ours = _project.Language(); theirs != 0 && ours != 0 && theirs != ours) {
+            Say(std::format("{}'s scripts are in {}, and {}'s are in {}: what is imported is in the same language.", module.name,
+                            theirs == 'k' ? "Kotlin" : "C#", _project.name, ours == 'k' ? "Kotlin" : "C#"), true);
+            return false;
+        }
+        const std::string reference = _project.Reference(module.directory);
+        if (std::ranges::contains(_project.modules, reference)) { Say(std::format("{} imports {} already.", _project.name, module.name)); return true; }
+        _project.modules.push_back(reference);
+        return ModulesChanged(std::format("{} imports {}: its scripts, shaders, functions, objects and assets are {}'s too.", _project.name, module.name, _project.name));
+    }
+
+    bool Session::ForgetModule(const std::string& reference)
+    {
+        if (!_hasProject || std::erase(_project.modules, reference) == 0) return false;
+        return ModulesChanged(std::format("{} no longer imports {}.", _project.name, std::filesystem::path(reference).filename().string()));
+    }
+
+    bool Session::ModulesChanged(const std::string& said)
+    {
+        std::string error;
+        if (!_project.Save(error)) { Say(error, true); return false; }
+        _project.Use();
+        Doc().ReloadModules();
+        LoadObjects();
+        ScanAssets();
+        Say(said);
+        return true;
     }
 
     bool Session::OpenProject(const std::filesystem::path& directory)
@@ -148,7 +202,6 @@ namespace keditor
         WriteEditorSetup(_project.directory, _project.name);
         LoadObjects();
         if (ScanAssets()) Say(std::format("Opened {}.", _project.name));     // or what was wrong of its assets is what the status says
-        _handingOver = handOver;    // over to its scripts' runner, if it has scripts: between frames, not in the middle of one
         return true;
     }
 
@@ -165,17 +218,11 @@ namespace keditor
 
     namespace {
 
-        /** A command's word, quoted for a shell. */
-        std::string Quoted(const std::string& text) { return "\"" + text + "\""; }
-
-        /** A command's start that gives what it runs @p name, @p value: as sh says it, or as cmd does on Windows. */
-        std::string WithVariable(const std::string_view name, const std::string& value)
+        /** Whether @p component is a camera: the Camera kind of the engine's package, or one of it — a PerspectiveCamera, an OrthographicCamera. */
+        bool IsCamera(const kecs::World& world, const std::string_view component)
         {
-#ifdef _WIN32
-            return std::format("set \"{}={}\" && ", name, value);
-#else
-            return std::format("{}={} ", name, Quoted(value));
-#endif
+            const kecs::ComponentId camera = world.Find("Camera"), id = world.Find(component);
+            return component == "Camera" || (camera != kecs::NoComponent && id != kecs::NoComponent && world.IsOf(id, camera));
         }
 
         /** Whether two folders are the same one, however they are written. */
@@ -193,88 +240,59 @@ namespace keditor
             return (config && *config ? std::filesystem::path(config) : std::filesystem::path(home && *home ? home : ".") / ".config") / "koral-engine";
         }
 
-        /** Says, to the editor about to be started, which project this one handed over: it does not hand it over again. */
-        constexpr const char* HandedOver = "KORAL_ENGINE_HANDED_OVER";
-
         /** Which language a project's scripts are in: 'k', 'c', or 0 when it has none. */
         char ScriptLanguage(const Project& project) { return project.Language(); }
-    }
-
-    std::string ScriptRunner(const Project& project, const bool edit)
-    {
-        const std::string folder = project.directory.string();
-        switch (ScriptLanguage(project)) {
-        case 'k': {
-            // The project's own build, which wants a JDK to start with: this build's, when none is said.
-            const char* java = std::getenv("JAVA_HOME");
-            const std::string home = (java && *java) || std::string_view(KEDITOR_JAVA_HOME).empty() ? std::string() : WithVariable("JAVA_HOME", KEDITOR_JAVA_HOME);
-#ifdef _WIN32
-            const std::filesystem::path gradlew = project.directory / "gradlew.bat";
-#else
-            const std::filesystem::path gradlew = project.directory / "gradlew";
-#endif
-            return std::format("{}{} -p {} -q {}", home, Quoted(gradlew.string()), Quoted(folder), edit ? "edit" : "play");
-        }
-        case 'c': {
-            const char* sdk = std::getenv("KORAL_SDK");
-            const std::string where = sdk && *sdk ? std::string() : WithVariable("KORAL_SDK", KEDITOR_SDK);
-            return std::format("{}{} {}{}", where, Quoted(KEDITOR_DOTNET_RUNNER), Quoted(folder), edit ? " --edit" : "");
-        }
-        default: return {};
-        }
-    }
-
-    std::optional<int> RunThroughScripts(const Project& project)
-    {
-        const std::string command = ScriptRunner(project, true);
-        if (command.empty()) return std::nullopt;
-        // The runner that is started opens the editor with them, and says so: it is not handed over again.
-        if (const char* was = std::getenv(HandedOver); was && Same(was, project.directory)) return std::nullopt;
-        if (ScriptLanguage(project) == 'k') WriteKotlinBuild(project.directory, project.name);    // this build of the engine
-#ifdef _WIN32
-        _putenv_s(HandedOver, project.directory.string().c_str());
-        return std::system(command.c_str());
-#else
-        setenv(HandedOver, project.directory.c_str(), 1);
-        // A process of its own, in this one's terminal: what it says is said here, and this one ends when it does.
-        const pid_t child = fork();
-        if (child < 0) return std::nullopt;
-        if (child == 0) {
-            execl("/bin/sh", "sh", "-c", command.c_str(), static_cast<char*>(nullptr));
-            _exit(127);
-        }
-        int status = 0;
-        while (waitpid(child, &status, 0) < 0 && errno == EINTR) {}
-        return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-#endif
     }
 
     std::string Session::RunCommand() const
     {
         if (!_hasProject) return {};
-        if (const std::string scripted = ScriptRunner(_project, false); !scripted.empty()) return scripted;
-        // The player that was built with this editor: beside it. Failing that, whichever is found by name.
-        std::filesystem::path player = "koral-play";
+        // The player that was built with this editor: beside it. Failing that, whichever is found by name. It runs the
+        // project's scripts itself, as this editor does.
+#ifdef _WIN32
+        const char* name = "koral-play.exe";
+        wchar_t self[4096];
+        const unsigned long length = GetModuleFileNameW(nullptr, self, static_cast<unsigned long>(std::size(self)));
+        const std::filesystem::path here = length > 0 ? std::filesystem::path(std::wstring(self, length)).parent_path() : std::filesystem::path();
+#else
+        const char* name = "koral-play";
+        std::error_code ignored;
+        const std::filesystem::path here = std::filesystem::read_symlink("/proc/self/exe", ignored).parent_path();
+#endif
         std::error_code ec;
-        if (const auto self = std::filesystem::read_symlink("/proc/self/exe", ec); !ec && std::filesystem::exists(self.parent_path() / "koral-play", ec))
-            player = self.parent_path() / "koral-play";
+        const std::filesystem::path player = !here.empty() && std::filesystem::exists(here / name, ec) ? here / name : std::filesystem::path(name);
         return std::format("\"{}\" \"{}\"", player.string(), _project.directory.string());
     }
 
-    std::string Session::EditCommand() const { return _hasProject ? ScriptRunner(_project, true) : std::string(); }
+    const std::vector<kscript::ScriptType>& Session::ProjectScriptTypes()
+    {
+        if (!_hasProject) { _scriptFiles.clear(); _scriptTypes.clear(); return _scriptTypes; }
+        // Those of the project's language: one in another runs nowhere, which is a problem of its own.
+        const char* ending = ScriptLanguage(_project) == 'k' ? ".kt" : ".cs";
+        std::error_code ignored;
+        std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> files;
+        std::vector<std::filesystem::path> folders { _project.directory / "scripts" };     // its own, and its modules': a class may derive from one of theirs
+        for (const auto& module : Doc().Modules()) folders.push_back(module / "scripts");
+        for (const auto& folder : folders)
+        for (const auto& entry : std::filesystem::directory_iterator(folder, ignored))
+            if (entry.path().extension() == ending) files.emplace_back(entry.path(), std::filesystem::last_write_time(entry.path(), ignored));
+        std::ranges::sort(files);
+        if (files != _scriptFiles) {
+            _scriptFiles = std::move(files);
+            std::vector<std::filesystem::path> paths;
+            for (const auto& file : _scriptFiles) paths.push_back(file.first);
+            _scriptTypes = kscript::DeclareFiles(paths).types;
+        }
+        return _scriptTypes;
+    }
 
     std::vector<std::string> Session::ScriptsNotRunning()
     {
+        // What is to be run is what the sources declare that is no Data: a file of Data, or of plain classes a script
+        // uses, has nothing of its own to run.
         std::vector<std::string> idle;
-        if (!_hasProject) return idle;
-        const char* ending = ScriptLanguage(_project) == 'k' ? ".kt" : ".cs";   // those in another language run nowhere: a problem of their own
-        std::error_code ignored;
-        for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "scripts", ignored)) {
-            if (entry.path().extension() != ending) continue;
-            // A script is a component by its class's name, which the editor's own are named for their file. A material
-            // kind is data, read from its file: there is nothing of it to run.
-            if (const std::string name = entry.path().stem().string(); !Doc().Scripts().Registered(name) && !Doc().Runtime().MaterialKindOf(name)) idle.push_back(name);
-        }
+        for (const auto& type : ProjectScriptTypes())
+            if (!type.data && !Doc().Scripts().Registered(type.name)) idle.push_back(type.name);
         std::ranges::sort(idle);
         return idle;
     }
@@ -296,55 +314,28 @@ namespace keditor
             for (const auto& file : _project.ScriptsInAnotherLanguage())
                 problems.push_back({ std::format("scripts/{}: the project's scripts are in {}, and this one is not. Nothing runs it.", file.filename().string(),
                                                  _project.Language() == 'k' ? "Kotlin" : "C#") });
-            // Scripts that are in the project and that nothing is running.
+            // Scripts that are in the project and that nothing is running: why, as this program has it.
             if (const auto idle = ScriptsNotRunning(); !idle.empty()) {
                 std::string names;
                 for (const auto& name : idle) names += std::format("{}{}", names.empty() ? "" : ", ", name);
-                problems.push_back({ std::format("Nothing is running the project's scripts ({}): this editor was started without them. Press this, or Project, Open with its scripts.", names) });
+                std::string why;
+                problems.push_back({ HostsScripts(&why)
+                    ? std::format("Not running: {}. They did not compile, or are being compiled: the log says which.", names)
+                    : std::format("Nothing is running the project's scripts ({}): {}.", names, why) });
             }
         }
         for (const auto& note : Doc().Notes()) problems.push_back({ note, {}, true });
         return problems;
     }
 
-    bool Session::ReopenWithScripts()
+    bool Session::HostsScripts(std::string* why) const
     {
-        if (_prefab) ClosePrefab(true);         // the scene is what changes: the prefab saved, and the scene back, first
-        const std::string command = EditCommand();
-        if (command.empty()) { Say("The project has no scripts: there is nothing more to open it with.", true); return false; }
-        if (InPlayMode()) Stop();
-        if (Doc().Dirty() && !Save()) return false;
-        if (!launch && handOverOnExit) {
-            // The program goes to the runner once this window is closed, in its terminal: RunThroughScripts.
-            handOverPending = _project.directory;
-            Say("Opening again with the project's scripts...");
-            if (quit) quit(); else kor::App::Current().Quit();
-            return true;
-        }
-        if (ScriptLanguage(_project) == 'k') WriteKotlinBuild(_project.directory, _project.name);    // this build of the engine
-#ifdef _WIN32
-        _putenv_s(HandedOver, _project.directory.string().c_str());
-        // A cmd of its own, as the command may be more than one (WithVariable's `set ... &&`): /s keeps its quotes.
-        const std::string detached = "start \"\" cmd /s /c \"" + command + "\"";
-#else
-        setenv(HandedOver, _project.directory.c_str(), 1);
-        const std::string detached = "(" + command + ") >/dev/null 2>&1 &";
-#endif
-        if (!(launch ? launch(command) : std::system(detached.c_str()) == 0)) { Say("The editor could not be started again with the scripts.", true); return false; }
-        Say("Opening again with the project's scripts...");
-        if (quit) quit(); else kor::App::Current().Quit();
-        return true;
-    }
-
-    bool Session::HostsScripts() const { return _hasProject && !_scriptsHost.empty() && Same(_scriptsHost, _project.directory); }
-
-    void Session::UpdateHandOver()
-    {
-        if (!std::exchange(_handingOver, false) || !_hasProject || !ScriptLanguage(_project) || HostsScripts()) return;
-        // Opened by the runner it was handed to, and that one did not say it runs them (one older than this editor):
-        // not again, round and round. The project says nothing runs its scripts, and Project, Open with its scripts is there.
-        if (const char* was = std::getenv(HandedOver); was && Same(was, _project.directory)) return;
-        ReopenWithScripts();
+        if (!_hasProject) return false;
+        if (!_scriptsHost.empty() && Same(_scriptsHost, _project.directory)) return true;
+        std::string said;
+        if (scriptRuntime && scriptRuntime->Runs(_project.directory, said)) return true;
+        if (why) *why = scriptRuntime ? said : "this program runs no scripts";
+        return false;
     }
 
     std::filesystem::path Session::StartupProject()
@@ -519,9 +510,6 @@ namespace keditor
     {
         if (!_hasProject) { Say("There is no project to run yet: File, New project.", true); return false; }
         if (!Save()) return false;
-        // Scripts in Kotlin are run by the project's build, which is told where this build of the engine is: the
-        // one that is open, a debug build or a release one.
-        if (ScriptLanguage(_project) == 'k') WriteKotlinBuild(_project.directory, _project.name);
 #ifdef _WIN32
         const std::string command = "start \"\" " + RunCommand();
 #else
@@ -1156,8 +1144,12 @@ namespace keditor
             // What the editor's view shows of what is not drawn: each scene camera as the pyramid it sees through,
             // and the picked light's reach.
             const float aspect = over ? over->Aspect() : runtime.Aspect();
-            // Which they are goes by what their components hold, as a View node goes: a field of view is a camera; a
-            // range and a cone a spot; a range alone a point light; an intensity and no range, light from far away.
+            // Which they are: a camera is of the Camera kind; a light goes by what its component holds, as a View node
+            // goes — a range and a cone a spot; a range alone a point light; an intensity and no range, light from far away.
+            const kecs::ComponentId cameras = world.Find("Camera");
+            const auto isCamera = [&](const kecs::Entity entity) {
+                return cameras != kecs::NoComponent && world.Has(entity, cameras) && world.IsEnabled(entity, cameras);
+            };
             const auto number = [&](const kecs::Entity entity, const kecs::ComponentId id, const char* name) -> std::optional<float> {
                 const kecs::FieldDescription* field = world.Describe(id).FindField(name);
                 const auto* bytes = static_cast<const std::byte*>(world.Get(entity, id));
@@ -1167,12 +1159,9 @@ namespace keditor
                 return v;
             };
             world.EachEntity([&](const kecs::Entity entity) {
-                for (const kecs::ComponentId id : world.ComponentsOf(entity))
-                    if (world.IsEnabled(entity, id) && number(entity, id, "fieldOfView")) {
-                        const kgraph::View lens = kgraph::ViewOf(world, entity);
-                        debug.Camera(lens.view, lens.Projection(aspect, false), 0.5f);
-                        break;
-                    }
+                if (!isCamera(entity)) return;
+                const kgraph::View lens = kgraph::ViewOf(world, entity);
+                debug.Camera(lens.view, lens.Projection(aspect, false), 0.5f);
             });
             // An icon where each light, camera and entity that draws nothing is, the same size whatever its distance:
             // a click on one picks it (what draws nothing the picking pass cannot find).
@@ -1184,10 +1173,9 @@ namespace keditor
                 world.EachEntity([&](const kecs::Entity entity) {
                     if (_viewHidden.contains(entity)) return;
                     if (meshes != kecs::NoComponent && world.Has(entity, meshes) && world.IsEnabled(entity, meshes)) return;
-                    enum class Kind { eLight, eCamera, eEmpty } kind = Kind::eEmpty;
+                    enum class Kind { eLight, eCamera, eEmpty } kind = isCamera(entity) ? Kind::eCamera : Kind::eEmpty;
                     for (const kecs::ComponentId id : world.ComponentsOf(entity)) {
-                        if (!world.IsEnabled(entity, id)) continue;
-                        if (number(entity, id, "fieldOfView")) { kind = Kind::eCamera; break; }
+                        if (kind == Kind::eCamera || !world.IsEnabled(entity, id)) continue;
                         if (number(entity, id, "intensity")) kind = Kind::eLight;
                     }
                     // An entity of nothing but a place is shown only when it has nothing under it to show where it is.
@@ -1236,20 +1224,15 @@ namespace keditor
                         const auto range = number(selected, id, "range"), outer = number(selected, id, "outerAngle"), inner = number(selected, id, "innerAngle");
                         if (range && outer) debug.SpotLight(position, forward, *range, *outer * Radians, inner.value_or(*outer) * Radians);
                         else if (range && number(selected, id, "intensity")) debug.PointLight(position, *range);
-                        else if (number(selected, id, "intensity") && !number(selected, id, "fieldOfView")) debug.DirectionalLight(position, forward);
+                        else if (number(selected, id, "intensity") && !isCamera(selected)) debug.DirectionalLight(position, forward);
                     }
                 }
             }
         }
 
-        // The gizmo on what is picked, and what dragging it does to its transform — or, its collider being changed, to that.
+        // The gizmo on what is picked, and what dragging it does to its transform.
         kor::GizmoPointer hand = viewport->GizmoPointer();
-        const bool colliderPicked = !selected.IsNull() && colliderShown && HasCollider(doc, selected);
-        if (colliderPicked) DrawCollider(debug, doc, selected, colliderEditing);
-        const bool sizingCollider = colliderPicked && colliderEditing && ColliderResizable(doc, selected);
-        if (sizingCollider && size.x > 0 && size.y > 0) {
-            if (EditCollider(debug, doc, selected, over ? over->ViewProjection() : runtime.ViewProjection(), hand)) _gizmoMoved = true;
-        } else if (!selected.IsNull() && gizmoEnabled && size.x > 0 && size.y > 0 && !_boxFrom) {
+        if (!selected.IsNull() && gizmoEnabled && size.x > 0 && size.y > 0 && !_boxFrom) {
             const kor::Mat4 before = kgraph::ToKor(world.WorldMatrix(selected));
             kor::Mat4 transform = before;
             kor::GizmoOptions options;
@@ -1555,8 +1538,8 @@ namespace keditor
             _snapshot = Doc().WorldJson();
             // Scripts nothing is running: said, since a scene that plays with them idle looks like a script that does nothing.
             if (const auto idle = ScriptsNotRunning(); !idle.empty())
-                Say(std::format("Playing, but nothing runs {}{}: this editor was started without the project's scripts. Project, Open with its scripts.",
-                                idle.front(), idle.size() > 1 ? std::format(" and {} more", idle.size() - 1) : std::string()), true);
+                Say(std::format("Playing, but {}{} {} not running: the Problems say why.", idle.front(),
+                                idle.size() > 1 ? std::format(" and {} more", idle.size() - 1) : std::string(), idle.size() > 1 ? "are" : "is"), true);
             else if (const kecs::ComponentId camera = Doc().World().Find("Camera");
                      camera == kecs::NoComponent || std::ranges::none_of(Doc().World().All(), [&](const kecs::Entity e) { return Doc().World().Has(e, camera); }))
                 Say("There is no Camera in the scene: it plays seen from where its main View's defaults are.", true);
@@ -1647,10 +1630,19 @@ namespace keditor
         }
         std::error_code ignored;
         std::vector<std::filesystem::path> files;
-        if (_hasProject)
-            for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "objects", ignored))
-                if (entry.is_regular_file() && entry.path().extension() == ".json") files.push_back(entry.path());
-        std::ranges::sort(files);
+        // Its modules', the farthest first, then its own: one of a name read later is what that name is.
+        std::vector<std::filesystem::path> folders;
+        if (_hasProject) {
+            for (const auto& module : Doc().Modules() | std::views::reverse) folders.push_back(module / "objects");
+            folders.push_back(_project.directory / "objects");
+        }
+        for (const auto& folder : folders) {
+            std::vector<std::filesystem::path> in;
+            for (const auto& entry : std::filesystem::directory_iterator(folder, ignored))
+                if (entry.is_regular_file() && entry.path().extension() == ".json") in.push_back(entry.path());
+            std::ranges::sort(in);
+            files.insert(files.end(), in.begin(), in.end());
+        }
         for (const auto& file : files) {
             std::ifstream in(file, std::ios::binary);
             const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
@@ -2024,10 +2016,10 @@ class $NAME : ResourceScript() {
     const std::vector<std::pair<std::string, std::string>>& Session::ScriptKinds()
     {
         static const std::vector<std::pair<std::string, std::string>> kinds {
-            { "C#", "Compiled when the project starts, and again whenever it is saved. Run the project with koral-engine-dotnet." },
-            { "Kotlin", "Compiled by a Gradle build the project is given: './gradlew edit' in its folder opens it with its scripts, built again as they are saved." },
-            { "C# ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each. Run with koral-engine-dotnet." },
-            { "Kotlin ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each. './gradlew edit' runs it." },
+            { "C#", "Compiled when the project opens, and again whenever it is saved: it runs in the editor, and in the game." },
+            { "Kotlin", "Compiled when the project opens, and again whenever it is saved: it runs in the editor, and in the game." },
+            { "C# ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
+            { "Kotlin ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
         };
         return kinds;
     }
@@ -2084,17 +2076,13 @@ class $NAME : ResourceScript() {
         const auto path = directory / (name + (kotlin ? ".kt" : ".cs"));
         const char* source = what == "ResourceScript" ? (kotlin ? KotlinResourceScript : CSharpResourceScript) : (kotlin ? KotlinScript : CSharpScript);
         { std::ofstream out(path, std::ios::binary); out << Named(source, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
-        // Kotlin is compiled by a build: the project is given one, when it has none.
-        if (kotlin) WriteKotlinBuild(_project.directory, _project.name);
         WriteEditorSetup(_project.directory, _project.name);
         // Its component is what its source declares, from now: to give entities, and as a node of the graph.
         Doc().DeclareScripts(path);
         if (what != "Script")
-            Say(std::format("Made scripts/{}.{}: a Script node of it — '{}', among the nodes to add — gives what it makes. {} runs it.", name, kotlin ? "kt" : "cs",
-                            name, kotlin ? "'./gradlew edit' in the project's folder" : "koral-engine-dotnet"));
+            Say(std::format("Made scripts/{}.{}: a Script node of it — '{}', among the nodes to add — gives what it makes.", name, kotlin ? "kt" : "cs", name));
         else
-            Say(kotlin ? std::format("Made scripts/{}.kt, a component: './gradlew edit' in the project's folder opens it with its scripts running.", name)
-                       : std::format("Made scripts/{}.cs, a component: koral-engine-dotnet runs it.", name));
+            Say(std::format("Made scripts/{}.{}, a component: it is compiled now, and runs once it is.", name, kotlin ? "kt" : "cs"));
         return true;
     }
 
@@ -2928,7 +2916,7 @@ class $NAME : ResourceScript() {
     {
         const auto has = Doc().ComponentsOf(entity);
         const auto with = [&](const std::string_view name) { return std::ranges::find(has, name) != has.end(); };
-        if (with("Camera")) return "camera";
+        if (std::ranges::any_of(has, [&](const std::string& component) { return IsCamera(Doc().World(), component); })) return "camera";
         if (with("DirectionalLight")) return "sun";
         for (const auto& component : has)
             if (component.ends_with("Light")) return "light";
@@ -2936,7 +2924,7 @@ class $NAME : ResourceScript() {
         const auto pipelines = PipelineComponents();
         static const std::set<std::string> own { "Mesh", "Camera", "Label" };
         for (const auto& component : has)
-            if (!own.contains(component) && !pipelines.contains(component) && !Doc().World().Describe(Doc().World().Find(component)).fields.empty()) return "script";
+            if (!own.contains(component) && !IsCamera(Doc().World(), component) && !pipelines.contains(component) && !Doc().World().Describe(Doc().World().Find(component)).fields.empty()) return "script";
         return Doc().World().ChildrenOf(entity).empty() ? "empty" : "group";
     }
 
@@ -3093,7 +3081,9 @@ class $NAME : ResourceScript() {
             return true;
         }
         case Asset::Kind::eScript: {
-            const std::string component = asset->file.stem().string();
+            const std::string& component = asset->label;   // the component itself, not its file: a file may declare several
+            if (asset->group == "kind") { Say(std::format("{} is a kind: nothing has one itself. Give {} one of what derives from it.", component, name), true); return false; }
+            if (asset->group == "resources") { Say(std::format("{} makes resources for a Script node of it: it is no component an entity has.", component), true); return false; }
             if (std::ranges::contains(doc.ComponentsOf(entity), component)) { Say(std::format("{} has {} already.", name, component)); return true; }
             if (!doc.AddComponent(entity, component)) {
                 Say(std::format("There is no component '{}' yet: a script's is there once the editor runs the project's scripts.", component), true);
@@ -3557,16 +3547,17 @@ public extension {0} : IKoralMaterial {{
     {
         if (!_hasProject) { Say("There is a folder to open once there is a project: File, New project.", true); return false; }
         WriteEditorSetup(_project.directory, _project.name);
-        std::error_code ignored;
-        bool hasKotlin = false;
-        if (std::filesystem::is_directory(_project.directory / "scripts", ignored))
-            for (const auto& entry : std::filesystem::directory_iterator(_project.directory / "scripts", ignored)) hasKotlin = hasKotlin || entry.path().extension() == ".kt";
-        if (hasKotlin) { WriteKotlinBuild(_project.directory, _project.name); }
         const char* said = std::getenv("KORAL_ENGINE_CODE");
         std::string command = std::format("{} \"{}\"", said && *said ? said : "code", _project.directory.string());
         if (!file.empty()) command += line > 0 ? std::format(" --goto \"{}:{}\"", file.string(), line) : std::format(" --goto \"{}\"", file.string());
         // The shell's, and not waited for: the editor of code is a program of its own.
-        const bool started = launch ? launch(command) : std::system((command + " >/dev/null 2>&1 &").c_str()) == 0;
+#ifdef _WIN32
+        // `code` is a code.cmd, so a cmd runs it. /b is no window of its own; /s keeps the command's quotes.
+        const std::string detached = "start \"\" /b cmd /s /c \"" + command + " >NUL 2>&1\"";
+#else
+        const std::string detached = command + " >/dev/null 2>&1 &";
+#endif
+        const bool started = launch ? launch(command) : std::system(detached.c_str()) == 0;
         if (started) Say(file.empty() ? std::string("Opened the project in the editor of code.") : std::format("Opened {} in the editor of code.", file.filename().string()));
         else Say(std::format("'{}' could not be run: set KORAL_ENGINE_CODE to the editor's command.", command), true);
         return started;
@@ -5206,7 +5197,6 @@ public extension {0} : IKoralMaterial {{
                     if (std::ranges::any_of(_session->Doc().Graph().nodes, [&](const auto& n) { return n.id == node; }))
                         press = [this, node = std::move(node)] { _session->GoTo(node); };
                 }
-                if (record.level != Level::eInfo && message.starts_with("Nothing is running the project's scripts")) press = [this] { _session->ReopenWithScripts(); };
                 if (press) line = kui::GestureDetector(kui::GestureOptions {}.OnTap(std::move(press)), std::move(line));
                 return kui::ContextMenu({ { .label = "Copy", .onSelected = [text = record.message] { kor::Window::SetClipboardText(text); } } }, std::move(line))
                     .Key(std::to_string(record.sequence));
@@ -5290,6 +5280,7 @@ public extension {0} : IKoralMaterial {{
                     if (const bool shown = _layout->IsShown("here"); shown != _session->DrawerShown()) _session->ShowDrawer(shown);
                     if (_session->TakeAskForNodes()) AskForNode(NewNodeAt());
                     if (_session->TakeAskForNewShader()) SetState([&] { _dialog = Dialog::eNewShader; _newId.clear(); _newKind = 0; });
+                    if (_session->TakeAskForNewProject()) AskForNewProject();
                     if (_session->TakeAskToArrange()) Arrange();
                     // Every page put in order: each once it has been drawn as it is shown, its nodes measured — a frame on.
                     if (const auto& pages = _session->PagesToArrange(); !pages.empty()) {
@@ -5451,6 +5442,118 @@ public extension {0} : IKoralMaterial {{
             }
             std::string _confirmWhat;
             std::function<void()> _confirmed;
+
+            /** The language a new project's scripts are in, asked once its folder is chosen: C# or Kotlin, all of them. */
+            /** What a new project is to be, as its form has it so far. */
+            struct NewProjectForm {
+                std::string name;
+                char language = 'k';                            ///< 'c' C#, 'k' Kotlin: every script of it, and of what it imports.
+                bool module = false;                            ///< A module, for projects to import: its one scene is for trying it out.
+                std::string folder;                             ///< What it is made in: at folder/name.
+                std::vector<std::filesystem::path> picked;      ///< Modules picked from elsewhere: offered beside those found in the folder.
+                std::vector<std::filesystem::path> imports;     ///< What it imports, of those offered.
+            };
+            NewProjectForm _newProject;
+
+            /** Opens the form for a new project: named nothing yet, in the projects folder, in Kotlin, importing nothing. */
+            void AskForNewProject()
+            {
+                SetState([&] {
+                    _newProject = {};
+                    _newProject.folder = Session::ProjectsDirectory().string();
+                    _dialog = Dialog::eNewProject;
+                });
+            }
+
+            kui::Widget NewProjectDialog()
+            {
+                NewProjectForm& form = _newProject;
+                const auto muted = [](std::string text) { return kgui::Line(std::move(text), kui::TextStyle {}.SetColor(kui::Theme::Current().textMuted).SetSize(12.f)); };
+                const auto label = [](const char* text) { return kgui::Line(text, kui::TextStyle {}.SetSize(12.f)); };
+                std::vector<kui::Widget> rows;
+                rows.push_back(Heading(form.module ? "A new module" : "A new project"));
+
+                rows.push_back(label("Name"));
+                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = form.name, .placeholder = "What it is called: its folder's name too",
+                                                                      .onChanged = [this](const std::string& typed) { _newProject.name = typed; }, .width = 520.f }));
+
+                rows.push_back(label("Its scripts are in"));
+                rows.push_back(kui::Row({
+                    kui::RadioButton(form.language == 'c', [this] { SetState([&] { _newProject.language = 'c'; }); }, "C#"),
+                    kui::RadioButton(form.language == 'k', [this] { SetState([&] { _newProject.language = 'k'; }); }, "Kotlin"),
+                }, kui::FlexOptions {}.SetGap(16.f)));
+
+                rows.push_back(label("It is"));
+                rows.push_back(kui::RadioButton(!form.module, [this] { SetState([&] { _newProject.module = false; }); }, "A project: its scenes, and what they are made of"));
+                rows.push_back(kui::RadioButton(form.module, [this] { SetState([&] { _newProject.module = true; }); },
+                                                "A module: what projects import — scripts, shaders, functions, objects, assets — and a scene to try it in"));
+
+                rows.push_back(label("In"));
+                rows.push_back(kui::Row({
+                    kui::TextField(kui::TextFieldOptions { .text = form.folder, .placeholder = "The folder it is made in",
+                                                           .onChanged = [this](const std::string& typed) { _newProject.folder = typed; }, .width = 420.f }),
+                    kui::Button("Browse...", [this] { SetState([&] { _dialog = Dialog::eNewProjectFolder; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
+                }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                const std::filesystem::path at = std::filesystem::path(form.folder) / form.name;
+                rows.push_back(muted(form.name.empty() ? "Made in a folder of its name, there." : std::format("Made at {}", at.generic_string())));
+
+                // What it imports: the modules in the folder it is made in, and any picked from elsewhere — those of its language.
+                rows.push_back(label("It imports"));
+                std::vector<keditor::Project> offered = keditor::Project::ModulesIn(form.folder);
+                for (const auto& folder : form.picked) {
+                    keditor::Project module;
+                    std::string ignored;
+                    if (keditor::Project::Open(folder, module, ignored) && std::ranges::none_of(offered, [&](const auto& other) { return other.directory == module.directory; }))
+                        offered.push_back(std::move(module));
+                }
+                std::erase_if(form.imports, [&](const auto& chosen) { return std::ranges::none_of(offered, [&](const auto& module) { return module.directory == chosen; }); });
+                bool any = false;
+                for (const auto& module : offered) {
+                    const char language = module.Language();
+                    if (language != 0 && language != form.language) continue;      // only what is in its language can be imported
+                    any = true;
+                    const bool on = std::ranges::contains(form.imports, module.directory);
+                    rows.push_back(kui::Checkbox(on, [this, folder = module.directory](const bool ticked) {
+                        SetState([&] {
+                            std::erase(_newProject.imports, folder);
+                            if (ticked) _newProject.imports.push_back(folder);
+                        });
+                    }, std::format("{}   ·   {}", module.name, module.directory.generic_string())));
+                }
+                if (!any) rows.push_back(muted(std::format("No module in {} there has its scripts in {}.", form.folder.empty() ? "the folder" : form.folder, form.language == 'k' ? "Kotlin" : "C#")));
+                rows.push_back(kui::Button("Add a module from a folder...", [this] { SetState([&] { _dialog = Dialog::eNewProjectModule; }); },
+                                           kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)));
+
+                const auto make = [this] {
+                    const NewProjectForm made = _newProject;
+                    const bool named = !made.name.empty() && made.name.find_first_of("/\\:*?\"<>|") == std::string::npos && made.name != "." && made.name != "..";
+                    if (!named) { _session->Say("A project's name is its folder's: some letters, and none of / \\ : * ? \" < > |.", true); SetState(); return; }
+                    if (made.folder.empty()) { _session->Say("Say which folder it is made in.", true); SetState(); return; }
+                    if (_session->NewProject(std::filesystem::path(made.folder) / made.name, made.language, made.module, made.imports)) SetState([&] { _dialog = Dialog::eNone; });
+                    else SetState();
+                };
+                if (_session->Failed()) rows.push_back(Problem(_session->Status()));
+                rows.push_back(kui::Row({ kui::Button(form.module ? "Make the module" : "Make the project", make),
+                                          kui::Button("Cancel", [this] { SetState([&] { _dialog = Dialog::eNone; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)) },
+                                        kui::FlexOptions {}.SetGap(8.f)));
+                return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(8.f)).Width(640.f));
+            }
+
+            /** A module picked for the new project from a folder of its own: imported when it is one, and in the language. */
+            void PickModuleForNewProject(const std::filesystem::path& folder)
+            {
+                keditor::Project module;
+                std::string error;
+                if (!keditor::Project::Open(folder, module, error)) _session->Say(error, true);
+                else if (!module.module) _session->Say(std::format("{} is a project, not a module: only a module is imported.", module.name), true);
+                else if (const char language = module.Language(); language != 0 && language != _newProject.language)
+                    _session->Say(std::format("{}'s scripts are in {}: what is imported is in the new one's language.", module.name, language == 'k' ? "Kotlin" : "C#"), true);
+                else {
+                    if (!std::ranges::contains(_newProject.picked, module.directory)) _newProject.picked.push_back(module.directory);
+                    if (!std::ranges::contains(_newProject.imports, module.directory)) _newProject.imports.push_back(module.directory);
+                }
+                SetState([&] { _dialog = Dialog::eNewProject; });
+            }
 
             Document& Doc() { return _session->Doc(); }
 
@@ -5876,7 +5979,7 @@ public extension {0} : IKoralMaterial {{
                 const kecs::Entity selected = Doc().World().Alive(_session->selectedEntity) ? _session->selectedEntity : kecs::NullEntity;
                 const bool some = !selected.IsNull(), playMode = _session->InPlayMode();
                 const auto needsProject = [this](std::function<void()> then) {
-                    return [this, then = std::move(then)] { if (!_session->HasProject()) SetState([&] { _dialog = Dialog::eNewProject; }); else then(); };
+                    return [this, then = std::move(then)] { if (!_session->HasProject()) AskForNewProject(); else then(); };
                 };
                 // What there is to make: each object, at the top and — with something picked — under it.
                 std::vector<kui::MenuItem> create = ObjectMenu(kecs::NullEntity);
@@ -5884,11 +5987,17 @@ public extension {0} : IKoralMaterial {{
                     create.push_back({ .separator = true });
                     create.push_back({ .label = std::format("Under {}", Doc().NameOf(selected)), .items = ObjectMenu(selected) });
                 }
+                // What the project imports, each to stop importing.
+                std::vector<kui::MenuItem> imported;
+                for (const auto& reference : _session->CurrentProject().modules)
+                    imported.push_back({ .label = reference, .onSelected = [this, reference] { _session->ForgetModule(reference); SetState(); } });
                 const auto ticked = [](const bool on, const char* label) { return std::string(on ? "✓  " : "     ") + label; };
                 return kui::MenuBar({
                     { "File", {
-                        { "New project...", Asking("Making another project", [this] { SetState([&] { _dialog = Dialog::eNewProject; }); }) },
+                        { "New project...", Asking("Making another project", [this] { AskForNewProject(); }) },
                         { "Open project...", Asking("Opening another project", [this] { SetState([&] { _dialog = Dialog::eOpenProject; }); }) },
+                        { "Import a module...", [this] { SetState([&] { _dialog = Dialog::eImportModule; }); }, _session->HasProject() && !playMode },
+                        { .label = "Stop importing", .enabled = !imported.empty() && !playMode, .items = std::move(imported) },
                         { .separator = true },
                         { "New scene", Asking("Making the scene anew", needsProject([this] { _session->NewStandardScene(); })), !playMode },
                         { "New lit scene", Asking("Making the scene anew, lit under a sky", needsProject([this] { _session->NewLitScene(); })), !playMode },
@@ -5932,7 +6041,6 @@ public extension {0} : IKoralMaterial {{
                     } },
                     { "Project", {
                         { "Run", needsProject([this] { _session->Run(); }) },
-                        { "Open with its scripts", [this] { _session->ReopenWithScripts(); }, !_session->ScriptsNotRunning().empty() },
                         { ticked(_session->HasProject() && Same(Session::StartupProject(), _session->CurrentProject().directory), "Open at startup"),
                           [this] { ToggleStartup(); }, _session->HasProject() },
                         { "Open in Visual Studio Code", needsProject([this] { _session->OpenInCode(); }) },
@@ -5980,9 +6088,19 @@ public extension {0} : IKoralMaterial {{
                 case Dialog::eCompressTextures: return _assets.CompressTexturesDialog();
                 case Dialog::eAddNode: return AddNodeDialog();
                 case Dialog::ePortChoice: return PortChoiceDialog();
-                case Dialog::eNewProject:
-                    return kgui::FileBrowser({ .start = Session::ProjectsDirectory(), .directories = true, .createDirectories = true, .confirm = "Make the project here" },
-                        [this](const std::filesystem::path& chosen) { _session->NewProject(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
+                case Dialog::eNewProject: return NewProjectDialog();
+                case Dialog::eNewProjectFolder:
+                    // Where the new one is made: back to its form, with the folder picked.
+                    return kgui::FileBrowser({ .start = _newProject.folder, .directories = true, .createDirectories = true, .confirm = "Make it in here" },
+                        [this](const std::filesystem::path& chosen) { SetState([&] { _newProject.folder = chosen.string(); _dialog = Dialog::eNewProject; }); },
+                        [this] { SetState([&] { _dialog = Dialog::eNewProject; }); });
+                case Dialog::eNewProjectModule:
+                    return kgui::FileBrowser({ .start = _newProject.folder, .directories = true, .confirm = "Import this module" },
+                        [this](const std::filesystem::path& chosen) { PickModuleForNewProject(chosen); },
+                        [this] { SetState([&] { _dialog = Dialog::eNewProject; }); });
+                case Dialog::eImportModule:
+                    return kgui::FileBrowser({ .start = _session->CurrentProject().directory.parent_path(), .directories = true, .confirm = "Import this module" },
+                        [this](const std::filesystem::path& chosen) { _session->ImportModule(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
                         [this] { SetState([&] { _dialog = Dialog::eNone; }); });
                 case Dialog::eOpenProject:
                     return kgui::FileBrowser({ .start = Session::ProjectsDirectory(), .directories = true, .confirm = "Open" },
@@ -7647,7 +7765,7 @@ public extension {0} : IKoralMaterial {{
                             for (const auto& name : *components->Named() | std::views::keys) if (test(name)) return true;
                         return false;
                     };
-                    if (has([](const std::string& name) { return name == "Camera"; })) cameras.push_back(std::move(item));
+                    if (has([&](const std::string& name) { return IsCamera(Doc().World(), name); })) cameras.push_back(std::move(item));
                     else if (has([](const std::string& name) { return name.ends_with("Light"); })) lights.push_back(std::move(item));
                     else if (has([](const std::string& name) { return name == "Mesh"; })) meshes.push_back(std::move(item));
                     else others.push_back(std::move(item));
@@ -8607,7 +8725,7 @@ public extension {0} : IKoralMaterial {{
                     const auto& type = doc.World().Describe(doc.World().Find(component));
                     if (const auto pipeline = pipelines.find(component); pipeline != pipelines.end()) return { "brush", "run by a pipeline", kui::Color::Hex(0xD9703F) };
                     if (component == "Mesh") return { "view_in_ar", "what is drawn", kui::Color::Hex(0x7DBB4B) };
-                    if (component == "Camera") return { "videocam", "what the scene is seen through", kui::Color::Hex(0x62C3E8) };
+                    if (IsCamera(doc.World(), component)) return { "videocam", "what the scene is seen through", kui::Color::Hex(0x62C3E8) };
                     if (component.ends_with("Light")) return { "lightbulb", "a light", kui::Color::Hex(0xE8C562) };
                     if (type.fields.empty()) return { "label", "a tag", kui::Color::Hex(0x9AA4B0) };
                     return { "data_object", "data", kui::Color::Hex(0x5B9BD5) };
@@ -8702,16 +8820,6 @@ public extension {0} : IKoralMaterial {{
                     head.push_back(kui::Expanded(kgui::Muted(what, 11.f)));
                     if (pipeline != pipelines.end())
                         head.push_back(kui::Tooltip("Go to the pipeline it is of, on the graph", SmallIcon("hub", [this, node = pipeline->second] { _session->GoTo(node); })));
-                    if (component == "Collider" && HasCollider(doc, entity)) {
-                        // The picked entity's collider, in the scene's view: shown, and changed by handles of its own.
-                        const bool shown = _session->colliderShown, editing = _session->colliderEditing;
-                        head.push_back(Tool(shown ? "visibility" : "visibility_off", "Show its collider in the scene, as the physics will have it", shown,
-                                            [this, shown] { _session->ShowCollider(!shown, false); SetState(); }));
-                        const bool resizable = ColliderResizable(doc, entity);
-                        head.push_back(Tool("open_in_full", resizable ? "Change its collider's size with handles in the scene, in place of the gizmo that moves it"
-                                                                      : "A plane's or a mesh's collider has no size to drag: it is shown only", editing,
-                                            [this, editing] { _session->ShowCollider(true, !editing); SetState(); }, resizable));
-                    }
                     head.push_back(kui::Tooltip("Take the component off the entity", SmallIcon("close", [this, entity, component] { Doc().RemoveComponent(entity, component); })));
                     rows.push_back(kui::ContextMenu({
                         { "Take it off the entity", [this, entity, component] { Doc().RemoveComponent(entity, component); } },
@@ -8759,6 +8867,7 @@ public extension {0} : IKoralMaterial {{
                 for (const int order : { 0, 1, 2 })
                     for (const auto& component : doc.ComponentNames()) {
                         if (std::ranges::find(has, component) != has.end()) continue;
+                        if (doc.World().Describe(doc.World().Find(component)).abstract) continue;     // a kind: given as one of it
                         const bool pipeline = pipelines.contains(component), tag = doc.World().Describe(doc.World().Find(component)).fields.empty();
                         if ((pipeline ? 0 : tag ? 2 : 1) != order) continue;
                         more.push_back(component);
@@ -10032,9 +10141,8 @@ public extension {0} : IKoralMaterial {{
 
     // ---- the scene ----------------------------------------------------------------------------------------------
 
-    EditorScene::EditorScene(std::filesystem::path project, const bool handOver) : _projectPath(std::move(project)), _handOver(handOver) {}
-    EditorScene::EditorScene(const kor::SceneArgs& arguments)
-        : _projectPath(arguments.String("project")), _scriptsHost(arguments.String("scripts")), _handOver(true) {}
+    EditorScene::EditorScene(std::filesystem::path project) : _projectPath(std::move(project)) {}
+    EditorScene::EditorScene(const kor::SceneArgs& arguments) : _projectPath(arguments.String("project")), _scriptsHost(arguments.String("scripts")) {}
     EditorScene::~EditorScene() = default;
 
     void EditorScene::Initialize()
@@ -10056,7 +10164,6 @@ public extension {0} : IKoralMaterial {{
         _play->SetInput(&_game->SceneInput());  // a script that is steered reads the Game panel's keys and mouse
         _play->OnFrame([this] { if (_session) _session->Tick(SceneInput(), static_cast<float>(SceneTime().FrameTime())); });
         Document::Alias(&Graph(), &_play->Graph());     // whoever is handed this scene is after the one it edits
-        _session->handOver = _handOver;
         _session->HostScripts(_scriptsHost);
         if (!_projectPath.empty()) _session->OpenProject(_projectPath);
         _session->window = &SceneWindow();      // what the title bar's own buttons act on
@@ -10073,7 +10180,6 @@ public extension {0} : IKoralMaterial {{
         }
         // Looking round, the mouse's own movement: not the pointer's, a pixel of the screen at a time and sped up.
         SceneInput().SetCursorMode(_session->Aiming() ? kor::Input::CursorMode::eCaptured : kor::Input::CursorMode::eNormal);
-        _session->UpdateHandOver();
         _session->UpdateLook(static_cast<float>(Time::FrameTime()));
         _session->UpdateThumbnails(static_cast<float>(Time::FrameTime()));
         _session->UpdateView(static_cast<float>(Time::FrameTime()));

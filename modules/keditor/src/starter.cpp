@@ -151,7 +151,19 @@ namespace keditor
   "position": [2, 1.5, 3],
   "rotation": [-20, 34, 0],
   "components": {
-    "Camera": { "fieldOfView": 60, "near": 0.1, "far": 100 }
+    "PerspectiveCamera": { "fieldOfView": 60, "near": 0.1, "far": 100 }
+  }
+}
+)json" },
+            { "Orthographic Camera.json", R"json({
+  "template": "Orthographic Camera",
+  "icon": "videocam",
+  "description": "A camera that sees in a box: as big however far — a plan, an elevation, a 2D game's view.",
+  "name": "Camera",
+  "position": [2, 1.5, 3],
+  "rotation": [-20, 34, 0],
+  "components": {
+    "OrthographicCamera": { "height": 10, "near": 0.1, "far": 100 }
   }
 }
 )json" },
@@ -163,7 +175,7 @@ namespace keditor
   "position": [2, 1.5, 3],
   "rotation": [-20, 34, 0],
   "components": {
-    "Camera": { "fieldOfView": 60, "near": 0.1, "far": 100 },
+    "PerspectiveCamera": { "fieldOfView": 60, "near": 0.1, "far": 100 },
     "FlyCamera": { "speed": 4, "sensitivity": 0.12 }
   }
 }
@@ -226,100 +238,6 @@ namespace keditor
         return written;
     }
 
-    std::vector<std::string> WriteKotlinBuild(const std::filesystem::path& project, const std::string& name)
-    {
-        std::vector<std::string> written;
-        std::error_code ignored;
-        const auto write = [&](const char* file, const std::string& text, const bool always = false) {
-            if (!always && std::filesystem::exists(project / file, ignored)) return;
-            std::ofstream(project / file, std::ios::binary) << text;
-            written.emplace_back(file);
-        };
-        std::string safe = name;
-        for (char& c : safe)
-            if (c == '"' || c == '\\' || c == '$') c = '_';
-        write("settings.gradle.kts", std::format(R"kts(// {}: a Koral Engine project with scripts in Kotlin.
-pluginManagement {{
-    repositories {{ gradlePluginPortal(); mavenCentral() }}
-}}
-rootProject.name = "{}"
-)kts", safe, safe));
-        write("build.gradle.kts", R"kts(// The project's scripts: the Kotlin files in `scripts`, each class a component of its name. Written by the editor.
-//
-//   ./gradlew edit      the project in the editor, its scripts built again and loaded whenever one is saved
-//   ./gradlew play      the project on its own
-//
-// gradle.properties, which is this machine's, says where the Koral SDK, the engine and the JDK are.
-plugins {
-    kotlin("jvm") version "2.4.20"
-}
-
-fun setting(name: String, variable: String): String =
-    (findProperty(name) as String?)?.takeIf { it.isNotBlank() } ?: System.getenv(variable)
-        ?: error("$name is not set: open the project in the editor once, which writes gradle.properties, or set $variable")
-
-val koralSdk = setting("koral.sdk", "KORAL_SDK")
-val engineLibrary = setting("koral.engine.library", "KORAL_ENGINE_LIBRARY")
-val engineMaven = setting("koral.engine.maven", "KORAL_ENGINE_MAVEN")
-val enginePackage = setting("koral.engine.package", "KORAL_ENGINE_PACKAGE")
-
-repositories {
-    maven(url = file("$koralSdk/share/Koral/maven"))    // Koral's own Kotlin libraries, as the SDK carries them
-    maven(url = file(engineMaven))                      // the engine's
-    mavenCentral()
-    google()
-}
-
-dependencies {
-    implementation("koral:koral-engine:0.1.0")
-}
-
-kotlin {
-    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }
-    sourceSets["main"].kotlin.srcDir("scripts")
-    sourceSets["main"].kotlin.srcDir("$enginePackage/scripts")      // the engine's own: the Camera, the lights, the Sky
-}
-java { sourceCompatibility = JavaVersion.VERSION_25; targetCompatibility = JavaVersion.VERSION_25 }
-
-// The engine, run on this project: a saved script is built again by this same build and loaded while it runs.
-fun engine(name: String, what: String, vararg more: String) = tasks.register<JavaExec>(name) {
-    group = "koral"
-    description = what
-    dependsOn(tasks.classes)
-    classpath = sourceSets.main.get().runtimeClasspath
-    mainClass.set("koral.engine.MainKt")
-    jvmArgs("--enable-native-access=ALL-UNNAMED")
-    environment("KORAL_SDK", koralSdk)
-    environment("KORAL_ENGINE_LIBRARY", engineLibrary)
-    if (System.getenv("JAVA_HOME").isNullOrBlank()) environment("JAVA_HOME", System.getProperty("java.home"))
-    workingDir = projectDir
-    val wrapper = projectDir.resolve(if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "gradlew")
-    args(projectDir.absolutePath, "--classes", layout.buildDirectory.dir("classes/kotlin/main").get().asFile.absolutePath,
-         "--sources", projectDir.resolve("scripts").absolutePath, "--compile", "$wrapper -p $projectDir -q --offline classes", *more)
-}
-engine("play", "Runs the project")
-engine("edit", "Opens the project in the editor, with its scripts", "--edit")
-)kts");
-        // This machine's: where things are here. Written each time, since it is not the project's to keep.
-        std::string properties = "# Written by the Koral Engine editor: where this machine's Koral SDK, engine and JDK are. Not the project's to commit.\n";
-        const char* sdk = std::getenv("KORAL_SDK");
-        properties += std::format("koral.sdk={}\nkoral.engine.library={}\nkoral.engine.maven={}\nkoral.engine.package={}\n", sdk && *sdk ? sdk : KEDITOR_SDK, KEDITOR_ENGINE_LIBRARY,
-                                  KEDITOR_MAVEN, kscript::PackageDirectory().generic_string());
-        if (std::string_view(KEDITOR_JAVA_HOME).size() > 0) properties += std::format("org.gradle.java.home={}\n", KEDITOR_JAVA_HOME);
-        properties += "org.gradle.jvmargs=-Xmx1g\n";
-        write("gradle.properties", properties, true);
-        write(".gitignore", "build/\n.gradle/\n.kotlin/\ngradle.properties\n");
-        // The wrapper, so that nothing has to be installed to build.
-        const std::filesystem::path wrapper = KEDITOR_GRADLE_WRAPPER;
-        for (const char* file : { "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties" }) {
-            if (std::filesystem::exists(project / file, ignored) || !std::filesystem::exists(wrapper / file, ignored)) continue;
-            std::filesystem::create_directories((project / file).parent_path(), ignored);
-            std::filesystem::copy_file(wrapper / file, project / file, ignored);
-            written.emplace_back(file);
-        }
-        return written;
-    }
-
     std::vector<std::string> WriteEditorSetup(const std::filesystem::path& project, const std::string& name)
     {
         std::vector<std::string> written;
@@ -354,7 +272,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         const std::filesystem::path assemblies = KEDITOR_DOTNET;
         if (std::filesystem::exists(assemblies / "Koral.Engine.dll", ignored)) {
             std::string references;
-            for (const char* assembly : { "Koral.Engine", "Koral" })
+            for (const char* assembly : { "Koral.Engine", "Koral", "Koral.UI", "Koral.Net" })
                 if (std::filesystem::exists(assemblies / (std::string(assembly) + ".dll"), ignored))
                     references += std::format("    <Reference Include=\"{}\"><HintPath>{}</HintPath><Private>false</Private></Reference>\n", assembly,
                                               (assemblies / (std::string(assembly) + ".dll")).generic_string());
@@ -418,7 +336,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         // The camera: a view from where its entity is, towards a step along the way it faces; a lens of its field of
         // view, near and far. In the editor, the editor's view. The shader's `camera`, a field each.
         node("Entity", "eye", 40, 1240);
-        set("eye", "component", "Camera");
+        set("eye", "component", "PerspectiveCamera");
         node("Add", "looking at", 400, 1300);
         wire("eye", "looking at", "a", "worldPosition");
         wire("eye", "looking at", "b", "forward");
@@ -486,7 +404,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
     {
         const auto vec = [](const float x, const float y, const float z) { return Value(Value::List { x, y, z }); };
         const kecs::Entity camera = doc.CreateEntity("Camera");
-        doc.AddComponent(camera, "Camera");
+        doc.AddComponent(camera, "PerspectiveCamera");
         doc.SetPosition(camera, { 2.f, 1.5f, 3.f });
         doc.SetRotation(camera, { -20.f, 34.f, 0.f });
         const kecs::Entity sun = doc.CreateEntity("Sun");
@@ -551,7 +469,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         };
         // The camera: a view from where its entity is, towards a step along the way it faces, rolled as it is; and a
         // lens of its field of view, near and far. What the scene is seen through: in the editor, the editor's view.
-        first("eye", "Camera", 180);
+        first("eye", "PerspectiveCamera", 180);
         node("Add", "looking at", 280, 260);
         wire("eye", "looking at", "a", "worldPosition");
         wire("eye", "looking at", "b", "forward");
@@ -737,7 +655,7 @@ engine("edit", "Opens the project in the editor, with its scripts", "--edit")
         const kecs::Entity sky = doc.CreateEntity("Sky");
         doc.AddComponent(sky, "Sky");
         const kecs::Entity camera = doc.CreateEntity("Camera");
-        doc.AddComponent(camera, "Camera");
+        doc.AddComponent(camera, "PerspectiveCamera");
         doc.SetPosition(camera, { 2.f, 1.5f, 3.f });
         doc.SetRotation(camera, { -20.f, 34.f, 0.f });
         const kecs::Entity sun = doc.CreateEntity("Sun");

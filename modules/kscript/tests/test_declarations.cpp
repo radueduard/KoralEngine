@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <format>
+
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -82,6 +85,39 @@ TEST(Declarations, ACSharpScriptsFieldsAreItsComponent) {
 }
 
 // Kotlin's public vars, typed as written or as what they start as; private ones, vals and functions are not.
+// A class with no body before a script is passed by. It was taken for the script, with the script's properties, under
+// its own name: `Particle` was offered to entities and `Simulator`, which is what runs, was not known.
+TEST(Declarations, AClassWithNoBodyIsNotTheScriptAfterIt) {
+    const auto found = kscript::Declare(R"(
+        import koral.Vec2
+        import koral.engine.PerFrame
+        import koral.engine.Setup
+
+        data class Particle(
+            var position: Vec2,
+            var mass: Float
+        )
+
+        fun Particle.moved(by: Vec2) = Particle(position + by, mass)
+
+        class Simulator : Setup(), PerFrame {
+            var center = Vec2(0f)
+            var extent = Vec2(1f)
+            override fun update(delta: Float) {}
+        }
+    )", true);
+    for (const auto& problem : found.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(found.types.size(), 1u);
+    EXPECT_EQ(found.types.front().name, "Simulator");
+    ASSERT_EQ(found.types.front().fields.size(), 2u);
+    EXPECT_FLOAT_EQ(FloatAt(found.types.front(), "extent", 0), 1.f) << "one number for a vector is each of its numbers";
+    EXPECT_FLOAT_EQ(FloatAt(found.types.front(), "extent", 1), 1.f);
+
+    const auto named = kscript::Declare("class Holder(val kind: Any = Particle::class) : Script() { var x = 1f }", true);
+    ASSERT_EQ(named.types.size(), 1u) << "`::class` starts no class";
+    EXPECT_EQ(named.types.front().name, "Holder");
+}
+
 TEST(Declarations, AKotlinScriptsPropertiesAreItsComponent) {
     const auto found = kscript::Declare(R"(
         import koral.Vec3
@@ -170,24 +206,52 @@ TEST(Declarations, ADeclaredComponentStartsAsWrittenAndIsTheScriptsLater) {
 TEST(Declarations, ThePackageIsTheSameInEitherLanguage) {
     const auto folder = kscript::PackageDirectory() / "scripts";
     ASSERT_TRUE(std::filesystem::is_directory(folder)) << folder;
-    for (const char* name : { "Camera", "DirectionalLight", "PointLight", "SpotLight", "Sky" }) {
-        const auto csharp = kscript::DeclareFiles(folder / (std::string(name) + ".cs"));
-        const auto kotlin = kscript::DeclareFiles(folder / (std::string(name) + ".kt"));
-        for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
-        for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
-        ASSERT_EQ(csharp.types.size(), 1u) << name;
-        ASSERT_EQ(kotlin.types.size(), 1u) << name;
-        const auto& a = csharp.types.front();
-        const auto& b = kotlin.types.front();
-        EXPECT_EQ(a.name, name);
-        EXPECT_EQ(b.name, name);
-        EXPECT_EQ(a.size, b.size) << name;
-        EXPECT_EQ(a.initial, b.initial) << name << " starts the same in both";
-        ASSERT_EQ(a.fields.size(), b.fields.size()) << name;
-        for (std::size_t i = 0; i < a.fields.size(); ++i) {
-            EXPECT_TRUE(a.fields[i].SameAs(b.fields[i])) << name << "." << a.fields[i].name;
-            EXPECT_EQ(a.fields[i].offset, b.fields[i].offset);
+    // Each language's files together, as a host compiles them: a camera's kind is in a file of its own.
+    const auto declared = [&](const char* ending) {
+        const auto copy = std::filesystem::temp_directory_path() / std::format("koral-package-{}", ending + 1);
+        std::filesystem::remove_all(copy);
+        std::filesystem::create_directories(copy);
+        for (const auto& entry : std::filesystem::directory_iterator(folder))
+            if (entry.path().extension() == ending) std::filesystem::copy_file(entry.path(), copy / entry.path().filename());
+        return kscript::DeclareFiles(copy);
+    };
+    const auto csharp = declared(".cs"), kotlin = declared(".kt");
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    const auto find = [](const kscript::Declarations& in, const std::string_view name) -> const kscript::ScriptType* {
+        for (const auto& type : in.types) if (type.name == name) return &type;
+        return nullptr;
+    };
+    for (const char* name : { "Camera", "PerspectiveCamera", "OrthographicCamera", "Light", "LocalLight", "DirectionalLight", "PointLight", "SpotLight", "Sky", "Instancer" }) {
+        const kscript::ScriptType* a = find(csharp, name);
+        const kscript::ScriptType* b = find(kotlin, name);
+        ASSERT_NE(a, nullptr) << name << " in C#";
+        ASSERT_NE(b, nullptr) << name << " in Kotlin";
+        EXPECT_TRUE(a->data && b->data) << name << " is Data";
+        EXPECT_EQ(a->abstract, b->abstract) << name;
+        EXPECT_EQ(a->kinds, b->kinds) << name;
+        EXPECT_EQ(a->size, b->size) << name;
+        EXPECT_EQ(a->initial, b->initial) << name << " starts the same in both";
+        ASSERT_EQ(a->fields.size(), b->fields.size()) << name;
+        for (std::size_t i = 0; i < a->fields.size(); ++i) {
+            EXPECT_TRUE(a->fields[i].SameAs(b->fields[i])) << name << "." << a->fields[i].name;
+            EXPECT_EQ(a->fields[i].offset, b->fields[i].offset);
         }
+    }
+    // The kinds, and what is one of each: nearest first.
+    EXPECT_TRUE(find(csharp, "Camera")->abstract);
+    EXPECT_TRUE(find(csharp, "LocalLight")->abstract);
+    EXPECT_FALSE(find(csharp, "PerspectiveCamera")->abstract);
+    EXPECT_EQ(find(csharp, "PerspectiveCamera")->kinds, std::vector<std::string> { "Camera" });
+    EXPECT_EQ(find(csharp, "SpotLight")->kinds, (std::vector<std::string> { "LocalLight", "Light" }));
+    EXPECT_TRUE(find(csharp, "Sky")->kinds.empty());
+    // A kind's fields are at the front of each of it, in the same places.
+    const auto& spot = *find(csharp, "SpotLight");
+    const auto& local = *find(csharp, "LocalLight");
+    ASSERT_GE(spot.fields.size(), local.fields.size());
+    for (std::size_t i = 0; i < local.fields.size(); ++i) {
+        EXPECT_TRUE(spot.fields[i].SameAs(local.fields[i])) << local.fields[i].name;
+        EXPECT_EQ(spot.fields[i].offset, local.fields[i].offset) << local.fields[i].name;
     }
 
     kecs::World world;
@@ -202,6 +266,99 @@ TEST(Declarations, ThePackageIsTheSameInEitherLanguage) {
     float value = 0.f;
     std::memcpy(&value, static_cast<const std::byte*>(world.Get(entity, lamp)) + range->offset, 4);
     EXPECT_EQ(value, 5.f);
+    // Declared into a world, a kind finds what is one of it — and is had by nobody itself.
+    const kecs::ComponentId light = world.Find("Light"), camera = world.Find("Camera");
+    ASSERT_NE(light, kecs::NoComponent);
+    ASSERT_NE(camera, kecs::NoComponent);
+    EXPECT_TRUE(world.Has(entity, light));
+    EXPECT_TRUE(world.Has(entity, world.Find("LocalLight")));
+    EXPECT_FALSE(world.Has(entity, camera));
+    EXPECT_FALSE(world.Add(entity, camera));
+    const kecs::Entity eye = world.Create();
+    ASSERT_TRUE(world.Add(eye, world.Find("OrthographicCamera")));
+    EXPECT_EQ(world.Which(eye, camera), world.Find("OrthographicCamera"));
+    const auto* far = world.Describe(camera).FindField("far");
+    ASSERT_NE(far, nullptr);
+    std::memcpy(&value, static_cast<const std::byte*>(world.Get(eye, camera)) + far->offset, 4);
+    EXPECT_EQ(value, 100.f) << "the kind's field, read from the one of it the entity has";
+}
+
+// Data: fields and nothing else, its bases' first. An abstract one is a kind; one that takes a piece is said and passed by.
+TEST(Declarations, DataIsFieldsItsBasesFirstAndAbstractDataIsAKind) {
+    const auto csharp = kscript::Declare(R"(
+        public abstract class Reading : Data
+        {
+            public float value = 2f;
+        }
+        public sealed class Temperature : Reading
+        {
+            public Vec3 where = new(1f, 2f, 3f);
+        }
+        public sealed class Ticking : Data, PerFrame
+        {
+            public float rate = 1f;
+            public void Update(float delta) { }
+        }
+        public abstract class Mover : Setup { public float speed = 4f; }
+        public sealed class Runner : Mover, PerFrame
+        {
+            public float stride = 1f;
+            public void Update(float delta) { }
+        }
+    )", false, "Readings.cs");
+    const auto find = [&](const std::string_view name) -> const kscript::ScriptType* {
+        for (const auto& type : csharp.types) if (type.name == name) return &type;
+        return nullptr;
+    };
+    const kscript::ScriptType* reading = find("Reading");
+    const kscript::ScriptType* temperature = find("Temperature");
+    ASSERT_NE(reading, nullptr) << "an abstract Data is a kind";
+    ASSERT_NE(temperature, nullptr);
+    EXPECT_TRUE(reading->abstract && reading->data);
+    EXPECT_FALSE(temperature->abstract);
+    EXPECT_EQ(temperature->kinds, std::vector<std::string> { "Reading" });
+    ASSERT_EQ(temperature->fields.size(), 2u);
+    EXPECT_EQ(temperature->fields[0].name, "value");
+    EXPECT_EQ(temperature->fields[0].offset, 0u);
+    EXPECT_EQ(temperature->fields[1].name, "where");
+    EXPECT_EQ(temperature->fields[1].offset, 4u);
+    EXPECT_EQ(find("Ticking"), nullptr) << "Data takes no pieces";
+    EXPECT_TRUE(std::ranges::any_of(csharp.problems, [](const std::string& p) { return p.find("Ticking") != std::string::npos; }));
+    // A script's abstract base is no script, but its fields are the script's, first — as a host lays them out.
+    EXPECT_EQ(find("Mover"), nullptr);
+    const kscript::ScriptType* runner = find("Runner");
+    ASSERT_NE(runner, nullptr);
+    EXPECT_FALSE(runner->data);
+    EXPECT_TRUE(runner->kinds.empty()) << "only Data has kinds";
+    ASSERT_EQ(runner->fields.size(), 2u);
+    EXPECT_EQ(runner->fields[0].name, "speed");
+    EXPECT_EQ(runner->pieces, std::vector<std::string> { "PerFrame" });
+
+    // In Kotlin alike.
+    const auto kotlin = kscript::Declare(R"(
+        abstract class Reading : Data() {
+            var value = 2f
+        }
+        class Temperature : Reading() {
+            var where = Vec3(1f, 2f, 3f)
+        }
+    )", true, "Readings.kt");
+    ASSERT_EQ(kotlin.types.size(), 2u);
+    EXPECT_EQ(kotlin.types[1].fields.size(), 2u);
+    EXPECT_EQ(kotlin.types[1].kinds, std::vector<std::string> { "Reading" });
+    EXPECT_EQ(kotlin.types[1].initial, temperature->initial);
+
+    // Declared, the kind finds what is one of it, and nothing has it itself.
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    for (const auto& type : csharp.types) ASSERT_NE(scripts.Declare(type), kecs::NoComponent) << type.name;
+    const kecs::Entity e = world.Create();
+    ASSERT_TRUE(world.Add(e, world.Find("Temperature")));
+    EXPECT_TRUE(world.Has(e, world.Find("Reading")));
+    EXPECT_FALSE(world.Add(e, world.Find("Reading")));
+    std::string error;
+    EXPECT_EQ(scripts.Register(*reading, &error), kecs::NoComponent) << "a kind is never run";
+    EXPECT_FALSE(error.empty());
 }
 
 // A ResourceScript is read as one: what it makes — each field of a resource type, with what its initialiser makes it

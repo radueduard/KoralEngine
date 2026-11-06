@@ -1,7 +1,7 @@
 {
   "koral-function": 1,
   "purpose": "Camera",
-  "description": "The scene's camera: the first entity with a Camera, seen from where it is the way it faces — through a perspective of its field of view, or, orthographic, a box of its height — near and far at the window's aspect. Its perspective is the main View and lens, which an editor looks through in its place. Gives every matrix of it, and all of them as one Bundle by the names a camera block has.",
+  "description": "The scene's camera: the first entity that is a Camera — a PerspectiveCamera or an OrthographicCamera — seen from where it is the way it faces: through a perspective of its field of view, or, orthographic, a box of its height; near and far at the window's aspect. The first Camera is the first of its own kind too, so each kind's Entity node finds the same one: it is orthographic when the first OrthographicCamera is it. Its perspective is the main View and lens, which an editor looks through in its place. Gives every matrix of it, and all of them as one Bundle by the names a camera block has.",
   "tags": [
     "camera",
     "view",
@@ -33,6 +33,89 @@
         ],
         "inputs": {
           "component": "Camera"
+        }
+      },
+      {
+        "id": "perspective of it",
+        "type": "Entity",
+        "at": [
+          0,
+          520
+        ],
+        "inputs": {
+          "component": "PerspectiveCamera"
+        }
+      },
+      {
+        "id": "orthographic of it",
+        "type": "Entity",
+        "at": [
+          0,
+          720
+        ],
+        "inputs": {
+          "component": "OrthographicCamera"
+        }
+      },
+      {
+        "id": "same",
+        "type": "Equal",
+        "at": [
+          250,
+          640
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "orthographic of it",
+              "entityId"
+            ]
+          },
+          "b": {
+            "$link": [
+              "eye",
+              "entityId"
+            ]
+          }
+        }
+      },
+      {
+        "id": "any",
+        "type": "Greater",
+        "at": [
+          250,
+          760
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "orthographic of it",
+              "entityId"
+            ]
+          },
+          "b": 0
+        }
+      },
+      {
+        "id": "boxed",
+        "type": "And",
+        "at": [
+          500,
+          700
+        ],
+        "inputs": {
+          "a": {
+            "$link": [
+              "same",
+              "out"
+            ]
+          },
+          "b": {
+            "$link": [
+              "any",
+              "out"
+            ]
+          }
         }
       },
       {
@@ -103,7 +186,7 @@
           },
           "fieldOfView": {
             "$link": [
-              "eye",
+              "perspective of it",
               "field.fieldOfView"
             ]
           },
@@ -131,7 +214,7 @@
         "inputs": {
           "size": {
             "$link": [
-              "eye",
+              "orthographic of it",
               "field.height"
             ]
           },
@@ -165,8 +248,8 @@
         "inputs": {
           "condition": {
             "$link": [
-              "eye",
-              "field.orthographic"
+              "boxed",
+              "out"
             ]
           },
           "a": {
@@ -193,8 +276,8 @@
         "inputs": {
           "condition": {
             "$link": [
-              "eye",
-              "field.orthographic"
+              "boxed",
+              "out"
             ]
           },
           "a": {
@@ -221,8 +304,8 @@
         "inputs": {
           "condition": {
             "$link": [
-              "eye",
-              "field.orthographic"
+              "boxed",
+              "out"
             ]
           },
           "a": {
@@ -249,8 +332,8 @@
         "inputs": {
           "condition": {
             "$link": [
-              "eye",
-              "field.orthographic"
+              "boxed",
+              "out"
             ]
           },
           "a": {
@@ -277,8 +360,8 @@
         "inputs": {
           "condition": {
             "$link": [
-              "eye",
-              "field.orthographic"
+              "boxed",
+              "out"
             ]
           },
           "a": {

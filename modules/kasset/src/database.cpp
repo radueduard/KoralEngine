@@ -48,18 +48,32 @@ namespace kasset
     std::string Database::Relative(const std::filesystem::path& file) const
     {
         std::error_code failed;
-        const std::filesystem::path whole = file.is_absolute() ? file : _root / file;
-        const std::filesystem::path relative = std::filesystem::weakly_canonical(whole, failed).lexically_relative(std::filesystem::weakly_canonical(_root, failed));
-        if (failed || relative.empty()) return {};
+        const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
+        const std::filesystem::path root = std::filesystem::weakly_canonical(_root, failed);
+        const std::filesystem::path relative = whole.lexically_relative(root);
+        if (failed) return {};
         const std::string text = relative.generic_string();
-        if (text == "." || text.starts_with("..")) return {};
-        return text;
+        if (!relative.empty() && text != "." && !text.starts_with("..")) return text;
+        // Not the project's own: one of a module's, named from the project's folder — or whole, on another drive.
+        if (!ModuleOf(whole)) return {};
+        return whole.root_name() == root.root_name() && !relative.empty() ? text : whole.generic_string();
+    }
+
+    std::optional<std::filesystem::path> Database::ModuleOf(const std::filesystem::path& file) const
+    {
+        std::error_code failed;
+        const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
+        for (const auto& module : _modules) {
+            const std::string text = whole.lexically_relative(std::filesystem::weakly_canonical(module, failed)).generic_string();
+            if (!text.empty() && text != "." && !text.starts_with("..")) return module;
+        }
+        return std::nullopt;
     }
 
     void Database::Index(Entry entry)
     {
         const Id id = entry.meta.id;
-        _byFile[entry.file] = id;
+        _byFile[entry.file.generic_string()] = id;
         _entries[id] = std::move(entry);
     }
 
@@ -80,17 +94,27 @@ namespace kasset
         // What is in the folders: the files that are assets, and the metas.
         std::vector<std::filesystem::path> sources, metas;
         std::error_code failed;
-        for (auto it = std::filesystem::recursive_directory_iterator(_root, std::filesystem::directory_options::skip_permission_denied, failed);
-             !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed)) {
-            if (it->is_directory(failed)) {
-                if (PassedBy(it->path())) it.disable_recursion_pending();
-                continue;
+        // The project's folders, then each module's: a module's own scenes are for trying it out, and not the project's.
+        std::vector<std::filesystem::path> roots { _root };
+        roots.insert(roots.end(), _modules.begin(), _modules.end());
+        for (const auto& root : roots) {
+            const bool module = root != _root;
+            for (auto it = std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, failed);
+                 !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed)) {
+                if (it->is_directory(failed)) {
+                    if (PassedBy(it->path()) || (module && it.depth() == 0 && it->path().filename() == "scenes")) it.disable_recursion_pending();
+                    continue;
+                }
+                if (!it->is_regular_file(failed)) continue;
+                if (module && it.depth() == 0 && it->path().filename() == "project.json") continue;
+                if (IsMeta(it->path())) metas.push_back(it->path());
+                else if (KindOfFile(it->path())) sources.push_back(it->path());
             }
-            if (!it->is_regular_file(failed)) continue;
-            if (IsMeta(it->path())) metas.push_back(it->path());
-            else if (KindOfFile(it->path())) sources.push_back(it->path());
+            if (failed) {
+                problems.push_back(std::format("{}'s folders could not all be read: {}", module ? root.filename().string() : std::string("The project"), failed.message()));
+                failed.clear();
+            }
         }
-        if (failed) problems.push_back(std::format("The project's folders could not all be read: {}", failed.message()));
         // In order, so that which of two copies keeps its ID is the same each time.
         std::ranges::sort(sources);
         std::ranges::sort(metas);
@@ -338,8 +362,9 @@ namespace kasset
         const std::filesystem::path& file = entry->file;
         // What the runtime names a file by: from the assets folder when it is in it, and by its whole path when not.
         const auto named = [&] {
-            const std::string inAssets = (_root / file).lexically_relative(AssetDirectory()).generic_string();
-            return "@" + (inAssets.empty() || inAssets.starts_with("..") ? (_root / file).generic_string() : inAssets);
+            const std::filesystem::path whole = (_root / file).lexically_normal();
+            const std::string inAssets = whole.lexically_relative(AssetDirectory().lexically_normal()).generic_string();
+            return "@" + (inAssets.empty() || inAssets.starts_with("..") ? whole.generic_string() : inAssets);
         };
         if (reference.part) {
             const Part* part = entry->meta.FindPart(reference.part);

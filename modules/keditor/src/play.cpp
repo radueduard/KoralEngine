@@ -1,5 +1,4 @@
 #include <keditor/play.h>
-#include "physics.h"
 #include <keditor/project.h>
 
 #include <algorithm>
@@ -175,7 +174,6 @@ namespace keditor
         if (_edited) _overlay = std::make_unique<keditor::Overlay>(Graph(), _document->World());
         Scenes()[_document.get()] = this;
         RegisterFlyCamera(*this);
-        RegisterPhysics(*this);
     }
 
     void GameScene::FixedUpdate()

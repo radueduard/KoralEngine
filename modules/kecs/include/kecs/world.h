@@ -59,7 +59,11 @@ namespace kecs
             std::vector<Entity> entities;
             std::size_t capacity = 0;
             std::unordered_map<ComponentId, Archetype*> with, without;   ///< Where an entity goes on gaining or losing one.
+            /// The kinds its components are of (ComponentDescription::kinds), each with the column of the first of them
+            /// that is one: what an id of a kind is answered with. Sorted by id.
+            std::vector<std::pair<ComponentId, int>> kinds;
 
+            /** @brief The column of @p id — or, for a kind, of the component here that is one of it. -1 when there is none. */
             [[nodiscard]] int ColumnOf(ComponentId id) const;
             [[nodiscard]] bool Has(const ComponentId id) const { return ColumnOf(id) >= 0; }
         };
@@ -232,6 +236,13 @@ namespace kecs
         [[nodiscard]] ComponentId Find(std::string_view name) const;
         [[nodiscard]] const ComponentDescription& Describe(ComponentId id) const;
         [[nodiscard]] std::size_t ComponentCount() const { return _types.size(); }
+        /**
+         * @brief Whether component @p id is @p kind, or one of it (ComponentDescription::kinds): what a query for the kind
+         *        finds an entity by.
+         */
+        [[nodiscard]] bool IsOf(ComponentId id, ComponentId kind) const;
+        /** @brief The component of @p entity that is @p kind, or one of it: the first, when it has several. NoComponent when none. */
+        [[nodiscard]] ComponentId Which(Entity entity, ComponentId kind) const;
         /**
          * @brief Gives component type @p id a new shape, and every entity that has it a value of that shape.
          *
@@ -451,6 +462,9 @@ namespace kecs
         /** Whether no entity of @p archetype can match: all of them have something the query must not have. */
         [[nodiscard]] bool Excluded(const detail::Archetype& archetype, const QueryDescription& query) const;
         ComponentId IdOf(std::uint32_t typeIndex, ComponentDescription (*describe)());
+        /** Which kinds each archetype's components are of: again, after a type is registered or reshaped that is a kind or of one. */
+        void Kinds(detail::Archetype& archetype) const;
+        void RefreshKinds();
 
         std::vector<std::unique_ptr<ComponentDescription>> _types;
         std::unordered_map<std::string, ComponentId> _byName;
@@ -494,8 +508,14 @@ namespace kecs
         std::uint64_t _sceneVersion = 0;
         std::uint64_t _structureVersion = 0;
         std::vector<std::uint64_t> _changesOf;      ///< A count a component type: ChangesOf.
+        std::vector<std::vector<ComponentId>> _kindsOf;     ///< A component type's kinds that are registered, by id: what changes with it.
 
-        void Changed(ComponentId id) { if (id >= _changesOf.size()) _changesOf.resize(id + 1, 0); ++_changesOf[id]; }
+        void Changed(const ComponentId id)
+        {
+            const auto bump = [this](const ComponentId which) { if (which >= _changesOf.size()) _changesOf.resize(which + 1, 0); ++_changesOf[which]; };
+            bump(id);
+            if (id < _kindsOf.size()) for (const ComponentId kind : _kindsOf[id]) bump(kind);
+        }
     };
 
     /**

@@ -1,6 +1,14 @@
+# The engine's C interface, compiled once: in the engine's library, and in the engine's own programs, which export it
+# for the scripts they run inside them (khost) — the program's own copy of the engine, not a library's beside it.
+add_library(kengine-capi OBJECT src/capi.cpp)
+target_include_directories(kengine-capi PUBLIC include)
+target_compile_definitions(kengine-capi PUBLIC KENGINE_BUILD)
+target_link_libraries(kengine-capi PUBLIC keditor kgraph kscript kecs Koral::Koral)
+target_compile_options(kengine-capi PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>)
+
 # koral-engine: the engine as one shared library, with its C interface and its scenes. What a C# or Kotlin program
 # loads beside the framework.
-add_library(koral-engine SHARED src/capi.cpp src/scenes.cpp)
+add_library(koral-engine SHARED src/scenes.cpp $<TARGET_OBJECTS:kengine-capi>)
 add_library(KoralEngine::koral-engine ALIAS koral-engine)
 target_include_directories(koral-engine PUBLIC include)
 target_compile_definitions(koral-engine PRIVATE KENGINE_BUILD)

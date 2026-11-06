@@ -1,8 +1,6 @@
 // The engine's package. Light from far away, shining along its entity's forward (-Z): a sun.
-// Data and nothing else: what a light or a camera does is the graph's, which reads it through a node of its name.
+// Data and nothing else: what a light does is the graph's, which reads it through a node of its name.
 
-public sealed class DirectionalLight : Setup
+public sealed class DirectionalLight : Light
 {
-    [Min(0f)] public Vec3 color = new(1f, 1f, 1f);
-    [Min(0f), Logarithmic] public float intensity = 1f;
 }

@@ -217,6 +217,16 @@ annotation class Min(val min: Float)
 @Retention(AnnotationRetention.SOURCE)
 annotation class Logarithmic
 
+/**
+ * A property its script starts over for: while the scene plays, when something other than the script changes it — the
+ * inspector, another script — the script is switched off, destroyed and made anew, a new object with the entity's
+ * properties as they are, as if it had just been added: what `initialize` set up from it is set up again, and what
+ * `onDestroyed` lets go of is let go of first. For what `initialize` reads: `@Reinitialize var particleCount = 100`.
+ */
+@Target(AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class Reinitialize
+
 /** What a whole-number property is one of, by name: the first is 0, the second 1. `@Choices("Opaque", "Masked", "Blended")`. */
 @Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
 @Retention(AnnotationRetention.SOURCE)
@@ -235,7 +245,28 @@ annotation class Choices(vararg val names: String)
  * }
  * ```
  */
-abstract class Material
+abstract class Material : Data()
+
+/**
+ * Structured data and nothing else: a component that no script runs. Its public vars are a component, shown on an
+ * entity, saved with the scene and set from a script by name, as a script's are; nothing is called on it, it takes no
+ * pieces, and it needs no runtime to be what it is — the engine reads it from its source. What it is for is the
+ * graph's, which reads it: a camera, a light, a sky.
+ *
+ * ```kotlin
+ * abstract class Camera : Data() {          // a kind: no entity has it, and a query for it finds every camera
+ *     @Min(0.001f) var near = 0.1f
+ *     var far = 100f
+ * }
+ * class PerspectiveCamera : Camera() {
+ *     @Range(1f, 179f) var fieldOfView = 60f
+ * }
+ * ```
+ *
+ * An abstract one is a kind: what derives from it has its properties first, and is found by its name —
+ * `world.with("Camera")`, a graph's `Entity` of `Camera` — with those read from whichever it is.
+ */
+abstract class Data
 
 /** A Material's picture, by the name it is found by: `"@textures/wall.png"`, or one of a texel — [White], [Black], [Normal]. */
 data class Texture(val name: String) {
@@ -256,7 +287,9 @@ internal enum class Hook { Created, Enabled, Started, FixedUpdate, Update, LateU
 
 /** How a script class's properties are laid out as a component's bytes. */
 internal class ScriptLayout private constructor(type: Class<*>) {
-    class Property(val field: Field, val type: String, val offset: Int, val size: Int)
+    class Property(val field: Field, val type: String, val offset: Int, val size: Int) {
+        val reinitializes = field.isAnnotationPresent(Reinitialize::class.java)
+    }
 
     val name: String = nameOf(type)
     val properties: List<Property>
@@ -319,7 +352,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
     }
 
     /** The object's properties into the engine's bytes. */
-    fun store(script: Setup, data: MemorySegment) {
+    fun store(script: Any, data: MemorySegment) {
         for (p in properties) {
             val at = p.offset.toLong()
             fun f(i: Int, v: Float) = data.set(JAVA_FLOAT_UNALIGNED, at + i * 4L, v)
@@ -353,7 +386,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
 
         @Synchronized fun of(type: Class<*>): ScriptLayout = layouts.getOrPut(type) { ScriptLayout(type) }
         /** What a script derives from: none of its properties are the script's own. */
-        private val bases = setOf(Setup::class.java, Script::class.java, GraphicsScript::class.java, ResourceScript::class.java, Any::class.java)
+        private val bases = setOf(Setup::class.java, Script::class.java, GraphicsScript::class.java, ResourceScript::class.java, Data::class.java, Material::class.java, Any::class.java)
         /** Forgets every class [loader] loaded: it is being let go of. */
         @Synchronized fun forget(loader: ClassLoader) { layouts.keys.removeIf { it.classLoader === loader } }
 

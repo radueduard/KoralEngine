@@ -354,19 +354,22 @@ class World internal constructor(internal val document: MemorySegment) {
      * What a script on [entity] holds now, as an object of its class: read, not kept. Null when the entity has none.
      * [write] puts one back.
      */
-    fun <T : Setup> read(entity: Entity, type: Class<T>): T? = native { a ->
+    fun <T : Any> read(entity: Entity, type: Class<T>): T? = native { a ->
         val layout = ScriptLayout.of(type)
         val data = dataOf(a, entity, layout) ?: return@native null
         val script = type.getDeclaredConstructor().newInstance()
-        script.entity = entity
-        script.world = this
+        if (script is Setup) {
+            script.entity = entity
+            script.world = this
+        }
         layout.load(script, data)
         script
     }
-    inline fun <reified T : Setup> read(entity: Entity): T? = read(entity, T::class.java)
+    /** What a script, or a [Data], on [entity] holds now: [read]. */
+    inline fun <reified T : Any> read(entity: Entity): T? = read(entity, T::class.java)
 
-    /** Makes a script on [entity] hold what [script] does. False when the entity has none. */
-    fun write(entity: Entity, script: Setup): Boolean = native { a ->
+    /** Makes a script, or a [Data], on [entity] hold what [script] does. False when the entity has none. */
+    fun write(entity: Entity, script: Any): Boolean = native { a ->
         val layout = ScriptLayout.of(script.javaClass)
         val data = dataOf(a, entity, layout) ?: return@native false
         layout.store(script, data)

@@ -364,12 +364,25 @@ namespace keditor
          *        of the engine's opened and changed is saved as the project's own.
          */
         [[nodiscard]] static std::filesystem::path EngineFunctionsDirectory();
-        /** @brief The functions there are to call, by name: the project's, and the engine's. */
+        /** @brief The functions there are to call, by name: the project's, its modules', and the engine's. */
         [[nodiscard]] std::vector<std::string> Functions() const;
         /** @brief What function @p name says it is for (its file's `purpose`, `description` and `tags`): the project's, or the engine's. */
         [[nodiscard]] FunctionAbout AboutFunction(std::string_view name) const;
         /** @brief Whether @p name is one of the engine's functions, and the project has none of its own so called. */
         [[nodiscard]] bool IsEngineFunction(std::string_view name) const;
+        /**
+         * @brief The file function @p name is read from: the project's, or — when it has none so called — the first of its
+         *        modules' that has one, or the engine's. Empty when there is no such function.
+         */
+        [[nodiscard]] std::filesystem::path FunctionFile(std::string_view name) const;
+
+        /**
+         * @brief The folders of the modules the scene's project imports (Project::Imported), the nearest first: their
+         *        scripts, shaders, functions and assets are the project's too. Found when the project is (SetAssetDirectory).
+         */
+        [[nodiscard]] const std::vector<std::filesystem::path>& Modules() const { return _modules; }
+        /** @brief Finds what the project imports again — after its project.json changed — and declares and scans what that is. */
+        void ReloadModules();
         /**
          * @brief What a node can be made as besides the types there are: the runtime's, a node for each component —
          *        and a call of each of the project's functions, by its name (or `<name> (function)`, where a type has it).
@@ -504,7 +517,8 @@ namespace keditor
 
         /**
          * @brief Makes the components the scripts under @p folder — or the one script file it is — declare known, as their
-         *        sources declare them: what a project's scripts are, whether or not anything runs them. Load does it for the
+         *        sources declare them, read with the modules' scripts — a class may derive from one of a module's: what a
+         *        project's scripts are, whether or not anything runs them. Load does it for the
          *        scene's project.
          */
         void DeclareScripts(const std::filesystem::path& folder);
@@ -632,6 +646,7 @@ namespace keditor
         std::unique_ptr<kgraph::Runtime> _runtime;
         std::uint32_t _reportsAsked = 0;     // frames since the start: Update's digest of the reports, every few
         std::unique_ptr<kasset::Database> _assets;
+        std::vector<std::filesystem::path> _modules;           ///< Modules(): the folders of what the project imports.
         std::vector<std::string> _assetProblems;
         /** The import settings the project's metas hold, into @p graph: over what a scene saved before they were the assets' said. */
         void ImportSettingsInto(kgraph::Graph& graph) const;
@@ -644,6 +659,11 @@ namespace keditor
          * another place is the same part, and what holds it — an entity's Mesh, a material it follows — is led there.
          */
         void RecordModelParts(const std::filesystem::path& file, const kgraph::Model& model);
+        /**
+         * What a component an object, a prefab or a scene names is here: itself — or, for one that is a kind now (a
+         * Camera), the one of it that what it holds says (kecs::Codecs::Becomes). Empty when it is a kind and nothing says.
+         */
+        [[nodiscard]] std::string Becomes(const std::string& component, const kgraph::Value& fields) const;
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
         std::vector<std::string> _notes;

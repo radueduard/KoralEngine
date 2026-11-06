@@ -26,6 +26,7 @@
 
 #include <kasset/database.h>
 #include <kgraph/catalog.h>
+#include <kscript/scripts.h>
 
 #include "document.h"
 #include "look.h"
@@ -67,18 +68,6 @@ namespace keditor
         std::filesystem::path file;
     };
 
-    /**
-     * @brief What runs @p project with its scripts — in the editor, with @p edit; on its own otherwise: its own Gradle
-     *        build for scripts in Kotlin, the C# runner for scripts in C#. Empty for a project with none.
-     */
-    [[nodiscard]] std::string ScriptRunner(const Project& project, bool edit);
-    /**
-     * @brief Before any window is opened: the editor on @p project through its scripts' runner, when it has scripts —
-     *        in a process forked for it, in this one's terminal, waited for. What it exited with; nothing for a project
-     *        with no scripts, or one this program was itself started for by that runner.
-     */
-    [[nodiscard]] std::optional<int> RunThroughScripts(const Project& project);
-
     /** @brief What a new shader of a kind has besides what every one of its kind has. Each is for the kinds it names. */
     struct ShaderChoice {
         bool wholePicture = false;      ///< Vertex: one triangle over the whole picture, reading another — no mesh — in place of each entity's mesh.
@@ -110,8 +99,19 @@ namespace keditor
         [[nodiscard]] kasset::Database* AssetDatabase();
         [[nodiscard]] const std::string& SceneName() const { return _scene; }
 
-        /** @brief Makes a project in @p directory and saves the scene being worked on as its first. */
-        bool NewProject(const std::filesystem::path& directory);
+        /**
+         * @brief Makes a project in @p directory and saves the scene being worked on as its first. Its scripts are
+         *        in @p language — 'c' for C#, 'k' for Kotlin — from the start: 0 leaves it to its first script.
+         */
+        bool NewProject(const std::filesystem::path& directory, char language = 0, bool module = false, const std::vector<std::filesystem::path>& modules = {});
+        /**
+         * @brief Makes the project import the module in @p folder: its scripts, shaders, functions, objects, prefabs and
+         *        assets are the project's from then on. Refused for a project rather than a module, or one whose scripts
+         *        are in another language.
+         */
+        bool ImportModule(const std::filesystem::path& folder);
+        /** @brief Makes the project no longer import the module it names @p reference (one of Project::modules). */
+        bool ForgetModule(const std::string& reference);
         /** @brief Opens the project in @p directory, and the scene it starts with. */
         bool OpenProject(const std::filesystem::path& directory);
         /** @brief Saves the scene to the project. False without one: a project is made first. */
@@ -122,20 +122,22 @@ namespace keditor
          */
         bool Run();
         /**
-         * @brief What Run runs: whatever runs the project with its scripts — its own Gradle build for scripts in
-         *        Kotlin, the C# runner for scripts in C# — or the player, for a project with none. Empty without a project.
+         * @brief What Run runs: the player beside this program, on the project — which runs its scripts inside it,
+         *        as this editor does. Empty without a project.
          */
         [[nodiscard]] std::string RunCommand() const;
-        /** @brief The same, for the project in the editor: empty when it has no scripts, and so needs nothing but this editor. */
-        [[nodiscard]] std::string EditCommand() const;
         /**
          * @brief The project's scripts that nothing is running: files in its `scripts` folder whose class is no
-         *        component with its functions in place. What an editor started without the scripts' host has —
-         *        the scene plays, and they do nothing.
+         *        component with its functions in place — not compiled yet, or not compiling, or nothing in this
+         *        program to run them. The scene plays, and they do nothing.
          */
         [[nodiscard]] std::vector<std::string> ScriptsNotRunning();
-        /** @brief Saves, starts the editor again on this project with its scripts, and closes this one. */
-        bool ReopenWithScripts();
+        /**
+         * @brief What the project's scripts declare, in its language, read from their sources together: every component
+         *        of them — scripts, Data, kinds, material kinds, ResourceScripts — each with the file it is in. Read again
+         *        only when a file is added, removed or written.
+         */
+        [[nodiscard]] const std::vector<kscript::ScriptType>& ProjectScriptTypes();
         /** @brief One thing wrong now: what is said of it, the node it is of (when it is a node's), and whether it is only a warning. */
         struct Problem { std::string text, node; bool warning = false; };
         /**
@@ -144,20 +146,16 @@ namespace keditor
          */
         [[nodiscard]] std::vector<Problem> Problems();
         /**
-         * @brief The project whose scripts the program this editor runs in runs: what a scripts' runner opened the
-         *        editor for. Empty in `koral-editor`, which runs none.
+         * @brief The project whose scripts the program this editor runs in runs itself: a program in C# or Kotlin
+         *        that opened the engine's library's Editor scene with them (its `scripts` argument). Not needed in
+         *        `koral-editor`, whose scripts are run by its ScriptRuntime.
          */
         void HostScripts(std::filesystem::path project) { _scriptsHost = std::move(project); }
-        /** @brief Whether this editor runs the scripts of the project that is open. */
-        [[nodiscard]] bool HostsScripts() const;
         /**
-         * @brief Whether a project with scripts this editor does not run is opened again by their runner as soon as
-         *        it is opened (ReopenWithScripts), rather than edited here with its scripts doing nothing. The
-         *        editor's program says so; a test does not.
+         * @brief Whether the scripts of the project that is open are run here. When not, why, in @p why (when it
+         *        is given).
          */
-        bool handOver = false;
-        /** @brief Between frames: hands the project over to its scripts' runner when opening it asked to. */
-        void UpdateHandOver();
+        [[nodiscard]] bool HostsScripts(std::string* why = nullptr) const;
 
         /**
          * @brief Makes an input a node can do without one the node shows: asked for, and not yet given. What a node
@@ -230,13 +228,6 @@ namespace keditor
         bool gizmoEnabled = true;
         kor::GizmoMode gizmo = kor::GizmoMode::eTranslate;
         void SetGizmo(const bool enabled, const kor::GizmoMode mode) { gizmoEnabled = enabled; gizmo = mode; ++_changes; }
-        /**
-         * The picked entity's Collider, as its inspector asks: drawn in the scene's view as the physics will have it —
-         * and, being changed, sized by a gizmo of its own in place of the one that moves the entity. Only ever the
-         * picked one's.
-         */
-        bool colliderShown = false, colliderEditing = false;
-        void ShowCollider(const bool shown, const bool editing) { colliderShown = shown || editing; colliderEditing = editing; ++_changes; }
         void SetLookThroughCamera(const bool through) { lookThroughCamera = through; ++_changes; }
         /** What the scene's panel shows the scene through: its pointer, for the gizmo and for picking. */
         std::shared_ptr<kgui::ViewportState> viewport = std::make_shared<kgui::ViewportState>();
@@ -771,6 +762,8 @@ namespace keditor
         bool WriteShadingModule(const std::string& kind);
         /** @brief The folder files that are not in the project are shown under, in the Assets panel. */
         static constexpr const char* OutsideFolder = "Outside the project";
+        /** @brief The folder the imported modules' things are shown under, each in a folder of its name. */
+        static constexpr const char* ModulesFolder = "Modules";
         /**
          * @brief Every mesh and picture the scene has of a file, the models and pictures in the project's `assets`
          *        folder that it has not, and the project's shaders and scripts. Models first, then meshes, textures,
@@ -891,15 +884,6 @@ namespace keditor
         bool OpenInCode(const std::filesystem::path& file = {}, int line = 0);
         /** @brief How a command is run: the system's shell, unless something else is put here (a test). */
         static inline std::function<bool(const std::string& command)> launch;
-        /** @brief How the editor closes once it has handed over to another: App::Quit, unless something else is put here (a test). */
-        static inline std::function<void()> quit;
-        /**
-         * @brief Whether a hand-over (ReopenWithScripts) is the program's to make once its window is closed — in its own
-         *        terminal, where it can see the runner fail — rather than a runner started from here. `koral-editor` says so.
-         */
-        static inline bool handOverOnExit = false;
-        /** @brief The project the program is to go to the runner of, once its window is closed; nothing for none. */
-        static inline std::optional<std::filesystem::path> handOverPending;
         /**
          * @brief The project the editor opens when it is given none: this user's choice, kept in their config
          *        folder (SetStartupProject). Empty when there is none, or it is no project any more.
@@ -1047,6 +1031,9 @@ namespace keditor
         /** @brief Asks for the New shader dialog: its kinds, and what each can have. */
         void AskForNewShader() { _wantsShader = true; ++_changes; }
         [[nodiscard]] bool TakeAskForNewShader() { return std::exchange(_wantsShader, false); }
+        /** @brief Opens the form for a new project, or module: its name, its scripts' language, what it is, where, and what it imports. */
+        void AskForNewProject() { _wantsProject = true; ++_changes; }
+        [[nodiscard]] bool TakeAskForNewProject() { return std::exchange(_wantsProject, false); }
         /** @brief Asks for the page the graph shows to be put in order: its nodes left to right, by what is wired to what. */
         void AskToArrange() { _wantsArrange = true; ++_changes; }
         [[nodiscard]] bool TakeAskToArrange() { return std::exchange(_wantsArrange, false); }
@@ -1064,6 +1051,11 @@ namespace keditor
         [[nodiscard]] std::uint64_t Version() { return Doc().Version() + _changes; }
 
     private:
+        /** Saves the project with what it imports now, and finds what that has: its scripts, objects and assets. */
+        bool ModulesChanged(const std::string& said);
+        /// ProjectScriptTypes, and the files (with when each was written) it was read from.
+        std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> _scriptFiles;
+        std::vector<kscript::ScriptType> _scriptTypes;
         PlayScene& _play;
         GameScene* _game = nullptr;
         GameScene* _second = nullptr;
@@ -1077,7 +1069,6 @@ namespace keditor
         /** What mesh @p id is made of, as a key: a model's file's content and its import, a generator's id. Empty when that is not known. */
         [[nodiscard]] std::string MeshKey(const std::string& id) const;
         std::filesystem::path _scriptsHost;
-        bool _handingOver = false;
         std::string _scene = "main";
         std::string _status = "A scene with nothing in it. Right-click the graph to add a node.";
         bool _failed = false;
@@ -1117,6 +1108,7 @@ namespace keditor
         std::vector<std::string> _toArrange;
         std::string _arrangedFrom;
         bool _wantsShader = false;
+        bool _wantsProject = false;
         std::uint32_t _went = 0;
         // What the outliner asks of every entity, worked out once for the scene as it is.
         std::map<std::string, std::string> _pipelines;
@@ -1280,12 +1272,9 @@ namespace keditor
     /** @brief The editor's own scene: its window is the interface, and the scene it edits runs offscreen inside it. */
     class EditorScene final : public kor::Scene {
     public:
-        /**
-         * @brief Opens on the project in @p project, or on an empty scene when there is none. With @p handOver, a
-         *        project with scripts is opened again by their runner (Session::handOver).
-         */
-        explicit EditorScene(std::filesystem::path project = {}, bool handOver = false);
-        /** "project": its folder. "scripts": the project whose scripts the runner that opened this runs. */
+        /** @brief Opens on the project in @p project, or on an empty scene when there is none. */
+        explicit EditorScene(std::filesystem::path project = {});
+        /** "project": its folder. "scripts": the project whose scripts the program that opened this runs itself. */
         explicit EditorScene(const kor::SceneArgs& arguments);
         ~EditorScene() override;
 
@@ -1298,7 +1287,6 @@ namespace keditor
 
     private:
         std::filesystem::path _projectPath, _scriptsHost;
-        bool _handOver = false;
         bool _focused = true;       // whether its window had the keys and mouse, the frame before
         PlayScene* _play = nullptr;
         GameScene* _game = nullptr;

@@ -386,126 +386,208 @@ namespace kscript
         }
     }
 
-    Declarations Declare(const std::string_view source, const bool kotlin, const std::string_view file)
-    {
-        Declarations out;
-        const std::string text = Uncommented(source);
-        const std::string where = file.empty() ? std::string() : std::format("{}: ", file);
-        // A class, what it is said to be before its body, and its body.
-        static const std::regex classes(R"(\bclass\s+(\w+)([^{;]*)\{)");
-        static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(Setup|Script|GraphicsScript|ResourceScript|Material)\b)");
-        static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(Setup|Script|GraphicsScript|ResourceScript|Material)\s*\(\s*\))");
-        static const std::regex named(R"rx(ScriptName\s*\(\s*(?:name\s*=\s*)?"([^"]*)"\s*\)\s*\]?\s*[\w\s]*$)rx");
-        static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
-        static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
-        for (auto it = std::sregex_iterator(text.begin(), text.end(), classes); it != std::sregex_iterator(); ++it) {
-            const std::smatch& found = *it;
-            const std::string header = found[2].str();
-            std::smatch base;
-            if (!std::regex_search(header, base, kotlin ? kotlinBase : csharpBase)) continue;
-            // What it is said to be, before `class`: abstract is no script, and a ScriptName names it otherwise.
-            const std::size_t at = static_cast<std::size_t>(found.position(0));
-            const std::size_t from = text.find_last_of(";}{", at == 0 ? 0 : at - 1);
-            const std::string before = text.substr(from == std::string::npos ? 0 : from + 1, at - (from == std::string::npos ? 0 : from + 1));
-            if (std::regex_search(before, std::regex(R"(\babstract\b)"))) continue;
-            ScriptType type;
-            type.name = found[1].str();
-            type.makesResources = base[1].str() == "ResourceScript";
-            type.material = base[1].str() == "Material";
-            if (std::smatch name; std::regex_search(before, name, named)) type.name = name[1].str();
-            // The pieces it takes: the names after its base, as its source writes them.
-            static const std::regex piece(R"(\b(PerFrame|FixedStep|BeforeDraw|MeshGenerator|ImageGenerator)\b)");
-            for (auto p = std::sregex_iterator(header.begin(), header.end(), piece); p != std::sregex_iterator(); ++p) type.pieces.push_back((*p)[1].str());
+    namespace {
+        /** What a script's class derives from at the root: what it is. */
+        const std::vector<std::string_view> Roots { "Setup", "Script", "GraphicsScript", "ResourceScript", "Material", "Data" };
 
-            const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
-            const std::size_t close = Closing(text, open);
-            bool fine = true;
-            // Each field as it is written, laid out once they are all read: a material's pictures first.
-            struct Parsed { std::string name, statement, value; const Kind* kind; };
-            std::vector<Parsed> parsed;
+        /** A class as its source says it: what it derives from, and the statements at the top of its body — not yet fields. */
+        struct Class {
+            std::string name;           ///< As the source names it: what another class derives from it by.
+            std::string component;      ///< Its component's name: its ScriptName's, or its own.
+            std::string base;           ///< What it derives from, the first after the colon, bare.
+            std::string where;          ///< Its file, as a problem says where.
+            std::string path;           ///< Its file, whole: what its type says it is declared in.
+            bool kotlin = false, isAbstract = false;
+            std::vector<std::string> pieces;
+            std::vector<std::string> statements;
+        };
+
+        /** Every class @p source declares that derives from anything, in the order it declares them. */
+        std::vector<Class> Classes(const std::string_view source, const bool kotlin, const std::string_view file, const std::string_view path = {})
+        {
+            std::vector<Class> out;
+            const std::string text = Uncommented(source);
+            const std::string where = file.empty() ? std::string() : std::format("{}: ", file);
+            // A class, what it is said to be before its body, and its body. One with no body (a Kotlin `data class Dot(...)`)
+            // is passed by: what is said of it ends at the next class, whose body is not its.
+            static const std::regex classes(R"(\bclass\s+(\w+)((?:(?!\bclass\s+\w)[^{;])*)\{)");
+            // What it derives from: C#'s first after the colon; Kotlin's the one it calls the constructor of.
+            static const std::regex csharpBase(R"(:\s*(?:[\w.]+\.)?(\w+)\b)");
+            static const std::regex kotlinBase(R"(:\s*(?:[\w.]+\.)?(\w+)\s*\(\s*\))");
+            static const std::regex named(R"rx(ScriptName\s*\(\s*(?:name\s*=\s*)?"([^"]*)"\s*\)\s*\]?\s*[\w\s]*$)rx");
+            static const std::regex piece(R"(\b(PerFrame|FixedStep|BeforeDraw|MeshGenerator|ImageGenerator)\b)");
+            for (auto it = std::sregex_iterator(text.begin(), text.end(), classes); it != std::sregex_iterator(); ++it) {
+                const std::smatch& found = *it;
+                const std::string header = found[2].str();
+                std::smatch base;
+                if (!std::regex_search(header, base, kotlin ? kotlinBase : csharpBase)) continue;
+                // What it is said to be, before `class`: abstract, and a ScriptName that names it otherwise.
+                const std::size_t at = static_cast<std::size_t>(found.position(0));
+                const std::size_t from = text.find_last_of(";}{", at == 0 ? 0 : at - 1);
+                const std::string before = text.substr(from == std::string::npos ? 0 : from + 1, at - (from == std::string::npos ? 0 : from + 1));
+                Class one;
+                one.name = one.component = found[1].str();
+                one.base = base[1].str();
+                one.where = where;
+                one.path = std::string(path);
+                one.kotlin = kotlin;
+                one.isAbstract = std::regex_search(before, std::regex(R"(\babstract\b)"));
+                if (std::smatch name; std::regex_search(before, name, named)) one.component = name[1].str();
+                // The pieces it takes: the names after its base, as its source writes them.
+                for (auto p = std::sregex_iterator(header.begin(), header.end(), piece); p != std::sregex_iterator(); ++p) one.pieces.push_back((*p)[1].str());
+                const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
+                const std::size_t close = Closing(text, open);
+                one.statements = Statements(text.substr(open + 1, close - open - 1), kotlin);
+                out.push_back(std::move(one));
+            }
+            return out;
+        }
+
+        /**
+         * The script types of @p classes: each that is no abstract class — or is an abstract Data, a kind — whose bases, each
+         * among them, come down from one of the Roots. A base's fields come first, as the hosts lay them out.
+         */
+        Declarations Resolve(const std::vector<Class>& classes)
+        {
+            Declarations out;
+            static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
+            static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
             // A Kotlin annotation on a line of its own is the next property's.
             static const std::regex annotationsOnly(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)+$)");
-            std::string pending;
-            for (const std::string& line : Statements(text.substr(open + 1, close - open - 1), kotlin)) {
-                const std::string statement = pending.empty() ? line : pending + " " + line;
-                if (kotlin && std::regex_match(line, annotationsOnly)) { pending = statement; continue; }
-                pending.clear();
-                std::smatch field;
-                std::string name, written, value, modifiers;
-                if (kotlin) {
-                    if (!std::regex_match(statement, field, kotlinField)) continue;
-                    modifiers = field[1].str();
-                    name = field[3].str();
-                    written = field[4].str();
-                    value = Trim(field[5].str());
-                    if (std::regex_search(modifiers, std::regex(R"(\b(?:private|protected|internal)\b)"))) continue;
-                    if (written.empty()) written = Inferred(value);
-                    // A resource it makes is one, kept as it is made: a val.
-                    if (type.makesResources && IsResourceKind(written)) { type.resources.push_back(Resource(name, written, value, where + type.name + ".", out.problems)); continue; }
-                    if (field[2].str() == "val") continue;
-                } else {
-                    if (!std::regex_match(statement, field, csharpField)) continue;
-                    modifiers = field[1].str();
-                    written = field[2].str();
-                    name = field[3].str();
-                    value = Trim(field[4].str());
-                    if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))) continue;
-                    if (type.makesResources && IsResourceKind(written) && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
-                        type.resources.push_back(Resource(name, written, value, where + type.name + ".", out.problems));
-                        continue;
+            const auto find = [&](const std::string& name, const bool kotlin) -> const Class* {
+                for (const auto& c : classes) if (c.name == name && c.kotlin == kotlin) return &c;
+                return nullptr;
+            };
+            for (const Class& declared : classes) {
+                // Down from its root: the chain of what it derives from, its root's first.
+                std::vector<const Class*> chain { &declared };
+                std::string root;
+                while (true) {
+                    const std::string& base = chain.back()->base;
+                    if (std::ranges::contains(Roots, base)) { root = base; break; }
+                    const Class* above = find(base, declared.kotlin);
+                    if (!above || std::ranges::contains(chain, above) || chain.size() > 32) break;   // no script's, or round in a circle
+                    chain.push_back(above);
+                }
+                if (root.empty()) continue;
+                const bool data = root == "Data" || root == "Material";
+                // An abstract class is a kind when it is Data: what is one of it is found by it. Any other is no script.
+                if (declared.isAbstract && root != "Data") continue;
+                std::ranges::reverse(chain);
+
+                ScriptType type;
+                type.name = declared.component;
+                type.file = declared.path;
+                type.makesResources = root == "ResourceScript";
+                type.material = root == "Material";
+                type.data = data;
+                type.abstract = declared.isAbstract;
+                for (auto above = chain.rbegin() + 1; above != chain.rend(); ++above)
+                    if ((*above)->isAbstract && root == "Data") type.kinds.push_back((*above)->component);     // nearest first
+                for (const Class* each : chain) type.pieces.insert(type.pieces.end(), each->pieces.begin(), each->pieces.end());
+                if (data && !type.pieces.empty()) {
+                    out.problems.push_back(std::format("{}{} is {}, which is data and nothing else: it takes no {}", declared.where, type.name,
+                                                       type.material ? "a Material" : "Data", type.pieces.front()));
+                    continue;
+                }
+
+                bool fine = true;
+                // Each field as it is written, laid out once they are all read: a material's pictures first.
+                struct Parsed { std::string name, statement, value; const Kind* kind; };
+                std::vector<Parsed> parsed;
+                for (const Class* each : chain) {
+                    const bool kotlin = each->kotlin;
+                    std::string pending;
+                    for (const std::string& line : each->statements) {
+                        const std::string statement = pending.empty() ? line : pending + " " + line;
+                        if (kotlin && std::regex_match(line, annotationsOnly)) { pending = statement; continue; }
+                        pending.clear();
+                        std::smatch field;
+                        std::string name, written, value, modifiers;
+                        if (kotlin) {
+                            if (!std::regex_match(statement, field, kotlinField)) continue;
+                            modifiers = field[1].str();
+                            name = field[3].str();
+                            written = field[4].str();
+                            value = Trim(field[5].str());
+                            if (std::regex_search(modifiers, std::regex(R"(\b(?:private|protected|internal)\b)"))) continue;
+                            if (written.empty()) written = Inferred(value);
+                            // A resource it makes is one, kept as it is made: a val.
+                            if (type.makesResources && IsResourceKind(written)) { type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems)); continue; }
+                            if (field[2].str() == "val") continue;
+                        } else {
+                            if (!std::regex_match(statement, field, csharpField)) continue;
+                            modifiers = field[1].str();
+                            written = field[2].str();
+                            name = field[3].str();
+                            value = Trim(field[4].str());
+                            if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))) continue;
+                            if (type.makesResources && IsResourceKind(written) && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
+                                type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
+                                continue;
+                            }
+                            if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;
+                        }
+                        const Kind* kind = type.material && IsTexture(written) ? &TextureKind : KindOf(written, kotlin);
+                        if (!kind) {
+                            out.problems.push_back(std::format("{}{}.{} is a {}, which a {} cannot keep", each->where, type.name, name, written.empty() ? "type not written" : written,
+                                                               IsTexture(written) ? "script (only a Material has pictures)" : "script"));
+                            fine = false;
+                            break;
+                        }
+                        parsed.push_back({ name, statement, value, kind });
                     }
-                    if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;
+                    if (!fine) break;
                 }
-                const Kind* kind = type.material && IsTexture(written) ? &TextureKind : KindOf(written, kotlin);
-                if (!kind) {
-                    out.problems.push_back(std::format("{}{}.{} is a {}, which a {} cannot keep", where, type.name, name, written.empty() ? "type not written" : written,
-                                                       IsTexture(written) ? "script (only a Material has pictures)" : "script"));
-                    fine = false;
-                    break;
+                if (!fine) continue;
+                std::ranges::stable_partition(parsed, [](const Parsed& p) { return p.kind == &TextureKind; });
+                std::size_t offset = 0, alignment = 1;
+                struct Start { std::size_t offset; const Kind* kind; std::vector<double> numbers; };
+                std::vector<Start> starts;
+                const std::string& where = declared.where;
+                for (const auto& [name, statement, value, kind] : parsed) {
+                    offset = (offset + kind->alignment - 1) / kind->alignment * kind->alignment;
+                    type.fields.push_back({ .name = name, .type = kind->name, .offset = offset, .size = kind->size });
+                    Limits(statement, type.fields.back());
+                    if (kind == &TextureKind) {
+                        const auto picture = PictureOf(value);
+                        if (!picture) out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts white", where, type.name, name, value));
+                        type.textures.emplace_back(name, picture.value_or("$white"));
+                    } else if (!value.empty()) {
+                        auto numbers = Numbers(value);
+                        const bool identity = kind->numbers == 16 && numbers && numbers->empty();
+                        if (identity) numbers = std::vector<double> { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+                        // One number for a whole vector, `Vec2(1f)`: each of its numbers.
+                        if (numbers && numbers->size() == 1 && kind->numbers >= 2 && kind->numbers <= 4) numbers = std::vector<double>(kind->numbers, numbers->front());
+                        if (numbers && kind->scalar != 'e' && (numbers->size() == kind->numbers || numbers->empty())) starts.push_back({ offset, kind, std::move(*numbers) });
+                        else if (kind->scalar == 'e') {}   // an entity starts as none, whatever it is said to start as: one is set in the editor
+                        else out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts at zero", where, type.name, name, value));
+                    }
+                    offset += kind->size;
+                    alignment = std::max(alignment, kind->alignment);
                 }
-                parsed.push_back({ name, statement, value, kind });
+                type.alignment = alignment;
+                type.size = (offset + alignment - 1) / alignment * alignment;
+                type.initial.assign(type.size, std::byte { 0 });
+                for (const auto& start : starts)
+                    for (std::size_t n = 0; n < start.numbers.size(); ++n) {
+                        const std::size_t width = start.kind->size / start.kind->numbers;
+                        Write(type.initial.data() + start.offset + n * width, start.kind->scalar, width, start.numbers[n]);
+                    }
+                if (std::ranges::all_of(type.initial, [](const std::byte b) { return b == std::byte { 0 }; })) type.initial.clear();
+                out.types.push_back(std::move(type));
             }
-            if (!fine) continue;
-            std::ranges::stable_partition(parsed, [](const Parsed& p) { return p.kind == &TextureKind; });
-            std::size_t offset = 0, alignment = 1;
-            struct Start { std::size_t offset; const Kind* kind; std::vector<double> numbers; };
-            std::vector<Start> starts;
-            for (const auto& [name, statement, value, kind] : parsed) {
-                offset = (offset + kind->alignment - 1) / kind->alignment * kind->alignment;
-                type.fields.push_back({ .name = name, .type = kind->name, .offset = offset, .size = kind->size });
-                Limits(statement, type.fields.back());
-                if (kind == &TextureKind) {
-                    const auto picture = PictureOf(value);
-                    if (!picture) out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts white", where, type.name, name, value));
-                    type.textures.emplace_back(name, picture.value_or("$white"));
-                } else if (!value.empty()) {
-                    auto numbers = Numbers(value);
-                    const bool identity = kind->numbers == 16 && numbers && numbers->empty();
-                    if (identity) numbers = std::vector<double> { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-                    if (numbers && kind->scalar != 'e' && (numbers->size() == kind->numbers || numbers->empty())) starts.push_back({ offset, kind, std::move(*numbers) });
-                    else if (kind->scalar == 'e') {}   // an entity starts as none, whatever it is said to start as: one is set in the editor
-                    else out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts at zero", where, type.name, name, value));
-                }
-                offset += kind->size;
-                alignment = std::max(alignment, kind->alignment);
-            }
-            type.alignment = alignment;
-            type.size = (offset + alignment - 1) / alignment * alignment;
-            type.initial.assign(type.size, std::byte { 0 });
-            for (const auto& start : starts)
-                for (std::size_t n = 0; n < start.numbers.size(); ++n) {
-                    const std::size_t width = start.kind->size / start.kind->numbers;
-                    Write(type.initial.data() + start.offset + n * width, start.kind->scalar, width, start.numbers[n]);
-                }
-            if (std::ranges::all_of(type.initial, [](const std::byte b) { return b == std::byte { 0 }; })) type.initial.clear();
-            out.types.push_back(std::move(type));
+            return out;
         }
-        return out;
+    }
+
+    Declarations Declare(const std::string_view source, const bool kotlin, const std::string_view file)
+    {
+        return Resolve(Classes(source, kotlin, file));
     }
 
     Declarations DeclareFiles(const std::filesystem::path& path)
     {
-        Declarations out;
         std::vector<std::filesystem::path> files;
         std::error_code ignored;
         if (std::filesystem::is_directory(path, ignored)) {
@@ -519,14 +601,24 @@ namespace kscript
         } else {
             files.push_back(path);
         }
+        return DeclareFiles(files);
+    }
+
+    Declarations DeclareFiles(const std::vector<std::filesystem::path>& files)
+    {
+        Declarations out;
+        // Every class of every file first, then what each is: a class may derive from one in another file.
+        std::vector<Class> classes;
         for (const auto& file : files) {
             std::ifstream in(file, std::ios::binary);
             if (!in) { out.problems.push_back(std::format("{} could not be read", file.generic_string())); continue; }
             const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-            auto found = Declare(source, file.extension() == ".kt", file.filename().generic_string());
-            for (auto& type : found.types) out.types.push_back(std::move(type));
-            for (auto& problem : found.problems) out.problems.push_back(std::move(problem));
+            auto found = Classes(source, file.extension() == ".kt", file.filename().generic_string(), file.generic_string());
+            classes.insert(classes.end(), std::make_move_iterator(found.begin()), std::make_move_iterator(found.end()));
         }
+        auto resolved = Resolve(classes);
+        for (auto& type : resolved.types) out.types.push_back(std::move(type));
+        for (auto& problem : resolved.problems) out.problems.push_back(std::move(problem));
         return out;
     }
 
@@ -546,13 +638,22 @@ namespace kscript
         std::error_code ignored;
         if (!std::filesystem::is_directory(folder, ignored)) return { std::format("the engine's package is not at {}", folder.generic_string()) };
         // In C# and in Kotlin alike, for the scripts of either: the same types, by the C# files.
-        Declarations found;
+        // Every file's classes at once: a Camera's kinds are in a file of their own.
+        std::vector<std::filesystem::path> files;
         for (const auto& entry : std::filesystem::directory_iterator(folder, ignored))
-            if (entry.path().extension() == ".cs") {
-                auto one = DeclareFiles(entry.path());
-                for (auto& type : one.types) found.types.push_back(std::move(type));
-                for (auto& problem : one.problems) found.problems.push_back(std::move(problem));
-            }
+            if (entry.path().extension() == ".cs") files.push_back(entry.path());
+        std::ranges::sort(files);
+        std::vector<Class> classes;
+        std::vector<std::string> unread;
+        for (const auto& file : files) {
+            std::ifstream in(file, std::ios::binary);
+            if (!in) { unread.push_back(std::format("{} could not be read", file.generic_string())); continue; }
+            const std::string source((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            auto found = Classes(source, false, file.filename().generic_string(), file.generic_string());
+            classes.insert(classes.end(), std::make_move_iterator(found.begin()), std::make_move_iterator(found.end()));
+        }
+        Declarations found = Resolve(classes);
+        found.problems.insert(found.problems.begin(), unread.begin(), unread.end());
         std::ranges::sort(found.types, {}, &ScriptType::name);
         for (auto& type : found.types) {
             if (type.makesResources) continue;      // a script that makes resources is no component

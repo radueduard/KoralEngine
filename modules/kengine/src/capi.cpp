@@ -100,6 +100,15 @@ const char* kengine_project_directory(KengineDocument* document)
     return Guarded([&] { return Keep(Doc(document).ProjectDirectory().string()); }, static_cast<const char*>(nullptr));
 }
 
+const char* kengine_module_scripts(KengineDocument* document)
+{
+    return Guarded([&] {
+        std::string folders;
+        for (const auto& module : Doc(document).Modules()) folders += (folders.empty() ? "" : "\n") + (module / "scripts").string();
+        return Keep(std::move(folders));
+    }, static_cast<const char*>(nullptr));
+}
+
 bool kengine_playing(KengineDocument* document)
 {
     return Guarded([&] { const auto* scene = keditor::PlayScene::Of(Doc(document)); return scene && scene->Playing(); }, false);

@@ -72,6 +72,16 @@ namespace kscript
         /// A Material's pictures, each a field of type "Image" at the front of it, by name: what each starts as (`$white`,
         /// `@textures/ramp.png`), in the order they are laid out.
         std::vector<std::pair<std::string, std::string>> textures;
+        /// Data: structured data and nothing else — a Data's, or a Material's. Nothing is called on it, no host runs it,
+        /// and it takes no pieces: what it is for is the graph's, which reads it.
+        bool data = false;
+        /// An abstract Data: a kind (kecs::ComponentDescription::abstract). No entity has it itself; one is of it by having
+        /// one of what derives from it, and a query for it finds that one. Its fields are those at the front of each.
+        bool abstract = false;
+        /// The abstract Data it derives from, by their components' names, nearest first: the kinds it is one of.
+        std::vector<std::string> kinds;
+        /// The file its class is declared in, as it was read (kscript::DeclareFiles); empty for one read from a string.
+        std::string file;
     };
 
     class Scripts {

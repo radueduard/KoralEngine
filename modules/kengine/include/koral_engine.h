@@ -64,6 +64,11 @@ KENGINE_API KecsWorld* kengine_document_world(KengineDocument* document);
 KENGINE_API const char* kengine_document_json(KengineDocument* document);
 /** The folder of the project the scene is of; "" for a scene that is in none. A runner of a project's scripts runs them in its own only. */
 KENGINE_API const char* kengine_project_directory(KengineDocument* document);
+/**
+ * The `scripts` folders of the modules the scene's project imports, nearest first, one a line; "" for none. A runner of a
+ * project's scripts compiles them with its own: what a module has is the project's too.
+ */
+KENGINE_API const char* kengine_module_scripts(KengineDocument* document);
 KENGINE_API bool kengine_document_save(KengineDocument* document, const char* path);
 /** Whether the scene plays: its scripts are updated. A scene run on its own does; one in an editor, when told to. */
 KENGINE_API bool kengine_playing(KengineDocument* document);

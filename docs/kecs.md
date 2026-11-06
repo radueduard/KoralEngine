@@ -82,6 +82,19 @@ commands.Apply();
 
 `commands.Create()` gives an entity that can be referred to at once and exists from `Apply` on.
 
+## Kinds
+
+A component type can be a **kind** (`ComponentDescription::abstract`): no entity has it itself, and an entity is of it
+by having a component that names it among its `kinds` — a `PerspectiveCamera` is a `Camera`. The kind's id is then
+answered with that component: `Has`, `Get`, `Mutable`, `SetEnabled` and queries (`QueryDescription::all`, `none`) of
+the kind find it, and its fields — which are at the front of each of what is one of it, in the same places — are read
+from it. `Which(e, kind)` says which component it is; `IsOf(id, kind)` whether a type is one. `Add` and `Remove` of a
+kind are refused, and a world saved never holds one. A type that names a kind before the kind is registered is of it
+from when it is.
+
+A file saved when a kind was a component of its own (a `Camera` before) loads as the one of it that `Codecs::Becomes`
+says, from what was saved of it; with nothing to say, it is left out and reported.
+
 ## Names, the hierarchy and transforms
 
 Every entity has a name, a place in a hierarchy and a transform relative to what it is under. They are the

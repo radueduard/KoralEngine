@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- What koral-editor and koral-play start .NET with, inside their own process, to run a project's C# scripts:
+       nothing of its own, but the runtime it asks for (its runtimeconfig.json) and everything a script runs on and is
+       compiled against (its deps.json): Koral.Engine, with its Roslyn, and Koral's assemblies. Koral.Engine.Embedded
+       is what they call. -->
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Koral.Engine.Host</AssemblyName>
+    <RootNamespace>Koral.Engine.Host</RootNamespace>
+    <GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+    <EnableDynamicLoading>false</EnableDynamicLoading>
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Koral.Engine/Koral.Engine.csproj" />
+    <Reference Include="Koral">
+      <HintPath>$(KoralDotnet)/Koral.dll</HintPath>
+    </Reference>
+    <!-- Beside it, so that a project's scripts compile against them and load them: ScriptHost's References. -->
+    <Reference Include="Koral.UI">
+      <HintPath>$(KoralDotnet)/Koral.UI.dll</HintPath>
+    </Reference>
+    <Reference Include="Koral.Net">
+      <HintPath>$(KoralDotnet)/Koral.Net.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

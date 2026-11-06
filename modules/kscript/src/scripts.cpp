@@ -60,6 +60,17 @@ namespace kscript
         description.size = std::max<std::size_t>(type.size, 1);
         description.alignment = std::max<std::size_t>(type.alignment, 1);
         description.construct = &ConstructScript;
+        description.kinds = type.kinds;
+        // A kind is had by nobody itself: nothing makes one, and it is only its fields' places.
+        if (type.abstract) {
+            if (live) {
+                if (error) *error = std::format("{} is abstract: it is a kind, which nothing runs", type.name);
+                return kecs::NoComponent;
+            }
+            description.abstract = true;
+            description.construct = nullptr;
+            description.size = type.size;
+        }
         // What its source says the fields are kept within, when what registers it does not say: a host gives the shape.
         if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent)
             for (auto& field : type.fields)
@@ -81,6 +92,7 @@ namespace kscript
             if (std::all_of(at, at + sizeof(kecs::Entity), [](const std::byte b) { return b == std::byte { 0 }; }))
                 std::memcpy(at, &kecs::NullEntity, sizeof(kecs::Entity));
         }
+        if (type.abstract) type.initial.clear();
         if (!type.initial.empty()) {
             type.initial.resize(description.size, std::byte { 0 });
             description.context = std::make_shared<const std::vector<std::byte>>(type.initial);
@@ -95,14 +107,24 @@ namespace kscript
         } else {
             const kecs::ComponentDescription& now = _world.Describe(id);
             // One a file brought in before its script was loaded is plain data of the same name: a script's all the same.
-            const bool ours = now.construct == &ConstructScript || (!now.construct && !now.copy && !now.relocate && !now.destroy && !now.IsTag());
+            const bool ours = now.construct == &ConstructScript || now.abstract || (!now.construct && !now.copy && !now.relocate && !now.destroy && !now.IsTag());
             if (!ours) {
                 if (error) *error = std::format("there is a component named '{}' already, and it is not a script's", type.name);
                 return kecs::NoComponent;
             }
+            // A component entities have cannot become a kind under them: what each has would be had by nobody.
+            if (description.abstract && !now.abstract) {
+                kecs::QueryDescription having;
+                having.all = { id };
+                having.includeDisabled = true;
+                if (_world.Count(having) > 0) {
+                    if (error) *error = std::format("{} is abstract now, and entities have it: give each one of what derives from it first", type.name);
+                    return kecs::NoComponent;
+                }
+            }
             const auto* before = static_cast<const std::vector<std::byte>*>(now.context.get());
             const auto* after = static_cast<const std::vector<std::byte>*>(description.context.get());
-            const bool same = now.size == description.size && now.construct == &ConstructScript
+            const bool same = now.size == description.size && now.construct == description.construct && now.abstract == description.abstract && now.kinds == description.kinds
                 && std::ranges::equal(now.fields, description.fields, [](const auto& a, const auto& b) { return a.SameAs(b) && a.offset == b.offset; })
                 && (before == after || (before && after && *before == *after));
             if (!same) {

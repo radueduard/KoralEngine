@@ -44,7 +44,8 @@ namespace kgraph
         kor::Quat rotation;
         if (kor::Decompose(ToKor(world.WorldMatrix(entity)), position, rotation, scale))
             view.view = kor::Inverse(kor::Compose(position, rotation, kor::Vec3(1.f)));
-        // Its lens: whichever of its components says how wide it sees.
+        // Its lens: whichever of its components says how wide it sees — through a field of view, or, with a near and a far,
+        // in a box of a height.
         for (const kecs::ComponentId id : world.ComponentsOf(entity)) {
             const kecs::ComponentDescription& type = world.Describe(id);
             const auto* bytes = static_cast<const std::byte*>(world.Get(entity, id));
@@ -55,8 +56,11 @@ namespace kgraph
                 std::memcpy(&v, bytes + field->offset, 4);
                 return v;
             };
-            if (!type.FindField("fieldOfView")) continue;
-            view.fieldOfView = number("fieldOfView", 60.f) * Radians;
+            const bool lens = type.FindField("fieldOfView") != nullptr;
+            const bool box = !lens && type.FindField("height") && type.FindField("near") && type.FindField("far");
+            if (!lens && !box) continue;
+            if (lens) view.fieldOfView = number("fieldOfView", 60.f) * Radians;
+            else view.orthographic = std::max(number("height", 10.f), 0.001f);
             view.near = std::max(number("near", 0.1f), 0.0001f);
             view.far = std::max(number("far", 100.f), view.near + 0.001f);
             break;

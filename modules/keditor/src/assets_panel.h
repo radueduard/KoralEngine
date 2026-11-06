@@ -34,7 +34,7 @@ namespace keditor
     using namespace widgets;
 
     /** Which of the editor's dialogs is in front of everything: one at a time. */
-    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame };
+    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eNewProjectFolder, eNewProjectModule, eImportModule, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame };
 
     class AssetsView {
     public:
@@ -118,11 +118,27 @@ namespace keditor
             return kui::SizedBox(size, size, kui::Icon(it->second, kui::Color::Hex(look.colour)));
         }
 
+        /** What a script's component is (Session::Asset::group of a script), as an icon, a colour and a word. */
+        struct ScriptLooks { const char* icon; std::uint32_t colour; const char* what; };
+        static ScriptLooks ScriptLook(const std::string_view group)
+        {
+            if (group == "data") return { "data_object", 0x5B9BD5, "Data: fields and nothing else, which the graph reads" };
+            if (group == "kind") return { "account_tree", 0x8E7CC3, "A kind: abstract Data that nothing has itself, and that finds every one of what derives from it" };
+            if (group == "material") return { "palette", 0xD9703F, "A material kind: what a drawn thing is made of" };
+            if (group == "resources") return { "memory", 0x4FB3BF, "A ResourceScript: what a Script node runs, to make resources and fill them" };
+            return { "code", 0x7DBB4B, "A script: run on each entity that has it" };
+        }
+
         /** An asset by what kind of thing it is, as an icon of its colour: faint for one not loaded. */
         static kui::Widget KindIcon(const Session::Asset& asset, const float size)
         {
             if (asset.kind == Session::Asset::Kind::eShader) {
                 return StageIcon(asset.stage, size);
+            }
+            if (asset.kind == Session::Asset::Kind::eScript) {
+                // A component a script declares, by what it is: code that runs, data, a kind of data, a material, resources made.
+                const ScriptLooks look = ScriptLook(asset.group);
+                return kui::SizedBox(size, size, kui::Icon(look.icon, kui::IconStyle::eFilled, kui::Color::Hex(look.colour)));
             }
             const char* icon = asset.kind == Session::Asset::Kind::eModel ? "category" : asset.kind == Session::Asset::Kind::eMesh ? "view_in_ar"
                              : asset.kind == Session::Asset::Kind::eLight ? "lightbulb" : asset.kind == Session::Asset::Kind::eCamera ? "videocam"
@@ -1080,7 +1096,7 @@ namespace keditor
             rows.push_back(kgui::Muted(asset.kind == Session::Asset::Kind::eModel ? "Model" : asset.kind == Session::Asset::Kind::eMesh ? "Mesh"
                                        : asset.kind == Session::Asset::Kind::eTexture ? "Texture" : asset.kind == Session::Asset::Kind::eShader ? StageOf(asset.stage).name
                                        : asset.kind == Session::Asset::Kind::eScene ? "Scene" : asset.kind == Session::Asset::Kind::ePrefab ? "Prefab"
-                                       : asset.kind == Session::Asset::Kind::eMaterial ? "Material" : "Script"));
+                                       : asset.kind == Session::Asset::Kind::eMaterial ? "Material" : "Component"));
             if (asset.builtIn) rows.push_back(kgui::Labeled("File", kgui::Muted("none: the editor's own, in every project"), LabelWidth));
             else rows.push_back(kgui::Labeled("File", kgui::Muted(asset.file.generic_string()), LabelWidth));
             // What names it, as the project's files are saved.
@@ -1288,9 +1304,9 @@ namespace keditor
                 rows.push_back(Small("Open in the graph", [this, asset] { _session->OpenAsset(asset); SetState(); }));
                 break;
             default:
-                rows.push_back(kgui::Muted(asset.file.extension() == ".kt" ? "A Kotlin script: a component of its class's name, once the project runs with its scripts."
-                                                                          : "A C# script: a component of its class's name, once the project runs with its scripts."));
-                rows.push_back(Small("Open in Visual Studio Code", [this, file = asset.file] { _session->OpenInCode(file); }));
+                rows.push_back(kgui::Muted(std::format("{}, in {}: {}.", ScriptLook(asset.group).what, asset.file.extension() == ".kt" ? "Kotlin" : "C#",
+                                                       asset.file.filename().string())));
+                rows.push_back(Small("Open its file in Visual Studio Code", [this, file = asset.file] { _session->OpenInCode(file); }));
                 break;
             }
             return Panel(std::move(rows));

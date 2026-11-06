@@ -84,13 +84,20 @@ Added to an entity, it is that entity's procedural mesh: the entity's `Mesh` hol
 (`$script/gen/Pyramid/<what it was made of>`), so a Filter `with Mesh` finds it as it finds any other. It is made
 again whenever its fields change — dragged in the inspector, set while the scene plays, or not playing at all — and
 every entity with the same fields shares one mesh, made once. What was made is kept in the project's
-`.koral/cache/meshes`: a scene opened without its scripts (plain `koral-editor`, `koral-play`) still has it.
+`.koral/cache/meshes`: a scene opened before its scripts are compiled, or where they cannot be run, still has it.
 
 A script that takes **ImageGenerator** makes a picture of its entity's material the same way: its
 `Initialize(ImageWriter)` sizes the picture and writes its texels, and the material field its `Into` names
 (`baseColorMap` unless it says) holds it — made again when its fields change, shared by every entity of the same
 fields, kept in `.koral/cache/images`. A picture a compute shader makes is a graph's Image, which a material's picture
 field can hold as it is.
+
+A field that `initialize` reads takes **`@Reinitialize`** (C#: `[Reinitialize]`). While the scene plays, when something
+other than the script changes it — the inspector, another script — the script starts over: it is switched off and
+destroyed, and a new object is made with the entity's fields as they are and started as if it had just been added.
+So what it holds in private goes with the old object, and what it allocates in `initialize` it lets go of in
+`onDestroyed`. A change the script makes itself does nothing, and neither does a change while the scene is not playing:
+it starts from the new value when it next plays. Only what is marked counts, so a `g` that `update` reads stays out of it.
 
 In the editor, an entity's Mesh offers the project's mesh generators beside its meshes, as *Pyramid (procedural)*:
 picked, the entity is given that generator, and it makes the mesh. **Save the generator**, in the inspector, writes the
@@ -115,7 +122,7 @@ an error when the scripts load, which names the field.
 A new component starts as its class initialises its fields: the engine reads the scripts' sources for it
 (`kscript::Declare`), so it does whether or not anything runs them. A number, true or false, and a vector,
 quaternion or matrix made of numbers (`new(1f, 0.5f, 0)`, `Vec3(1f, 0.5f, 0f)`) are understood; anything else
-starts at zero, and the editor's notes say so. The same reading is how an editor started without a project's host
+starts at zero, and the editor's notes say so. The same reading is how an editor whose scripts are not running yet
 knows its scripts' components: to give an entity one, and to offer a node of it.
 
 An `Entity` field is another entity of the scene for the script to use: it starts as none (`Entity.Null`, whatever
@@ -136,16 +143,60 @@ the script runs: a script can set a field to anything.
 
 ## The engine's package
 
-Every project has the engine's own scripts as well: `Camera`, `DirectionalLight`, `PointLight`, `SpotLight` and
-`Sky`, in `packages/koral/scripts`, in C# and in Kotlin — and its two material kinds (see [Materials](#materials)). They are data and nothing else — what a light does is the
-graph's, through a ForEach of it — and are compiled with a project's own (Kotlin's build has them as a source
-folder), so a script reads one as it reads its own: `World.Read<PointLight>(entity)!.range`. Their fields are
-lowerCamel in both languages, as the graph and the scene files name them. `kengine_package_directory()` says
-where the package is; `KORAL_ENGINE_PACKAGE` in the environment moves it.
+Every project has the engine's own components as well, in `packages/koral/scripts`, in C# and in Kotlin. They are
+[Data](#data) — what a light does is the graph's, through a ForEach of it — and are compiled with a project's own
+(Kotlin's build has them as a source folder), so a script reads one as it reads its own:
+`World.Read<PointLight>(entity)!.range`. Their fields are lowerCamel in both languages, as the graph and the scene
+files name them. `kengine_package_directory()` says where the package is; `KORAL_ENGINE_PACKAGE` in the environment
+moves it.
+
+```
+Camera (kind)              near, far
+├─ PerspectiveCamera       fieldOfView
+└─ OrthographicCamera      height
+Light (kind)               color, intensity
+├─ DirectionalLight
+└─ LocalLight (kind)       range
+   ├─ PointLight
+   └─ SpotLight            innerAngle, outerAngle
+Sky, Instancer
+Material (see Materials)   PbrMaterial, BlinnPhongMaterial
+```
+
+`Camera`, `Light` and `LocalLight` are kinds: no entity has one itself, and a query for one finds every entity that has
+what derives from it — `World.With("Camera")`, a graph's Entity node of `Camera` — its fields read from whichever that is.
+A scene, object or prefab saved when a `Camera` was one component (with `orthographic` saying which) loads as the
+`PerspectiveCamera` or `OrthographicCamera` it was.
+
+## Data
+
+A class that derives from `Data` is structured data and nothing else: its public fields are a component, shown on an
+entity, saved with the scene and set from a script by name, as a script's are — but nothing is called on it, no host
+runs it, and it takes no pieces (one that says `PerFrame` is said in the Problems, and is no component). The engine
+reads it from its source, so it needs no runtime: a project of Data alone needs neither .NET nor a JRE. What it is for
+is the graph's, which reads it.
+
+```csharp
+public abstract class Reading : Data         // a kind
+{
+    [Min(0f)] public float value = 1f;
+}
+public sealed class Temperature : Reading
+{
+    public Vec3 where = new(0f, 0f, 0f);
+}
+```
+
+A class derives from another of a project's, or of the package's: the base's fields come first, in the same places
+in each of what derives from it — as the hosts lay them out. An **abstract** Data is a **kind**: nobody has a
+`Reading` itself (adding one is refused), but every entity with a `Temperature` is one, `World.With("Reading")` finds
+it, and `World.FieldJson(entity, "Reading", "value")` reads the value from its Temperature. A script's own abstract bases
+(`abstract class Mover : Setup`) give their fields the same way, but are no kind. `World.Read<T>` and `World.Write`
+take a Data as they take a script.
 
 ## Materials
 
-A material kind is a class that derives from `Material`: what a drawn thing is made of, data and nothing else. Its
+A material kind is a class that derives from `Material` — a [Data](#data) of its own: what a drawn thing is made of. Its
 public fields are a component, shown on an entity as a script's are, saved with the scene and set from a script by
 name (`World.Set(entity, "PbrMaterial", "roughness", 0.2f)`). Nothing is called on it. Besides a script's field types,
 it has pictures: a `Texture` field, which starts as the picture it is given — `"@textures/ramp.png"`, or a texel,
@@ -308,6 +359,35 @@ override fun update(delta: Float) {
 }
 ```
 
+`image` draws a picture among them, on four corners — or, in a `logicSpace`, between two — behind the fills and lines
+of its space. It takes an Image, or a 2D ImageView of one to say which level and layer (a view starts with all of them:
+`setBaseArrayLayer(1).setArrayLayerCount(1)` is one layer), and a Sampler when linear and clamped is not what is wanted.
+The image needs `eSampled` among its usage: a graph's Image says so in its `usage`, for nothing is wired to it from
+here. A script's numbers reach it through a Buffer and a CopyBufferToImage, and a buffer is reached by index with
+`asArray` (C#: `As<T>()`), which holds nothing open and can be kept for as long as the node's buffer is:
+
+```kotlin
+import koral.asArray
+
+data class Texel(val red: Byte, val green: Byte, val blue: Byte, val alpha: Byte)
+
+override fun update(delta: Float) {
+    val texels = world.buffer("fluid bytes") ?: return
+    texels.asArray<Texel>()[index] = Texel(-1, 0, 0, -1)            // each index a copy of its own: a whole picture is one write
+    texels.close()
+
+    val picture = world.image("fluid debug") ?: return
+    world.debug.logicSpace(16f, 9f) {
+        image(Vec2(1f, 1f), Vec2(15f, 8f), picture, nearest)
+        for (p in particles) circle(p.position, 0.05f)
+    }
+    picture.close()                                                 // the handle: the graph keeps the image
+}
+```
+
+The pass that draws the shapes is not told of the image, so nothing orders the two: a copy that is scheduled after it
+shows a frame later.
+
 A script that is steered reads the window's keys and mouse: `input` in Kotlin — `input.isKeyHeld(Key.eW)`,
 `input.isMouseButtonHeld(MouseButton.eRight)`, `input.mousePositionDelta`, `input.mouseScrollDelta` — and `Input`
 in C#, `Input.IsKeyHeld(Key.eW)`. In the editor it is the Game panel's: while the pointer is over it, or it was the
@@ -431,45 +511,38 @@ the script was edited and loaded. A script that throws leaves the node failed, s
 
 ## Running a project with scripts
 
-A runner runs its project's scripts in that project's scenes only: another project opened in the editor it hosts
-has its scripts run by its own runner, or none.
+`koral-editor` and `koral-play` run a project's scripts themselves, inside their own process: open a project, and
+its scripts are compiled and run on its scenes. No other program is started, and there is nothing to set up.
 
-A project's scripts are all in one language: the first script made says which, and `project.json` keeps it
-(`"scripts": "kotlin"` or `"csharp"`). **Assets, New script** offers only that one from then on; a project from
-before has the language of the scripts it has. A script in the other language, put in the folder by hand, runs
-nowhere, and the Problems panel says so.
+A project's scripts are all in one language, chosen when the project is made — **File, New project** asks, C# or
+Kotlin — and kept in `project.json` (`"scripts": "csharp"` or `"kotlin"`). **Assets, New script** offers only that
+one. A project from before says nothing until its first script is made, which says it; one with scripts already
+has the language of the scripts it has. A script in the other language, put in the folder by hand, runs nowhere,
+and the Problems panel says so.
 
-`koral-editor` on a project with scripts opens no window of its own: it knows the project's language before it
-opens any, and starts the editor through that language's runner (below) in a process forked for it, in the same
-terminal — it ends when that does. A project opened later from the editor's File menu is handed over the same way.
+What runs them is started the first time a project needs it, and stays until the program ends: .NET for C#, a JVM
+for Kotlin (`khost::Scripts`). Another project opened from the File menu has its own scripts run, in the same
+program; a program can have both, one project after another. Each calls the engine's C interface — the program's
+own copy of the engine, which it exports (`kengine-capi`), not a library loaded beside it.
 
-**C#.** Scripts are the `.cs` files in the project's `scripts` folder; the editor's **Assets, New script**
-makes one to start from. Nothing else is needed: they are
-compiled when the project starts.
+**C#.** Scripts are the `.cs` files in the project's `scripts` folder, with the engine's package's. They are
+compiled in the process by Roslyn when the project opens, and again when one is saved. .NET is started by its
+`hostfxr` as `Koral.Engine.Host` — the build puts it, Koral.Engine and Roslyn in `dotnet/` beside the programs —
+and `Koral.Engine.Embedded` is what the program calls. It is looked for in `dotnet/` beside the program (a runtime
+shipped with it), then `DOTNET_ROOT`, then where .NET is installed: the .NET 10 runtime is all a machine needs.
+`System`, `System.Linq`, `System.Collections.Generic`, `Koral` and `Koral.Engine` are already in scope.
 
-```
-koral-engine-dotnet <project>            run it
-koral-engine-dotnet <project> --edit     open it in the editor, scripts running
-```
+**Kotlin.** Scripts are the `.kt` files in the project's `scripts` folder, with the engine's package's. They are
+compiled in the process too, by Kotlin's own compiler (`kotlin-compiler-embeddable`), on a thread of its own so that
+the editor carries on as they compile: into the project's `.koral/cache/kotlin`, where a build of the sources as
+they are is loaded at once the next time the project is opened. The build puts the engine's Kotlin layer and what it
+runs on in `kotlin/lib` beside the programs, and the compiler in `kotlin/compiler`; `koral.engine.Embedded` is what
+the program calls. The JVM is looked for in `jre/` beside the program (one shipped with it), then
+`KORAL_ENGINE_JAVA_HOME`, `JAVA_HOME`, and the JDK the engine was built with: Java 25 or later. There is no Gradle
+build: a project is its folder.
 
-Both need `KORAL_SDK` set to the Koral SDK. `koral-engine-dotnet` is built into `<build>/dotnet` when the
-machine has the .NET 10 SDK. `System`, `System.Linq`, `System.Collections.Generic`, `Koral` and
-`Koral.Engine` are already in scope.
-
-**Kotlin.** Kotlin is compiled by a build, and the editor gives a project one: **Assets, New script** with
-Kotlin chosen writes a Gradle build at the project's root, whose sources are the `scripts` folder
-(`keditor::WriteKotlinBuild` does the same from code).
-
-```
-./gradlew edit      the project in the editor, its scripts built again and loaded whenever one is saved
-./gradlew play      the project on its own
-```
-
-`gradlew` needs a JDK to start with: set `JAVA_HOME`. `gradle.properties` is this machine's — where the Koral
-SDK, the engine's library and its Kotlin artifact are — and is written by the editor, not kept with the
-project. The build depends on `koral:koral-engine:0.1.0` and runs `koral.engine.MainKt`, which is
-`koral.engine.run`: the project's folder, `--edit`, `--frames N`, `--classes <dir>` for the compiled
-classes, and `--sources <dir>` with `--compile <command>` to have a saved source built.
+When the scripts cannot be run — no .NET, no Java, the engine's layer not built — the project opens all the same,
+its scripts' components as data, and the Problems panel says why.
 
 ## Editing while it runs
 
@@ -481,10 +554,10 @@ Save a script and it is loaded again without the scene stopping. The data is the
 - A script whose class is gone stops being called. Entities keep its data, for when it is back.
 - Scripts that **do not compile change nothing**. The ones running carry on and the errors are logged.
 
-C# is compiled in the process, into a load context of its own that is unloaded once it is replaced. Kotlin
-classes are loaded through a class loader of their own. With `--sources` and `--compile`, the host runs the
-build when a source is saved and loads what it made. Without them it watches the classes folder, for an IDE
-or `gradlew -t classes` to write into.
+C# is compiled in the process, into a load context of its own that is unloaded once it is replaced. Kotlin is
+compiled in the process as well, each build into a folder of its own, its classes loaded through a class loader of
+their own; what was running carries on until the build is done. A `koral.engine.ScriptHost` made by a program of
+its own can instead be given `--sources` with a `compile` command to run, or watch a classes folder an IDE writes.
 
 ## From C, or another language
 
@@ -495,15 +568,19 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 ## Not yet
 
 - **Text, lists and resources as fields.** A script reaches a resource through `World`, by node id.
-- **A ResourceScript runs only with its project's scripts**, as every script does: in plain `koral-editor` what it
-  makes is made with nothing in it, and its node says so.
+- **A ResourceScript runs only with its project's scripts**, as every script does: until they are compiled, or
+  where they cannot be run, what it makes is made with nothing in it, and its node says so.
 - **Scripts run only while the scene plays** in the editor (Play, in the Scene panel): nothing is created, enabled
   or started before then — a `BeforeDraw`'s `Prepare` alone runs as the scene is edited, for what is drawn — and
-  what they made is gone on Stop. Start the editor with
-  `koral-engine-dotnet --edit`: plain `koral-editor` runs no scripts.
+  what they made is gone on Stop.
 - **The inspector follows a script ten times a second**, while the scene plays and the entity is picked: a
   field changed every frame is seen at that rate, not every frame.
-- **The Kotlin build's paths are a build's own.** `gradle.properties` points at the engine's build folder;
-  an installed engine would need them from elsewhere. A path with a space in it breaks the compile command.
+- **A Kotlin project's first compile takes seconds** (the compiler warming up): its scripts run once it is done, and
+  a project opened again with its scripts as they were loads the last build at once.
+- **The runtimes are found, not shipped.** `dotnet/` and `kotlin/` are beside the programs in a build; a .NET
+  runtime in `dotnet/` and a JRE in `jre/` beside them are used when they are there, but nothing puts them there yet.
+- **Scripts are looked at between frames**: an editor that is not in front draws few, so a script saved from
+  another program is compiled a little later than it would be.
 - **C# edits are a new build each time**, not applied in place as the framework's scene scripts are.
-- **A script named like an existing plain component** takes that component over.
+- **A script named like an existing plain component** takes that component over — a kind too: a project's own `Light` script is the `Light` from then on, and the package's lights are no longer found by that name. In a host's build, a class named as one of the package's is two of one name, and does not compile.
+- **A light's kind starts each of what derives from it the same**: a field starts as its class says, so `PointLight` and `SpotLight` start white, of intensity 1 and range 5, as `Light` and `LocalLight` say. An object (the Point Light's, the Spot Light's) gives its own.

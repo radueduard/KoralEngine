@@ -1,0 +1,9 @@
+{
+  "template": "Cube",
+  "icon": "view_in_ar",
+  "name": "Cube",
+  "components": {
+    "Mesh": { "mesh": "$cube" },
+    "default": { "color": [0.85, 0.6, 1] }
+  }
+}

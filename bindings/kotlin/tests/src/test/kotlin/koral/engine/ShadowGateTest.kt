@@ -39,6 +39,7 @@ class ShadowGateTest {
         val project = System.getProperty("koral.engine.test.shadowProject")
         assumeTrue(project != null && Files.exists(Path.of(project, "project.json")), "the engine's own gate makes the project first")
         App(AppSettings(platform = WindowPlatform.eNone)).use { app ->
+            EngineLibrary.load()
             app.loadLibrary(EngineLibrary.path.toString())
             val scene = app.openOffscreen("Play", OffscreenSettings(title = "shadow", width = 32, height = 32), SceneArgs().with("project", project))
             val world = World.of(scene) ?: error("the Play scene has no world")

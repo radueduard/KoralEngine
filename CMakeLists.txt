@@ -7,6 +7,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 option(KORAL_ENGINE_BUILD_TESTS "Build the engine's tests" ON)
+# The Forward+ sample's tests take minutes each: built always, as keditor_forward_plus_tests, but part of a ctest run
+# only when asked for — -DKORAL_ENGINE_FORWARD_PLUS_TESTS=ON — or run by hand.
+option(KORAL_ENGINE_FORWARD_PLUS_TESTS "Run the Forward+ sample's slow tests with ctest" OFF)
 # Where the editor offers to make a new project: the KORAL_ENGINE_PROJECTS environment variable says otherwise.
 if(WIN32)
     file(TO_CMAKE_PATH "$ENV{USERPROFILE}/KoralProjects" KORAL_ENGINE_PROJECTS_DEFAULT)
@@ -23,6 +26,9 @@ endif()
 
 if(KORAL_ENGINE_BUILD_TESTS)
     enable_testing()
+    # Eight test programs at a time, each its own process: the whole run in under five minutes. Those that time
+    # themselves are RUN_SERIAL, and each program has a temporary folder of its own (kgraph/tests/support.cpp).
+    set(CMAKE_CTEST_ARGUMENTS "--parallel;8;--output-on-failure")
     find_package(GTest REQUIRED)
     include(GoogleTest)
 endif()
@@ -30,7 +36,6 @@ endif()
 add_subdirectory(modules/kecs)
 add_subdirectory(modules/kasset)
 add_subdirectory(modules/kscript)
-add_subdirectory(modules/kphysics)
 
 # What runs on the GPU needs the Koral framework: an SDK, which is a Koral checkout's `stage/debug` or
 # `stage/release`. The one that matches this build is found by itself when the checkout is known —
@@ -90,22 +95,27 @@ if(Koral_FOUND)
     add_subdirectory(modules/keditor)
     add_subdirectory(modules/kengine)
 
-    # Scripts in C#: the engine's C# layer and the program that runs a project with it. Built where there is a .NET
-    # SDK and the Koral SDK has its C# assemblies.
+    # Scripts in C#: the engine's C# layer, and what koral-editor and koral-play start .NET with to run a project's
+    # scripts inside them (Koral.Engine.Host), in dotnet/ beside them. Built where there is a .NET SDK and the Koral
+    # SDK has its C# assemblies.
     find_program(KORAL_ENGINE_DOTNET dotnet)
     if(KORAL_ENGINE_DOTNET AND EXISTS "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.dll")
         set(KORAL_ENGINE_DOTNET_OUT "${CMAKE_BINARY_DIR}/dotnet")
         file(GLOB_RECURSE KORAL_ENGINE_CS CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bindings/csharp/*.cs" "${CMAKE_SOURCE_DIR}/bindings/csharp/*.csproj")
         list(FILTER KORAL_ENGINE_CS EXCLUDE REGEX "/(bin|obj)/")
-        add_custom_command(OUTPUT "${KORAL_ENGINE_DOTNET_OUT}/koral-engine-dotnet.dll" "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll"
-            COMMAND ${KORAL_ENGINE_DOTNET} build "${CMAKE_SOURCE_DIR}/bindings/csharp/Koral.Engine.Runner/Koral.Engine.Runner.csproj"
+        add_custom_command(OUTPUT "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Host.dll" "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll"
+            COMMAND ${KORAL_ENGINE_DOTNET} build "${CMAKE_SOURCE_DIR}/bindings/csharp/Koral.Engine.Host/Koral.Engine.Host.csproj"
                     "-p:KoralSdk=${KORAL_ENGINE_SDK}" -o "${KORAL_ENGINE_DOTNET_OUT}" --nologo -v quiet
             COMMAND ${KORAL_ENGINE_DOTNET} build "${CMAKE_SOURCE_DIR}/bindings/csharp/Koral.Engine.Tests/Koral.Engine.Tests.csproj"
                     "-p:KoralSdk=${KORAL_ENGINE_SDK}" -o "${KORAL_ENGINE_DOTNET_OUT}" --nologo -v quiet
-            DEPENDS ${KORAL_ENGINE_CS}
+            # Up to date for what is below, though nothing of the engine's needed compiling again.
+            COMMAND ${CMAKE_COMMAND} -E touch "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Host.dll" "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll"
+            # The SDK's assemblies too: they are copied beside the host, and a script is compiled against them.
+            DEPENDS ${KORAL_ENGINE_CS} "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.dll"
+                    "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.UI.dll" "${KORAL_ENGINE_SDK}/lib/koral-dotnet/Koral.Net.dll"
             COMMENT "Building the engine's C# layer"
             VERBATIM)
-        add_custom_target(koral-engine-dotnet ALL DEPENDS "${KORAL_ENGINE_DOTNET_OUT}/koral-engine-dotnet.dll" koral-engine)
+        add_custom_target(koral-engine-dotnet ALL DEPENDS "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Host.dll" koral-engine)
         # Beside the assemblies, where they look for it.
         add_custom_command(TARGET koral-engine-dotnet POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:koral-engine>" "${KORAL_ENGINE_DOTNET_OUT}/")
@@ -116,7 +126,7 @@ if(Koral_FOUND)
             add_test(NAME CSharp.ShadowGate COMMAND ${KORAL_ENGINE_DOTNET} "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll" shadow "${CMAKE_BINARY_DIR}/shadow-project")
             set_tests_properties(CSharp.ShadowGate PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}" FIXTURES_REQUIRED shadow_project)
         endif()
-        message(STATUS "C# scripts: building koral-engine-dotnet")
+        message(STATUS "C# scripts: building the engine's C# layer, which koral-editor and koral-play run them with")
     else()
         message(STATUS "C# scripts: not built (no dotnet, or a Koral SDK without its C# assemblies)")
     endif()
@@ -127,8 +137,9 @@ if(Koral_FOUND)
     set(KORAL_ENGINE_JAVA_HOME "" CACHE PATH "The JDK (25 or later) the engine's Kotlin layer is built with")
     if(NOT KORAL_ENGINE_JAVA_HOME)
         file(GLOB KORAL_ENGINE_JDKS "$ENV{HOME}/.local/jdk/jdk-2[5-9]*")
-        foreach(home IN ITEMS "$ENV{JAVA_HOME}" LISTS KORAL_ENGINE_JDKS)
-            if(home AND EXISTS "${home}/bin/java")
+        file(TO_CMAKE_PATH "$ENV{JAVA_HOME}" KORAL_ENGINE_JAVA_HOME_ENV)     # it goes into a C++ string too: no backslashes
+        foreach(home IN ITEMS "${KORAL_ENGINE_JAVA_HOME_ENV}" LISTS KORAL_ENGINE_JDKS)
+            if(home AND EXISTS "${home}/bin/java${CMAKE_EXECUTABLE_SUFFIX}")
                 set(KORAL_ENGINE_JAVA_HOME "${home}" CACHE PATH "The JDK (25 or later) the engine's Kotlin layer is built with" FORCE)
                 break()
             endif()
@@ -137,8 +148,14 @@ if(Koral_FOUND)
     if(KORAL_ENGINE_JAVA_HOME AND EXISTS "${KORAL_ENGINE_SDK}/share/Koral/maven/koral/koral")
         set(KORAL_ENGINE_KOTLIN_DIR "${CMAKE_SOURCE_DIR}/bindings/kotlin")
         set(KORAL_ENGINE_MAVEN "${CMAKE_BINARY_DIR}/maven")
-        set(KORAL_ENGINE_GRADLE ${CMAKE_COMMAND} -E env "JAVA_HOME=${KORAL_ENGINE_JAVA_HOME}" "${KORAL_ENGINE_KOTLIN_DIR}/gradlew"
-            -p "${KORAL_ENGINE_KOTLIN_DIR}" --console=plain -q "-PkoralSdk=${KORAL_ENGINE_SDK}" "-PengineRepo=${KORAL_ENGINE_MAVEN}"
+        set(KORAL_ENGINE_GRADLEW "${KORAL_ENGINE_KOTLIN_DIR}/gradlew")
+        if(WIN32)
+            string(APPEND KORAL_ENGINE_GRADLEW ".bat")
+        endif()
+        # No daemon of Gradle's or Kotlin's: one left running keeps this step's output open, and Ninja waits on it for good.
+        set(KORAL_ENGINE_GRADLE ${CMAKE_COMMAND} -E env "JAVA_HOME=${KORAL_ENGINE_JAVA_HOME}" "${KORAL_ENGINE_GRADLEW}"
+            -p "${KORAL_ENGINE_KOTLIN_DIR}" --no-daemon -Pkotlin.compiler.execution.strategy=in-process
+            --console=plain -q "-PkoralSdk=${KORAL_ENGINE_SDK}" "-PengineRepo=${KORAL_ENGINE_MAVEN}"
             "-PengineLibrary=$<TARGET_FILE:koral-engine>")
         file(GLOB_RECURSE KORAL_ENGINE_KT CONFIGURE_DEPENDS "${KORAL_ENGINE_KOTLIN_DIR}/koral-engine/*.kt" "${KORAL_ENGINE_KOTLIN_DIR}/*.kts")
         add_custom_command(OUTPUT "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml"
@@ -146,7 +163,15 @@ if(Koral_FOUND)
             DEPENDS ${KORAL_ENGINE_KT}
             COMMENT "Building the engine's Kotlin layer"
             VERBATIM)
-        add_custom_target(koral-engine-kotlin ALL DEPENDS "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml")
+        # What koral-editor and koral-play start a JVM with to run a project's scripts inside them, in kotlin/ beside
+        # them: the engine's Kotlin layer and what it runs on (lib), and Kotlin's compiler (compiler).
+        set(KORAL_ENGINE_KOTLIN_OUT "${CMAKE_BINARY_DIR}/kotlin")
+        add_custom_command(OUTPUT "${KORAL_ENGINE_KOTLIN_OUT}/lib/koral-engine.jar"
+            COMMAND ${KORAL_ENGINE_GRADLE} :koral-engine:hostLayout "-PhostDir=${KORAL_ENGINE_KOTLIN_OUT}"
+            DEPENDS ${KORAL_ENGINE_KT} "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml"
+            COMMENT "Laying out the engine's Kotlin layer, and Kotlin's compiler, for the engine's programs"
+            VERBATIM)
+        add_custom_target(koral-engine-kotlin ALL DEPENDS "${KORAL_ENGINE_MAVEN}/koral/koral-engine/maven-metadata.xml" "${KORAL_ENGINE_KOTLIN_OUT}/lib/koral-engine.jar")
         if(KORAL_ENGINE_BUILD_TESTS)
             # Its scripts test, and E6's gate in Kotlin on the project the engine's own gate saves.
             add_test(NAME Kotlin.Scripts COMMAND ${KORAL_ENGINE_GRADLE} :tests:test "-PshadowProject=${CMAKE_BINARY_DIR}/shadow-project")
@@ -156,6 +181,7 @@ if(Koral_FOUND)
     else()
         message(STATUS "Kotlin scripts: not built (no JDK 25, or a Koral SDK without its Kotlin libraries)")
     endif()
+    add_subdirectory(modules/khost)     # after the JDK is known: its JNI headers are what Kotlin is run with
 
     if(KORAL_ENGINE_BUILD_TESTS)
         # The gate's project, made by the engine's own gate: what the C# and Kotlin gates open.
@@ -163,14 +189,20 @@ if(Koral_FOUND)
         set_tests_properties(Shadow.Project PROPERTIES FIXTURES_SETUP shadow_project)
     endif()
 
-    add_executable(koral-editor apps/editor/main.cpp)
-    target_link_libraries(koral-editor PRIVATE keditor)
-    # What it hands a project with scripts to: built with it, or an old one opens the project instead of this editor.
-    if(TARGET koral-engine-dotnet)
-        add_dependencies(koral-editor koral-engine-dotnet)
-    endif()
-    add_executable(koral-play apps/player/main.cpp)
-    target_link_libraries(koral-play PRIVATE keditor)
+    add_executable(koral-editor apps/editor/main.cpp apps/frames.h)
+    add_executable(koral-play apps/player/main.cpp apps/frames.h)
+    foreach(app koral-editor koral-play)
+        # A project's scripts run inside them, and call the engine's C interface: theirs, which they export.
+        target_link_libraries(${app} PRIVATE keditor khost kengine-capi)
+        target_include_directories(${app} PRIVATE apps)
+        set_target_properties(${app} PROPERTIES ENABLE_EXPORTS ON)
+        # What a project's scripts are run with, beside them: built with them.
+        foreach(layer koral-engine-dotnet koral-engine-kotlin)
+            if(TARGET ${layer})
+                add_dependencies(${app} ${layer})
+            endif()
+        endforeach()
+    endforeach()
     # The project either opens when it is given none: Forward+, made with nodes, in the projects folder (forward-plus).
     foreach(app koral-editor koral-play)
         target_compile_definitions(${app} PRIVATE KORAL_ENGINE_DEFAULT_PROJECT="${KORAL_ENGINE_PROJECTS}/forward-plus")
@@ -182,18 +214,10 @@ else()
     message(STATUS "Koral not found (set CMAKE_PREFIX_PATH to an SDK): building kecs alone")
 endif()
 
-# Where this build's pieces are, for the editor to write into a project's Kotlin build: the SDK, the engine's library
-# and its Kotlin artifact, the JDK, and the Gradle wrapper it copies. A build's own paths: an installed editor would
-# be told another way.
+# Where this build's C# assemblies are, for the editor to name in the project of a project's C# scripts that an editor
+# of code reads. A build's own paths: an installed editor would be told another way.
 if(TARGET keditor)
-    get_filename_component(KEDITOR_SDK_PATH "${Koral_DIR}/../../.." ABSOLUTE)
     target_compile_definitions(keditor PRIVATE
-        KEDITOR_SDK="${KEDITOR_SDK_PATH}"
-        KEDITOR_MAVEN="${CMAKE_BINARY_DIR}/maven"
         KEDITOR_DOTNET="${CMAKE_BINARY_DIR}/dotnet"
-        KEDITOR_PROJECTS="${KORAL_ENGINE_PROJECTS}"
-        KEDITOR_ENGINE_LIBRARY="$<TARGET_FILE:koral-engine>"
-        KEDITOR_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}"
-        KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin"
-        KEDITOR_DOTNET_RUNNER="${CMAKE_BINARY_DIR}/dotnet/koral-engine-dotnet")
+        KEDITOR_PROJECTS="${KORAL_ENGINE_PROJECTS}")
 endif()

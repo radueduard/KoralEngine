@@ -5,7 +5,6 @@
 
 #include <keditor/editor.h>
 #include <keditor/viewer.h>
-#include "physics.h"
 #include <kasset/import.h>
 #include <kasset/cache.h>
 #include <kasset/manifest.h>
@@ -31,9 +30,6 @@
 #include <regex>
 #include <set>
 #include <app.h>
-#include <cerrno>
-#include <sys/wait.h>
-#include <unistd.h>
 #include <builderDescriptions.h>
 #include <koralUI.h>
 #include <kui/dock.h>
@@ -172,7 +168,11 @@ namespace keditor
         }
         if (_hasProject) {
             // What is in the project's folders and not in the scene: there to be imported, or dragged where it is wanted.
-            if (const auto folder = _project.directory / "assets"; std::filesystem::is_directory(folder, ignored))
+            // Its own, and its modules': what they have is its too.
+            std::vector<std::filesystem::path> roots { _project.directory };
+            for (const auto& module : Doc().Modules()) roots.push_back(module);
+            for (const auto& root : roots)
+            if (const auto folder = root / "assets"; std::filesystem::is_directory(folder, ignored))
                 for (const auto& entry : std::filesystem::recursive_directory_iterator(folder, std::filesystem::directory_options::skip_permission_denied, ignored)) {
                     if (!entry.is_regular_file(ignored)) continue;
                     const std::string kind = ending(entry.path());
@@ -218,10 +218,20 @@ namespace keditor
                     assets.push_back(std::move(asset));
                 }
             };
-            files(_project.ShaderDirectory(), Asset::Kind::eShader, "shader:", { ".slang" });
-            files(_project.directory / "scripts", Asset::Kind::eScript, "script:", { ".cs", ".kt" });
-            files(_project.directory / "prefabs", Asset::Kind::ePrefab, "prefab:", { ".prefab" });
-            files(_project.directory / "functions", Asset::Kind::eFunction, "function:", { ".kfunc" });
+            for (const auto& root : roots) files(root / "shaders", Asset::Kind::eShader, "shader:", { ".slang" });
+            // The scripts' components, not their files: each that a source declares — a script, Data, a kind, a material
+            // kind, a ResourceScript — by its name, opened in the file it is in. A file of plain classes shows nothing.
+            for (const auto& type : ProjectScriptTypes()) {
+                Asset asset;
+                asset.kind = Asset::Kind::eScript;
+                asset.id = "script:" + type.name;
+                asset.label = type.name;
+                asset.file = type.file;
+                asset.group = type.makesResources ? "resources" : type.material ? "material" : type.abstract ? "kind" : type.data ? "data" : "script";
+                if (listed.insert(asset.id).second) assets.push_back(std::move(asset));
+            }
+            for (const auto& root : roots) files(root / "prefabs", Asset::Kind::ePrefab, "prefab:", { ".prefab" });
+            for (const auto& root : roots) files(root / "functions", Asset::Kind::eFunction, "function:", { ".kfunc" });
             // The scenes it has: listed, like everything else it is made of.
             if (const auto folder = _project.directory / "scenes"; std::filesystem::is_directory(folder, ignored))
                 for (const auto& entry : std::filesystem::directory_iterator(folder, ignored)) {
@@ -261,8 +271,16 @@ namespace keditor
             if (asset.builtIn) continue;            // in the folder it was given
             const std::filesystem::path in = asset.file.parent_path();
             const auto relative = _hasProject ? in.lexically_relative(_project.directory) : std::filesystem::path("..");
+            // A module's, under the one for the modules: in a folder of its name, as its own folders are.
+            const auto module = std::ranges::find_if(Doc().Modules(), [&](const std::filesystem::path& folder) {
+                const auto inside = in.lexically_normal().lexically_relative(folder.lexically_normal());
+                return !inside.empty() && *inside.begin() != "..";
+            });
             if (_hasProject && !relative.empty() && *relative.begin() != "..") asset.folder = relative == "." ? std::string() : relative.generic_string();
-            else {
+            else if (module != Doc().Modules().end()) {
+                const auto inside = in.lexically_normal().lexically_relative(module->lexically_normal());
+                asset.folder = std::format("{}/{}{}", ModulesFolder, module->filename().string(), inside == "." ? std::string() : "/" + inside.generic_string());
+            } else {
                 asset.folder = OutsideFolder;
                 if (in.has_parent_path() && in.parent_path().has_filename()) asset.folder += "/" + in.parent_path().filename().string();
                 if (in.has_filename()) asset.folder += "/" + in.filename().string();
@@ -347,9 +365,10 @@ namespace keditor
                 add(it->path().lexically_relative(_project.directory).generic_string());
             }
         }
-        // The project's own first, by name; what is outside it after them.
+        // The project's own first, by name; its modules' after them; what is outside it last.
         std::vector<std::string> sorted(folders.begin(), folders.end());
-        std::ranges::stable_sort(sorted, [](const std::string& a, const std::string& b) { return a.starts_with(OutsideFolder) < b.starts_with(OutsideFolder); });
+        const auto rank = [](const std::string& folder) { return folder.starts_with(OutsideFolder) ? 2 : folder.starts_with(ModulesFolder) ? 1 : 0; };
+        std::ranges::stable_sort(sorted, [&](const std::string& a, const std::string& b) { return rank(a) < rank(b); });
         return sorted;
     }
 
@@ -357,6 +376,14 @@ namespace keditor
     {
         if (!_hasProject || folder.starts_with(OutsideFolder)) return {};
         if (folder.empty()) return _project.directory;
+        // A module's: its folder of that name, and what is in it.
+        if (folder.starts_with(std::string(ModulesFolder) + "/")) {
+            const std::filesystem::path within(std::string(folder.substr(std::string_view(ModulesFolder).size() + 1)));
+            const std::string name = within.begin()->string();
+            for (const auto& module : const_cast<Session*>(this)->Doc().Modules())
+                if (module.filename() == name) return (module / within.lexically_relative(name)).lexically_normal();
+            return {};
+        }
         // The editor's own (Materials/PBR, Materials/Blinn-Phong) are of no folder on disk, unless the project has one so called.
         std::error_code ignored;
         if ((folder.starts_with("Meshes") || folder.starts_with("Materials")) && !std::filesystem::is_directory(_project.directory / folder, ignored)) return {};

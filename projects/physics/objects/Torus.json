@@ -1,0 +1,9 @@
+{
+  "template": "Torus",
+  "icon": "donut_large",
+  "name": "Torus",
+  "components": {
+    "Mesh": { "mesh": "$torus" },
+    "default": { "color": [0.85, 0.6, 1] }
+  }
+}

@@ -1,0 +1,870 @@
+{
+"koral-scene": 1,
+"tags": [],
+"graph": {
+  "kgraph": 1,
+  "passes": ["frame", "scene", "sky", "show"],
+  "nodes": [
+    {
+      "id": "screen",
+      "type": "Screen",
+      "pass": "frame",
+      "at": [40, 40],
+      "inputs": {}
+    },
+    {
+      "id": "eye",
+      "type": "Entity",
+      "pass": "frame",
+      "at": [40, 180],
+      "inputs": {
+        "component": "PerspectiveCamera"
+      }
+    },
+    {
+      "id": "looking at",
+      "type": "Add",
+      "pass": "frame",
+      "at": [280, 260],
+      "inputs": {
+        "a": { "$link": ["eye", "worldPosition"] },
+        "b": { "$link": ["eye", "forward"] }
+      }
+    },
+    {
+      "id": "camera",
+      "type": "View",
+      "pass": "frame",
+      "at": [480, 180],
+      "inputs": {
+        "main": true,
+        "position": { "$link": ["eye", "worldPosition"] },
+        "target": { "$link": ["looking at", "out"] },
+        "up": { "$link": ["eye", "up"] }
+      }
+    },
+    {
+      "id": "lens",
+      "type": "Perspective",
+      "pass": "frame",
+      "at": [680, 180],
+      "inputs": {
+        "aspect": { "$link": ["screen", "aspect"] },
+        "far": { "$link": ["eye", "field.far"] },
+        "fieldOfView": { "$link": ["eye", "field.fieldOfView"] },
+        "main": true,
+        "near": { "$link": ["eye", "field.near"] }
+      }
+    },
+    {
+      "id": "seen",
+      "type": "MatrixMultiply",
+      "pass": "frame",
+      "at": [680, 300],
+      "inputs": {
+        "a": { "$link": ["lens", "out"] },
+        "b": { "$link": ["camera", "out"] }
+      }
+    },
+    {
+      "id": "unseen",
+      "type": "MatrixInverse",
+      "pass": "frame",
+      "at": [680, 380],
+      "inputs": {
+        "a": { "$link": ["seen", "out"] }
+      }
+    },
+    {
+      "id": "sky values",
+      "type": "Entity",
+      "pass": "frame",
+      "at": [40, 460],
+      "inputs": {
+        "component": "Sky"
+      }
+    },
+    {
+      "id": "zenith",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 420],
+      "inputs": {
+        "color": { "$link": ["sky values", "field.zenith"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "horizon",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 500],
+      "inputs": {
+        "color": { "$link": ["sky values", "field.horizon"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "ground",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 580],
+      "inputs": {
+        "color": { "$link": ["sky values", "field.ground"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "sun radius",
+      "type": "Multiply",
+      "pass": "frame",
+      "at": [280, 660],
+      "inputs": {
+        "a": { "$link": ["sky values", "field.sunSize"] },
+        "b": 0.5
+      }
+    },
+    {
+      "id": "sun radians",
+      "type": "Radians",
+      "pass": "frame",
+      "at": [480, 660],
+      "inputs": {
+        "a": { "$link": ["sun radius", "out"] }
+      }
+    },
+    {
+      "id": "sun cosine",
+      "type": "Cos",
+      "pass": "frame",
+      "at": [680, 660],
+      "inputs": {
+        "a": { "$link": ["sun radians", "out"] }
+      }
+    },
+    {
+      "id": "sun",
+      "type": "Entity",
+      "pass": "frame",
+      "at": [40, 760],
+      "inputs": {
+        "component": "DirectionalLight"
+      }
+    },
+    {
+      "id": "towards the sun",
+      "type": "Negate",
+      "pass": "frame",
+      "at": [280, 760],
+      "inputs": {
+        "a": { "$link": ["sun", "forward"] }
+      }
+    },
+    {
+      "id": "sun linear",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 840],
+      "inputs": {
+        "color": { "$link": ["sun", "field.color"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "sun color",
+      "type": "Multiply",
+      "pass": "frame",
+      "at": [480, 840],
+      "inputs": {
+        "a": { "$link": ["sun linear", "out"] },
+        "b": { "$link": ["sun", "field.intensity"] }
+      }
+    },
+    {
+      "id": "frame data",
+      "type": "BufferBuilder",
+      "pass": "frame",
+      "at": [920, 340],
+      "inputs": {
+        "field.cameraPosition": { "$link": ["camera", "position"] },
+        "field.counts": { "$link": ["light data", "count"] },
+        "field.inverseViewProjection": { "$link": ["unseen", "out"] },
+        "field.skyAmbient": { "$link": ["sky values", "field.ambient"] },
+        "field.skyGround": { "$link": ["ground", "out"] },
+        "field.skyHorizon": { "$link": ["horizon", "out"] },
+        "field.skyZenith": { "$link": ["zenith", "out"] },
+        "field.sunColor": { "$link": ["sun color", "out"] },
+        "field.sunCosine": { "$link": ["sun cosine", "out"] },
+        "field.sunDirection": { "$link": ["towards the sun", "out"] },
+        "field.sunPresent": { "$link": ["sun", "present"] },
+        "field.viewProjection": { "$link": ["seen", "out"] },
+        "layout": [{ "name": "viewProjection", "type": "eMat4" }, { "name": "inverseViewProjection", "type": "eMat4" }, { "name": "cameraPosition", "type": "eVec4" }, { "name": "skyZenith", "type": "eVec3" }, { "name": "skyAmbient", "type": "eFloat" }, { "name": "skyHorizon", "type": "eVec3" }, { "name": "sunCosine", "type": "eFloat" }, { "name": "skyGround", "type": "eVec4" }, { "name": "sunDirection", "type": "eVec3" }, { "name": "sunPresent", "type": "eFloat" }, { "name": "sunColor", "type": "eVec4" }, { "name": "counts", "type": "eUVec4" }],
+        "usage": "eUniform"
+      }
+    },
+    {
+      "id": "suns",
+      "type": "ForEach",
+      "pass": "frame",
+      "at": [40, 1000],
+      "inputs": {
+        "component": "DirectionalLight"
+      }
+    },
+    {
+      "id": "suns linear",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 1000],
+      "inputs": {
+        "color": { "$link": ["suns", "field.color"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "suns color",
+      "type": "Multiply",
+      "pass": "frame",
+      "at": [480, 1000],
+      "inputs": {
+        "a": { "$link": ["suns linear", "out"] },
+        "b": { "$link": ["suns", "field.intensity"] }
+      }
+    },
+    {
+      "id": "suns position",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1080],
+      "inputs": {
+        "a": { "$link": ["suns", "worldPosition"] },
+        "b": 0
+      }
+    },
+    {
+      "id": "suns direction",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1160],
+      "inputs": {
+        "a": { "$link": ["suns", "forward"] },
+        "b": 0
+      }
+    },
+    {
+      "id": "suns data",
+      "type": "ShaderBuffer",
+      "pass": "frame",
+      "at": [920, 1000],
+      "inputs": {
+        "entry": "fragment",
+        "field.color": { "$link": ["suns color", "out"] },
+        "field.direction": { "$link": ["suns direction", "out"] },
+        "field.position": { "$link": ["suns position", "out"] },
+        "module": "lit",
+        "parameter": "lights"
+      }
+    },
+    {
+      "id": "lamps",
+      "type": "ForEach",
+      "pass": "frame",
+      "at": [40, 1360],
+      "inputs": {
+        "component": "PointLight"
+      }
+    },
+    {
+      "id": "lamps linear",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 1360],
+      "inputs": {
+        "color": { "$link": ["lamps", "field.color"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "lamps color",
+      "type": "Multiply",
+      "pass": "frame",
+      "at": [480, 1360],
+      "inputs": {
+        "a": { "$link": ["lamps linear", "out"] },
+        "b": { "$link": ["lamps", "field.intensity"] }
+      }
+    },
+    {
+      "id": "lamps position",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1440],
+      "inputs": {
+        "a": { "$link": ["lamps", "worldPosition"] },
+        "b": { "$link": ["lamps", "field.range"] }
+      }
+    },
+    {
+      "id": "lamps direction",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1520],
+      "inputs": {
+        "a": { "$link": ["lamps", "forward"] },
+        "b": 1
+      }
+    },
+    {
+      "id": "lamps data",
+      "type": "ShaderBuffer",
+      "pass": "frame",
+      "at": [920, 1360],
+      "inputs": {
+        "after": { "$link": ["suns data", "out"] },
+        "entry": "fragment",
+        "field.color": { "$link": ["lamps color", "out"] },
+        "field.direction": { "$link": ["lamps direction", "out"] },
+        "field.position": { "$link": ["lamps position", "out"] },
+        "module": "lit",
+        "parameter": "lights"
+      }
+    },
+    {
+      "id": "spots",
+      "type": "ForEach",
+      "pass": "frame",
+      "at": [40, 1720],
+      "inputs": {
+        "component": "SpotLight"
+      }
+    },
+    {
+      "id": "spots linear",
+      "type": "ColorConvert",
+      "pass": "frame",
+      "at": [280, 1720],
+      "inputs": {
+        "color": { "$link": ["spots", "field.color"] },
+        "from": "eGamma22",
+        "to": "eLinear"
+      }
+    },
+    {
+      "id": "spots color",
+      "type": "Multiply",
+      "pass": "frame",
+      "at": [480, 1720],
+      "inputs": {
+        "a": { "$link": ["spots linear", "out"] },
+        "b": { "$link": ["spots", "field.intensity"] }
+      }
+    },
+    {
+      "id": "spots position",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1800],
+      "inputs": {
+        "a": { "$link": ["spots", "worldPosition"] },
+        "b": { "$link": ["spots", "field.range"] }
+      }
+    },
+    {
+      "id": "spots direction",
+      "type": "Append",
+      "pass": "frame",
+      "at": [280, 1880],
+      "inputs": {
+        "a": { "$link": ["spots", "forward"] },
+        "b": 2
+      }
+    },
+    {
+      "id": "light data",
+      "type": "ShaderBuffer",
+      "pass": "frame",
+      "at": [920, 1720],
+      "inputs": {
+        "after": { "$link": ["lamps data", "out"] },
+        "entry": "fragment",
+        "field.color": { "$link": ["spots color", "out"] },
+        "field.cone": { "$link": ["spots cone", "out"] },
+        "field.direction": { "$link": ["spots direction", "out"] },
+        "field.position": { "$link": ["spots position", "out"] },
+        "module": "lit",
+        "parameter": "lights"
+      }
+    },
+    {
+      "id": "spots innerAngle radians",
+      "type": "Radians",
+      "pass": "frame",
+      "at": [480, 1960],
+      "inputs": {
+        "a": { "$link": ["spots", "field.innerAngle"] }
+      }
+    },
+    {
+      "id": "spots innerAngle cosine",
+      "type": "Cos",
+      "pass": "frame",
+      "at": [680, 1960],
+      "inputs": {
+        "a": { "$link": ["spots innerAngle radians", "out"] }
+      }
+    },
+    {
+      "id": "spots outerAngle radians",
+      "type": "Radians",
+      "pass": "frame",
+      "at": [480, 2020],
+      "inputs": {
+        "a": { "$link": ["spots", "field.outerAngle"] }
+      }
+    },
+    {
+      "id": "spots outerAngle cosine",
+      "type": "Cos",
+      "pass": "frame",
+      "at": [680, 2020],
+      "inputs": {
+        "a": { "$link": ["spots outerAngle radians", "out"] }
+      }
+    },
+    {
+      "id": "spots cone",
+      "type": "Append",
+      "pass": "frame",
+      "at": [880, 1990],
+      "inputs": {
+        "a": { "$link": ["spots innerAngle cosine", "out"] },
+        "b": { "$link": ["spots outerAngle cosine", "out"] }
+      }
+    },
+    {
+      "id": "shape",
+      "type": "Primitive",
+      "pass": "frame",
+      "at": [280, 40],
+      "inputs": {
+        "shape": "eCube"
+      }
+    },
+    {
+      "id": "screen (in scene)",
+      "type": "Reference",
+      "title": "screen",
+      "pass": "scene",
+      "at": [40, 40],
+      "inputs": {
+        "node": "screen"
+      }
+    },
+    {
+      "id": "color",
+      "type": "Image",
+      "pass": "scene",
+      "at": [300, 40],
+      "inputs": {
+        "extent": { "$link": ["screen (in scene)", "extent"] },
+        "format": "eRGBA8_UNORM",
+        "usage": ["eColorAttachment", "eSampled", "eTransferSrc", "eTransferDst"]
+      }
+    },
+    {
+      "id": "depth",
+      "type": "Image",
+      "pass": "scene",
+      "at": [300, 360],
+      "inputs": {
+        "extent": { "$link": ["screen (in scene)", "extent"] },
+        "format": "eD32_SFLOAT",
+        "usage": ["eDepthStencilAttachment"]
+      }
+    },
+    {
+      "id": "scene target",
+      "type": "Framebuffer",
+      "pass": "scene",
+      "at": [760, 40],
+      "inputs": {
+        "color[0].clear": { "scalarType": "Float", "components": 4, "value": { "f": [0, 0, 0, 1] } },
+        "color[0].name": "color",
+        "color[0].view": { "$link": ["color", "out"] },
+        "depthStencil.depth": 1,
+        "depthStencil.name": "depth",
+        "depthStencil.view": { "$link": ["depth", "out"] },
+        "depthStencil.which": "Depth"
+      }
+    },
+    {
+      "id": "lit",
+      "type": "GraphicsPipeline",
+      "pass": "scene",
+      "at": [1020, 40],
+      "inputs": {
+        "fragment.entry": "fragment",
+        "fragment.module": "lit",
+        "framebuffer": { "$link": ["scene target", "out"] },
+        "param.frame": { "$link": ["frame data (in scene)", "out"] },
+        "param.lights": { "$link": ["light data (in scene)", "out"] },
+        "stages": "eVertex",
+        "vertex.entry": "vertex",
+        "vertex.layout": { "$link": ["shape (in scene)", "layout"] },
+        "vertex.module": "lit"
+      }
+    },
+    {
+      "id": "shape (in scene)",
+      "type": "Reference",
+      "title": "shape",
+      "pass": "scene",
+      "at": [760, 420],
+      "inputs": {
+        "node": "shape"
+      }
+    },
+    {
+      "id": "frame data (in scene)",
+      "type": "Reference",
+      "title": "frame data",
+      "pass": "scene",
+      "at": [760, 540],
+      "inputs": {
+        "node": "frame data"
+      }
+    },
+    {
+      "id": "light data (in scene)",
+      "type": "Reference",
+      "title": "light data",
+      "pass": "scene",
+      "at": [760, 660],
+      "inputs": {
+        "node": "light data"
+      }
+    },
+    {
+      "id": "all",
+      "type": "Entities",
+      "pass": "scene",
+      "at": [1020, 260],
+      "inputs": {}
+    },
+    {
+      "id": "drawn",
+      "type": "Filter",
+      "pass": "scene",
+      "at": [1020, 360],
+      "inputs": {
+        "entities": { "$link": ["all", "out"] },
+        "with": ["Mesh", "PbrMaterial"]
+      }
+    },
+    {
+      "id": "draw scene",
+      "type": "Draw",
+      "pass": "scene",
+      "at": [1300, 40],
+      "inputs": {
+        "mesh": { "$link": ["drawn", "Mesh.mesh"] },
+        "pipeline": { "$link": ["lit", "out"] },
+        "push.albedo": { "$link": ["drawn", "PbrMaterial.baseColor"] },
+        "push.emission": { "$link": ["drawn", "PbrMaterial.emission"] },
+        "push.metallic": { "$link": ["drawn", "PbrMaterial.metallic"] },
+        "push.model": { "$link": ["drawn", "matrix"] },
+        "push.roughness": { "$link": ["drawn", "PbrMaterial.roughness"] }
+      }
+    },
+    {
+      "id": "depth (in sky)",
+      "type": "Reference",
+      "title": "depth",
+      "pass": "sky",
+      "at": [40, 160],
+      "inputs": {
+        "node": "depth"
+      }
+    },
+    {
+      "id": "color (in sky)",
+      "type": "Reference",
+      "title": "color",
+      "pass": "sky",
+      "at": [40, 40],
+      "inputs": {
+        "node": "color"
+      }
+    },
+    {
+      "id": "sky target",
+      "type": "Framebuffer",
+      "pass": "sky",
+      "at": [320, 40],
+      "inputs": {
+        "color[0].name": "color",
+        "color[0].view": { "$link": ["color (in sky)", "out"] },
+        "depthStencil.depth": 1,
+        "depthStencil.name": "depth",
+        "depthStencil.view": { "$link": ["depth (in sky)", "out"] },
+        "depthStencil.which": "Depth"
+      }
+    },
+    {
+      "id": "sky",
+      "type": "GraphicsPipeline",
+      "pass": "sky",
+      "at": [600, 40],
+      "inputs": {
+        "depthStencilState": { "depthTestEnable": true, "depthWriteEnable": false, "depthCompareOp": "eLessOrEqual" },
+        "fragment.entry": "fragment",
+        "fragment.module": "sky",
+        "framebuffer": { "$link": ["sky target", "out"] },
+        "param.frame": { "$link": ["frame data (in sky)", "out"] },
+        "stages": "eVertex",
+        "vertex.entry": "vertex",
+        "vertex.module": "sky"
+      }
+    },
+    {
+      "id": "frame data (in sky)",
+      "type": "Reference",
+      "title": "frame data",
+      "pass": "sky",
+      "at": [320, 300],
+      "inputs": {
+        "node": "frame data"
+      }
+    },
+    {
+      "id": "draw sky",
+      "type": "Draw",
+      "pass": "sky",
+      "at": [880, 40],
+      "inputs": {
+        "load": true,
+        "pipeline": { "$link": ["sky", "out"] }
+      }
+    },
+    {
+      "id": "show",
+      "type": "Blit",
+      "pass": "show",
+      "at": [320, 40],
+      "inputs": {
+        "destination": { "$link": ["screen (in show)", "out"] },
+        "source": { "$link": ["color (in show)", "out"] }
+      }
+    },
+    {
+      "id": "color (in show)",
+      "type": "Reference",
+      "title": "color",
+      "pass": "show",
+      "at": [40, 40],
+      "inputs": {
+        "node": "color"
+      }
+    },
+    {
+      "id": "screen (in show)",
+      "type": "Reference",
+      "title": "screen",
+      "pass": "show",
+      "at": [40, 300],
+      "inputs": {
+        "node": "screen"
+      }
+    }
+  ]
+}
+,
+"world": {
+  "kecs": 1,
+  "types": [
+    { "name": "CapsuleCollider", "size": 16, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "radius", "type": "f32", "offset": 8, "size": 4 },
+        { "name": "height", "type": "f32", "offset": 12, "size": 4 }
+      ] },
+    { "name": "CubeCollider", "size": 20, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "halfExtents", "type": "vec3", "offset": 8, "size": 12 }
+      ] },
+    { "name": "CylinderCollider", "size": 16, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "radius", "type": "f32", "offset": 8, "size": 4 },
+        { "name": "height", "type": "f32", "offset": 12, "size": 4 }
+      ] },
+    { "name": "DirectionalLight", "size": 16, "alignment": 4, "plain": true, "kinds": ["Light"], "fields": [
+        { "name": "color", "type": "vec3", "offset": 0, "size": 12 },
+        { "name": "intensity", "type": "f32", "offset": 12, "size": 4 }
+      ] },
+    { "name": "Mesh", "size": 16, "alignment": 8, "plain": false, "fields": [
+        { "name": "mesh", "type": "Mesh", "offset": 0, "size": 16 }
+      ] },
+    { "name": "MeshCollider", "size": 8, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 }
+      ] },
+    { "name": "PbrMaterial", "size": 128, "alignment": 8, "plain": false, "fields": [
+        { "name": "baseColorMap", "type": "Image", "offset": 0, "size": 16 },
+        { "name": "normalMap", "type": "Image", "offset": 16, "size": 16 },
+        { "name": "metallicRoughnessMap", "type": "Image", "offset": 32, "size": 16 },
+        { "name": "emissiveMap", "type": "Image", "offset": 48, "size": 16 },
+        { "name": "occlusionMap", "type": "Image", "offset": 64, "size": 16 },
+        { "name": "baseColor", "type": "vec4", "offset": 80, "size": 16 },
+        { "name": "metallic", "type": "f32", "offset": 96, "size": 4 },
+        { "name": "roughness", "type": "f32", "offset": 100, "size": 4 },
+        { "name": "emission", "type": "vec3", "offset": 104, "size": 12 },
+        { "name": "alphaMode", "type": "i32", "offset": 116, "size": 4 },
+        { "name": "alphaCutoff", "type": "f32", "offset": 120, "size": 4 },
+        { "name": "doubleSided", "type": "bool", "offset": 124, "size": 1 }
+      ] },
+    { "name": "PerspectiveCamera", "size": 12, "alignment": 4, "plain": true, "kinds": ["Camera"], "fields": [
+        { "name": "near", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "far", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "fieldOfView", "type": "f32", "offset": 8, "size": 4 }
+      ] },
+    { "name": "Physics", "size": 20, "alignment": 4, "plain": true, "fields": [
+        { "name": "gravity", "type": "vec3", "offset": 0, "size": 12 },
+        { "name": "substeps", "type": "i32", "offset": 12, "size": 4 },
+        { "name": "contactCapacity", "type": "i32", "offset": 16, "size": 4 }
+      ] },
+    { "name": "PlaneCollider", "size": 8, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 }
+      ] },
+    { "name": "RigidBody", "size": 40, "alignment": 4, "plain": true, "fields": [
+        { "name": "motion", "type": "i32", "offset": 0, "size": 4 },
+        { "name": "mass", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "linearDamping", "type": "f32", "offset": 8, "size": 4 },
+        { "name": "angularDamping", "type": "f32", "offset": 12, "size": 4 },
+        { "name": "velocity", "type": "vec3", "offset": 16, "size": 12 },
+        { "name": "angularVelocity", "type": "vec3", "offset": 28, "size": 12 }
+      ] },
+    { "name": "Sky", "size": 44, "alignment": 4, "plain": true, "fields": [
+        { "name": "zenith", "type": "vec3", "offset": 0, "size": 12 },
+        { "name": "horizon", "type": "vec3", "offset": 12, "size": 12 },
+        { "name": "ground", "type": "vec3", "offset": 24, "size": 12 },
+        { "name": "ambient", "type": "f32", "offset": 36, "size": 4 },
+        { "name": "sunSize", "type": "f32", "offset": 40, "size": 4 }
+      ] },
+    { "name": "SphereCollider", "size": 12, "alignment": 4, "plain": true, "kinds": ["Collider"], "fields": [
+        { "name": "friction", "type": "f32", "offset": 0, "size": 4 },
+        { "name": "restitution", "type": "f32", "offset": 4, "size": 4 },
+        { "name": "radius", "type": "f32", "offset": 8, "size": 4 }
+      ] }
+  ],
+  "entities": [
+    {
+      "id": 0,
+      "name": "Sky",
+      "components": {
+        "Sky": { "zenith": [0.22,0.42,0.78], "horizon": [0.72,0.8,0.9], "ground": [0.23,0.21,0.19], "ambient": 0.35, "sunSize": 1.5 }
+      }
+    },
+    {
+      "id": 1,
+      "name": "Camera",
+      "position": [0, 4, 12],
+      "rotation": [-15, 0, 0],
+      "components": {
+        "PerspectiveCamera": { "near": 0.1, "far": 100, "fieldOfView": 60 }
+      }
+    },
+    {
+      "id": 2,
+      "name": "Sun",
+      "position": [0, 3, 0],
+      "rotation": [-50, 30, 0],
+      "components": {
+        "DirectionalLight": { "color": [1,0.96,0.9], "intensity": 1 }
+      }
+    },
+    {
+      "id": 3,
+      "name": "Physics",
+      "components": {
+        "Physics": { "gravity": [0,-9.81,0], "substeps": 4, "contactCapacity": 4096 }
+      }
+    },
+    {
+      "id": 4,
+      "name": "Ground",
+      "scale": [20, 1, 20],
+      "components": {
+        "Mesh": { "mesh": "$plane" },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.55,0.55,0.5,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "PlaneCollider": { "friction": 0.5, "restitution": 0.2 },
+        "RigidBody": { "motion": 0, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] }
+      }
+    },
+    {
+      "id": 5,
+      "name": "Cube",
+      "position": [-4, 3, 0],
+      "components": {
+        "CubeCollider": { "friction": 0.5, "restitution": 0.2, "halfExtents": [0.5,0.5,0.5] },
+        "Mesh": { "mesh": "$cube" },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.9,0.35,0.3,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "RigidBody": { "motion": 1, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] }
+      }
+    },
+    {
+      "id": 6,
+      "name": "Sphere",
+      "position": [-2, 4, 0],
+      "components": {
+        "Mesh": { "mesh": "$sphere" },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.3,0.6,0.9,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "RigidBody": { "motion": 1, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] },
+        "SphereCollider": { "friction": 0.5, "restitution": 0.2, "radius": 0.5 }
+      }
+    },
+    {
+      "id": 7,
+      "name": "Cylinder",
+      "position": [0, 5, 0],
+      "components": {
+        "CylinderCollider": { "friction": 0.5, "restitution": 0.2, "radius": 0.5, "height": 1 },
+        "Mesh": { "mesh": "$cylinder" },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.4,0.8,0.4,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "RigidBody": { "motion": 1, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] }
+      }
+    },
+    {
+      "id": 8,
+      "name": "Capsule",
+      "position": [2, 6, 0],
+      "components": {
+        "CapsuleCollider": { "friction": 0.5, "restitution": 0.2, "radius": 0.5, "height": 1 },
+        "Mesh": { "mesh": "$capsule" },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.9,0.75,0.3,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "RigidBody": { "motion": 1, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] }
+      }
+    },
+    {
+      "id": 9,
+      "name": "Torus",
+      "position": [4, 7, 0],
+      "components": {
+        "Mesh": { "mesh": "$torus" },
+        "MeshCollider": { "friction": 0.5, "restitution": 0.2 },
+        "PbrMaterial": { "baseColorMap": "$white", "normalMap": "$normal", "metallicRoughnessMap": "$white", "emissiveMap": "$white", "occlusionMap": "$white", "baseColor": [0.75,0.45,0.9,1], "metallic": 0, "roughness": 0.5, "emission": [0,0,0], "alphaMode": 0, "alphaCutoff": 0.5, "doubleSided": false },
+        "RigidBody": { "motion": 1, "mass": 1, "linearDamping": 0.01, "angularDamping": 0.05, "velocity": [0,0,0], "angularVelocity": [0,0,0] }
+      }
+    }
+  ]
+}
+
+}

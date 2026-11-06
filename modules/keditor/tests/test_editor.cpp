@@ -26,6 +26,7 @@
 #include <capiInterop.h>
 #include <image.h>
 #include <keditor/editor.h>
+#include <keditor/scripting.h>
 #include <log.h>
 #include <koralUI.h>
 
@@ -1723,8 +1724,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().Connect("color", "out", invert, "param.source");
     EXPECT_TRUE(Doc().Runtime().Status(invert)->ok) << Doc().Runtime().Status(invert)->error;
 
-    // With no scripts, this editor is all the project needs, and the player runs it.
-    EXPECT_TRUE(Session().EditCommand().empty());
+    // With no scripts, there is nothing to run them, and the player runs it.
     EXPECT_TRUE(Session().ScriptsNotRunning().empty());
     EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos);
 
@@ -1745,24 +1745,39 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     ASSERT_TRUE(Session().NewScript("Roller", "Kotlin")) << Session().Status();
     EXPECT_NE(text(directory / "scripts", "Drifter.kt").find("class Drifter : Setup(), PerFrame"), std::string::npos);
     for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew" })
-        EXPECT_TRUE(std::filesystem::exists(directory / file)) << file << ": a Kotlin script comes with the build that compiles it";
-    EXPECT_NE(Session().RunCommand().find("gradlew"), std::string::npos) << "scripts in Kotlin are run by the project's build: " << Session().RunCommand();
-    EXPECT_NE(Session().RunCommand().find(" play"), std::string::npos);
-    EXPECT_NE(Session().EditCommand().find(" edit"), std::string::npos);
+        EXPECT_FALSE(std::filesystem::exists(directory / file)) << file << ": Kotlin is compiled by the program that runs it, with no build of the project's";
+    EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos) << "the player runs the scripts itself: " << Session().RunCommand();
     // One in the other language, put there by hand, runs nowhere: it is said so.
     std::ofstream(directory / "scripts" / "Stray.cs") << "// not the project's language";
     EXPECT_EQ(Session().CurrentProject().ScriptsInAnotherLanguage().size(), 1u);
     EXPECT_TRUE(HasProblem("scripts/Stray.cs: the project's scripts are in Kotlin"));
 
-    // This editor was not started with them: nothing runs them, and it says so rather than play a scene whose
-    // scripts do nothing.
+    // This program has nothing to run them with (koral-editor has: khost): it says so rather than play a scene whose
+    // scripts do nothing. Data, and plain classes a script uses, have nothing to run: they are not among them.
+    std::ofstream(directory / "scripts" / "Reading.kt") << "import koral.engine.Data\n\nclass Reading : Data() {\n    var value = 1f\n}\n";
+    std::ofstream(directory / "scripts" / "Buffers.kt") << "class Buffers {\n    var values = FloatArray(0)\n}\n";
     EXPECT_EQ(Session().ScriptsNotRunning(), (std::vector<std::string> { "Drifter", "Roller" }));
-    EXPECT_TRUE(HasProblem("Nothing is running the project's scripts (Drifter, Roller)"));
+    EXPECT_TRUE(HasProblem("Nothing is running the project's scripts (Drifter, Roller): this program runs no scripts"));
     Session().StartPlaying();
     EXPECT_TRUE(Session().Failed());
-    EXPECT_TRUE(Shows("nothing runs Drifter and 1 more"));
-    EXPECT_TRUE(Shows("Open with its scripts"));
+    EXPECT_TRUE(Shows("Drifter and 1 more are not running"));
     Session().Stop();
+    // With something that runs them, why they do not is what it says — and once it runs them, that they did not compile.
+    {
+        struct Runner final : keditor::ScriptRuntime {
+            bool runs = false;
+            bool Runs(const std::filesystem::path&, std::string& why) const override { why = "its scripts are in Kotlin, and no Java was found"; return runs; }
+            void Forget(keditor::Document*) override {}
+        } runner;
+        keditor::scriptRuntime = &runner;
+        EXPECT_TRUE(HasProblem("Nothing is running the project's scripts (Drifter, Roller): its scripts are in Kotlin, and no Java was found"));
+        std::string why;
+        EXPECT_FALSE(Session().HostsScripts(&why));
+        runner.runs = true;
+        EXPECT_TRUE(Session().HostsScripts());
+        EXPECT_TRUE(HasProblem("Not running: Drifter, Roller. They did not compile, or are being compiled"));
+        keditor::scriptRuntime = nullptr;
+    }
     // A new scene knows them too, as one loaded from its file does: an entity in it is given one.
     ASSERT_TRUE(Session().NewStandardScene()) << Session().Status();
     EXPECT_TRUE(Doc().AddComponent(Doc().World().Roots().front(), "Drifter")) << "a new scene forgot the project's scripts";
@@ -1771,57 +1786,21 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_FALSE(Session().NewScript("My Script", "Kotlin"));
     EXPECT_FALSE(Session().NewScript("Thing", "Lua"));
 
-    // Before any window, the editor's program goes to the runner of a project with scripts — not of one with none,
-    // and not when that runner is what started it.
-    {
-        keditor::Project none;
-        std::string error;
-        std::filesystem::remove_all(directory.parent_path() / "assets-none");
-        ASSERT_TRUE(keditor::Project::Create(directory.parent_path() / "assets-none", "none", none, error)) << error;
-        EXPECT_FALSE(keditor::RunThroughScripts(none).has_value());
-        setenv("KORAL_ENGINE_HANDED_OVER", directory.string().c_str(), 1);
-        EXPECT_FALSE(keditor::RunThroughScripts(Session().CurrentProject()).has_value()) << "started by the runner it would go to";
-        unsetenv("KORAL_ENGINE_HANDED_OVER");
-        EXPECT_NE(keditor::ScriptRunner(Session().CurrentProject(), true).find(" edit"), std::string::npos);
-    }
-
-    // The editor's program hands a project with scripts over to their runner as it opens it, and closes.
-    std::vector<std::string> ran;
-    int quits = 0;
-    keditor::Session::launch = [&](const std::string& command) { ran.push_back(command); return true; };
-    keditor::Session::quit = [&] { ++quits; };
-    unsetenv("KORAL_ENGINE_HANDED_OVER");
-    Session().handOver = true;
-    ASSERT_TRUE(Session().OpenProject(directory)) << Session().Status();
-    Frame();
-    ASSERT_EQ(ran.size(), 1u) << "handed over, between frames";
-    EXPECT_NE(ran[0].find(" edit"), std::string::npos) << ran[0];
-    EXPECT_EQ(quits, 1);
-    // The editor the runner opens says it runs them, and keeps the project.
+    // A program in C# or Kotlin that opened the engine's Editor scene with the project's scripts runs them itself.
     Session().HostScripts(directory);
-    ASSERT_TRUE(Session().OpenProject(directory)) << Session().Status();
-    Frame();
     EXPECT_TRUE(Session().HostsScripts());
-    EXPECT_EQ(ran.size(), 1u) << "it runs them: it is not handed over again";
-    // A runner that does not say so is not handed the project again, round and round.
     Session().HostScripts({});
-    ASSERT_TRUE(Session().OpenProject(directory)) << Session().Status();
-    Frame();
-    EXPECT_EQ(ran.size(), 1u) << "this editor was handed it already";
-    unsetenv("KORAL_ENGINE_HANDED_OVER");
-    Session().handOver = false;
-    keditor::Session::launch = {};
-    keditor::Session::quit = {};
 
-    // A project whose scripts are in C#: run by the C# runner, and Kotlin refused.
+    // A project made with its scripts in C#: so from the start, before any script, and Kotlin refused.
     const auto csharp = directory.parent_path() / "assets-csharp";
     std::filesystem::remove_all(csharp);
-    ASSERT_TRUE(Session().NewProject(csharp)) << Session().Status();
+    ASSERT_TRUE(Session().NewProject(csharp, 'c')) << Session().Status();
+    EXPECT_NE(text(csharp, "project.json").find(R"("scripts": "csharp")"), std::string::npos) << text(csharp, "project.json");
+    EXPECT_EQ(Session().ScriptKindsHere().size(), 2u) << "only C#'s, from the start";
     ASSERT_TRUE(Session().NewScript("Roller", "C#")) << Session().Status();
     EXPECT_NE(text(csharp / "scripts", "Roller.cs").find("public sealed class Roller : Setup, PerFrame"), std::string::npos);
     EXPECT_EQ(text(csharp / "scripts", "Roller.cs").find("$NAME"), std::string::npos);
-    EXPECT_NE(Session().RunCommand().find("koral-engine-dotnet"), std::string::npos) << "scripts in C# are run by their runner: " << Session().RunCommand();
-    EXPECT_NE(Session().EditCommand().find("--edit"), std::string::npos);
+    EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos) << "the player runs C# scripts itself: " << Session().RunCommand();
     EXPECT_FALSE(Session().NewScript("Drifter", "Kotlin"));
     EXPECT_FALSE(std::filesystem::exists(csharp / "build.gradle.kts")) << "and no Kotlin build was made for it";
 }
@@ -1843,13 +1822,33 @@ TEST_F(EditorTest, ScriptsAreGivenEntitiesAndPrefabsArePlaced) {
     std::ofstream(directory / "scripts" / "Follower.kt") << "import koral.engine.*\n\nclass Follower : Script() {\n    var target: Entity = Entity.Null\n    var speed = 1f\n}\n";
     Doc().DeclareScripts(directory / "scripts");
     for (const auto& note : Doc().Notes()) EXPECT_EQ(note.find("Follower"), std::string::npos) << note;
-    ASSERT_TRUE(Session().GiveAsset("script:Follower.kt", camera)) << Session().Status();
+    ASSERT_TRUE(Session().GiveAsset("script:Follower", camera)) << Session().Status();
     EXPECT_TRUE(Doc().Field(camera, "Follower", "target").IsNull()) << "none, not the first entity there is";
     Session().Select(camera);
     EXPECT_TRUE(Shows("(nothing)"));
     ASSERT_TRUE(Doc().SetField(camera, "Follower", "target", keditor::EntityValue(sphere)));
     EXPECT_TRUE(Shows("Sphere"));
     EXPECT_EQ(Doc().Field(camera, "Follower", "target"), keditor::EntityValue(sphere));
+
+    // The Scripts are the components the sources declare, not their files: a file of a kind and two of it is three, each
+    // opened in that file; a file of plain classes is none. A kind is not given to an entity.
+    std::ofstream(directory / "scripts" / "Readings.kt") << "import koral.engine.Data\n\nabstract class Reading : Data() {\n    var value = 1f\n}\n"
+                                                             "class Heat : Reading() {\n    var where = 0f\n}\nclass Light2 : Reading() {\n}\n";
+    std::ofstream(directory / "scripts" / "Helpers.kt") << "class Helpers {\n    var values = FloatArray(0)\n}\n";
+    std::map<std::string, keditor::Session::Asset> scripts;
+    for (const auto& asset : Session().Assets())
+        if (asset.kind == keditor::Session::Asset::Kind::eScript) scripts[asset.label] = asset;
+    EXPECT_EQ(scripts.size(), 4u) << "Follower, Reading, Heat and Light2";
+    ASSERT_TRUE(scripts.contains("Heat") && scripts.contains("Reading") && scripts.contains("Follower"));
+    EXPECT_FALSE(scripts.contains("Helpers") || scripts.contains("Readings"));
+    EXPECT_EQ(scripts["Heat"].file.filename(), "Readings.kt");
+    EXPECT_EQ(scripts["Heat"].group, "data");
+    EXPECT_EQ(scripts["Reading"].group, "kind");
+    EXPECT_EQ(scripts["Follower"].group, "script");
+    Doc().DeclareScripts(directory / "scripts");
+    EXPECT_FALSE(Session().GiveAsset("script:Reading", sphere)) << "nothing has a kind itself";
+    EXPECT_TRUE(Session().GiveAsset("script:Heat", sphere)) << Session().Status();
+    EXPECT_TRUE(Doc().World().Has(sphere, Doc().World().Find("Reading")));
 
     // Made a prefab of, the sphere is its first instance; the prefab is among the assets, and placed it is another.
     ASSERT_TRUE(Session().SaveAsPrefab(sphere)) << Session().Status();
@@ -1971,16 +1970,6 @@ TEST_F(EditorTest, TheProjectToStartWithIsTheUsersChoice) {
     if (was) setenv("XDG_CONFIG_HOME", before.c_str(), 1); else unsetenv("XDG_CONFIG_HOME");
     std::filesystem::remove_all(config);
     std::filesystem::remove_all(project);
-}
-
-// Not a test: gives the project at KEDITOR_WRITE_PROJECT the build its Kotlin scripts need.
-TEST_F(EditorTest, DISABLED_WritesAKotlinBuild) {
-    const char* directory = std::getenv("KEDITOR_WRITE_PROJECT");
-    ASSERT_NE(directory, nullptr);
-    keditor::Project project;
-    std::string error;
-    ASSERT_TRUE(keditor::Project::Open(directory, project, error)) << error;
-    for (const auto& file : keditor::WriteKotlinBuild(project.directory, project.name)) std::printf("wrote %s\n", file.c_str());
 }
 
 // Not a test: sets a project up with the standard scene and the entities a file lists, when told where.
@@ -3265,64 +3254,6 @@ TEST_F(EditorTest, WhatAPageCanUseStaysInSightAsItsPicturesAreMadeAgain) {
     EXPECT_EQ(Doc().Graph().Find(Session().selectedNode)->type, "Reference");
 }
 
-// How long a frame of the editor takes while a scene plays, nothing selected and then a body selected: KEDITOR_BENCH
-// names the project, whose start scene is played. Not run by default.
-TEST_F(EditorTest, DISABLED_PlayingWithABodySelectedTakesNoLongerThanWithNothing) {
-    const char* named = std::getenv("KEDITOR_BENCH");
-    if (!named) GTEST_SKIP() << "KEDITOR_BENCH names the project";
-    Open(named);
-    const int frames = std::getenv("KEDITOR_BENCH_FRAMES") ? std::atoi(std::getenv("KEDITOR_BENCH_FRAMES")) : 300;
-    Session().StartPlaying();
-    for (int i = 0; i < 120; ++i) Frame();
-    const auto time = [&] {
-        const auto versions = Session().Version();
-        const auto began = std::chrono::steady_clock::now();
-        for (int i = 0; i < frames; ++i) Frame();
-        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count() / frames;
-        return std::pair { ms, Session().Version() - versions };
-    };
-    // Nothing, something still (the sun: what having a selection costs, its outline, without its inspector built again),
-    // a body: in turn, round after round, so that the scene settling as it plays (cheaper as bodies sleep) falls on each
-    // alike.
-    kecs::Entity body = kecs::NullEntity;
-    Doc().World().EachEntity([&](const kecs::Entity e) { if (body.IsNull() && Doc().World().Has(e, Doc().World().Find("RigidBody"))) body = e; });
-    const kecs::Entity picks[3] { kecs::NullEntity, Doc().World().FindEntity("Sun"), body };
-    double total[3] {};
-    std::uint64_t rebuilt[3] {};
-    const int rounds = 6;
-    for (int round = 0; round < rounds; ++round)
-        for (int k = 0; k < 3; ++k) {
-            Session().Select(picks[k]);
-            for (int i = 0; i < 5; ++i) Frame();
-            const auto [ms, versions] = time();
-            total[k] += ms;
-            rebuilt[k] += versions;
-        }
-    std::printf("            playing, nothing selected: %.3f ms a frame; the sun selected: %.3f; a body selected: %.3f (interface made again %llu, %llu, %llu times), %d rounds of %d frames\n",
-                total[0] / rounds, total[1] / rounds, total[2] / rounds, static_cast<unsigned long long>(rebuilt[0]),
-                static_cast<unsigned long long>(rebuilt[1]), static_cast<unsigned long long>(rebuilt[2]), rounds, frames);
-
-    // Not playing, the body picked and dragged, as the gizmo drags it: moved, and the document told, every frame.
-    Session().Stop();
-    for (int i = 0; i < 10; ++i) Frame();
-    body = kecs::NullEntity;
-    Doc().World().EachEntity([&](const kecs::Entity e) { if (body.IsNull() && Doc().World().Has(e, Doc().World().Find("RigidBody"))) body = e; });
-    Session().Select(body);
-    for (int i = 0; i < 5; ++i) Frame();
-    const auto [held, rebuiltHeld] = time();
-    const auto versions = Session().Version();
-    const auto began = std::chrono::steady_clock::now();
-    for (int i = 0; i < frames; ++i) {
-        Doc().World().SetPosition(body, { 0.01f * static_cast<float>(i), 2.f, 0.f });
-        Doc().Moved(body, "position");
-        Frame();
-    }
-    const double dragging = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count() / frames;
-    std::printf("            stopped, a body picked: %.3f ms a frame; dragged: %.3f (interface made again %llu times while dragged)\n",
-                held, dragging, static_cast<unsigned long long>(Session().Version() - versions));
-    (void)rebuiltHeld;
-}
-
 // Dragged with the gizmo, an entity is moved every frame of the drag: the inspector follows it by itself, nothing else is
 // built again for it, and it is a change all the same — the scene not saved, and the drag one thing to take back.
 TEST_F(EditorTest, AnEntityDraggedIsFollowedWithoutTheInterfaceBuiltAgainAndIsTakenBack) {
@@ -3429,25 +3360,13 @@ TEST_F(EditorTest, AFieldThatIsOneOfSoManyThingsIsShownByItsName) {
     Open();
     ASSERT_TRUE(Session().NewProject(directory));
     ASSERT_TRUE(Session().NewStandardScene());
-    const kecs::Entity body = Doc().CreateEntity("Body");
-    ASSERT_TRUE(Doc().AddComponent(body, "RigidBody"));
-    ASSERT_TRUE(Doc().AddComponent(body, "Collider"));
-    ASSERT_TRUE(Doc().SetField(body, "Collider", "shape", "Capsule"));
-    Session().Select(body);
-    EXPECT_TRUE(Shows("Dynamic")) << "its kind, by name";
-    EXPECT_TRUE(Shows("Capsule")) << "its shape, by name";
-
-    // Its collider shown, and being changed, in the scene's view: every shape, a mesh's by its edges.
-    Session().ShowCollider(true, true);
-    ASSERT_TRUE(Doc().AddComponent(body, "Mesh"));
-    ASSERT_TRUE(Doc().SetField(body, "Mesh", "mesh", "$cube"));
-    for (const char* shape : { "Sphere", "Box", "Capsule", "Plane", "Cone", "Mesh" }) {
-        ASSERT_TRUE(Doc().SetField(body, "Collider", "shape", shape));
-        for (int i = 0; i < 3; ++i) Frame();
-    }
-    EXPECT_TRUE(Session().colliderShown && Session().colliderEditing);
-    Session().ShowCollider(false, false);
-    EXPECT_FALSE(Session().colliderShown);
+    // A material's alphaMode: `[Choices("Opaque", "Masked", "Blended")]`, kept as a number and shown by name.
+    const kecs::Entity glass = Doc().CreateEntity("Glass");
+    ASSERT_TRUE(Doc().AddComponent(glass, "PbrMaterial"));
+    ASSERT_TRUE(Doc().SetField(glass, "PbrMaterial", "alphaMode", "Blended"));
+    EXPECT_EQ(Doc().Field(glass, "PbrMaterial", "alphaMode"), kgraph::Value(2)) << "kept as the number it is";
+    Session().Select(glass);
+    EXPECT_TRUE(Shows("Blended")) << "its mode, by name";
 }
 
 TEST_F(EditorTest, APassRunsEveryFrameOnTheFixedStepOrOnceAndTheFixedStepIsTakenWhileItPlays) {
@@ -3892,4 +3811,88 @@ TEST_F(EditorTest, TheSceneViewMeasuresHidesPicksInABoxAndSplits) {
     for (int i = 0; i < 6; ++i) Frame();
     Sheet("view-split");
     Session().SetSplit(false);
+}
+
+// A module is a project minus its scenes: what it has — scripts, functions, objects, assets — is the project's that
+// imports it, as long as their scripts are in one language. Its one scene is for trying it out.
+TEST_F(EditorTest, AModuleIsImportedAndWhatItHasIsTheProjects) {
+    const auto root = std::filesystem::temp_directory_path() / "keditor-tests" / "modules";
+    std::filesystem::remove_all(root);
+    Open();
+    const auto write = [](const std::filesystem::path& file, const std::string& text) {
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream(file, std::ios::binary) << text;
+    };
+
+    // A project of no use to import, and a module in C#.
+    ASSERT_TRUE(Session().NewProject(root / "plain", 'k')) << Session().Status();
+    ASSERT_TRUE(Session().NewProject(root / "sharp", 'c', true)) << Session().Status();
+
+    // The module: a kind and what is of it, a function, an object and a picture.
+    ASSERT_TRUE(Session().NewProject(root / "physics", 'k', true)) << Session().Status();
+    EXPECT_TRUE(Session().CurrentProject().module);
+    EXPECT_EQ(Session().CurrentProject().start, "test") << "its one scene is for trying it out";
+    EXPECT_TRUE(std::filesystem::exists(root / "physics" / "scenes" / "test.scene.json"));
+    write(root / "physics" / "scripts" / "Colliders.kt",
+          "import koral.engine.Data\n\nabstract class Collider : Data() {\n    var friction = 0.5f\n}\nclass SphereCollider : Collider() {\n    var radius = 0.5f\n}\n");
+    std::filesystem::create_directories(root / "physics" / "functions");
+    std::filesystem::copy_file(keditor::Document::EngineFunctionsDirectory() / "RadixSort.kfunc", root / "physics" / "functions" / "Sorted.kfunc",
+                               std::filesystem::copy_options::overwrite_existing);
+    write(root / "physics" / "objects" / "Ball.json", R"({ "template": "Ball", "name": "Ball", "components": { "SphereCollider": { "radius": 1 } } })");
+    write(root / "physics" / "assets" / "textures" / "rubber.png", "x");
+
+    // What is offered to a project made beside them: the modules, not the project.
+    const auto offered = keditor::Project::ModulesIn(root);
+    ASSERT_EQ(offered.size(), 2u);
+    EXPECT_EQ(offered[0].name, "physics");
+    EXPECT_EQ(offered[1].name, "sharp");
+
+    // A project that imports it has what it has.
+    ASSERT_TRUE(Session().NewProject(root / "game", 'k', false, { root / "physics" })) << Session().Status();
+    EXPECT_FALSE(Session().CurrentProject().module);
+    EXPECT_EQ(Session().CurrentProject().modules, std::vector<std::string> { "../physics" }) << "kept from its own folder";
+    ASSERT_EQ(Doc().Modules().size(), 1u);
+    kecs::World& world = Doc().World();
+    ASSERT_NE(world.Find("SphereCollider"), kecs::NoComponent) << "the module's components";
+    EXPECT_TRUE(world.IsOf(world.Find("SphereCollider"), world.Find("Collider")));
+    EXPECT_TRUE(std::ranges::contains(Doc().Functions(), std::string("Sorted"))) << "its functions";
+    EXPECT_EQ(Doc().FunctionFile("Sorted").parent_path().parent_path().filename(), "physics");
+    EXPECT_TRUE(std::ranges::any_of(Session().Objects(), [](const auto& object) { return object.name == "Ball"; })) << "its objects";
+    ASSERT_NE(Doc().Assets(), nullptr);
+    EXPECT_NE(Doc().Assets()->FindFile(root / "physics" / "assets" / "textures" / "rubber.png"), nullptr) << "its assets, by their IDs";
+    EXPECT_EQ(Doc().Assets()->FindFile(root / "physics" / "scenes" / "test.scene.json"), nullptr) << "but not its scene";
+    std::map<std::string, keditor::Session::Asset> listed;
+    for (const auto& asset : Session().Assets()) listed[asset.label] = asset;
+    ASSERT_TRUE(listed.contains("SphereCollider"));
+    EXPECT_EQ(listed["SphereCollider"].folder, "Modules/physics/scripts") << "under the modules, in a folder of its name";
+    ASSERT_TRUE(listed.contains("rubber.png"));
+    EXPECT_EQ(listed["rubber.png"].folder, "Modules/physics/assets/textures");
+    EXPECT_EQ(Session().AssetFolderPath("Modules/physics/assets"), (root / "physics" / "assets").lexically_normal());
+
+    // What is not a module, or is in another language, is not imported; nor is a module twice.
+    EXPECT_FALSE(Session().ImportModule(root / "plain")) << "a project";
+    EXPECT_FALSE(Session().ImportModule(root / "sharp")) << "scripts in C#";
+    EXPECT_TRUE(Session().ImportModule(root / "physics"));
+    EXPECT_EQ(Session().CurrentProject().modules.size(), 1u);
+    EXPECT_FALSE(Session().NewProject(root / "mixed", 'k', false, { root / "sharp" }));
+    EXPECT_FALSE(std::filesystem::exists(root / "mixed" / "project.json"));
+
+    // Opened again, it imports what it did; and forgotten, it imports nothing.
+    ASSERT_TRUE(Session().OpenProject(root / "game")) << Session().Status();
+    ASSERT_EQ(Doc().Modules().size(), 1u);
+    EXPECT_TRUE(Session().ForgetModule("../physics"));
+    EXPECT_TRUE(Doc().Modules().empty());
+    keditor::Project saved;
+    std::string error;
+    ASSERT_TRUE(keditor::Project::Open(root / "game", saved, error)) << error;
+    EXPECT_TRUE(saved.modules.empty());
+
+    // The form a new one is made with: its name, its language, what it is, where, and the modules there to import.
+    Session().AskForNewProject();
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(Shows("A new project"));
+    EXPECT_TRUE(Shows("Its scripts are in"));
+    EXPECT_TRUE(Shows("Browse..."));
+    EXPECT_TRUE(Shows("It imports"));
+    EXPECT_TRUE(Shows("Add a module from a folder..."));
 }

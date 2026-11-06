@@ -1,11 +1,10 @@
 // The Koral Engine editor: `koral-editor [project folder] [--frames N] [--no-vsync] [--validate] [--arrange]`. With no project it opens the one
 // this user said to start with (Project, Open at startup), or else the engine's own: Forward+, made with nodes (forward-plus, in the projects folder).
-// A project with scripts is opened by their runner instead, which runs them: before this opens any window, in a
-// process forked for it — and when one is opened from the File menu, this closes its window and does the same.
+// A project's scripts — in C# or in Kotlin, as the project says — are run inside this program: .NET or a JVM is started
+// in it the first time a project needs one, and the scripts are compiled and run on the scene that is open (khost).
 // --arrange puts every page of the project's scene in order, as the Graph menu's Arrange every page does, saves the
 // scene and exits: a graph a script wrote, laid out as the editor would.
 
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -13,41 +12,17 @@
 #include <string_view>
 #include <filesystem>
 #include <memory>
-#include <optional>
-#include <vector>
-
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 
 #include <app.h>
 
 #include <keditor/editor.h>
+#include <khost/scripts.h>
 
-namespace {
-    /**
-     * The editor on @p folder through its scripts' runner, in a process of its own, waited for: what it exited with.
-     * Nothing for a project with no scripts — or when the runner stopped with an error before it had run a minute (no
-     * JDK, no runner built): then this program opens the project itself, without them, and says why.
-     */
-    std::optional<int> ThroughScripts(const std::filesystem::path& folder)
-    {
-        keditor::Project project;
-        std::string error;
-        if (!keditor::Project::Open(folder, project, error)) return std::nullopt;
-        const auto started = std::chrono::steady_clock::now();
-        const auto exited = keditor::RunThroughScripts(project);
-        if (!exited || *exited == 0 || std::chrono::steady_clock::now() - started > std::chrono::minutes(1)) return exited;
-        std::fprintf(stderr, "koral-editor: the runner of %s's scripts stopped (%d) before it got going: the editor opens it without them.\n",
-                     project.name.c_str(), *exited);
-        return std::nullopt;
-    }
-}
+#include <frames.h>
 
 int main(const int argc, char** argv)
 {
     std::filesystem::path project;
-    std::vector<std::string> flags;     // what is said besides the project: kept when this runs itself on another
     long frames = 0;    // 0: until the window is closed
     bool vsync = true;  // frames wait for the display; --no-vsync draws them as fast as they are made
     // --validate: Vulkan's validation layer checks every call, as a debug build of the framework asks it to when the
@@ -57,12 +32,10 @@ int main(const int argc, char** argv)
     kor::WindowPlatform platform = kor::WindowPlatform::eAuto;     // --platform x11 | wayland
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
-        else if (std::strcmp(argv[i], "--no-vsync") == 0) { vsync = false; flags.emplace_back(argv[i]); }
-        else if (std::strcmp(argv[i], "--validate") == 0) { validate = true; flags.emplace_back(argv[i]); }
+        else if (std::strcmp(argv[i], "--no-vsync") == 0) vsync = false;
+        else if (std::strcmp(argv[i], "--validate") == 0) validate = true;
         else if (std::strcmp(argv[i], "--arrange") == 0) arrange = true;
         else if (std::strcmp(argv[i], "--platform") == 0 && i + 1 < argc) {
-            flags.emplace_back(argv[i]);
-            flags.emplace_back(argv[i + 1]);
             const std::string_view which = argv[++i];
             platform = which == "x11" ? kor::WindowPlatform::eX11 : which == "wayland" ? kor::WindowPlatform::eWayland : kor::WindowPlatform::eAuto;
         }
@@ -73,60 +46,32 @@ int main(const int argc, char** argv)
     if (project.empty()) project = keditor::Session::StartupProject();
     if (project.empty() && std::filesystem::exists(std::filesystem::path(KORAL_ENGINE_DEFAULT_PROJECT) / "project.json")) project = KORAL_ENGINE_DEFAULT_PROJECT;
 
-    // A project with scripts is the editor run by their runner, which runs them: known before any window is opened,
-    // and started in a process of its own, this one waiting for it. (Not when that runner is what started this.)
-    if (!project.empty() && frames <= 0 && !arrange)
-        if (const auto exited = ThroughScripts(project)) return *exited;
-
 #ifdef _WIN32
     if (!validate && !std::getenv("VK_LOADER_LAYERS_DISABLE")) _putenv_s("VK_LOADER_LAYERS_DISABLE", "*validation*");
 #else
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
 #endif
-#ifndef _WIN32
-    // Another project with scripts opened from the File menu: the window closes, and this goes to its runner as above.
-    keditor::Session::handOverOnExit = frames <= 0 && !arrange;
-#endif
-    int code = 0;
-    {
-        kor::App app(kor::AppSettings { .platform = platform });
-        auto scene = std::make_unique<keditor::EditorScene>(project, true);
-        keditor::EditorScene* editor = scene.get();
-        // As this user last left it — not for a run of so many frames, or one that arranges and saves.
-        const bool kept = keditor::Session::keepsWindow = frames <= 0 && !arrange;
-        const keditor::Session::SavedWindow last = kept ? keditor::Session::LastWindow() : keditor::Session::SavedWindow {};
-        app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = last.extent, .vsync = vsync, .position = last.position });
-        if (last.maximized) editor->SceneWindow().ToggleMaximize();
-        if (arrange) {
-            // Drawn a few times first, so that each node is as big as it comes out; then each page in turn, then saved.
-            for (int i = 0; i < 30; ++i) app.Frame();
-            keditor::Session& session = editor->CurrentSession();
-            session.ArrangeEveryPage();
-            for (int i = 0; i < 100000 && !session.PagesToArrange().empty(); ++i) app.Frame();
-            for (int i = 0; i < 5; ++i) app.Frame();
-            if (!session.Save()) { std::fprintf(stderr, "koral-editor: %s\n", session.Status().c_str()); return 1; }
-            std::printf("koral-editor: every page of %s is in order, and saved\n", project.string().c_str());
-            return 0;
-        }
-        if (frames > 0) {
-            for (long i = 0; i < frames; ++i) app.Frame();
-            return 0;
-        }
-        code = app.Run();
+    khost::Scripts scripts;     // before the editor: what its Problems ask whether the scripts run
+    kor::App app(kor::AppSettings { .platform = platform });
+    auto scene = std::make_unique<keditor::EditorScene>(project);
+    keditor::EditorScene* editor = scene.get();
+    // As this user last left it — not for a run of so many frames, or one that arranges and saves.
+    const bool kept = keditor::Session::keepsWindow = frames <= 0 && !arrange;
+    const keditor::Session::SavedWindow last = kept ? keditor::Session::LastWindow() : keditor::Session::SavedWindow {};
+    kor::Scene* opened = app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = last.extent, .vsync = vsync, .position = last.position });
+    if (last.maximized) editor->SceneWindow().ToggleMaximize();
+    if (arrange) {
+        // Drawn a few times first, so that each node is as big as it comes out; then each page in turn, then saved.
+        for (int i = 0; i < 30; ++i) app.Frame();
+        keditor::Session& session = editor->CurrentSession();
+        session.ArrangeEveryPage();
+        for (int i = 0; i < 100000 && !session.PagesToArrange().empty(); ++i) app.Frame();
+        for (int i = 0; i < 5; ++i) app.Frame();
+        if (!session.Save()) { std::fprintf(stderr, "koral-editor: %s\n", session.Status().c_str()); return 1; }
+        std::printf("koral-editor: every page of %s is in order, and saved\n", project.string().c_str());
+        return 0;
     }
-#ifndef _WIN32
-    if (const auto next = std::exchange(keditor::Session::handOverPending, std::nullopt)) {
-        // This program again, on that project: which goes to its runner, in this terminal, before any window.
-        std::vector<std::string> words { argv[0] };
-        words.insert(words.end(), flags.begin(), flags.end());
-        words.push_back(next->string());
-        std::vector<char*> pointers;
-        for (auto& word : words) pointers.push_back(word.data());
-        pointers.push_back(nullptr);
-        execv("/proc/self/exe", pointers.data());
-        std::perror("koral-editor: it could not be started again");
-        return 1;
-    }
-#endif
-    return code;
+    // The scripts follow the scene being worked on: another project opened from the File menu has its own run, here.
+    apps::RunFrames(app, scripts, [&]() -> keditor::Document* { return app.IsOpen(opened) ? &editor->CurrentSession().Doc() : nullptr; }, frames);
+    return 0;
 }

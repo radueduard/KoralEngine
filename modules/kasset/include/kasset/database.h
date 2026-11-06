@@ -26,7 +26,7 @@ namespace kasset
     /** @brief An asset of the project's: its meta, and the file it is beside. */
     struct Entry {
         Meta meta;
-        std::filesystem::path file;     ///< From the project's folder, `/` between folders: `assets/textures/wall.png`.
+        std::filesystem::path file;     ///< From the project's folder, `/` between folders: `assets/textures/wall.png` — a module's `../physics/assets/wall.png`.
     };
 
     /** @brief What happened to a kind of part when a file was read again (Database::RecordParts). */
@@ -41,6 +41,16 @@ namespace kasset
         explicit Database(std::filesystem::path root);
 
         [[nodiscard]] const std::filesystem::path& Root() const { return _root; }
+        /**
+         * @brief The folders of the modules the project imports: their assets are the project's too, found by Scan after
+         *        its own and kept by the IDs their metas give them. A module's scenes are its own, and not among them. An
+         *        Entry of a module's has its file from the project's folder (`../physics/assets/wall.png`), or whole when
+         *        the two are on different drives. Taken from the next Scan on.
+         */
+        void SetModules(std::vector<std::filesystem::path> modules) { _modules = std::move(modules); }
+        [[nodiscard]] const std::vector<std::filesystem::path>& Modules() const { return _modules; }
+        /** @brief The folder of the module @p file is in, when it is in one of them rather than in the project. */
+        [[nodiscard]] std::optional<std::filesystem::path> ModuleOf(const std::filesystem::path& file) const;
         /** @brief Where a file named by an old `@` reference is: the project's `assets` folder. */
         [[nodiscard]] std::filesystem::path AssetDirectory() const { return _root / "assets"; }
 
@@ -144,6 +154,7 @@ namespace kasset
         [[nodiscard]] std::string Relative(const std::filesystem::path& file) const;
 
         std::filesystem::path _root;
+        std::vector<std::filesystem::path> _modules;
         std::unordered_map<Id, Entry> _entries;
         std::map<std::string, Id, std::less<>> _byFile;     ///< By Entry::file.
         struct BuiltIn { Kind kind; std::string legacy; };

@@ -67,12 +67,21 @@ namespace kecs
         void Reads(std::string type, std::string was);
         /** @brief Whether a field of @p type reads what was saved as @p was: the same type, or one it Reads. */
         [[nodiscard]] bool ReadsAs(std::string_view type, std::string_view was) const;
+        /**
+         * @brief A component saved as @p was, which is a kind now (ComponentDescription::abstract): @p which says, from what
+         *        was saved of one — its fields as a JSON object — which of the kind's components it loads as. The fields of
+         *        that one's names are read into it; what only the old one had, what told them apart, is gone.
+         */
+        void Becomes(std::string was, std::function<std::string(std::string_view saved)> which);
+        /** @brief What a component saved as @p was, holding @p saved, loads as (Becomes); empty when nothing says. */
+        [[nodiscard]] std::string BecomesOf(std::string_view was, std::string_view saved) const;
         /** @brief The ones Save and Load use unless given others. */
         static Codecs& Default();
 
     private:
         std::map<std::string, Codec, std::less<>> _codecs;
         std::set<std::pair<std::string, std::string>, std::less<>> _reads;     // (type, was)
+        std::map<std::string, std::function<std::string(std::string_view)>, std::less<>> _becomes;
     };
 
     /** @brief A world saved. */

@@ -13,11 +13,13 @@ Engine scene: every pass a page of the graph, every buffer a node. Nothing in th
   them: `forwardplus::BuildGraph(doc, error)` and `forwardplus::BuildScene(doc)`. The camera has the engine's
   `FlyCamera`: hold the right button, and the mouse turns it and W A S D E Q move it.
 
-`modules/keditor/tests/test_forward_plus.cpp` builds it, runs it, and leaves it as a project in the build folder:
+`modules/keditor/tests/test_forward_plus.cpp` builds it, runs it, and leaves it as a project in the build folder. Its
+tests take minutes each, so they are a program of their own, `keditor_forward_plus_tests`, which a ctest run leaves out
+unless the build is configured with `-DKORAL_ENGINE_FORWARD_PLUS_TESTS=ON` (then `ctest -L slow` runs them alone):
 
 ```sh
-cmake --build cmake-build-debug --target keditor_tests koral-play koral-editor
-cmake-build-debug/modules/keditor/keditor_tests --gtest_filter='ForwardPlus.*'
+cmake --build cmake-build-debug --target keditor_forward_plus_tests koral-play koral-editor
+cmake-build-debug/modules/keditor/keditor_forward_plus_tests
 cmake-build-debug/koral-play cmake-build-debug/forward-plus-project
 cmake-build-debug/koral-editor cmake-build-debug/forward-plus-project
 ```

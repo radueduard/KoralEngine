@@ -2,6 +2,8 @@ import koral.Vec3
 import koral.engine.ResourceScript
 import koral.engine.Entity
 import koral.engine.BeforeDraw
+import koral.engine.PerFrame
+import koral.engine.Reinitialize
 import koral.engine.Setup
 import koral.engine.Script
 
@@ -16,6 +18,21 @@ class Spin : Script() {
 
     override fun start() { started = true; axis = Vec3(0f, 1f, 0f) }
     override fun update(delta: Float) { angle += speed; ++updates; ++mine }
+}
+
+/** Starts over when its size is changed, and not for what else changes. */
+class Restarter : Setup(), PerFrame {
+    @Reinitialize var size = 0
+    var other = 0
+    var made = 0                // how many times initialize has run
+    var gone = 0
+    var madeOf = 0
+    var kept = 0                // what this object has seen: new when it starts over
+    private var frames = 0
+
+    override fun initialize() { ++made; madeOf = size }
+    override fun onDestroyed() { world.set(entity, "Restarter", "gone", gone + 1) }      // what is held is not stored back after this
+    override fun update(delta: Float) { kept = ++frames; if (other == 7) size = 99 }
 }
 
 /** Reads the Spin of the first entity that has one, and sets it turning from 118: once. */

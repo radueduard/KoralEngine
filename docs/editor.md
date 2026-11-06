@@ -50,14 +50,12 @@ The menus:
 - **View** frames what is picked, looks through the scene's camera, and chooses the gizmo.
 - **Assets** makes a new shader or a new script: a name, a kind, and a file in the project to start from.
 - **Scene** plays, pauses and stops.
-- **Project, Run** saves and runs the project (Control+R): with its scripts' own runner when it has scripts,
-  with `koral-play` when it has none. **Open at startup** makes the project the one the editor opens when it is
+- **Project, Run** saves and runs the project (Control+R) with `koral-play`, which runs its scripts as the editor does. **Open at startup** makes the project the one the editor opens when it is
   given none; ticked, it puts the engine's own back.
-- A project with scripts is handed over as it is opened: `koral-editor` runs no Kotlin and no C#, so it starts
-  the editor again through the scripts' runner (`./gradlew edit`, `koral-engine-dotnet --edit`), which runs them,
-  and closes. In `koral-editor` the runner is started once the window has closed, in its terminal, as when it starts
-  on such a project. A runner that stops with an error before it gets going (no JDK, no runner built) is said so
-  there, and the project opens without its scripts. **Project, Open with its scripts** does the same by hand.
+- **File, New project** is one form: its name, the language of its scripts (C# or Kotlin), whether it is a project or
+  a module, the folder it goes in (typed, or picked with **Browse...**) — it is made at that folder and the name — and
+  the modules it imports: those in that folder whose scripts are in its language, and any picked with **Add a module
+  from a folder...**. **Import a module...** imports another into the open project, and **Stop importing** forgets one.
 - **Graph** and **Entity** add a node and an entity.
 - **Settings, Theme** draws the editor in Koral's design, Material's, Cupertino's or Windows', dark or light
   (`kui::Theme::Of`). The choice is this user's, kept in `~/.config/koral-engine/theme` for the next run.
@@ -149,7 +147,7 @@ that uses it out of ordinary nodes, to be changed like any other:
 
 | Pass | What is on its page |
 |---|---|
-| `Draw` | The Screen; `color` and `depth` images the size of it, and `target`, their Framebuffer; the first Camera's main View and main Perspective, with its place, as `camera data` (the shader's `camera`); a ForEach of the DirectionalLight as `light data` (its `light`); and `default`, the pipeline that draws meshes. `drawn`, a ForEach of every entity with a Mesh and the pipeline's component, is wired to the Draw: each entity's mesh, its matrix, and the component's `color`. |
+| `Draw` | The Screen; `color` and `depth` images the size of it, and `target`, their Framebuffer; the first PerspectiveCamera's main View and main Perspective, with its place, as `camera data` (the shader's `camera`); a ForEach of the DirectionalLight as `light data` (its `light`); and `default`, the pipeline that draws meshes. `drawn`, a ForEach of every entity with a Mesh and the pipeline's component, is wired to the Draw: each entity's mesh, its matrix, and the component's `color`. |
 | `Blit` | The Blit of `color` to the Screen. |
 
 **File, New lit scene** is the larger one to start from instead: meshes lit by every light, under a sky. It writes
@@ -157,7 +155,7 @@ three shaders (`engineCommon`, `lit`, `sky`) and builds:
 
 | Pass | What is on its page |
 |---|---|
-| `frame` | The Screen; a ForEach of the first Camera, Sky and DirectionalLight, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (colours in linear terms, the sun disc's cosine); `frame data`, packed in the order `engineCommon.slang` declares it; and the lights — a ForEach of each kind into a ShaderBuffer of the shader's `Light`, each after the last, `light data` the last of them. |
+| `frame` | The Screen; a ForEach of the first PerspectiveCamera, Sky and DirectionalLight, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (colours in linear terms, the sun disc's cosine); `frame data`, packed in the order `engineCommon.slang` declares it; and the lights — a ForEach of each kind into a ShaderBuffer of the shader's `Light`, each after the last, `light data` the last of them. |
 | `scene` | `color` and `depth` images the size of the window, and `lit`, the pipeline that draws meshes. `all`, every entity, and `drawn`, a Filter of those with a Mesh and the pipeline's component, are wired to the Draw: each entity's mesh, its matrix, and the component's `albedo`, `metallic`, `roughness` and `emission`. An entity with both is drawn. |
 | `sky` | The sky, drawn where nothing nearer was. |
 | `show` | The Blit of `color` to the Screen. |
@@ -182,7 +180,7 @@ sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`, and `AddLi
 
 The Scene panel shows the scene from the editor's own view: right-drag turns it about what it looks at,
 middle-drag moves it, the wheel zooms, and **Frame** points it at what is picked. **Camera** looks through
-the scene's camera instead. Each entity with a field of view (a Camera) is drawn as the pyramid it sees through,
+the scene's camera instead. Each entity that is a Camera — a PerspectiveCamera or an OrthographicCamera — is drawn as the pyramid, or the box, it sees through,
 and a picked light as its reach — a spot by its range and cone, a point light by its range, a light from far away
 by the way it shines: by what its component holds, as a View node goes, not by its name.
 
@@ -228,17 +226,17 @@ pages, once — starting play first when it was not playing. **Stop** puts every
 pressed, with what was picked still picked. A scene can't be saved while it plays. `koral-play` always
 plays.
 
-Scripts are run by a host the editor is started through (`./gradlew edit` for Kotlin, `koral-engine-dotnet
---edit` for C#), not by the editor itself. An editor started any other way has the scripts' components as
-data and runs none of them: the Problems panel says so, Play says so, and **Project, Open with its
-scripts** saves and reopens the editor through the host.
+The editor runs the project's scripts itself, in its own process: .NET for C#, a JVM for Kotlin, compiled when the
+project opens and again when one is saved (see [scripts](scripts.md#running-a-project-with-scripts)). Where they
+cannot be run — no .NET, no Java — the scene has their components as data and runs none of them: the Problems panel
+says why, and Play says so.
 
 ### Objects
 
 An object is an entity as a file: `{ "template": "Lamp", "name": "Lamp", "position": [0, 2, 0],
 "components": { "PointLight": { "range": 5 } }, "children": [...] }`. **Edit, Save as object** writes what
 is picked as one, and a new project starts with a cube, a sphere, the other default meshes, a planet with a
-moon, a camera, a fly camera (a Camera with the engine's FlyCamera: right button, the mouse and W A S D), the
+moon, a camera, an orthographic camera, a fly camera (a PerspectiveCamera with the engine's FlyCamera: right button, the mouse and W A S D), the
 three lights and a sky. The mesh objects name the standard graph's `default` component. The engine's own objects are
 offered in any project, one made before an object was among them included; a file of the project's of the same
 name is what it says instead.
@@ -633,6 +631,21 @@ only, move, rotate, scale — framing what is picked, how the scene is shown, th
 **File, New project** makes a project with nothing in it. Only a scene that was in no project yet — made in an
 editor opened on none — goes into the one that is made: that is where it is saved.
 
+#### Projects and modules
+
+A project is a set of scenes, scripts, shaders, functions, objects, prefabs and assets; a module is the same, minus the
+scenes. What a module has is for the projects that import it: a project — or another module — that imports one has
+its components, its shaders on the search path after its own, its functions after its own and before the engine's, its
+objects (one of the project's of the same name is the project's), its prefabs and its assets, which keep the IDs
+their metas give them. All of it is shown in the Assets panel under **Modules**, in a folder of each one's name. A
+module's scripts are compiled with the project's, so a project's class may derive from one of the module's.
+
+A module has one scene, `test`, to try it out in: opening the module opens it, and a project that imports the module
+never sees it. `project.json` says `"kind": "module"` for a module, and lists what is imported under `"modules"`, each
+from its own folder (`../physics`) where the two are on one drive. What is imported is followed through what it
+imports, each once; one that is not there, is a project, is in the other language of scripts, or imports what imports
+it, is left out and said in the Problems.
+
 ### The scene view's tools
 
 Along the top of the Scene panel are two toolbars; where the panel is narrow they go onto more than one line.
@@ -713,7 +726,7 @@ given a script: `.vscode/settings.json` (where a shader's imports are looked for
 list) and `.vscode/extensions.json` (the Slang, C# and Kotlin extensions), and `<Name>.Scripts.csproj`, which
 names the project's C# scripts and the engine's own assemblies — so a script is written with the engine's names
 offered and checked. Nothing builds that file, and it names this machine's paths: it is written again each
-time. Kotlin scripts have the same of the Gradle build the project is given.
+time. Kotlin scripts have no such file: they are compiled by the editor, with no build of the project's.
 
 ## Where projects are made
 

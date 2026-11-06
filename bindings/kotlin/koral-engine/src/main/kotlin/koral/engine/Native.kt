@@ -46,6 +46,22 @@ object EngineLibrary {
         candidates.firstOrNull { Files.exists(it) }?.toAbsolutePath()
             ?: throw EngineException("Koral Engine's native library ($fileName) was not found. Set KORAL_ENGINE_LIBRARY to the library itself.")
     }
+
+    /**
+     * Loads the library, before [koral.App.loadLibrary] is given it. Told first, Koral loads a copy on Windows, and what
+     * this side calls is then another library than the one the scenes are in, which knows of none of them.
+     */
+    fun load() = Native.load()
+
+    /**
+     * The engine's C interface is the running program's own: one of the engine's programs (`koral-editor`, `koral-play`)
+     * that runs the scripts inside it ([Embedded]). [resolve] is a C function of it that gives a symbol's address by
+     * its name. Before anything is called.
+     */
+    fun useLoaded(resolve: MemorySegment) { embedded = resolve }
+
+    /** The running program's symbol resolver, when the engine is in it: kept here, as [Native] looks everything up as it is first used. */
+    @Volatile internal var embedded: MemorySegment? = null
 }
 
 internal object Native {
@@ -56,7 +72,28 @@ internal object Native {
     /** KengineScriptCallbacks: user, then nine functions. */
     val CALLBACKS: StructLayout = MemoryLayout.structLayout(*Array(10) { ADDRESS })
 
-    private val library: SymbolLookup by lazy { SymbolLookup.libraryLookup(EngineLibrary.path, Arena.global()) }
+
+    private val library: SymbolLookup by lazy {
+        EngineLibrary.embedded?.let { resolver ->
+            val resolve = Koral.linker.downcallHandle(resolver, FunctionDescriptor.of(ADDRESS, ADDRESS))
+            return@lazy SymbolLookup { name ->
+                Arena.ofConfined().use { a ->
+                    val found = resolve.invokeExact(a.allocateFrom(name)) as MemorySegment
+                    if (found.address() == 0L) java.util.Optional.empty() else java.util.Optional.of(found)
+                }
+            }
+        }
+        if (!System.getProperty("os.name").lowercase().startsWith("windows")) return@lazy SymbolLookup.libraryLookup(EngineLibrary.path, Arena.global())
+        // What it imports is beside it, where Windows does not look on its own, as Koral has it look for its libraries.
+        val setDirectory = java.lang.foreign.Linker.nativeLinker().downcallHandle(
+            SymbolLookup.libraryLookup("kernel32", Arena.global()).find("SetDllDirectoryW").orElseThrow(), FunctionDescriptor.of(JAVA_INT, ADDRESS))
+        Arena.ofConfined().use { a ->
+            val ignored = setDirectory.invokeWithArguments(a.allocateFrom(EngineLibrary.path.parent.toString(), Charsets.UTF_16LE)) as Int
+            try { SymbolLookup.libraryLookup(EngineLibrary.path, Arena.global()) }
+            finally { setDirectory.invokeWithArguments(MemorySegment.NULL) }
+        }
+    }
+    fun load() { library }
 
     private fun call(name: String, result: MemoryLayout?, vararg arguments: MemoryLayout): MethodHandle {
         val symbol = library.find(name).orElseThrow { EngineException("the engine's library has no $name: it is another version's") }
@@ -75,6 +112,7 @@ internal object Native {
     val kengine_document_world = call("kengine_document_world", ADDRESS, ADDRESS)
     val kengine_document_json = call("kengine_document_json", ADDRESS, ADDRESS)
     val kengine_project_directory = call("kengine_project_directory", ADDRESS, ADDRESS)
+    val kengine_module_scripts = call("kengine_module_scripts", ADDRESS, ADDRESS)
     val kengine_document_save = call("kengine_document_save", JAVA_BOOLEAN, ADDRESS, ADDRESS)
     val kengine_playing = call("kengine_playing", JAVA_BOOLEAN, ADDRESS)
     val kengine_set_playing = call("kengine_set_playing", JAVA_BOOLEAN, ADDRESS, JAVA_BOOLEAN)

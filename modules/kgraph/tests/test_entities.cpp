@@ -856,7 +856,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     kecs::World& world = scene->world;
     const kecs::Entity eye = world.Create(), lamp = world.Create();
     world.Rename(eye, "Eye");
-    support::Give(world, eye, "Camera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 50.f } } });
+    support::Give(world, eye, "PerspectiveCamera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 50.f } } });
     world.SetPosition(eye, { 1, 2, 3 });
     world.Rename(lamp, "Lamp");
     support::Give(world, lamp, "PointLight", { { "color", { 1, 1, 1 } }, { "range", { 7.f } } });
@@ -864,7 +864,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
 
     kgraph::Graph graph;
     graph.passes = { "frame", "later" };
-    graph.Add("eye", "Entity").Set("component", "Camera");
+    graph.Add("eye", "Entity").Set("component", "PerspectiveCamera");
     graph.Add("looking at", "Add").Wire("a", "eye", "worldPosition").Wire("b", "eye", "forward");
     graph.Add("camera", "View").Wire("position", "eye", "worldPosition").Wire("target", "looking at").Wire("up", "eye", "up").Set("main", true);
     graph.Add("lens", "Perspective").Set("main", true).Wire("fieldOfView", "eye", "field.fieldOfView").Wire("near", "eye", "field.near")
@@ -877,7 +877,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     graph.Add("lamps", "ForEach").Set("component", "PointLight");
     graph.Add("place and reach", "Append").Wire("a", "lamps", "worldPosition").Wire("b", "lamps", "field.range");
     graph.Add("lights", "Collect").Wire("value", "place and reach");
-    graph.Add("far", "Entity").Set("component", "Camera");
+    graph.Add("far", "Entity").Set("component", "Camera");     // the kind: what every camera has, of whichever it is
     graph.Add("twice as far", "Multiply").Wire("a", "far", "field.far").Set("b", 2);
     graph.Add("where", "Entity").Set("entity", "Lamp");     // of no component: the one so named, wherever it is
     graph.Add("placed", "Append").Wire("a", "camera", "position").Wire("b", "far", "field.far");
@@ -944,7 +944,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     const auto builds = [&](const char* node) { return runtime.Status(node)->builds; };
     const std::uint64_t before[] { builds("lens"), builds("block"), builds("twice as far"), builds("from afar"), builds("lights") };
     world.SetPosition(eye, { 5, 6, 7 });
-    support::Give(world, eye, "Camera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 80.f } } });
+    support::Give(world, eye, "PerspectiveCamera", { { "fieldOfView", { 90.f } }, { "near", { 0.5f } }, { "far", { 80.f } } });
     world.Destroy(lamp);
     Frame();
     Frame();
@@ -1023,7 +1023,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
     // One by name, the first, and one there is not.
     const kecs::Entity second = world.Create();
     world.Rename(second, "Second");
-    support::Give(world, second, "Camera", { { "far", { 7.f } } });
+    support::Give(world, second, "PerspectiveCamera", { { "far", { 7.f } } });
     graph.Find("eye")->Set("entity", "Second");
     runtime.Set(graph);
     Frame();
@@ -1052,7 +1052,7 @@ TEST_F(EntityTest, ComponentsAreValuesThatFollowTheWorldIntoABuffer) {
 TEST_F(EntityTest, EachComponentIsOfferedAsANode) {
     const auto presets = scene->runtime->Presets();
     const auto find = [&](const std::string_view name) { return std::ranges::find(presets, name, &kgraph::Preset::name); };
-    for (const char* name : { "Camera", "PointLight", "SpotLight", "DirectionalLight", "Sky" }) {
+    for (const char* name : { "Camera", "PerspectiveCamera", "OrthographicCamera", "Light", "PointLight", "SpotLight", "DirectionalLight", "Sky" }) {
         const auto each = find(name);
         ASSERT_NE(each, presets.end()) << name;
         EXPECT_EQ(each->type, "ForEach");

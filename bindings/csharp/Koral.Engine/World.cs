@@ -280,22 +280,23 @@ public sealed unsafe class World
     }
 
     /// <summary>
-    /// What a script on <paramref name="entity"/> holds now, as an object of its class: read, not kept. Null when the
-    /// entity has none. <see cref="Write{T}"/> puts one back.
+    /// What a script — or a <see cref="Data"/> — on <paramref name="entity"/> holds now, as an object of its class: read,
+    /// not kept. Null when the entity has none. <see cref="Write{T}"/> puts one back.
     /// </summary>
-    public T? Read<T>(Entity entity) where T : Setup, new()
+    public T? Read<T>(Entity entity) where T : class, new()
     {
         var layout = ScriptLayout.Of(typeof(T));
         var id = Native.kecs_component_find(Handle, layout.Name);
         var data = id == Native.NoComponent ? null : Native.kecs_get(Handle, entity, id);
         if (data is null) return null;
-        var script = new T { Entity = entity, World = this };
+        var script = new T();
+        if (script is Setup setup) { setup.Entity = entity; setup.World = this; }
         layout.Load(script, (IntPtr)data);
         return script;
     }
 
-    /// <summary>Makes a script on <paramref name="entity"/> hold what <paramref name="script"/> does. False when the entity has none.</summary>
-    public bool Write<T>(Entity entity, T script) where T : Setup
+    /// <summary>Makes a script, or a Data, on <paramref name="entity"/> hold what <paramref name="script"/> does. False when the entity has none.</summary>
+    public bool Write<T>(Entity entity, T script) where T : class
     {
         var layout = ScriptLayout.Of(typeof(T));
         var id = Native.kecs_component_find(Handle, layout.Name);

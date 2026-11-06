@@ -289,6 +289,15 @@ public sealed class MinAttribute(float min) : Attribute
 public sealed class LogarithmicAttribute : Attribute;
 
 /// <summary>
+/// A field its script starts over for: while the scene plays, when something other than the script changes it — the
+/// inspector, another script — the script is switched off, destroyed and made anew, a new object with the entity's fields
+/// as they are, as if it had just been added: what Initialize set up from it is set up again, and what OnDestroyed lets
+/// go of is let go of first. For what Initialize reads: <c>[Reinitialize] public int ParticleCount = 100;</c>
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class ReinitializeAttribute : Attribute;
+
+/// <summary>
 /// What a whole-number field is one of, by name: the first is 0, the second 1. The editor shows and is given the name.
 /// <c>[Choices("Opaque", "Masked", "Blended")] public uint alphaMode;</c>. Read from the script's source.
 /// </summary>
@@ -312,7 +321,28 @@ public sealed class ChoicesAttribute(params string[] names) : Attribute
 /// }
 /// </code>
 /// </summary>
-public abstract class Material;
+public abstract class Material : Data;
+
+/// <summary>
+/// Structured data and nothing else: a component that no script runs. Its public fields are a component, shown on an
+/// entity, saved with the scene and set from a script by name, as a script's are; nothing is called on it, it takes no
+/// pieces, and it needs no runtime to be what it is — the engine reads it from its source. What it is for is the
+/// graph's, which reads it: a camera, a light, a sky.
+/// <code>
+/// public abstract class Camera : Data           // a kind: no entity has it, and a query for it finds every camera
+/// {
+///     [Min(0.001f)] public float near = 0.1f;
+///     public float far = 100f;
+/// }
+/// public sealed class PerspectiveCamera : Camera
+/// {
+///     [Range(1f, 179f)] public float fieldOfView = 60f;
+/// }
+/// </code>
+/// An abstract one is a kind: what derives from it has its fields first, and is found by its name —
+/// <c>World.With("Camera")</c>, a graph's <c>Entity</c> of <c>Camera</c> — with those fields read from whichever it is.
+/// </summary>
+public abstract class Data;
 
 /// <summary>
 /// A Material's picture, by the name it is found by: <c>"@textures/wall.png"</c>, or one of a texel —
@@ -337,7 +367,10 @@ public sealed class ScriptNameAttribute(string name) : Attribute
 /// <summary>How a script class's fields are laid out as a component's bytes.</summary>
 internal sealed unsafe class ScriptLayout
 {
-    internal sealed record Field(FieldInfo Info, string Type, int Offset, int Size);
+    internal sealed record Field(FieldInfo Info, string Type, int Offset, int Size)
+    {
+        public bool Reinitializes { get; } = Info.IsDefined(typeof(ReinitializeAttribute));
+    }
 
     public string Name { get; }
     public int Size { get; }
@@ -346,7 +379,7 @@ internal sealed unsafe class ScriptLayout
 
     private static readonly Dictionary<Type, ScriptLayout> s_layouts = [];
     /// <summary>What a script derives from: none of its fields are the script's own.</summary>
-    private static readonly HashSet<Type> s_bases = [typeof(Setup), typeof(Script), typeof(GraphicsScript), typeof(ResourceScript), typeof(object)];
+    private static readonly HashSet<Type> s_bases = [typeof(Setup), typeof(Script), typeof(GraphicsScript), typeof(ResourceScript), typeof(Data), typeof(Material), typeof(object)];
 
     /// <summary>What a field type is called as a component's, and how big it is; null for one a script cannot keep.</summary>
     private static (string Type, int Size, int Alignment)? Describe(Type type)
@@ -434,7 +467,7 @@ internal sealed unsafe class ScriptLayout
     }
 
     /// <summary>The object's fields into the engine's bytes.</summary>
-    public void Store(Setup script, IntPtr data)
+    public void Store(object script, IntPtr data)
     {
         foreach (var field in Fields)
         {

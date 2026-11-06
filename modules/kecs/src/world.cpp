@@ -18,8 +18,11 @@ namespace kecs
 
     int detail::Archetype::ColumnOf(const ComponentId id) const
     {
-        const auto it = std::ranges::lower_bound(ids, id);
-        return it != ids.end() && *it == id ? static_cast<int>(it - ids.begin()) : -1;
+        if (const auto it = std::ranges::lower_bound(ids, id); it != ids.end() && *it == id) return static_cast<int>(it - ids.begin());
+        if (kinds.empty()) return -1;
+        // A kind: the column of what here is one of it.
+        const auto kind = std::ranges::lower_bound(kinds, id, {}, &std::pair<ComponentId, int>::first);
+        return kind != kinds.end() && kind->first == id ? kind->second : -1;
     }
 
     namespace {
@@ -114,11 +117,52 @@ namespace kecs
             return known->second;
         }
         const auto id = static_cast<ComponentId>(_types.size());
+        const bool kinded = description.abstract || !description.kinds.empty();
         _byName.emplace(description.name, id);
         _types.push_back(std::make_unique<ComponentDescription>(std::move(description)));
         _onAdd.emplace_back();
         _onRemove.emplace_back();
+        if (kinded) RefreshKinds();
         return id;
+    }
+
+    bool World::IsOf(const ComponentId id, const ComponentId kind) const
+    {
+        if (id == kind) return id < _types.size();
+        return id < _kindsOf.size() && std::ranges::contains(_kindsOf[id], kind);
+    }
+
+    ComponentId World::Which(const Entity entity, const ComponentId kind) const
+    {
+        const Record* record = RecordOf(entity);
+        if (!record || !record->archetype) return NoComponent;
+        const int column = record->archetype->ColumnOf(kind);
+        return column < 0 ? NoComponent : record->archetype->ids[static_cast<std::size_t>(column)];
+    }
+
+    void World::Kinds(Archetype& archetype) const
+    {
+        archetype.kinds.clear();
+        for (std::size_t i = 0; i < archetype.ids.size(); ++i) {
+            const ComponentId of = archetype.ids[i];
+            if (of >= _kindsOf.size()) continue;
+            for (const ComponentId kind : _kindsOf[of])
+                if (std::ranges::find(archetype.kinds, kind, &std::pair<ComponentId, int>::first) == archetype.kinds.end())
+                    archetype.kinds.emplace_back(kind, static_cast<int>(i));     // the first that is one of it
+        }
+        std::ranges::sort(archetype.kinds);
+    }
+
+    void World::RefreshKinds()
+    {
+        _kindsOf.assign(_types.size(), {});
+        for (std::size_t id = 0; id < _types.size(); ++id)
+            for (const std::string& name : _types[id]->kinds)
+                if (const ComponentId kind = Find(name); kind != NoComponent && kind != id && _types[kind]->abstract && !std::ranges::contains(_kindsOf[id], kind))
+                    _kindsOf[id].push_back(kind);
+        for (const auto& archetype : _archetypes) Kinds(*archetype);
+        _queries.clear();       // what each matched may be more or less now
+        ++_structureVersion;
     }
 
     ComponentId World::IdOf(const std::uint32_t typeIndex, ComponentDescription (*describe)())
@@ -195,7 +239,9 @@ namespace kecs
             _byName.erase(current.name);
             _byName.emplace(newer.name, id);
         }
+        const bool kinded = current.abstract || newer.abstract || !current.kinds.empty() || !newer.kinds.empty();
         current = std::move(newer);
+        if (kinded) RefreshKinds();
         return migration;
     }
 
@@ -208,6 +254,7 @@ namespace kecs
         archetype->ids = sortedIds;
         archetype->columns.resize(sortedIds.size());
         for (std::size_t i = 0; i < sortedIds.size(); ++i) archetype->columns[i].type = _types[sortedIds[i]].get();
+        Kinds(*archetype);
         Archetype& made = *archetype;
         _archetypes.push_back(std::move(archetype));
         _byIds.emplace(std::move(sortedIds), &made);
@@ -463,6 +510,7 @@ namespace kecs
         RequireStill("Add");
         if (!RecordOf(entity) || id >= _types.size()) return false;
         const ComponentDescription& type = *_types[id];
+        if (type.abstract) return false;    // a kind is had through what is one of it
         if (value && !type.copyable) return false;
         bool existed = false;
         void* slot = Slot(entity, id, existed);
@@ -479,7 +527,7 @@ namespace kecs
     {
         RequireStill("Remove");
         Record* record = RecordOf(entity);
-        if (!record || !record->archetype || !record->archetype->Has(id)) return false;
+        if (id >= _types.size() || _types[id]->abstract || !record || !record->archetype || !record->archetype->Has(id)) return false;
         NotifyRemove(entity, id);
         record = RecordOf(entity);
         if (!record || !record->archetype || !record->archetype->Has(id)) return false;   // an observer took it, or the entity
@@ -520,7 +568,7 @@ namespace kecs
         if (switched.Disabled(record->row) == !enabled) return true;
         SetDisabled(switched, record->row, !enabled);
         ++_structureVersion;
-        Changed(id);
+        Changed(record->archetype->ids[static_cast<std::size_t>(column)]);     // for a kind's id, what is one of it
         return true;
     }
 
@@ -539,7 +587,7 @@ namespace kecs
         const int column = record->archetype->ColumnOf(id);
         if (column < 0) return false;
         record->archetype->columns[static_cast<std::size_t>(column)].changed[record->row] = _tick;
-        Changed(id);
+        Changed(record->archetype->ids[static_cast<std::size_t>(column)]);
         return true;
     }
 

@@ -6,6 +6,11 @@
 #include <string>
 #include <vector>
 
+#include <capiInterop.h>
+#include <debugDraw.h>
+#include <koral_c.h>
+#include <sampler.h>
+
 #include <kgraph/catalog.h>
 #include <kgraph/graph.h>
 #include <kgraph/runtime.h>
@@ -221,6 +226,155 @@ TEST_F(DrawTest, DrawsAndDispatchesAreReadFromABuffer) {
         EXPECT_NEAR(scene->Pixel(x, y).x, 128, 1) << "the clear's red, halved by the shader";
         EXPECT_GT(scene->Pixel(x, y).y, 247);
     }
+}
+
+// What a script writes into a Buffer node each frame, copied into an Image node by a pass and drawn among the debug
+// shapes: no pass wires the picture to the DebugDraw node, so the copy has to run, and be seen, all the same.
+TEST_F(DrawTest, ADebugImageShowsWhatAScriptPutInABuffer) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("clear", "Clear").Wire("image", "canvas").Set("color", Value::List { 0, 0, 0, 1 });
+    graph.Add("bytes", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eTransferSrc" });
+    graph.Add("picture", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 2, 2 }).Set("usage", Value::List { "eSampled" });
+    graph.Add("upload", "CopyBufferToImage").Wire("buffer", "bytes").Wire("image", "picture");
+    graph.Add("debug", "DebugDraw").Wire("image", "canvas");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+
+    kor::DebugDraw draw;
+    scene->runtime->SetDebugDraw(&draw);
+    scene->runtime->ReachedFromTheCpu("bytes");     // what handing a script the buffer does
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+
+    const auto picture = scene->runtime->ImageOf("picture");
+    ASSERT_TRUE(picture.Valid());
+    const auto nearest = kor::Sampler::Builder {}.SetMinFilter(kor::Filter::eNearest).SetMagFilter(kor::Filter::eNearest).Build();
+    draw.BeginLogicSpace({ 1.f, 1.f });
+    draw.Image({ 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 1.f, 1.f, 0.f }, { 0.f, 1.f, 0.f }, picture, nearest, {.outline = false});
+    draw.EndLogicSpace();
+    EXPECT_EQ(draw.ImageCount(), 1u);
+
+    const auto write = [&](const std::array<std::uint8_t, 16>& texels) {
+        const auto bytes = scene->runtime->ResourceOf("bytes");
+        ASSERT_NE(bytes, nullptr);
+        EXPECT_EQ(koral_buffer_write(bytes->handle, texels.data(), texels.size(), 0), 0) << koral_last_error();
+    };
+    write({ 255, 0, 0, 255,   0, 255, 0, 255,   0, 0, 255, 255,   255, 255, 255, 255 });
+    Frame();
+    Frame();
+    Frame();
+    const auto is = [&](const kor::u32 x, const kor::u32 y, const int r, const int g, const int b) {
+        const auto p = scene->Pixel(x, y);
+        EXPECT_EQ(std::tuple(int(p.x), int(p.y), int(p.z)), std::tuple(r, g, b)) << x << ", " << y;
+    };
+    is(2, 2, 255, 0, 0);
+    is(Size - 3, 2, 0, 255, 0);
+    is(2, Size - 3, 0, 0, 255);
+    is(Size - 3, Size - 3, 255, 255, 255);
+
+    // And again, as a script does every frame: the same draw shows what the buffer holds now.
+    write({ 0, 255, 0, 255,   0, 255, 0, 255,   0, 255, 0, 255,   0, 255, 0, 255 });
+    Frame();
+    Frame();
+    Frame();
+    is(2, 2, 0, 255, 0);
+    EXPECT_EQ(scene->Schedule(), (std::vector<std::string> { "clear", "upload", "debug", "show", "Read screen" })) << "the copy, and it before the draw";
+    scene->runtime->SetDebugDraw(nullptr);
+}
+
+// An image a script holds, no node of any graph: its staging buffer written and copied in the frame's update, a copy of
+// its own, and drawn among the debug shapes as a script draws it, anew each frame.
+TEST_F(DrawTest, ADebugImageAScriptHoldsShowsWhatItCopiedInThatUpdate) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("clear", "Clear").Wire("image", "canvas").Set("color", Value::List { 0, 0, 0, 1 });
+    graph.Add("debug", "DebugDraw").Wire("image", "canvas");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+
+    kor::DebugDraw draw;
+    scene->runtime->SetDebugDraw(&draw);
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+
+    auto picture = kor::Image::Builder {}.SetType(kor::Image::Type::e2D).SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2 { 2, 2 })
+        .SetUsage(kor::Image::Usage::eTransferDst | kor::Image::Usage::eSampled).Build();
+    auto staging = kor::Buffer::RawBuilder {}.SetRawSize(16).SetUsage(kor::Buffer::Usage::eTransferSrc).SetType(kor::Buffer::Type::eStaging).Build();
+    const auto nearest = kor::Sampler::Builder {}.SetMinFilter(kor::Filter::eNearest).SetMagFilter(kor::Filter::eNearest).Build();
+
+    const auto update = [&](const std::array<std::uint8_t, 16>& texels) {
+        scene->afterUpdate = [&, texels] {
+            staging->Write(std::span<const std::uint8_t>(texels), 0);
+            kor::CommandBuffer::SingleTimeCommand([&](kor::CommandBuffer& cb) { cb.CopyBufferToImage(staging, picture); }).Wait();
+            draw.Clear();
+            draw.BeginLogicSpace({ 1.f, 1.f });
+            draw.Image({ 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 1.f, 1.f, 0.f }, { 0.f, 1.f, 0.f }, picture, nearest, {.outline = false});
+            draw.EndLogicSpace();
+        };
+        Frame();
+        Frame();
+    };
+    const auto is = [&](const kor::u32 x, const kor::u32 y, const int r, const int g, const int b) {
+        const auto p = scene->Pixel(x, y);
+        EXPECT_EQ(std::tuple(int(p.x), int(p.y), int(p.z)), std::tuple(r, g, b)) << x << ", " << y;
+    };
+    update({ 255, 0, 0, 255,   0, 255, 0, 255,   0, 0, 255, 255,   255, 255, 255, 255 });
+    is(2, 2, 255, 0, 0);
+    is(Size - 3, 2, 0, 255, 0);
+    is(2, Size - 3, 0, 0, 255);
+    update({ 0, 0, 255, 255,   0, 0, 255, 255,   0, 0, 255, 255,   0, 0, 255, 255 });
+    is(2, 2, 0, 0, 255);
+    scene->runtime->SetDebugDraw(nullptr);
+}
+
+// A script's image goes with the script, and what was drawn of it may still be held: whenever it goes, the frames after
+// draw what is left and nothing fails — held by the shapes, by the last frame's draw, or still on the GPU.
+TEST_F(DrawTest, AnImageThatGoesIsLeftOutOfTheDebugShapes) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("clear", "Clear").Wire("image", "canvas").Set("color", Value::List { 0, 0, 0, 1 });
+    graph.Add("debug", "DebugDraw").Wire("image", "canvas");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+
+    kor::DebugDraw& draw = scene->SceneDebug();
+    scene->runtime->SetDebugDraw(&draw);
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+
+    const auto make = [] {
+        return kor::Image::Builder {}.SetType(kor::Image::Type::e2D).SetFormat(kor::Image::Format::eRGBA8_UNORM).SetExtent(kor::UVec2 { 2, 2 })
+            .SetUsage(kor::Image::Usage::eTransferDst | kor::Image::Usage::eSampled).Build();
+    };
+    const auto shown = [&](const kor::ResourceRef<const kor::Image>& image) {
+        draw.BeginLogicSpace({ 1.f, 1.f });
+        draw.Image({ 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 1.f, 1.f, 0.f }, { 0.f, 1.f, 0.f }, image, {}, {.outline = false});
+        draw.EndLogicSpace();
+    };
+
+    // Gone in the update after the one that drew it, while what that frame recorded may still be running.
+    auto picture = make();
+    scene->afterUpdate = [&] { shown(picture); };
+    Frame();
+    scene->afterUpdate = [&] { picture = {}; };
+    Frame();
+    Frame();
+
+    // Gone in the same update that asked for it: the shapes hold an image that is no more.
+    auto second = make();
+    scene->afterUpdate = [&] { shown(second); second = {}; };
+    Frame();
+    Frame();
+
+    // Drawn for longer than a frame, and gone while it is.
+    auto third = make();
+    scene->afterUpdate = [&] {
+        draw.BeginLogicSpace({ 1.f, 1.f });
+        draw.Image({ 0.f, 0.f, 0.f }, { 1.f, 0.f, 0.f }, { 1.f, 1.f, 0.f }, { 0.f, 1.f, 0.f }, third, {}, {.duration = 60.f, .outline = false});
+        draw.EndLogicSpace();
+    };
+    Frame();
+    third = {};
+    Frame();
+    Frame();
+    draw.Clear();
+    EXPECT_TRUE(scene->runtime->Ok());
+    scene->runtime->SetDebugDraw(nullptr);
 }
 
 // An image to a buffer and back, a buffer cleared, a part of an image copied and scaled, and many samples made one.

@@ -33,6 +33,7 @@ class ScriptsTest {
     @Test
     fun scriptsRunAreEditedAndLoadedAgain() {
         App(AppSettings(platform = WindowPlatform.eNone)).use { app ->
+            EngineLibrary.load()
             app.loadLibrary(EngineLibrary.path.toString())
             val scene = app.openOffscreen("Play", OffscreenSettings(title = "play", width = 32, height = 32))
             val world = World.of(scene) ?: error("the Play scene has no world")
@@ -43,8 +44,33 @@ class ScriptsTest {
             install("a")
             val host = ScriptHost(world, classes)
             assertTrue(host.load(), "the scripts load: ${host.errors}")
-            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Spin", "Watcher"), host.scripts)
+            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Restarter", "Spin", "Watcher"), host.scripts)
             assertTrue(world.hasComponentType("Spin"), "a script is a component type, by its class name")
+
+            // What initialize reads, changed from outside: the script starts over, a new object, once. Nothing else does that.
+            run {
+                val restarted = world.create("Restarted")
+                assertTrue(world.add(restarted, "Restarter"))
+                frames(3)
+                assertEquals(1f, number(restarted, "Restarter", "made"), "initialized once")
+                assertTrue(number(restarted, "Restarter", "kept") >= 2f, "and it goes on")
+                world.set(restarted, "Restarter", "size", 5)
+                frames(1)
+                assertEquals(2f, number(restarted, "Restarter", "made"), "changed: initialized again")
+                assertEquals(1f, number(restarted, "Restarter", "gone"), "what the old one held let go of first")
+                assertEquals(5f, number(restarted, "Restarter", "madeOf"), "and of what it is now")
+                assertEquals(1f, number(restarted, "Restarter", "kept"), "a new object: nothing private is left of the old")
+                frames(3)
+                assertEquals(2f, number(restarted, "Restarter", "made"), "once for a change, not once a frame")
+                world.set(restarted, "Restarter", "other", 3)
+                frames(2)
+                assertEquals(2f, number(restarted, "Restarter", "made"), "a property not marked starts nothing over")
+                world.set(restarted, "Restarter", "other", 7)
+                frames(3)
+                assertEquals(99f, number(restarted, "Restarter", "size"), "the script changed it itself")
+                assertEquals(2f, number(restarted, "Restarter", "made"), "and that is its own to do: it does not start over")
+                world.destroy(restarted)
+            }
 
             val wheel = world.create("Wheel")
             assertTrue(world.add(wheel, "Spin"))
@@ -221,46 +247,40 @@ class ScriptsTest {
             assertEquals(5f, number(wheel, "Spin", "laps"), "what it did before throwing is kept, and it is called again")
             assertTrue(number(source, "Feeder", "prepared") >= prepared + 2, "and the other scripts were not stopped by it")
 
-            // ---- with a build command: a saved source is built, then loaded ------------------------------------
+            // ---- compiled in the process: Kotlin's own compiler, on a thread of its own, as the engine's programs do --
             host.close()
             val sources = Files.createTempDirectory("koral-engine-kotlin-sources")
-            Files.writeString(sources.resolve("Scripts.kt"), "// as first written")
-            install("a")
-            val a = System.getProperty("koral.engine.test.a").split(java.io.File.pathSeparator).first { Files.isDirectory(Path.of(it)) }
-            val b = System.getProperty("koral.engine.test.b").split(java.io.File.pathSeparator).first { Files.isDirectory(Path.of(it)) }
-            // The "compiler": installs build B once the source says so, build A before, and fails when it says to.
-            val script = sources.resolve("build.sh")
-            Files.writeString(script, """
-                if grep -q broken Scripts.kt; then echo "e: Scripts.kt:3:1 this is not Kotlin"; exit 1; fi
-                rm -rf "$classes"/*
-                if grep -q edited Scripts.kt; then cp -r "$b"/. "$classes"; else cp -r "$a"/. "$classes"; fi
-            """.trimIndent())
-            // Run by its build, a project has the classes folder on its own classpath too, which keeps what it loaded once.
-            val classpath = java.net.URLClassLoader(arrayOf(classes.toUri().toURL()), ScriptHost::class.java.classLoader)
-            val built = ScriptHost(world, classes, sources, listOf("sh", script.toString()), classpath)
-            built.pollInterval = 10
-            built.settleTime = 60
-            assertTrue(built.load(), "built and loaded: ${built.errors}")
-            classpath.loadClass("Spin")     // build A's, from now on the classpath's
-            assertTrue("Watcher" in built.scripts, "the build as first written")
+            val built = Files.createTempDirectory("koral-engine-kotlin-built")
+            val kotlinc = InProcessKotlinCompiler(listOf(sources), System.getProperty("java.class.path"),
+                                                  InProcessKotlinCompiler.jarsOf(Path.of(System.getProperty("koral.engine.test.compiler"))))
+            fun ticker(by: String) = "class Ticker : koral.engine.Setup(), koral.engine.PerFrame {\n    var ticks = 0f\n    override fun update(delta: Float) { ticks += $by }\n}\n"
+            Files.writeString(sources.resolve("Ticker.kt"), ticker("1f"))
+            val compiled = ScriptHost(world, built, sources, compiler = kotlinc)
+            compiled.pollInterval = 10
+            compiled.settleTime = 60
+            assertTrue(compiled.load(), "the build is under way")
+            assertTrue(compiled.isCompiling, "on a thread of its own, the frames carrying on")
+            assertTrue(compiled.awaitCompile(), "built and loaded: ${compiled.errors}")
+            assertTrue("Ticker" in compiled.scripts)
 
             fun save(text: String, until: () -> Boolean): Boolean {
-                Files.writeString(sources.resolve("Scripts.kt"), text)
-                repeat(300) { if (until()) return true; Thread.sleep(10); built.poll() }
+                Files.writeString(sources.resolve("Ticker.kt"), text)
+                repeat(6000) { if (until()) return true; Thread.sleep(10); compiled.poll() }
                 return until()
             }
-            assertTrue(save("// broken") { built.errors.isNotEmpty() }, "a save that does not compile is noticed")
-            assertTrue("this is not Kotlin" in built.errors.single(), "and the compiler's error is what is said: ${built.errors}")
-            assertTrue("Watcher" in built.scripts, "with what was running still running")
-            assertTrue(save("// edited, and longer") { "Watcher" !in built.scripts }, "a save that compiles is built and loaded")
-            assertTrue(built.errors.isEmpty())
-            val laps = number(wheel, "Spin", "laps")
-            frames(1)
-            assertEquals(laps + 1, number(wheel, "Spin", "laps"), "and runs, with what the entity had: the new build's, not the classpath's")
-
-            built.close()
-            frames(2)
-            assertEquals(laps + 1, number(wheel, "Spin", "laps"), "with the host gone nothing runs, and the data is still the scene's")
+            assertTrue(save("class Ticker : koral.engine.Setup() { val x: Int = \"no\" }\n") { compiled.errors.isNotEmpty() }, "a save that does not compile is noticed")
+            assertTrue(compiled.errors.any { "Ticker.kt" in it }, "and the compiler's error is what is said: ${compiled.errors}")
+            assertTrue("Ticker" in compiled.scripts, "with what was running still running")
+            val generation = compiled.generation
+            assertTrue(save(ticker("2f")) { compiled.generation > generation }, "a save that compiles is built and loaded")
+            assertTrue(compiled.errors.isEmpty(), "${compiled.errors}")
+            compiled.close()
+            // Opened again with the sources as they are: the build from before, loaded at once.
+            val again = ScriptHost(world, built, sources, compiler = kotlinc)
+            assertTrue(again.load(), "${again.errors}")
+            assertFalse(again.isCompiling, "nothing to compile")
+            assertTrue("Ticker" in again.scripts)
+            again.close()
 
             // ---- a script's meshes, of attributes of its own -------------------------------------------------------
             val blade = world.meshes.create("blade", 3, listOf(

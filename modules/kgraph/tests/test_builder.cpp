@@ -124,11 +124,11 @@ TEST_F(BuilderTest, AnElementLaidOutOnTheNodeIsWhereTheShaderReadsIt) {
 // its component's numbers: neither knows of a camera. Wired into a buffer field by field, they are its one element.
 TEST_F(BuilderTest, ACameraIsAViewAndALensOfItsNumbers) {
     const kecs::Entity eye = scene->world.Create();
-    support::Give(scene->world, eye, "Camera", { { "fieldOfView", { 50.f } }, { "far", { 40.f } } });
+    support::Give(scene->world, eye, "PerspectiveCamera", { { "fieldOfView", { 50.f } }, { "far", { 40.f } } });
     scene->world.SetPosition(eye, { 1, 2, 3 });
     scene->world.SetRotation(eye, { -20, 30, 15 });     // rolled as well
     kgraph::Graph graph;
-    graph.Add("eye", "Entity").Set("component", "Camera");
+    graph.Add("eye", "Entity").Set("component", "PerspectiveCamera");
     graph.Add("looking at", "Add").Wire("a", "eye", "worldPosition").Wire("b", "eye", "forward");
     graph.Add("camera", "View").Wire("position", "eye", "worldPosition").Wire("target", "looking at").Wire("up", "eye", "up");
     graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");

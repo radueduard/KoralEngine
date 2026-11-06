@@ -8,6 +8,7 @@
 #include <set>
 #include <ranges>
 
+#include <kecs/json.h>
 #include <kgraph/entities.h>
 #include <kgraph/meshes.h>
 #include <keditor/editor.h>
@@ -211,7 +212,7 @@ template <> struct kecs::Name<prefabs::Follows> { static constexpr std::string_v
 KECS_FIELDS(prefabs::Follows, target)
 
 // A prefab is made of an entity and what is under it; its instances follow it, but for what each made its own.
-// A project is opened through its scripts' runner only when it has something to run: a material kind is data.
+// A project has scripts to run only when it has something to run: a material kind is data.
 TEST_F(DocumentTest, MaterialKindsNeedNoRunner) {
     keditor::Project project = scene::MakeProject("kinds");
     const auto scripts = project.directory / "scripts";
@@ -219,9 +220,49 @@ TEST_F(DocumentTest, MaterialKindsNeedNoRunner) {
     EXPECT_EQ(project.Language(), 0);
     std::ofstream(scripts / "Toon.cs") << "public sealed class Toon : Material\n{\n    public float softness = 0.2f;\n}\n";
     EXPECT_EQ(project.Language(), 0) << "a kind alone";
-    EXPECT_FALSE(keditor::RunThroughScripts(project).has_value()) << "so it is opened by the editor itself";
+    std::ofstream(scripts / "Reading.cs") << "public sealed class Reading : Data\n{\n    public float value = 1f;\n}\n";
+    EXPECT_EQ(project.Language(), 0) << "Data is nothing to run either";
     std::ofstream(scripts / "Mover.cs") << "public sealed class Mover : Setup\n{\n    public float speed = 1f;\n}\n";
     EXPECT_EQ(project.Language(), 'c') << "a script beside it";
+}
+
+// A Camera was one component, `orthographic` saying which; it is a kind now. What was saved before is the one of it it was.
+TEST_F(DocumentTest, ACameraSavedBeforeItWasAKindIsTheCameraItWas) {
+    scene::MakeProject("kinds of camera");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    kecs::World& world = doc.World();
+    const kecs::ComponentId camera = world.Find("Camera");
+    ASSERT_NE(camera, kecs::NoComponent);
+    EXPECT_TRUE(world.Describe(camera).abstract);
+    EXPECT_FALSE(doc.AddComponent(doc.CreateEntity("Nothing"), "Camera")) << "no entity has a kind itself";
+
+    // An object file of before: a Camera, orthographic.
+    std::string json = R"({ "name": "Plan", "components": { "Camera": { "fieldOfView": 60, "near": 0.5, "far": 40, "orthographic": true, "height": 7 } } })";
+    kecs::json::Value parsed;
+    std::string error;
+    ASSERT_TRUE(kecs::json::Parse(json, parsed, error)) << error;
+    const kgraph::Value object = kgraph::Value::FromJson(parsed);
+    std::vector<std::string> problems;
+    const kecs::Entity plan = doc.ReadEntity(object, kecs::NullEntity, &problems);
+    EXPECT_TRUE(problems.empty()) << problems.front();
+    ASSERT_TRUE(world.Has(plan, world.Find("OrthographicCamera")));
+    EXPECT_NEAR(*doc.Field(plan, "OrthographicCamera", "height").Number(), 7.0, 1e-6);
+    EXPECT_NEAR(*doc.Field(plan, "Camera", "near").Number(), 0.5, 1e-6);
+
+    // A scene's world of before: a Camera that was not orthographic is a perspective.
+    const std::string saved = R"({ "kecs": 1, "types": [
+        { "name": "Camera", "size": 20, "alignment": 4, "plain": true, "fields": [
+            { "name": "fieldOfView", "type": "f32", "offset": 0, "size": 4 }, { "name": "near", "type": "f32", "offset": 4, "size": 4 },
+            { "name": "far", "type": "f32", "offset": 8, "size": 4 }, { "name": "orthographic", "type": "bool", "offset": 12, "size": 1 },
+            { "name": "height", "type": "f32", "offset": 16, "size": 4 } ] } ],
+      "entities": [ { "id": 0, "name": "Eye", "components": { "Camera": { "fieldOfView": 45, "near": 0.1, "far": 80, "orthographic": false, "height": 10 } } } ] })";
+    ASSERT_TRUE(doc.RestoreWorld(saved, error)) << error;
+    const kecs::Entity eye = world.FindEntity("Eye");
+    ASSERT_TRUE(world.Has(eye, world.Find("PerspectiveCamera")));
+    EXPECT_NEAR(*doc.Field(eye, "PerspectiveCamera", "fieldOfView").Number(), 45.0, 1e-6);
+    EXPECT_NEAR(*doc.Field(eye, "PerspectiveCamera", "far").Number(), 80.0, 1e-6);
+    EXPECT_EQ(doc.ComponentsOf(eye), std::vector<std::string> { "PerspectiveCamera" });
 }
 
 // A procedural mesh starts as it is, each entity tunes its own, and those with the same numbers hold the one mesh.
@@ -899,14 +940,14 @@ TEST_F(DocumentTest, AnEngineFunctionSaysWhatItIsFor) {
     scene::MakeProject("function purposes");
     Running editing;
     keditor::Document& doc = editing.scene->Doc();
-    const keditor::FunctionAbout about = doc.AboutFunction("XpbdStep");
-    EXPECT_EQ(about.purpose, "Physics");
+    const keditor::FunctionAbout about = doc.AboutFunction("RadixSort");
+    EXPECT_EQ(about.purpose, "Sort and scan");
     EXPECT_FALSE(about.description.empty());
-    EXPECT_TRUE(std::ranges::contains(about.tags, std::string("rigid body")));
+    EXPECT_TRUE(std::ranges::contains(about.tags, std::string("radix")));
     const auto presets = doc.Presets();
-    const auto call = std::ranges::find(presets, std::string("XpbdStep"), &kgraph::Preset::name);
+    const auto call = std::ranges::find(presets, std::string("RadixSort"), &kgraph::Preset::name);
     ASSERT_NE(call, presets.end());
-    EXPECT_EQ(call->group, "Physics");
+    EXPECT_EQ(call->group, "Sort and scan");
     const auto found = keditor::FindNodeTypes("prefix sum", presets);
     ASSERT_FALSE(found.empty());
     EXPECT_EQ(found.front()->name, "Scan") << "found by what it does, not only its name";
@@ -1220,16 +1261,18 @@ TEST_F(DocumentTest, AModelsLightsAndCamerasAreImportedOnTheirThings) {
     ASSERT_EQ(named("lamp").size(), 1u);
     const kecs::Entity eye = named("eye")[0], plan = named("plan")[0], lamp = named("lamp")[0];
 
+    // Each a Camera, and the one of it the file says: a lens, or a box.
     ASSERT_TRUE(doc.World().Has(eye, doc.World().Find("Camera")));
-    EXPECT_NEAR(*doc.Field(eye, "Camera", "fieldOfView").Number(), 0.8 * 180.0 / std::numbers::pi, 1e-3) << "top to bottom, as the file has it";
-    EXPECT_NEAR(*doc.Field(eye, "Camera", "near").Number(), 0.05, 1e-6);
-    EXPECT_NEAR(*doc.Field(eye, "Camera", "far").Number(), 500.0, 1e-3);
-    EXPECT_EQ(doc.Field(eye, "Camera", "orthographic"), kgraph::Value(false));
+    ASSERT_TRUE(doc.World().Has(eye, doc.World().Find("PerspectiveCamera")));
+    EXPECT_NEAR(*doc.Field(eye, "PerspectiveCamera", "fieldOfView").Number(), 0.8 * 180.0 / std::numbers::pi, 1e-3) << "top to bottom, as the file has it";
+    EXPECT_NEAR(*doc.Field(eye, "PerspectiveCamera", "near").Number(), 0.05, 1e-6);
+    EXPECT_NEAR(*doc.Field(eye, "Camera", "far").Number(), 500.0, 1e-3) << "what every camera has, read through the kind";
     EXPECT_EQ(doc.World().PositionOf(eye), (kecs::Vec3 { 1.f, 2.f, 3.f })) << "where its thing is";
 
     ASSERT_TRUE(doc.World().Has(plan, doc.World().Find("Camera")));
-    EXPECT_EQ(doc.Field(plan, "Camera", "orthographic"), kgraph::Value(true));
-    EXPECT_NEAR(*doc.Field(plan, "Camera", "height").Number(), 6.0, 1e-6);
+    ASSERT_TRUE(doc.World().Has(plan, doc.World().Find("OrthographicCamera")));
+    EXPECT_FALSE(doc.World().Has(plan, doc.World().Find("PerspectiveCamera")));
+    EXPECT_NEAR(*doc.Field(plan, "OrthographicCamera", "height").Number(), 6.0, 1e-6);
 
     ASSERT_TRUE(doc.World().Has(lamp, doc.World().Find("PointLight")));
     EXPECT_NEAR(*doc.Field(lamp, "PointLight", "intensity").Number(), 7.0, 1e-6);

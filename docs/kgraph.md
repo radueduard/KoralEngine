@@ -119,7 +119,7 @@ A **WriteBack** writes what the GPU worked out into the entities it was worked o
 two late, as a watch is: see [Looking at what a node made](#looking-at-what-a-node-made)); `forEach` names the ForEach
 whose elements the buffer's are — its first element is that ForEach's first entity — and `stride` how many bytes an
 element is. Each element's `position` (three floats, where the entity is relative to what it is under), `rotation` (a
-quaternion, x y z w) and `fields` (`{ "RigidBody.velocity": 32 }`: each component field's bytes, copied as they are) are
+quaternion, x y z w) and `fields` (`{ "Spin.velocity": 32 }`: each component field's bytes, copied as they are) are
 read from where those say, in bytes, and written into the entity — but only when what is read back changes, so that a
 scene that is not stepping is not written over while it is edited. Only the runtime a scene is run by writes; a view
 that follows it does not.
@@ -129,7 +129,7 @@ again, from the world as it is: what setup made of the entities starts from wher
 before that are let pass. A simulation's state goes round through the entities this way, its velocities too when they
 are among `fields`. An element whose float at `follows` (bytes into it) is not 0 follows its entity instead — a kinematic
 body a script turns every step: it is neither written back nor taken as moved, and its entity's place goes to the
-simulation another way (XpbdStep's `driven`). Taken as moved, it would make setup run again every step.
+simulation another way (a `driven` flag a simulation keeps). Taken as moved, it would make setup run again every step.
 
 What is read back is of the steps before this frame's, while what a script moved this frame — that kinematic blade — is
 drawn where it was put: a body the blade pushes would be drawn a step behind it, in it. Given `velocity` (three floats,
@@ -198,12 +198,7 @@ works on 32-bit uints, in buffers with `eStorage`:
 | **OddEvenSort** | `elements`, `type` (`uint`), `count`, `phases` (2, given on the call, up to 256), `start` | `elements` nearer sorted in place, of any type that is IComparable (see below), and stably: each phase meets each element with its neighbour. For what is nearly sorted already, a few phases a frame; sorted whole, it takes `count` phases. Wire `start` from a count of frames when `phases` is odd, or the same pairs are met each frame |
 | **Compact** | `flags`, `values`, `count` | `kept`: the values whose flag is not 0, one after another, in their order; `count`, a buffer of how many |
 | **IndirectArgs** | `counter` (a buffer), `offset` (which uint of it), `groupSize` | `args`: the groups that cover that count, for a Dispatch's `indirect` |
-| **SpheresStep** | `bodies` (64 bytes each: position and inverse mass, velocity and radius, spin and inverse inertia, orientation), `materials` (16 bytes each: friction, restitution, linear and angular damping), `count`, `dt`, `gravity`, `cell` (the largest diameter), `ground` (a height) | one fixed step of the spheres, in place: kphysics' sequential impulses, one colour of contacts at a time — a hashed grid sorted with RadixSort, the contacts, colours worked out on the GPU (each contact proposes the lowest colour its bodies have free; twelve, and what is left one more), ten iterations — and `contacts`, a buffer whose first uint is how many touch |
-| **XpbdStep** | `bodies` (112 bytes each: position — of its centre of mass — and inverse mass; velocity and reach; spin and shape — 0 a sphere, 1 a box, 2 a capsule, 3 a plane, 4 a cone, 5 a mesh; orientation; size — a sphere's radius, a box's half extents, a capsule's radius and half its length, a cone's radius and height; inverse inertia about its own axes, and in `w` how long it has been still; where its entity is, what a WriteBack writes: a cone's middle, a quarter of its height above its centre of mass), `materials`, `count`, `shared` (what setup found: the largest reach, the planes, the joints, the mesh colliders and their triangles), `dt`, `gravity`, `cell` (0: the largest reach, twice), `ground` (a height; −1e31 none), `sleepAfter` (seconds still before a body sleeps; 0 never), `driven` (two float4 each kinematic body's entity: where it is and its entityId, its orientation) and `drivenCount`, `steps` (this frame's, to get there in), `contactsEvery` (how many substeps the contacts found are kept for; 2), `idle` | one fixed step the GPU's way: XPBD in eight substeps (Macklin and others' small steps), each body solved by itself from every contact it finds in the grid — collided as kphysics collides them, a box against a box by separating axes and the incident face clipped — the pushes averaged over its points, friction averaged over each contact's points and whole across contacts (which rolls a sphere), a velocity solve that takes off what pushing apart turned into speed and bounces what came fast; no colours. Its contacts with the bodies near it are found every `contactsEvery` substeps, each a little bigger by how far it goes meanwhile, and kept: each point on each body in its own frame (a round one's as its core and its radius), the normal kept too — but a sphere's against a sphere or a capsule along their cores as they are — so that a substep finds how deep each is from where the two are then, with no narrowphase of its own. Kept for a whole step, a crowd a blade throws about is met as it was and pressed into floors; found every substep, it costs most. Its pushes out of the bodies it meets that move are at most 5 m/s (and as much turning at its reach): turned into speed, more threw a capsule landing on a box metres up. Joints (ball, hinge with its limits and motor, distance, rope) hold whole, each body's averaged apart from its contacts, a hinge's turns about its pin; one at a limit it turned into stops there. A body still (under 0.05 m/s and rad/s) for `sleepAfter` sleeps — not moved, until something moving touches it or a joint's other moves. A cone meets what it touches by points — its point and twelve of its rim against the other's surface, and the other's points against its own; against a box, also its lines from point to rim where they run through the box, and the box's edges. A body's pushes out of what nothing moves (a static or kinematic body) are averaged apart from those with what moves, and the planes' and meshes' apart again, with the last word — what the rest would push it further into them with is let go — so that a crowd or a sweeping blade does not press it through a floor, a wall or the blade; the pushes between moving bodies stay shared by every point. A mesh collider (static or kinematic) is met one-sided, as kphysics meets one: each of the body's points against its triangles — a point behind a face the body's middle is behind too goes out through it, one behind faces the middle is in front of through the nearest — and an edge of it into a body in front of its face pushing the body off, never back through the face; sixteen lanes share a body's triangles before each solve, and a push out of a mesh is at most 5 m/s. A static body stays; a kinematic one goes by its velocity, pushing and never pushed — or, one whose entity is among `driven`, by the velocity that takes it where its entity is. The grid's cells are sized by the dynamic bodies: a static or kinematic one too big for them (a floor, a wall, a bar) is met from a list of its own, by what is near its surface rather than its middle. A body's contacts are found by sixteen lanes, each a sixteenth of the bodies near it, so that a few hundred bodies keep the GPU busy: a substep takes as long as its slowest group, and a narrowphase in any of them is what a substep costs |
-| **XpbdPrepare** | `bodies`, `count` | each body's inverse mass, inverse inertia and reach worked out from its shape, its size and its mass (given in `w` of its inverse inertia), and `shared` with no joints — on setup |
-| **XpbdFromComponents** | `described` (eight float4 an entity: position and kind; orientation; velocity and shape; spin and radius; half extents and height; scale and density; mass, friction, restitution, angular damping; linear damping, the entity's id and a mesh's thickness), `count`, `joints` (five float4 a Joint: its entity's id, the other's, kind, limited; anchor and lower limit; other anchor and upper limit; axis and motor speed; most torque and whether the two still collide), `jointCount`, the meshes: `meshesOf` (a float4 an entity with a Mesh: its id and its group, which of the pack's meshes it shows), `listed`, a MeshPack's `ranges` (its rangeBuffer) and `meshes` (its count), and its MeshBuffers' `vertices`, `indices`, `stride`, `position` and `indexCount` | `bodies`, `materials` and `shared` for XpbdStep, as kphysics' bridge reads a RigidBody, a Collider and a Joint: sizes by the entity's scale, the mass given or of the density and the volume, a cone's body at its centre of mass; each joint's bodies found by their entities, its anchors and axes in each one's frame, and each body's list of them; each mesh collider's line — its triangles, its scale, its thickness, its bounds — and every triangle of the pack |
-| **XpbdRigidBodies** | — | every entity with a RigidBody and a Collider (its ForEach is `<call>/bodies of`, which a WriteBack names), every Joint on one, and the meshes they show (a Filter of them grouped by Mesh, packed as positions only), as XpbdStep's `bodies`, `materials`, `count` and `shared`: put it on a setup page |
-| **Camera** | — | the scene's camera — the first entity with a Camera, a View from where it is the way it faces and a Perspective of its fields at the window's aspect, both `main` — as `view`, `projection`, `viewProjection`, and `camera`: a Bundle of `view`, `projection`, `inverseView`, `inverseProjection`, `viewProjection`, `position`, `zNear` and `zFar`, the names a camera block has |
+| **Camera** | — | the scene's camera — the first entity that is a Camera (a PerspectiveCamera or an OrthographicCamera), a View from where it is the way it faces and a Perspective of its fields — or, orthographic, an Orthographic of its height — at the window's aspect, both `main` — as `view`, `projection`, `viewProjection`, and `camera`: a Bundle of `view`, `projection`, `inverseView`, `inverseProjection`, `viewProjection`, `position`, `zNear` and `zFar`, the names a camera block has |
 | **SunShadows** | `entities`, `cascades` (a buffer whose first four matrices are the cascades'), `matrices` (the same four, a ShadowCascades' `matrices`), `layout` (a mesh's vertex layout), `size` (4096), `without` (components whose entities cast none: `["PointLight"]`) | `atlas`: four cascades' depth, `size` each way, two by two, each entity with a Mesh drawn as each cascade sees it (`koral_shadow`), again only when what it would draw has changed |
 | **Bloom** | `picture` (an image of light, `eStorage`), `sampler` (linear), `threshold` (1), `knee` (0.5), `strength` (1/12) | the picture with what is brighter than `threshold` bled round it, in place (`koral_bloom`): six levels down, five up; and `picture`, for what comes after |
 | **Tonemap** | `picture`, `exposure` (1) | `picture`: an image of eight bits a channel the window's size, exposed, tone mapped (ACES) and encoded for the display (`koral_tonemap`) |
@@ -236,17 +231,6 @@ them first. Each swap copies a whole element: what is large is better sorted as 
 module `koral_compare_sort`, the type it sorts, for which a module (`koral_sort_of_<type>`) is generated beside the
 material kinds' and built as any other, again when the type's own module is written. A type that does not conform is
 said on the call, in the shader compiler's words.
-
-A scene runs its RigidBodies on the GPU with no PhysicsSimulation: XpbdRigidBodies on a setup page; FixedStep and XpbdStep
-(wired from it) on a page of the fixed step; and a WriteBack of XpbdStep's `bodies` (stride 112, `position` 96,
-`rotation` 48, `follows` 108, `velocity` 16, `spin` 32, `fields` `{ "RigidBody.velocity": 16, "RigidBody.angularVelocity": 32 }`)
-on a page of every frame. The
-physics project's `gpu` scene is a thousand of them.
-
-Both behave as kphysics does (`tests/test_gpu_physics.cpp`: a falling sphere, one that rolls at 5/7 of the speed it slid at,
-a bounce, a pile), and on an RTX 5090 a step of either takes less than a step of kphysics with its threads: 10,000
-spheres 3.9 ms (SpheresStep) and 2.7 ms (SpheresXpbd) a frame against 4.1 ms; 50,000, 11.4 and 7.6 against 23.2;
-100,000, 20.7 and 14.7 against 51.8.
 
 A buffer read or written by one of the engine's shaders is read and written (`RWStructuredBuffer`), so that the passes
 that use it run in the order of the nodes.
@@ -690,10 +674,14 @@ compiles them with the project's own, so a script reads a light as it reads its 
 
 | Component | Fields, and what each starts as |
 |---|---|
-| `Camera` | `fieldOfView` (60, degrees, top to bottom), `near` (0.1), `far` (100). |
-| `DirectionalLight` | `color` (1, 1, 1), `intensity` (1). It shines along its entity's forward (-Z). |
-| `PointLight` | `color` (1, 0.85, 0.6), `intensity` (2), `range` (5). |
-| `SpotLight` | `color`, `intensity` (3), `range` (8), `innerAngle` (20), `outerAngle` (30, degrees, from the middle of the cone). |
+| `Camera` (a kind) | `near` (0.1), `far` (100): what every camera has. No entity has one itself; an Entity node or a ForEach of `Camera` finds each that has one of the two below, these fields read from it. |
+| `PerspectiveCamera` | A Camera's, and `fieldOfView` (60, degrees, top to bottom). |
+| `OrthographicCamera` | A Camera's, and `height` (10): how much it sees, top to bottom, in a box. |
+| `Light` (a kind) | `color` (1, 1, 1), `intensity` (1): what every light has, found as a Camera is. |
+| `DirectionalLight` | A Light's. It shines along its entity's forward (-Z). |
+| `LocalLight` (a kind) | A Light's, and `range` (5): what a point and a spot have. |
+| `PointLight` | A LocalLight's. |
+| `SpotLight` | A LocalLight's, and `innerAngle` (20), `outerAngle` (30, degrees, from the middle of the cone). |
 | `Sky` | `zenith`, `horizon`, `ground` (colours), `ambient` (0.35), `sunSize` (1.5, degrees). |
 | `Instancer` | `count` (100000), `extent` (100, 100), `seed` (1), `scale` (0.5, 1.5), `jitter` (1), `pointDistance` (60), `drawDistance` (100000), `color` (points'). Its entity's Mesh, that many times, made and drawn on the GPU: see [Many of one mesh, on the GPU](#many-of-one-mesh-on-the-gpu). |
 
@@ -731,7 +719,7 @@ View from where its entity is towards a step along the way it faces, up as its u
 component's fields:
 
 ```json
-{ "id": "eye", "type": "Entity", "inputs": { "component": "Camera" } },
+{ "id": "eye", "type": "Entity", "inputs": { "component": "PerspectiveCamera" } },
 { "id": "looking at", "type": "Add", "inputs": { "a": { "$link": ["eye", "worldPosition"] }, "b": { "$link": ["eye", "forward"] } } },
 { "id": "camera", "type": "View", "inputs": { "main": true, "position": { "$link": ["eye", "worldPosition"] },
     "target": { "$link": ["looking at", "out"] }, "up": { "$link": ["eye", "up"] } } },
@@ -828,7 +816,7 @@ How many elements the buffer has depends on what it is and what its fields are w
 | `ConstantBuffer<T>`, a uniform block | either | One: the first entity's. |
 
 So a camera's block is a ShaderBuffer whose parameter is a `ConstantBuffer`, with fields wired from a View and a
-Perspective of a ForEach of `Camera`. Anything else wired to a ForEach has the first element's values.
+Perspective of a ForEach of `PerspectiveCamera`. Anything else wired to a ForEach has the first element's values.
 
 An Entity node is one element: no loop. A buffer wired from several of those — a camera, a sky and a sun — is one
 element, as it is of values that follow no

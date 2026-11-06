@@ -235,7 +235,7 @@ Kotlin.
 
 - `modules/kscript`: a script type as the engine sees it, a component with functions called on each one.
 - `modules/kengine`: the engine as one shared library with its scenes and its C interface, `koral_engine.h`.
-- `bindings/csharp`: `Koral.Engine` and the runner `koral-engine-dotnet`.
+- `bindings/csharp`: `Koral.Engine`, and `Koral.Engine.Host`, which koral-editor and koral-play start .NET with.
 - `bindings/kotlin`: the Gradle library `koral:koral-engine`.
 
 The gate runs three times on one scene: with the scripts as C functions (which also saves the project),

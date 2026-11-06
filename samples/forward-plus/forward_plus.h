@@ -196,7 +196,7 @@ namespace forwardplus
         };
         // The camera: a view from where its entity is, towards a step along the way it faces, rolled as it is; and a
         // lens of its field of view, near and far. What the scene is seen through: in the editor, the editor's view.
-        first("eye", "Camera", 300);
+        first("eye", "PerspectiveCamera", 300);
         node("Add", "looking at", 220, 380);
         wire("eye", "looking at", "a", "worldPosition");
         wire("eye", "looking at", "b", "forward");
@@ -874,9 +874,9 @@ namespace forwardplus
         doc.AddComponent(sky, "Sky");
         doc.SetField(sky, "Sky", "ambient", Value(0.12));
         const kecs::Entity camera = doc.CreateEntity("Camera");
-        doc.AddComponent(camera, "Camera");
-        doc.SetField(camera, "Camera", "fieldOfView", Value(50));
-        doc.SetField(camera, "Camera", "far", Value(200));
+        doc.AddComponent(camera, "PerspectiveCamera");
+        doc.SetField(camera, "PerspectiveCamera", "fieldOfView", Value(50));
+        doc.SetField(camera, "PerspectiveCamera", "far", Value(200));
         doc.SetPosition(camera, { 0.f, 5.5f, 15.f });
         doc.SetRotation(camera, { -22.f, 0.f, 0.f });
         doc.AddComponent(camera, "FlyCamera");       // hold the right button: the mouse turns it, W A S D E Q move it
@@ -933,9 +933,9 @@ namespace forwardplus
         doc.AddComponent(sky, "Sky");
         doc.SetField(sky, "Sky", "ambient", Value(0.25));
         const kecs::Entity camera = doc.CreateEntity("Camera");
-        doc.AddComponent(camera, "Camera");
-        doc.SetField(camera, "Camera", "fieldOfView", Value(60));
-        doc.SetField(camera, "Camera", "far", Value(200));
+        doc.AddComponent(camera, "PerspectiveCamera");
+        doc.SetField(camera, "PerspectiveCamera", "fieldOfView", Value(60));
+        doc.SetField(camera, "PerspectiveCamera", "far", Value(200));
         doc.SetPosition(camera, { -9.5f, 2.2f, -0.4f });
         doc.SetRotation(camera, { 6.f, -90.f, 0.f });
         doc.AddComponent(camera, "FlyCamera");       // hold the right button: the mouse turns it, W A S D E Q move it

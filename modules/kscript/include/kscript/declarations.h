@@ -41,6 +41,8 @@ namespace kscript
     [[nodiscard]] Declarations Declare(std::string_view source, bool kotlin, std::string_view file = {});
     /** @brief The script types of a file (`.cs` or `.kt`), or of every such file under a folder, in the order of their paths. */
     [[nodiscard]] Declarations DeclareFiles(const std::filesystem::path& path);
+    /** @brief The script types of @p files, read together: a class in one may derive from a class in another. */
+    [[nodiscard]] Declarations DeclareFiles(const std::vector<std::filesystem::path>& files);
 
     /**
      * @brief The engine's own package: scripts every project has — the scene's Camera, its lights, its Sky — in its

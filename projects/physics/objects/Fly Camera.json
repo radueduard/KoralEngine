@@ -1,0 +1,12 @@
+{
+  "template": "Fly Camera",
+  "icon": "videocam",
+  "description": "A camera flown with the mouse and the keys while the right button is held: W A S D, E and Q, Shift faster.",
+  "name": "Camera",
+  "position": [2, 1.5, 3],
+  "rotation": [-20, 34, 0],
+  "components": {
+    "PerspectiveCamera": { "fieldOfView": 60, "near": 0.1, "far": 100 },
+    "FlyCamera": { "speed": 4, "sensitivity": 0.12 }
+  }
+}

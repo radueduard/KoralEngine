@@ -56,6 +56,12 @@ public static class EngineLibrary
     }
     private static IntPtr s_handle;
 
+    /// <summary>
+    /// The engine's C interface is in <paramref name="module"/>, already loaded: a program of the engine's own that
+    /// runs the scripts inside it (<see cref="Embedded"/>). Before anything is called.
+    /// </summary>
+    public static void UseLoaded(IntPtr module) => s_handle = module;
+
 #pragma warning disable CA2255
     [ModuleInitializer]
 #pragma warning restore CA2255
@@ -135,6 +141,7 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] public static partial IntPtr kengine_debug(IntPtr document);
     [LibraryImport(Lib)] public static partial byte* kengine_document_json(IntPtr document);
     [LibraryImport(Lib)] public static partial byte* kengine_project_directory(IntPtr document);
+    [LibraryImport(Lib)] public static partial byte* kengine_module_scripts(IntPtr document);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_document_save(IntPtr document, string path);
 

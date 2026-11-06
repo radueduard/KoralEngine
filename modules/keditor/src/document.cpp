@@ -1,4 +1,6 @@
 #include <keditor/document.h>
+#include <keditor/scripting.h>
+#include <keditor/project.h>
 
 #include <kasset/cache.h>
 #include <kasset/parameters.h>
@@ -144,6 +146,16 @@ namespace keditor
         _world.Id<MaterialLink>();
         _world.Id<PrefabPart>();
         _world.Id<kgraph::Mesh>();
+        // A Camera was one component, `orthographic` saying which it was; it is a kind now, of a PerspectiveCamera and an
+        // OrthographicCamera: a scene, an object or a prefab saved before is given the one it was.
+        _codecs.Becomes("Camera", [](const std::string_view saved) {
+            kecs::json::Value fields;
+            std::string ignored;
+            const kecs::json::Value* orthographic = kecs::json::Parse(saved, fields, ignored) ? fields.Find("orthographic") : nullptr;
+            const bool boxed = orthographic && (orthographic->kind == kecs::json::Value::Kind::eBool ? orthographic->boolean
+                                                : orthographic->kind == kecs::json::Value::Kind::eNumber && orthographic->number != 0.0);
+            return std::string(boxed ? "OrthographicCamera" : "PerspectiveCamera");
+        });
         // What every scene has, whatever its project: the engine's package — the Camera, the lights, the Sky — and its
         // shaders' modules, for any shader to import (`import entity;`).
         std::vector<kscript::ScriptType> materials;
@@ -157,8 +169,20 @@ namespace keditor
     void Document::DeclareScripts(const std::filesystem::path& folder)
     {
         std::error_code ignored;
-        if (!std::filesystem::exists(folder, ignored)) return;     // a folder of scripts, or one script's file
-        auto declared = kscript::DeclareFiles(folder);
+        if (!std::filesystem::exists(folder, ignored) && _modules.empty()) return;     // a folder of scripts, or one script's file
+        // Read with every module's: a class of the project's may derive from one of a module's — a Collider.
+        std::vector<std::filesystem::path> files;
+        const auto sources = [&](const std::filesystem::path& from) {
+            if (std::filesystem::is_regular_file(from, ignored)) { files.push_back(from); return; }
+            for (auto it = std::filesystem::recursive_directory_iterator(from, ignored); it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
+                const std::string text = it->path().generic_string();
+                if (text.contains("/bin/") || text.contains("/obj/") || text.contains("/build/")) continue;
+                if (it->path().extension() == ".cs" || it->path().extension() == ".kt") files.push_back(it->path());
+            }
+        };
+        sources(folder);
+        for (const auto& module : _modules) sources(module / "scripts");
+        auto declared = kscript::DeclareFiles(files);
         for (auto& problem : declared.problems) _notes.push_back(std::move(problem));
         for (auto& type : declared.types) {
             if (type.makesResources) { DeclareResourceScript(std::move(type)); continue; }    // what a Script node runs, no component
@@ -872,8 +896,13 @@ namespace keditor
         _assets.reset();
         _assetProblems.clear();
         std::error_code failed;
+        _modules.clear();
         if (root.empty() || !std::filesystem::is_regular_file(root / "project.json", failed)) return;
+        // What it imports: their assets are its too, and so are their scripts, shaders and functions.
+        Project project;
+        if (std::string unread; Project::Open(root, project, unread)) _modules = project.ImportedDirectories(&_notes);
         _assets = std::make_unique<kasset::Database>(root);
+        _assets->SetModules(_modules);
         for (const auto& name : kgraph::DefaultMeshNames()) _assets->AddBuiltIn(kasset::Kind::eMesh, "mesh/" + name, kgraph::DefaultMeshId(name));
         for (const std::string_view texel : { "white", "black", "normal" })
             _assets->AddBuiltIn(kasset::Kind::eTexture, std::format("texture/{}", texel), std::format("${}", texel));
@@ -958,6 +987,7 @@ namespace keditor
     Document::~Document()
     {
         _scripts.Shutdown();    // while the world they are told of is whole
+        if (scriptRuntime) scriptRuntime->Forget(this);     // and what runs them lets go of it, before it is gone
         if (const auto it = Documents().find(_frameGraph); it != Documents().end() && it->second == this) Documents().erase(it);
     }
 
@@ -1817,10 +1847,19 @@ namespace keditor
     {
         const kecs::ComponentId id = _world.Find(component);
         if (id == kecs::NoComponent || !_world.Alive(entity) || _world.Has(entity, id)) return false;
-        _world.Add(entity, id);
+        if (!_world.Add(entity, id)) return false;     // a kind: what an entity has is one of it
         Override(entity, std::format("+{}", component));
         Changed();
         return true;
+    }
+
+    std::string Document::Becomes(const std::string& component, const Value& fields) const
+    {
+        const kecs::ComponentId id = _world.Find(component);
+        if (id == kecs::NoComponent || !_world.Describe(id).abstract) return component;
+        const std::string one = _codecs.BecomesOf(component, fields.ToJson());
+        const kecs::ComponentId which = one.empty() ? kecs::NoComponent : _world.Find(one);
+        return which != kecs::NoComponent && !_world.Describe(which).abstract && _world.IsOf(which, id) ? one : std::string();
     }
 
     bool Document::RemoveComponent(const kecs::Entity entity, const std::string_view component)
@@ -2040,11 +2079,15 @@ namespace keditor
         if (Three(data.Find("rotation"), three)) _world.SetRotation(entity, three);
         if (Three(data.Find("scale"), three)) _world.SetScale(entity, three);
         if (const Value* components = data.Find("components"); components && components->Named())
-            for (const auto& [component, fields] : *components->Named()) {
-                if (!AddComponent(entity, component)) { problem(std::format("there is no component '{}': left out", component)); continue; }
+            for (const auto& [named, fields] : *components->Named()) {
+                // One that is a kind now is the one of it that what it holds says, and has only that one's fields.
+                const std::string component = Becomes(named, fields);
+                const bool became = component != named;
+                if (component.empty() || !AddComponent(entity, component)) { problem(std::format("there is no component '{}': left out", named)); continue; }
                 if (!fields.Named()) continue;
+                const kecs::ComponentDescription& type = _world.Describe(_world.Find(component));
                 for (const auto& [field, given] : *fields.Named()) {
-                    if (given.IsNull()) continue;
+                    if (given.IsNull() || (became && !type.FindField(field))) continue;
                     std::string error;
                     if (!SetField(entity, component, field, given, &error)) problem(std::format("'{}.{}': {}", component, field, error));
                 }
@@ -2380,12 +2423,13 @@ namespace keditor
         }
         for (const auto& camera : model->cameras) {
             const kecs::Entity entity = holder(camera.node, camera.atNode, camera.name.empty() ? std::string("Camera") : camera.name, camera.position, camera.direction);
-            AddComponent(entity, "Camera");
-            SetField(entity, "Camera", "orthographic", Value(camera.orthographic));
-            if (camera.orthographic) SetField(entity, "Camera", "height", Value(camera.height));
-            else SetField(entity, "Camera", "fieldOfView", Value(std::clamp(camera.fieldOfView, 1.f, 179.f)));
-            if (camera.zNear > 0.f) SetField(entity, "Camera", "near", Value(camera.zNear));
-            SetField(entity, "Camera", "far", Value(camera.zFar));     // 0: as far as there is
+            // A camera of the kind the file says: a box of its height, or a lens of its field of view.
+            const char* kind = camera.orthographic ? "OrthographicCamera" : "PerspectiveCamera";
+            AddComponent(entity, kind);
+            if (camera.orthographic) SetField(entity, kind, "height", Value(camera.height));
+            else SetField(entity, kind, "fieldOfView", Value(std::clamp(camera.fieldOfView, 1.f, 179.f)));
+            if (camera.zNear > 0.f) SetField(entity, kind, "near", Value(camera.zNear));
+            SetField(entity, kind, "far", Value(camera.zFar));     // 0: as far as there is
         }
         Changed();
     }
@@ -2516,12 +2560,41 @@ namespace keditor
     {
         std::set<std::string> names;
         std::error_code ignored;
-        for (const auto& folder : { FunctionsDirectory(), EngineFunctionsDirectory() }) {
+        std::vector<std::filesystem::path> folders { FunctionsDirectory() };
+        for (const auto& module : _modules) folders.push_back(module / "functions");
+        folders.push_back(EngineFunctionsDirectory());
+        for (const auto& folder : folders) {
             if (folder.empty()) continue;
             for (const auto& entry : std::filesystem::directory_iterator(folder, ignored))
                 if (entry.path().extension() == FunctionEnding) names.insert(entry.path().stem().string());
         }
         return { names.begin(), names.end() };
+    }
+
+    std::filesystem::path Document::FunctionFile(const std::string_view name) const
+    {
+        std::error_code ignored;
+        const std::string file = std::string(name) + FunctionEnding;
+        std::vector<std::filesystem::path> folders { FunctionsDirectory() };
+        for (const auto& module : _modules) folders.push_back(module / "functions");
+        folders.push_back(EngineFunctionsDirectory());
+        for (const auto& folder : folders)
+            if (!folder.empty() && std::filesystem::exists(folder / file, ignored)) return folder / file;
+        return {};
+    }
+
+    void Document::ReloadModules()
+    {
+        const std::filesystem::path assets = _runtime->AssetDirectory();
+        _assets.reset();        // found again, with what it imports now
+        SetAssetDirectory(assets);
+        if (const std::filesystem::path project = ProjectDirectory(); !project.empty()) {
+            Project opened;
+            if (std::string unread; Project::Open(project, opened, unread)) opened.Use();
+            DeclareScripts(project / "scripts");
+        }
+        _functionFiles.clear();
+        Apply(kgraph::Graph(Graph()));
     }
 
     bool Document::IsEngineFunction(const std::string_view name) const
@@ -2530,13 +2603,15 @@ namespace keditor
         const std::string file = std::string(name) + FunctionEnding;
         const std::filesystem::path project = FunctionsDirectory();
         if (!project.empty() && std::filesystem::exists(project / file, ignored)) return false;
+        for (const auto& module : _modules) if (std::filesystem::exists(module / "functions" / file, ignored)) return false;     // a module's
         return std::filesystem::exists(EngineFunctionsDirectory() / file, ignored);
     }
 
     FunctionAbout Document::AboutFunction(const std::string_view name) const
     {
         const std::string file = std::string(name) + FunctionEnding;
-        return ReadAbout(IsEngineFunction(name) ? EngineFunctionsDirectory() / file : FunctionsDirectory() / file);
+        const std::filesystem::path found = FunctionFile(name);
+        return ReadAbout(found.empty() ? FunctionsDirectory() / file : found);
     }
 
     std::vector<kgraph::Preset> Document::Presets() const
@@ -2561,7 +2636,6 @@ namespace keditor
     void Document::WithFunctions(kgraph::Graph& graph)
     {
         graph.functions.clear();
-        const std::filesystem::path folder = FunctionsDirectory();
         std::vector<const kgraph::Graph*> look { &graph };
         while (!look.empty()) {
             const kgraph::Graph* of = look.back();
@@ -2570,8 +2644,8 @@ namespace keditor
                 if (node.type != "Function") continue;
                 const std::string* name = TextOf(node, "function");
                 if (!name || graph.functions.contains(*name)) continue;
-                // The project's, or — when it has none so called — the engine's.
-                const std::filesystem::path file = (IsEngineFunction(*name) ? EngineFunctionsDirectory() : folder) / (*name + FunctionEnding);
+                // The project's, or — when it has none so called — a module's, or the engine's.
+                const std::filesystem::path file = FunctionFile(*name);
                 std::error_code ec;
                 const auto written = std::filesystem::last_write_time(file, ec);
                 if (ec) continue;   // the call says there is no such function, on itself
@@ -3320,14 +3394,19 @@ namespace keditor
             if (const Value* disabled = node.Find("disabled"); disabled && disabled->Items())
                 for (const auto& component : *disabled->Items()) if (component.String()) off.insert(*component.String());
             if (const Value* components = node.Find("components"); components && components->Named())
-                for (const auto& [component, fields] : *components->Named()) {
+                for (const auto& [named, fields] : *components->Named()) {
+                    // One that is a kind now (a Camera, saved before) is the one of it that what it holds says.
+                    const std::string component = Becomes(named, fields);
+                    if (component.empty()) { _notes.push_back(std::format("{}: its prefab's '{}' is a kind, and nothing says which of it: left out", _world.NameOf(root), named)); continue; }
                     has.insert(component);
                     if (own(part, "-" + component)) { RemoveComponent(entity, component); continue; }
                     const kecs::ComponentId id = _world.Find(component);
                     if (id == kecs::NoComponent) { _notes.push_back(std::format("{}: its prefab's '{}' is no component here: left out", _world.NameOf(root), component)); continue; }
                     if (!_world.Has(entity, id)) AddComponent(entity, component);
+                    const kecs::ComponentDescription& type = _world.Describe(id);
                     if (fields.Named())
                         for (const auto& [field, given] : *fields.Named()) {
+                            if (named != component && !type.FindField(field)) continue;     // what told the kind's apart
                             if (own(part, component + "." + field)) continue;
                             if (const Value* other = given.Find("part"); other && other->Number() && given.Named() && given.Named()->size() == 1) {
                                 links.push_back({ entity, component, field, static_cast<int>(*other->Number()) });

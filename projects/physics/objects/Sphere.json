@@ -1,0 +1,9 @@
+{
+  "template": "Sphere",
+  "icon": "circle",
+  "name": "Sphere",
+  "components": {
+    "Mesh": { "mesh": "$sphere" },
+    "default": { "color": [0.85, 0.6, 1] }
+  }
+}

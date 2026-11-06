@@ -165,6 +165,14 @@ namespace kecs
         return type == was || _reads.contains(std::pair { std::string(type), std::string(was) });
     }
 
+    void Codecs::Becomes(std::string was, std::function<std::string(std::string_view saved)> which) { _becomes.insert_or_assign(std::move(was), std::move(which)); }
+
+    std::string Codecs::BecomesOf(const std::string_view was, const std::string_view saved) const
+    {
+        const auto it = _becomes.find(was);
+        return it == _becomes.end() || !it->second ? std::string() : it->second(saved);
+    }
+
     Codecs& Codecs::Default()
     {
         static Codecs codecs;
@@ -257,8 +265,12 @@ namespace kecs
             for (const auto& field : type.fields)
                 fields += std::format("{}\n        {{ \"name\": {}, \"type\": {}, \"offset\": {}, \"size\": {} }}", fields.empty() ? "" : ",",
                                       json::Quote(field.name), json::Quote(field.type), field.offset, field.size);
-            typeText += std::format("{}\n    {{ \"name\": {}, \"size\": {}, \"alignment\": {}, \"plain\": {}, \"fields\": [{}{}] }}", typeText.empty() ? "" : ",",
-                                    json::Quote(name), type.size, type.alignment, Rebuildable(type) ? "true" : "false", fields, fields.empty() ? "" : "\n      ");
+            // The kinds it is one of: a world that loads it without whoever declared it still finds it by them.
+            std::string kinds;
+            for (const auto& kind : type.kinds) kinds += std::format("{}{}", kinds.empty() ? "" : ", ", json::Quote(kind));
+            typeText += std::format("{}\n    {{ \"name\": {}, \"size\": {}, \"alignment\": {}, \"plain\": {}{}, \"fields\": [{}{}] }}", typeText.empty() ? "" : ",",
+                                    json::Quote(name), type.size, type.alignment, Rebuildable(type) ? "true" : "false",
+                                    kinds.empty() ? std::string() : std::format(", \"kinds\": [{}]", kinds), fields, fields.empty() ? "" : "\n      ");
         }
 
         saved.json = std::format("{{\n  \"kecs\": 1,\n  \"types\": [{}{}],\n  \"entities\": [{}{}]\n}}\n", typeText, typeText.empty() ? "" : "\n  ",
@@ -301,6 +313,9 @@ namespace kecs
             description.name = name->string;
             description.size = number(type.Find("size"));
             description.alignment = std::max<std::size_t>(number(type.Find("alignment")), 1);
+            if (const json::Value* kinds = type.Find("kinds"))
+                for (const auto& kind : kinds->items)
+                    if (kind.kind == json::Value::Kind::eString) description.kinds.push_back(kind.string);
             SavedType entry {};
             if (const json::Value* fields = type.Find("fields"))
                 for (const auto& field : fields->items) {
@@ -355,11 +370,26 @@ namespace kecs
                             problems.insert(std::format("'{}' is not among the file's types: left out", name));
                         continue;
                     }
-                    const ComponentId id = saved->second.id;
-                    world.Add(e, id);
+                    ComponentId id = saved->second.id;
+                    // Saved as what is a kind now: loaded as the one of it that what it holds says.
+                    const bool became = world.Describe(id).abstract;
+                    if (became) {
+                        const std::string which = codecs.BecomesOf(name, value.raw);
+                        const ComponentId one = which.empty() ? NoComponent : world.Find(which);
+                        if (one == NoComponent || world.Describe(one).abstract || !world.IsOf(one, id)) {
+                            problems.insert(std::format("'{}' is a kind now, and nothing says which of its components one saved is: left out", name));
+                            continue;
+                        }
+                        id = one;
+                    }
+                    if (!world.Add(e, id)) {
+                        problems.insert(std::format("'{}' could not be given: left out", name));
+                        continue;
+                    }
                     const ComponentDescription& type = world.Describe(id);
                     if (type.IsTag()) continue;
                     auto* target = static_cast<std::byte*>(world.Mutable(e, id));
+                    if (!target) continue;
 
                     if (const json::Value* whole = bytes(value)) {
                         if (!Plain(type) || !type.fields.empty() || !FromHex(whole->string, target, type.size))
@@ -368,6 +398,7 @@ namespace kecs
                     }
                     for (const auto& [fieldName, fieldValue] : value.members) {
                         const FieldDescription* field = type.FindField(fieldName);
+                        if (became && !field) continue;     // what told the kind's components apart: said by which it is now
                         const auto was = saved->second.fields.find(fieldName);
                         // A field the file's type does not list — newer than it, written in by hand or by a script — is read
                         // as the world's type has it; one it lists otherwise than the world has it is left at its default.

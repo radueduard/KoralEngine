@@ -316,3 +316,47 @@ TEST_F(Project, WhatNamesAFileByWhereItIsNamesItByItsIdBeforeItMoves)
     ASSERT_TRUE(database.Move(wall, "assets/brick.png"));
     EXPECT_EQ(database.ToLegacy({ wall, {} }), "@brick.png");
 }
+
+// A module's assets are the project's too: found after its own, by the IDs their metas give them, named from the
+// project's folder — and its scenes, for trying it out, are not among them.
+TEST_F(Project, AModulesAssetsAreTheProjectsByTheirIds)
+{
+    const fs::path game = root / "game", physics = root / "physics";
+    const auto file = [](const fs::path& path, const std::string_view text = "x") {
+        fs::create_directories(path.parent_path());
+        std::ofstream(path, std::ios::binary) << text;
+    };
+    file(game / "project.json");
+    file(game / "assets/textures/grass.png");
+    file(physics / "project.json");
+    file(physics / "assets/textures/rubber.png");
+    file(physics / "scripts/RigidBody.kt");
+    file(physics / "scenes/test.scene.json");
+
+    // The module on its own, first: its metas, its IDs.
+    Database own(physics);
+    EXPECT_TRUE(own.Scan().empty());
+    const Entry* rubberOwn = own.FindFile("assets/textures/rubber.png");
+    ASSERT_NE(rubberOwn, nullptr);
+    const Id rubber = rubberOwn->meta.id;
+
+    Database assets(game);
+    assets.SetModules({ physics });
+    for (const auto& problem : assets.Scan()) ADD_FAILURE() << problem;
+    const Entry* found = assets.Find(rubber);
+    ASSERT_NE(found, nullptr) << "a module's asset, by the ID it has in the module";
+    EXPECT_EQ(found->file.generic_string(), "../physics/assets/textures/rubber.png");
+    EXPECT_EQ(assets.ModuleOf(physics / "assets/textures/rubber.png"), physics);
+    EXPECT_FALSE(assets.ModuleOf(game / "assets/textures/grass.png"));
+    EXPECT_NE(assets.FindFile(physics / "scripts/RigidBody.kt"), nullptr) << "its scripts too";
+    EXPECT_EQ(assets.FindFile(physics / "scenes/test.scene.json"), nullptr) << "but not its scenes";
+    EXPECT_EQ(assets.FindFile(physics / "project.json"), nullptr);
+    EXPECT_NE(assets.FindFile(game / "assets/textures/grass.png"), nullptr) << "and the project's own as before";
+
+    // What the runtime loads it by is its whole path; and that is found again as the same asset.
+    const std::string named = assets.ToLegacy({ rubber, {} });
+    EXPECT_EQ(named, "@" + (physics / "assets/textures/rubber.png").lexically_normal().generic_string());
+    const auto again = assets.FromLegacy(named);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->asset, rubber);
+}

@@ -1,0 +1,10 @@
+{
+  "template": "Directional Light",
+  "icon": "light_mode",
+  "name": "Sun",
+  "position": [0, 3, 0],
+  "rotation": [-50, 30, 0],
+  "components": {
+    "DirectionalLight": { "color": [1, 0.96, 0.9], "intensity": 1 }
+  }
+}
