@@ -87,6 +87,19 @@ if(Koral_FOUND)
         endif()
         koral_copy_runtime_dlls(${program})
         file(GLOB runtime "${KORAL_ENGINE_SDK}/bin/*.bin" "${KORAL_ENGINE_SDK}/bin/*.manifest")
+        # Linked again when the SDK is staged again, so that what is copied after the link is the SDK's as it is now, not
+        # what was beside the program before.
+        file(GLOB sdkLibraries CONFIGURE_DEPENDS "${KORAL_ENGINE_SDK}/bin/*.dll" "${KORAL_ENGINE_SDK}/bin/modules/*.dll")
+        set_property(TARGET ${program} APPEND PROPERTY LINK_DEPENDS ${sdkLibraries})
+        # Programs made in one folder copy into the same one after they link: one at a time, or a copy finds a file
+        # another is writing (Ninja's pools; other generators link a folder's programs one after another anyway).
+        string(MD5 folder "${CMAKE_CURRENT_BINARY_DIR}")
+        string(SUBSTRING "${folder}" 0 12 folder)
+        get_property(pools GLOBAL PROPERTY JOB_POOLS)
+        if(NOT "runtime_${folder}=1" IN_LIST pools)
+            set_property(GLOBAL APPEND PROPERTY JOB_POOLS "runtime_${folder}=1")
+        endif()
+        set_property(TARGET ${program} PROPERTY JOB_POOL_LINK "runtime_${folder}")
         add_custom_command(TARGET ${program} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${runtime} $<TARGET_RUNTIME_DLLS:${program}> "$<TARGET_FILE_DIR:${program}>"
             COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${KORAL_ENGINE_SDK}/bin/modules" "$<TARGET_FILE_DIR:${program}>/modules"
