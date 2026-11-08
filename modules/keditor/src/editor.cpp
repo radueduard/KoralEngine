@@ -2126,6 +2126,29 @@ class $NAME : ResourceScript() {
         return true;
     }
 
+    bool Session::AddScene(const std::string& name, const bool lit)
+    {
+        if (!_hasProject) { Say("A scene of its own goes in a project: File, New project.", true); return false; }
+        if (name.empty() || name.find_first_of("/\\:*?\"<>|") != std::string::npos) { Say(std::format("'{}' is no scene's name: a file's name, without / \\ : * ? \" < > |", name), true); return false; }
+        std::error_code ec;
+        if (std::ranges::contains(_project.scenes, name) || std::filesystem::exists(_project.ScenePath(name), ec)) { Say(std::format("The project has a scene called {} already.", name), true); return false; }
+        // What was done to the one open is kept: saved before it is let go of.
+        if (Doc().Dirty() && !Save()) return false;
+        const std::string was = _scene;
+        _scene = name;
+        if (!NewScene(lit) || !Save()) {
+            std::string again;
+            _scene = was;
+            (void)_play.Open(_project.ScenePath(was), again);
+            return false;
+        }
+        _project.scenes.push_back(name);
+        std::string error;
+        if (!_project.Save(error)) Say(std::format("{} is made, and project.json could not list it: {}", name, error), true);
+        else Say(std::format("Made {}, a scene of the project's.", name));
+        return true;
+    }
+
     bool Session::Revert()
     {
         if (_prefab) ClosePrefab(true);         // the scene is what changes: the prefab saved, and the scene back, first
@@ -6025,6 +6048,10 @@ public extension {0} : IKoralMaterial {{
                 for (const auto& reference : _session->CurrentProject().modules)
                     imported.push_back({ .label = reference, .onSelected = [this, reference] { _session->ForgetModule(reference); SetState(); } });
                 const auto ticked = [](const bool on, const char* label) { return std::string(on ? "✓  " : "     ") + label; };
+                // The project's scenes, each to open: the one open ticked.
+                std::vector<kui::MenuItem> scenes;
+                for (const auto& scene : _session->CurrentProject().scenes)
+                    scenes.push_back({ .label = ticked(scene == _session->SceneName(), scene.c_str()), .onSelected = [this, scene] { _session->OpenScene(scene); SetState(); } });
                 return kui::MenuBar({
                     { "File", {
                         { "New project...", Asking("Making another project", [this] { AskForNewProject(); }) },
@@ -6032,6 +6059,8 @@ public extension {0} : IKoralMaterial {{
                         { "Import a module...", [this] { SetState([&] { _dialog = Dialog::eImportModule; }); }, _session->HasProject() && !playMode },
                         { .label = "Stop importing", .enabled = !imported.empty() && !playMode, .items = std::move(imported) },
                         { .separator = true },
+                        { .label = "Open scene", .enabled = scenes.size() > 1 && !playMode, .items = std::move(scenes) },
+                        { "Add a scene...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewScene; _newId.clear(); }); }), !playMode },
                         { "New scene", Asking("Making the scene anew", needsProject([this] { _session->NewStandardScene(); })), !playMode },
                         { "New lit scene", Asking("Making the scene anew, lit under a sky", needsProject([this] { _session->NewLitScene(); })), !playMode },
                         { "Revert to saved", Asking("Putting the saved scene back", [this] { _session->Revert(); }), _session->HasProject() && !playMode },
@@ -6142,6 +6171,7 @@ public extension {0} : IKoralMaterial {{
                 case Dialog::eConfirm: return ConfirmDialog();
                 case Dialog::eImportOptions: return _assets.ImportOptionsDialog();
                 case Dialog::eNewFolder: return _assets.NewFolderDialog();
+                case Dialog::eNewScene: return _assets.NewSceneDialog();
                 case Dialog::eNewPrefab: return _assets.NewPrefabDialog();
                 case Dialog::eTrash: return _assets.TrashDialog();
                 case Dialog::eMoveAsset: return _assets.MoveAssetDialog();

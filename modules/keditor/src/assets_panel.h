@@ -34,7 +34,7 @@ namespace keditor
     using namespace widgets;
 
     /** Which of the editor's dialogs is in front of everything: one at a time. */
-    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eNewProjectFolder, eNewProjectModule, eImportModule, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame };
+    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eNewProjectFolder, eNewProjectModule, eImportModule, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame, eNewScene };
 
     class AssetsView {
     public:
@@ -655,6 +655,26 @@ namespace keditor
                                                                   .onSubmitted = [this, make](const std::string& typed) { _newId = typed; make(); }, .width = 420.f, .focus = 1 }));
             if (_session->Failed()) rows.push_back(Problem(_session->Status()));
             rows.push_back(kui::Row({ kui::Button("Make it", make), kui::Button("Cancel", [this] { SetState([&] { _dialog = Dialog::eNone; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)) },
+                                    kui::FlexOptions {}.SetGap(8.f)));
+            return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(8.f)).Width(460.f));
+        }
+
+        /** A name, for another scene of the project's: made as the standard one is, or lit, and opened. */
+        kui::Widget NewSceneDialog()
+        {
+            const auto make = [this](const bool lit) {
+                if (_session->AddScene(_newId, lit)) SetState([&] { _dialog = Dialog::eNone; });
+                else SetState();
+            };
+            std::vector<kui::Widget> rows;
+            rows.push_back(Heading("Another scene"));
+            rows.push_back(kgui::Muted("Of the project's, in scenes/: the one open is saved first."));
+            rows.push_back(kui::TextField(kui::TextFieldOptions { .text = _newId, .placeholder = "Its name",
+                                                                  .onChanged = [this](const std::string& typed) { _newId = typed; },
+                                                                  .onSubmitted = [this, make](const std::string& typed) { _newId = typed; make(false); }, .width = 420.f, .focus = 1 }));
+            if (_session->Failed()) rows.push_back(Problem(_session->Status()));
+            rows.push_back(kui::Row({ kui::Button("Make it", [make] { make(false); }), kui::Button("Make it lit", [make] { make(true); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
+                                      kui::Button("Cancel", [this] { SetState([&] { _dialog = Dialog::eNone; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)) },
                                     kui::FlexOptions {}.SetGap(8.f)));
             return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(8.f)).Width(460.f));
         }

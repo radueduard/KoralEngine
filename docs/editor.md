@@ -43,7 +43,8 @@ would (its window is open while it does).
 
 The menus:
 
-- **File** makes a project, opens one, starts the standard scene over (**New scene**, or **New lit scene** for
+- **File** makes a project, opens one, opens another of its scenes (**Open scene**), makes another (**Add a scene...**:
+  the standard one or lit, in `scenes/`, listed in `project.json`, the one open saved first), starts the standard scene over (**New scene**, or **New lit scene** for
   the larger lit one), reads the scene again from its file (**Revert to saved**) and saves it (Control+S).
 - **Edit** duplicates, moves to the top, saves as an object, or deletes what is picked.
 - **Create** makes an entity from one of the project's objects, at the top or under what is picked.
@@ -489,8 +490,6 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 - **A node renamed** (its Name, in the inspector) takes its wires, what names it by id and its component with it, each
   entity keeping what it holds of it. A script that reaches its resource by the name it had does not follow: that is the
   script's to change.
-- **One scene a project** in the interface. `project.json` can list more, and `koral-play` takes a scene
-  file, but the editor opens the starting one only.
 - **An entity's own image or buffer** has to come from a node. Nothing in the editor makes a resource per
   entity.
 - **A component the shader makes starts at zero**: a new `default` is black until its colour is set. The objects set them. Objects have no icons.

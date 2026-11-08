@@ -4035,3 +4035,28 @@ TEST_F(EditorTest, AModuleIsImportedAndWhatItHasIsTheProjects) {
     EXPECT_TRUE(Shows("It imports"));
     EXPECT_TRUE(Shows("Add a module from a folder..."));
 }
+
+// Another scene of the project's: made as the standard one, listed in project.json, and opened — the one open saved
+// first. Each opens again as it was left; a name the project has is no new scene's.
+TEST_F(EditorTest, AProjectHasAsManyScenesAsAreMadeInIt) {
+    const auto project = scene::MakeProject("scenes");
+    Open(project.directory);
+    const std::string first = Session().SceneName();
+    const kecs::Entity marked = Doc().CreateEntity("Only in the first");
+    ASSERT_FALSE(marked.IsNull());
+
+    ASSERT_TRUE(Session().AddScene("second")) << Session().Status();
+    EXPECT_EQ(Session().SceneName(), "second");
+    EXPECT_TRUE(std::filesystem::exists(project.ScenePath("second")));
+    EXPECT_TRUE(std::ranges::contains(Session().CurrentProject().scenes, "second"));
+    keditor::Project read;
+    std::string error;
+    ASSERT_TRUE(keditor::Project::Open(project.directory, read, error)) << error;
+    EXPECT_TRUE(std::ranges::contains(read.scenes, "second")) << "listed in project.json";
+    EXPECT_TRUE(Doc().World().FindEntity("Only in the first").IsNull()) << "a scene of its own";
+
+    ASSERT_TRUE(Session().OpenScene(first)) << Session().Status();
+    EXPECT_FALSE(Doc().World().FindEntity("Only in the first").IsNull()) << "the first as it was left: saved before the second was made";
+    EXPECT_FALSE(Session().AddScene("second")) << "a name the project has";
+    EXPECT_FALSE(Session().AddScene("a/b")) << "no file's name";
+}

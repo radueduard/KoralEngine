@@ -877,6 +877,12 @@ namespace keditor
         /** @brief Opens the project's scene @p name (`main`): the one open saved first, when it has changed. */
         bool OpenScene(const std::string& name);
         /**
+         * @brief Makes another scene of the project's, `scenes/<name>.scene.json` — the standard one, or lit — lists it in
+         *        `project.json`, and opens it: the one open saved first, when it has changed. False, said, for a name the
+         *        project has already or that is no file's name.
+         */
+        bool AddScene(const std::string& name, bool lit = false);
+        /**
          * @brief Makes a model's material @p id one of the project's own, in `assets/materials/<its name>.kmat`, which
          *        every entity that followed it follows (Document::ExtractMaterial). Its id, picked; empty when it was not.
          */
