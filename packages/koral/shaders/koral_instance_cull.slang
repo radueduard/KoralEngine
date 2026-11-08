@@ -12,6 +12,9 @@
 // Distances are along the view, in the world's units: the w a position has in the picture.
 
 import koral_instances;
+import koral_math;
+import koral_bounds;
+import koral_wave;
 
 struct CullPush {
     float4x4 toClip;            // the Instancer's entity's space to the picture's: its matrix, then the view, then the lens
@@ -36,52 +39,21 @@ RWStructuredBuffer<uint> points;    // which instance each point is
 RWStructuredBuffer<uint> args;      // cullInstances' groups (x, y, z), then the points' (x, y, z)
 RWStructuredBuffer<uint> commands;  // the meshes' draw: a VkDrawIndexedIndirectCommand
 
-static const uint Wide = 65535;
-
-uint3 groupsFor(uint groups)
-{
-    return groups == 0 ? uint3(0, 1, 1) : uint3(min(groups, Wide), (groups + Wide - 1) / Wide, 1);
-}
-
-/** A box, centre and half its size, as the picture sees it: whether it is wholly out of sight, how near its nearest part is, and how many pixels it spans. */
-struct Seen {
-    bool out;
-    float nearest;
-    float pixels;
-};
-Seen look(float3 centre, float3 half)
-{
-    const float4 c = mul(float4(centre, 1.0), push.toClip);
-    const float4 e[3] = { mul(float4(half.x, 0.0, 0.0, 0.0), push.toClip), mul(float4(0.0, half.y, 0.0, 0.0), push.toClip),
-                          mul(float4(0.0, 0.0, half.z, 0.0), push.toClip) };
-    int past[6] = { 0, 0, 0, 0, 0, 0 };
-    [unroll] for (uint corner = 0; corner < 8; ++corner) {
-        float4 at = c;
-        [unroll] for (uint axis = 0; axis < 3; ++axis) at += (corner & (1u << axis)) != 0 ? e[axis] : -e[axis];
-        past[0] += at.x < -at.w; past[1] += at.x > at.w; past[2] += at.y < -at.w; past[3] += at.y > at.w; past[4] += at.z < 0.0; past[5] += at.z > at.w;
-    }
-    Seen seen;
-    seen.out = false;
-    [unroll] for (uint side = 0; side < 6; ++side) seen.out = seen.out || past[side] == 8;
-    const float reach = abs(e[0].w) + abs(e[1].w) + abs(e[2].w);
-    seen.nearest = c.w - reach;
-    const float across = max(abs(e[0].x) + abs(e[1].x) + abs(e[2].x), abs(e[0].y) + abs(e[1].y) + abs(e[2].y));
-    seen.pixels = seen.nearest > 0.0 ? across / seen.nearest * push.halfHeight : 1e30;
-    return seen;
-}
+/** A box, centre and half its size, as the picture sees it. */
+KoralBoxSeen look(float3 centre, float3 half) { return KoralSeeBox(centre, half, push.toClip, push.halfHeight); }
 
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void cullClusters(uint3 id : SV_DispatchThreadID)
 {
-    const uint cluster = id.x + id.y * Wide * 256;
+    const uint cluster = KoralThreadIndex(id, 256);
     if (cluster >= clusterCount(push.count)) return;
     const uint4 low = instances.Load4(clusterAddress(cluster));
     const float3 high = asfloat(instances.Load3(clusterAddress(cluster) + 16));
     const float3 lowest = asfloat(low.xyz);
     const float reach = asfloat(low.w) * push.meshRadius;
-    const Seen seen = look((lowest + high) * 0.5, (high - lowest) * 0.5 + reach);
-    if (seen.out || seen.nearest > push.drawDistance) return;
+    const KoralBoxSeen seen = look((lowest + high) * 0.5, (high - lowest) * 0.5 + reach);
+    if (seen.outOfSight || seen.nearest > push.drawDistance) return;
     const uint first = cluster * InstancesPerCluster, many = min(InstancesPerCluster, push.count - first);
     // All of it past pointDistance, and over fewer pixels than it has instances: as many points as it has pixels, of
     // instances spread over it — no more points than can be seen, however many there are.
@@ -106,7 +78,7 @@ void cullClusters(uint3 id : SV_DispatchThreadID)
 [numthreads(1, 1, 1)]
 void clusterArgs()
 {
-    const uint3 groups = groupsFor(counters[0]);
+    const uint3 groups = KoralGroupsFor(counters[0]);
     args[0] = groups.x; args[1] = groups.y; args[2] = groups.z;
 }
 
@@ -114,35 +86,26 @@ void clusterArgs()
 [numthreads(256, 1, 1)]
 void cullInstances(uint3 group : SV_GroupID, uint lane : SV_GroupIndex)
 {
-    const uint which = group.x + group.y * Wide;
+    const uint which = KoralGroupIndex(group);
     if (which >= counters[0]) return;
     const uint i = listed[which] * InstancesPerCluster + lane;
     bool asMesh = false, asPoint = false;
     if (i < push.count) {
         const Instance instance = loadInstance(instances, push.count, i);
-        const Seen seen = look(instance.position, instance.scale * push.meshRadius);
-        if (!seen.out && seen.nearest <= push.drawDistance) {
+        const KoralBoxSeen seen = look(instance.position, instance.scale * push.meshRadius);
+        if (!seen.outOfSight && seen.nearest <= push.drawDistance) {
             asMesh = seen.nearest < push.pointDistance;
             asPoint = !asMesh;
         }
     }
     // Counted a wave at a time: one atomic for many.
-    const uint meshes = WaveActiveCountBits(asMesh), dots = WaveActiveCountBits(asPoint);
-    uint meshFirst = 0, dotFirst = 0;
-    if (WaveIsFirstLane()) {
-        if (meshes > 0) InterlockedAdd(counters[1], meshes, meshFirst);
-        if (dots > 0) InterlockedAdd(counters[2], dots, dotFirst);
-    }
-    meshFirst = WaveReadLaneFirst(meshFirst);
-    dotFirst = WaveReadLaneFirst(dotFirst);
+    const uint meshAt = KoralWaveAppend(asMesh, counters, 1), dotAt = KoralWaveAppend(asPoint, counters, 2);
     if (asMesh) {
-        const uint at = meshFirst + WavePrefixCountBits(asMesh);
-        if (at < push.capacity) visible[at] = i;
+        if (meshAt < push.capacity) visible[meshAt] = i;
         else InterlockedAdd(counters[3], 1u);
     }
     if (asPoint) {
-        const uint at = dotFirst + WavePrefixCountBits(asPoint);
-        if (at < push.pointCapacity) points[at] = i;
+        if (dotAt < push.pointCapacity) points[dotAt] = i;
         else InterlockedAdd(counters[3], 1u);
     }
 }
@@ -156,6 +119,6 @@ void finish()
     commands[2] = push.firstIndex;
     commands[3] = asuint(push.vertexOffset);
     commands[4] = 0;
-    const uint3 groups = groupsFor((min(counters[2], push.pointCapacity) + 255) / 256);
+    const uint3 groups = KoralGroupsFor((min(counters[2], push.pointCapacity) + 255) / 256);
     args[3] = groups.x; args[4] = groups.y; args[5] = groups.z;
 }

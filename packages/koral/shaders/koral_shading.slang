@@ -24,7 +24,7 @@
 //     };
 //     public extension Toon : IKoralMaterial {
 //         public typealias Shading = ToonLit;
-//         public ToonLit Read(KoralSurface at) { ToonLit lit; lit.normal = at.normal; lit.colour = KoralLinear(tint.rgb); return lit; }
+//         public ToonLit Read(KoralSurface at) { ToonLit lit; lit.normal = at.normal; lit.colour = KoralLinearFromGamma22(tint.rgb); return lit; }
 //     };
 //
 // A kind can give back an engine's shading instead (Shading = KoralPbr) and need no function of its own.
@@ -32,8 +32,8 @@
 module koral_shading;
 
 __exported import koral_lights;
-
-public static const float KoralPi = 3.14159265358979;
+__exported import koral_math;
+__exported import koral_color;
 
 /** A point of a surface, seen from nowhere in particular: where it is, which way it faces, and how to read a picture there. */
 public struct KoralSurface {
@@ -68,9 +68,6 @@ public float3 KoralMappedNormal(KoralSurface surface, float3 texel)
     const float3 turned = texel * 2.0 - 1.0;
     return normalize(surface.tangent * turned.x + surface.bitangent * turned.y + surface.normal * turned.z);
 }
-
-/** A colour as it is picked, as light: a material's fields and pictures are the former, a shading function works in the latter. */
-public float3 KoralLinear(float3 picked) { return pow(max(picked, 0.0), 2.2); }
 
 /** Where the camera is. */
 public struct KoralCamera {

@@ -20,6 +20,9 @@
 
 module koral_instances;
 
+import koral_math;
+import koral_encoding;
+
 public static const uint InstancesPerCluster = 256;
 public static const uint HeaderWords = 8;
 public static const uint ClusterWords = 8;
@@ -47,44 +50,6 @@ public struct Cluster {
     public float3 max;
 };
 
-/** A quaternion in 32 bits: its three smallest parts, 10 bits each, and which part was left out — the largest, made positive. */
-public uint packRotation(float4 q)
-{
-    const float4 a = abs(q);
-    uint largest = 0;
-    if (a.y > a[largest]) largest = 1;
-    if (a.z > a[largest]) largest = 2;
-    if (a.w > a[largest]) largest = 3;
-    if (q[largest] < 0.0) q = -q;
-    uint packed = largest;
-    uint shift = 2;
-    [unroll] for (uint i = 0; i < 4; ++i) {
-        if (i == largest) continue;
-        // Each of the others is within ±1/√2.
-        const float unit = saturate(q[i] * 0.70710678 + 0.5);
-        packed |= uint(round(unit * 1023.0)) << shift;
-        shift += 10;
-    }
-    return packed;
-}
-
-public float4 unpackRotation(uint packed)
-{
-    const uint largest = packed & 3u;
-    float4 q = 0.0;
-    float sum = 0.0;
-    uint shift = 2;
-    [unroll] for (uint i = 0; i < 4; ++i) {
-        if (i == largest) continue;
-        const float part = (float((packed >> shift) & 1023u) / 1023.0 - 0.5) * 1.41421356;
-        q[i] = part;
-        sum += part * part;
-        shift += 10;
-    }
-    q[largest] = sqrt(max(1.0 - sum, 0.0));
-    return q;
-}
-
 public Instance loadInstance(ByteAddressBuffer instances, uint count, uint index)
 {
     const uint at = instanceAddress(count, index);
@@ -92,7 +57,7 @@ public Instance loadInstance(ByteAddressBuffer instances, uint count, uint index
     Instance instance;
     instance.position = asfloat(words.xyz);
     instance.scale = asfloat(words.w);
-    instance.rotation = unpackRotation(instances.Load(at + 16));
+    instance.rotation = KoralUnpackQuaternion(instances.Load(at + 16));
     return instance;
 }
 
@@ -100,19 +65,7 @@ public Instance loadInstance(ByteAddressBuffer instances, uint count, uint index
 public uint instancesCount(ByteAddressBuffer instances) { return instances.Load(4); }
 
 /** An instance as a matrix — its rotation, scale and place — in its Instancer's entity's space, row-vector convention (mul(v, m)). */
-public float4x4 instanceMatrix(Instance instance)
-{
-    const float4 q = instance.rotation;
-    const float s = instance.scale;
-    const float xx = q.x * q.x, yy = q.y * q.y, zz = q.z * q.z;
-    const float xy = q.x * q.y, xz = q.x * q.z, yz = q.y * q.z;
-    const float wx = q.w * q.x, wy = q.w * q.y, wz = q.w * q.z;
-    return float4x4(
-        float4((1.0 - 2.0 * (yy + zz)) * s, 2.0 * (xy + wz) * s, 2.0 * (xz - wy) * s, 0.0),
-        float4(2.0 * (xy - wz) * s, (1.0 - 2.0 * (xx + zz)) * s, 2.0 * (yz + wx) * s, 0.0),
-        float4(2.0 * (xz + wy) * s, 2.0 * (yz - wx) * s, (1.0 - 2.0 * (xx + yy)) * s, 0.0),
-        float4(instance.position, 1.0));
-}
+public float4x4 instanceMatrix(Instance instance) { return KoralMatrixOf(instance.rotation, instance.scale, instance.position); }
 
 /** Instance @p index of the buffer as a matrix: what a vertex shader places its vertices by, before the entity's matrix. */
 public float4x4 instanceMatrix(ByteAddressBuffer instances, uint index)

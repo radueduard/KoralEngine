@@ -59,11 +59,11 @@ public extension PbrMaterial : IKoralMaterial {
         const float4 surface = kor_Texture2D[NonUniformResourceIndex(metallicRoughnessMap)].Sample(at.sampler, at.uv);
         KoralPbr pbr;
         pbr.normal = KoralMappedNormal(at, kor_Texture2D[NonUniformResourceIndex(normalMap)].Sample(at.sampler, at.uv).xyz);
-        pbr.baseColor = KoralLinear(baseColor.rgb * base.rgb);
+        pbr.baseColor = KoralLinearFromGamma22(baseColor.rgb * base.rgb);
         pbr.metallic = saturate(metallic * surface.b);
         pbr.roughness = clamp(roughness * surface.g, 0.03, 1.0);
         pbr.occlusion = kor_Texture2D[NonUniformResourceIndex(occlusionMap)].Sample(at.sampler, at.uv).r;
-        pbr.emission = emission * KoralLinear(kor_Texture2D[NonUniformResourceIndex(emissiveMap)].Sample(at.sampler, at.uv).rgb);
+        pbr.emission = emission * KoralLinearFromGamma22(kor_Texture2D[NonUniformResourceIndex(emissiveMap)].Sample(at.sampler, at.uv).rgb);
         const float alpha = baseColor.a * base.a;
         pbr.opacity = alphaMode == 0 ? 1.0 : alphaMode == 1 ? (alpha < alphaCutoff ? 0.0 : 1.0) : alpha;
         return pbr;

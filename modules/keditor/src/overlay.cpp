@@ -78,13 +78,14 @@ uint fragment() : SV_Target
         constexpr const char* OutlineShader = R"slang(// The editor's: a line round the picked entity. A pixel that is not the entity's, but is within `thickness` pixels of
 // one that is, is the line's colour; every other pixel is left as nothing. `selected` is wired from a Selected node.
 
+import koral_math;
+
 Texture2D<uint> ids;
 
 [shader("vertex")]
 float4 vertex(uint index : SV_VertexID) : SV_Position
 {
-    float2 corner = float2((index << 1) & 2, index & 2);
-    return float4(corner * 2.0 - 1.0, 0.0, 1.0);
+    return float4(KoralFullscreenCorner(index), 0.0, 1.0);
 }
 
 [shader("fragment")]

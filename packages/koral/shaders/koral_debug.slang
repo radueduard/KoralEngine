@@ -12,6 +12,8 @@
 
 module koral_debug;
 
+import koral_color;
+
 /** Which channel is shown: kgraph::ShaderDebugChannel. 0 shows the lit colour. */
 [vk::constant_id(64)] public const int koralDebugView = 0;
 
@@ -53,11 +55,11 @@ public bool koralDebugShowing() { return koralDebugView != KoralDebugLit; }
 public float3 koralDebugColor(KoralSurface surface)
 {
     switch (koralDebugView) {
-    case KoralDebugAlbedo: return pow(saturate(surface.albedo), 1.0 / 2.2);
+    case KoralDebugAlbedo: return KoralGamma22FromLinear(saturate(surface.albedo));
     case KoralDebugNormal: return normalize(surface.normal) * 0.5 + 0.5;
     case KoralDebugRoughness: return float3(saturate(surface.roughness));
     case KoralDebugMetallic: return float3(saturate(surface.metallic));
-    case KoralDebugEmissive: return pow(saturate(surface.emissive), 1.0 / 2.2);
+    case KoralDebugEmissive: return KoralGamma22FromLinear(saturate(surface.emissive));
     case KoralDebugOcclusion: return float3(saturate(surface.occlusion));
     default: return float3(1.0, 0.0, 1.0);     // a channel this does not know: magenta, so as to be seen
     }

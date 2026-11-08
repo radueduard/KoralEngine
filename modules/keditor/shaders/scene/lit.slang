@@ -1,6 +1,7 @@
 module lit;
 
 import engineCommon;
+import koral_math;
 import koral_debug;     // what the editor's scene view shows of the material: its albedo, its normal...
 
 struct Vertex {
@@ -38,11 +39,7 @@ RasterInfo vertex(Vertex vertex)
     float4 world = mul(float4(vertex.position, 1.0), model);
     raster.worldPosition = world.xyz;
     raster.position = mul(world, frame.viewProjection);
-    // The normal through the cofactors of the model's 3x3 — its inverse transpose, but for a scale that normalize
-    // takes away — so that it stays square to the surface however unevenly the model is scaled.
-    float3 a0 = model[0].xyz, a1 = model[1].xyz, a2 = model[2].xyz;
-    float3 normal = vertex.normal.x * cross(a1, a2) + vertex.normal.y * cross(a2, a0) + vertex.normal.z * cross(a0, a1);
-    raster.normal = normal * sign(dot(a0, cross(a1, a2)));   // a mirroring scale turns the cofactors inside out
+    raster.normal = KoralTransformNormal(vertex.normal, model);     // square to the surface however it is scaled
     return raster;
 }
 
@@ -53,15 +50,13 @@ float falloff(float distance, float range)
     return edge * edge / (distance * distance + 1.0);
 }
 
-static const float Pi = 3.14159265358979;
-
 /** How much of a surface's tiny facets face [halfway]: Trowbridge-Reitz (GGX). */
 float facets(float facingHalfway, float roughness)
 {
     float a = roughness * roughness;
     float a2 = a * a;
     float d = facingHalfway * facingHalfway * (a2 - 1.0) + 1.0;
-    return a2 / (Pi * d * d);
+    return a2 / (KoralPi * d * d);
 }
 
 /** How much of them is neither hidden from the light nor from the eye: Smith's, with Schlick's fit. */
@@ -81,13 +76,13 @@ float3 reflected(float facing, float3 straightOn)
 [shader("fragment")]
 float4 fragment(RasterInfo raster) : SV_Target
 {
-    float3 albedo = toLinear(draw.albedo.rgb);
+    float3 albedo = KoralLinearFromGamma22(draw.albedo.rgb);
     float metallic = saturate(draw.metallic);
     float roughness = clamp(draw.roughness, 0.045, 1.0);   // none at all is a highlight too small to draw
     float3 normal = normalize(raster.normal);
     float3 toEye = normalize(frame.cameraPosition.xyz - raster.worldPosition);
     float facingEye = max(dot(normal, toEye), 1e-4);
-    if (koralDebugShowing()) return float4(koralDebugColor(KoralSurface(albedo, normal, roughness, metallic, toLinear(draw.emission))), 1.0);
+    if (koralDebugShowing()) return float4(koralDebugColor(KoralSurface(albedo, normal, roughness, metallic, KoralLinearFromGamma22(draw.emission))), 1.0);
 
     // What it reflects straight on: a little of everything for what is not metal, its own colour for what is.
     // And what is left to scatter: a metal scatters none.
@@ -121,9 +116,9 @@ float4 fragment(RasterInfo raster) : SV_Target
                          / (4.0 * facingEye * facing);
         // A light's colour is what a matte white surface facing it shows: so the scattered part is not divided
         // by pi, and the highlight is multiplied by it.
-        lit += light.color.rgb * amount * facing * (scattered * (1.0 - mirrored) + highlight * Pi);
+        lit += light.color.rgb * amount * facing * (scattered * (1.0 - mirrored) + highlight * KoralPi);
     }
-    lit += toLinear(draw.emission);
+    lit += KoralLinearFromGamma22(draw.emission);
 
-    return float4(present(lit), 1.0);
+    return float4(KoralDisplay(lit), 1.0);
 }

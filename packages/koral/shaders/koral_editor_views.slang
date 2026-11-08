@@ -5,6 +5,9 @@
 // `model` and `entityId` are wired to each Draw from a Filter of Mesh, so no entity needs anything to be drawn here. A
 // mesh that has not what a vertex entry reads (a NORMAL, a UV) is not drawn by it.
 
+import koral_math;
+import koral_color;
+
 struct View {
     float4x4 viewProjection;
     float4x4 view;
@@ -29,15 +32,6 @@ struct Mapped {
 
 float4 placed(float3 position) { return mul(mul(float4(position, 1.0), object.model), view.viewProjection); }
 
-/** A normal into the world through the cofactors of the model's 3x3: square to the surface however it is scaled. */
-float3 turned(float3 normal)
-{
-    float4x4 model = object.model;
-    float3 a0 = model[0].xyz, a1 = model[1].xyz, a2 = model[2].xyz;
-    float3 n = normal.x * cross(a1, a2) + normal.y * cross(a2, a0) + normal.z * cross(a0, a1);
-    return normalize(n * sign(dot(a0, cross(a1, a2))));
-}
-
 [shader("vertex")]
 float4 positionOnly(float3 position : POSITION) : SV_Position { return placed(position); }
 
@@ -46,7 +40,7 @@ Shaped withNormal(float3 position : POSITION, float3 normal : NORMAL)
 {
     Shaped shaped;
     shaped.position = placed(position);
-    shaped.normal = turned(normal);
+    shaped.normal = KoralTransformNormal(normal, object.model);
     return shaped;
 }
 
@@ -94,10 +88,5 @@ float4 overdraw() : SV_Target { return float4(0.08, 0.035, 0.012, 1.0); }
 [shader("fragment")]
 float4 entities() : SV_Target
 {
-    uint h = object.entityId * 2654435761u;
-    h ^= h >> 15;
-    h *= 2246822519u;
-    h ^= h >> 13;
-    float3 color = float3(h & 255u, (h >> 8) & 255u, (h >> 16) & 255u) / 255.0;
-    return float4(0.25 + 0.75 * color, 1.0);
+    return float4(KoralColorOfIndex(object.entityId), 1.0);
 }

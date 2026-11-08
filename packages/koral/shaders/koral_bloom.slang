@@ -7,20 +7,18 @@
 // threshold is for the first. `strength` is given on the composite's.
 
 import koral_debug;
+import koral_color;
 
 Sampler2D<float4> source;
 Sampler2D<float4> detail;           // on the way up: this level as it was filtered down
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> target;
 [[vk::image_format("rgba16f")]] RWTexture2D<float4> hdrImage;
 
-float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
-float3 sane(float3 v) { return any(isnan(v)) || any(isinf(v)) ? float3(0.0, 0.0, 0.0) : v; }
-
 /** Four samples averaged, each weighed down by how bright it is: one very bright pixel does not flicker through. */
 float3 karis(float3 a, float3 b, float3 c, float3 d)
 {
-    a = sane(a); b = sane(b); c = sane(c); d = sane(d);
-    float wa = 1.0 / (1.0 + luma(a)), wb = 1.0 / (1.0 + luma(b)), wc = 1.0 / (1.0 + luma(c)), wd = 1.0 / (1.0 + luma(d));
+    a = KoralSane(a); b = KoralSane(b); c = KoralSane(c); d = KoralSane(d);
+    float wa = 1.0 / (1.0 + KoralLuminance(a)), wb = 1.0 / (1.0 + KoralLuminance(b)), wc = 1.0 / (1.0 + KoralLuminance(c)), wd = 1.0 / (1.0 + KoralLuminance(d));
     return (a * wa + b * wb + c * wc + d * wd) / max(wa + wb + wc + wd, 1e-4);
 }
 
@@ -43,7 +41,7 @@ void downsample(uint3 id : SV_DispatchThreadID, uniform float threshold, uniform
     float3 i = source.SampleLevel(uv + float2(2.0 * x, -2.0 * y), 0.0).rgb, j = source.SampleLevel(uv + float2(-x, y), 0.0).rgb;
     float3 k = source.SampleLevel(uv + float2(x, y), 0.0).rgb, l = source.SampleLevel(uv + float2(-x, -y), 0.0).rgb;
     float3 m = source.SampleLevel(uv + float2(x, -y), 0.0).rgb;
-    float3 result = sane(karis(j, k, l, m) * 0.5 + (karis(a, b, j, d) + karis(b, c, k, e) + karis(d, j, g, l) + karis(k, f, m, i)) * 0.125);
+    float3 result = KoralSane(karis(j, k, l, m) * 0.5 + (karis(a, b, j, d) + karis(b, c, k, e) + karis(d, j, g, l) + karis(k, f, m, i)) * 0.125);
 
     if (level == 0) {
         // Only what is brighter than the threshold goes on, coming in softly over the knee.

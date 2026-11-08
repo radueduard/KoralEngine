@@ -2708,7 +2708,7 @@ TEST_F(EditorTest, MaterialsAreDrawnByTheirKindsShading) {
         std::ifstream in(Session().ShadingModuleOf("Toon"));
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         const std::string from = "lit.colour = float3(0.8);";
-        text.replace(text.find(from), from.size(), "lit.colour = KoralLinear(baseColor.rgb);");
+        text.replace(text.find(from), from.size(), "lit.colour = KoralLinearFromGamma22(baseColor.rgb);");
         std::ofstream(Session().ShadingModuleOf("Toon"), std::ios::trunc) << text;
     }
     const auto toonPicture = drawn("@Green.kmat");

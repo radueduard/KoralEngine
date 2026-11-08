@@ -2,8 +2,10 @@
 // SceneView node, whose `frame` and `lights` outputs are wired to a pipeline's `param.frame` and `param.lights`.
 // Neither is given a binding here: the engine numbers what a pipeline's shaders declare.
 //
-// Light is worked in linear terms: the colours here are linear already (the SceneView converts them), a surface's
-// colour is converted with toLinear, and what is worked out goes back to the display through present.
+// Light is worked in linear terms: the colours here are linear already (the graph converts them), a surface's colour
+// is converted with KoralLinearFromGamma22, and what is worked out goes back to the display through KoralDisplay.
+
+__exported import koral_display;
 
 public struct FrameData {
     public float4x4 viewProjection;
@@ -30,22 +32,6 @@ public struct Light {
 
 public ConstantBuffer<FrameData> frame;
 public StructuredBuffer<Light> lights;
-
-/** A colour as picked — as the display shows it — in linear terms, which light adds up in. */
-public float3 toLinear(float3 color)
-{
-    return pow(max(color, 0.0), 2.2);
-}
-
-/**
- * Linear light as the display shows it: tone mapped (Narkowicz's fit of ACES), so that brighter than white rolls off
- * rather than clipping, then encoded for the display's curve.
- */
-public float3 present(float3 light)
-{
-    float3 mapped = saturate((light * (2.51 * light + 0.03)) / (light * (2.43 * light + 0.59) + 0.14));
-    return pow(mapped, 1.0 / 2.2);
-}
 
 /** The light the sky gives a surface facing [normal]: the ground's from below, the zenith's from above. */
 public float3 skyLight(float3 normal)

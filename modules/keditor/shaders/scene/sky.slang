@@ -1,6 +1,8 @@
 module sky;
 
 import engineCommon;
+import koral_math;
+import koral_depth;
 
 struct RasterInfo {
     float4 position : SV_Position;
@@ -12,9 +14,8 @@ struct RasterInfo {
 [shader("vertex")]
 RasterInfo vertex(uint index : SV_VertexID)
 {
-    float2 corner = float2((index << 1) & 2, index & 2);
     RasterInfo raster;
-    raster.ndc = corner * 2.0 - 1.0;
+    raster.ndc = KoralFullscreenCorner(index);
     raster.position = float4(raster.ndc, 1.0, 1.0);
     return raster;
 }
@@ -22,9 +23,7 @@ RasterInfo vertex(uint index : SV_VertexID)
 [shader("fragment")]
 float4 fragment(RasterInfo raster) : SV_Target
 {
-    // The point under the pixel on the near plane and on the far one: the way the eye looks through it.
-    float4 near = mul(float4(raster.ndc, 0.0, 1.0), frame.inverseViewProjection);
-    float4 far = mul(float4(raster.ndc, 1.0, 1.0), frame.inverseViewProjection);
-    float3 direction = normalize(far.xyz / far.w - near.xyz / near.w);
-    return float4(present(skyColor(direction)), 1.0);
+    // The way the eye looks through the pixel.
+    const float3 direction = KoralRayThrough(raster.ndc, frame.inverseViewProjection).direction;
+    return float4(KoralDisplay(skyColor(direction)), 1.0);
 }

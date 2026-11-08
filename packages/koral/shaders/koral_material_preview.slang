@@ -6,6 +6,8 @@ module koral_material_preview;
 
 __exported import koral_shading;
 __exported import koral_bindless;
+import koral_display;
+import koral_math;
 
 public struct KoralPreviewView {
     public float4x4 viewProjection;
@@ -62,12 +64,8 @@ public KoralCubeEnvironment KoralPreviewAround()
     return KoralCubeEnvironment(kor_TextureCube[NonUniformResourceIndex(view.environment)], smooth, view.mips);
 }
 
-/** Light as the picture shows it: a soft shoulder (ACES, Narkowicz's fit) and the display's curve. */
-float3 Shown(float3 light)
-{
-    const float3 toned = saturate(light * 0.8 * (2.51 * light * 0.8 + 0.03) / (light * 0.8 * (2.43 * light * 0.8 + 0.59) + 0.14));
-    return pow(toned, 1.0 / 2.2);
-}
+/** Light as the picture shows it: exposed a little under, then as the engine shows light. */
+float3 Shown(float3 light) { return KoralDisplay(light * 0.8); }
 
 public float4 KoralPreviewColour<M : IKoralMaterial>(M material, KoralPreviewRaster raster, bool front)
 {
@@ -95,7 +93,7 @@ public struct KoralPreviewSkyRaster {
 public KoralPreviewSkyRaster skyVertex(uint index : SV_VertexID)
 {
     KoralPreviewSkyRaster raster;
-    raster.at = float2((index << 1) & 2, index & 2) * 2.0 - 1.0;
+    raster.at = KoralFullscreenCorner(index);
     raster.position = float4(raster.at, 0.99999, 1.0);
     return raster;
 }

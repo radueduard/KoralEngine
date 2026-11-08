@@ -3,6 +3,10 @@
 // plane is seen edge on. Drawn over a whole picture, a ray a pixel: where the ray meets the plane behind what the scene
 // has drawn there (`sceneDepth`, when `depthTested`), nothing is.
 
+import koral_math;
+import koral_depth;
+import koral_bounds;
+
 struct GridView {
     float4x4 viewProjection;
     float4x4 inverseViewProjection;
@@ -18,9 +22,8 @@ struct Raster {
 [shader("vertex")]
 Raster vertex(uint index : SV_VertexID)
 {
-    float2 corner = float2((index << 1) & 2, index & 2);
     Raster raster;
-    raster.clip = corner * 2.0 - 1.0;
+    raster.clip = KoralFullscreenCorner(index);
     raster.position = float4(raster.clip, 0.0, 1.0);
     return raster;
 }
@@ -39,18 +42,17 @@ float axis(float at, float width) { return 1.0 - saturate(abs(at) / max(fwidth(a
 [shader("fragment")]
 float4 fragment(Raster raster, uniform float cell, uniform float major, uniform float fade, uniform float opacity, uniform int plane, uniform int depthTested) : SV_Target
 {
-    float4 nearPoint = mul(float4(raster.clip, 0.0, 1.0), gridView.inverseViewProjection);
-    float4 farPoint = mul(float4(raster.clip, 1.0, 1.0), gridView.inverseViewProjection);
-    float3 from = nearPoint.xyz / nearPoint.w, to = farPoint.xyz / farPoint.w;
-    float3 ray = to - from;
+    const KoralRay ray = KoralRayThrough(raster.clip, gridView.inverseViewProjection);
+    const float3 from = ray.origin;
 
     // Which axis the plane is square to, and the two in it: XZ (Y up), XY, YZ.
     int across = plane == 1 ? 2 : plane == 2 ? 0 : 1;
     int u = plane == 2 ? 1 : 0, v = plane == 1 ? 1 : 2;
-    if (abs(ray[across]) < 1e-7) discard;
-    float t = -from[across] / ray[across];
-    if (t <= 0.0 || t >= 1.0) discard;
-    float3 at = from + ray * t;
+    float3 square = 0.0;
+    square[across] = 1.0;
+    const float t = KoralRayPlane(ray.origin, ray.direction, float3(0.0), square);
+    if (t <= 0.0 || t >= ray.length) discard;
+    float3 at = from + ray.direction * t;
 
     float4 clip = mul(float4(at, 1.0), gridView.viewProjection);
     float depth = clip.z / clip.w;
@@ -74,7 +76,7 @@ float4 fragment(Raster raster, uniform float cell, uniform float major, uniform 
     float distance = length(at - from);
     float far = max(fade, 1e-3);
     alpha *= 1.0 - smoothstep(far * 0.45, far, distance);
-    alpha *= saturate(abs(normalize(ray)[across]) * 6.0);     // edge on, a plane is all lines
+    alpha *= saturate(abs(ray.direction[across]) * 6.0);     // edge on, a plane is all lines
     alpha *= saturate(opacity);
     if (alpha < 0.004) discard;
     return float4(color, alpha);

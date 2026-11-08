@@ -7,6 +7,8 @@
 // A pixel of `splat` is how near (24 bits: 1 at the near plane, 0 at the far one) and a shade (8 bits); 0 is none.
 
 import koral_instances;
+import koral_math;
+import koral_random;
 
 struct PointsPush {
     float4x4 toClip;            // the Instancer's entity's space to the picture's, as CullInstances had it
@@ -27,20 +29,11 @@ RWStructuredBuffer<uint> splat;     // a uint a pixel
 RWTexture2D<float4> target;         // what they are laid over
 Texture2D<float> depth;             // and how near what the scene drew is
 
-static const uint Wide = 65535;
-
-uint hash(uint x)
-{
-    x = x * 747796405u + 2891336453u;
-    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
-    return (x >> 22u) ^ x;
-}
-
 [shader("compute")]
 [numthreads(256, 1, 1)]
 void splatPoints(uint3 id : SV_DispatchThreadID)
 {
-    const uint k = id.x + id.y * Wide * 256;
+    const uint k = KoralThreadIndex(id, 256);
     if (k >= min(counters[2], push.pointCapacity)) return;
     const uint which = points[k];
     const uint4 words = instances.Load4(instanceAddress(push.count, which));
@@ -56,7 +49,7 @@ void splatPoints(uint3 id : SV_DispatchThreadID)
     const int2 middle = int2((ndc.xy * 0.5 + 0.5) * float2(push.width, push.height));
     const float near = push.reversedZ != 0 ? ndc.z : 1.0 - ndc.z;
     // Each a little lighter or darker than the next, as leaves and stones are.
-    const uint shade = 150u + hash(which) % 106u;
+    const uint shade = 150u + KoralPcgHash(which) % 106u;
     const uint value = (uint(saturate(near) * 16777215.0) << 8) | shade;
     const int low = -int(side / 2);
     for (int y = 0; y < int(side); ++y)
