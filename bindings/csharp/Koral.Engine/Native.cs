@@ -138,6 +138,7 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] public static partial IntPtr kengine_document(IntPtr graph);
     [LibraryImport(Lib)] public static partial IntPtr kengine_document_world(IntPtr document);
     [LibraryImport(Lib)] public static partial IntPtr kengine_script_input(IntPtr document);
+    [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kengine_script_viewport(IntPtr document, float* width, float* height);
     [LibraryImport(Lib)] public static partial IntPtr kengine_debug(IntPtr document);
     [LibraryImport(Lib)] public static partial byte* kengine_document_json(IntPtr document);
     [LibraryImport(Lib)] public static partial byte* kengine_project_directory(IntPtr document);

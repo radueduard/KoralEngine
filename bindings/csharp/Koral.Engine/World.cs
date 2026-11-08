@@ -55,6 +55,20 @@ public sealed unsafe class World
     }
 
     /// <summary>
+    /// How big, in pixels, the window is whose mouse <see cref="Input"/> reads — the scene's, or the editor's Game panel:
+    /// what <c>Input.MousePosition</c> is from the top-left of, to make a ray of the cursor through the camera. Zero
+    /// when no scene runs.
+    /// </summary>
+    public unsafe Koral.Vec2 ViewportSize
+    {
+        get
+        {
+            float width = 0, height = 0;
+            return Native.kengine_script_viewport(Document, &width, &height) ? new Koral.Vec2(width, height) : new Koral.Vec2(0, 0);
+        }
+    }
+
+    /// <summary>
     /// The lines and shapes a script draws to see what it does — contacts, normals, bounds: the scene's, shown over the
     /// editor's view of it. Drawn in Update they last the frame; FixedUpdate runs 0 to 8 times a frame, so what is to be
     /// seen every frame is drawn in Update, or given a duration.

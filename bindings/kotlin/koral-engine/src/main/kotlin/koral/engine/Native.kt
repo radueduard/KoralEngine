@@ -117,6 +117,7 @@ internal object Native {
     val kengine_playing = call("kengine_playing", JAVA_BOOLEAN, ADDRESS)
     val kengine_set_playing = call("kengine_set_playing", JAVA_BOOLEAN, ADDRESS, JAVA_BOOLEAN)
     val kengine_script_input = call("kengine_script_input", ADDRESS, ADDRESS)
+    val kengine_script_viewport = call("kengine_script_viewport", JAVA_BOOLEAN, ADDRESS, ADDRESS, ADDRESS)
     val kengine_debug = call("kengine_debug", ADDRESS, ADDRESS)
 
     val kengine_node_add = call("kengine_node_add", ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_DOUBLE, JAVA_DOUBLE)

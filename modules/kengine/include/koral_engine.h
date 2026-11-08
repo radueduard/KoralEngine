@@ -79,6 +79,11 @@ KENGINE_API bool kengine_set_playing(KengineDocument* document, bool playing);
  */
 KENGINE_API KoralInput* kengine_script_input(KengineDocument* document);
 /**
+ * How big, in pixels, the window is whose mouse the scripts read (kengine_script_input): what its positions are from the
+ * top-left of — to make a ray of the cursor through the camera. False, and nothing written, for a document no scene runs.
+ */
+KENGINE_API bool kengine_script_viewport(KengineDocument* document, float* width, float* height);
+/**
  * The debug lines the document's scripts draw with (koral_debug_line and the rest): its scene's, shown over the
  * editor's view of it, and by a DebugDraw node of its graph. Drawn in an update, they last that frame; a fixed update
  * runs 0 to 8 times a frame, so what is to be seen every frame is drawn in update, or given a duration. Null for a

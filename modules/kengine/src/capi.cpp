@@ -121,6 +121,17 @@ KoralInput* kengine_script_input(KengineDocument* document)
         return scene ? reinterpret_cast<KoralInput*>(const_cast<kor::Input*>(&scene->ScriptInput())) : nullptr;
     }, static_cast<KoralInput*>(nullptr));
 }
+bool kengine_script_viewport(KengineDocument* document, float* width, float* height)
+{
+    return Guarded([&] {
+        const auto* scene = keditor::PlayScene::Of(Doc(document));
+        if (!scene) return false;
+        const kor::UVec2 size = scene->ScriptViewport();
+        if (width) *width = static_cast<float>(size.x);
+        if (height) *height = static_cast<float>(size.y);
+        return true;
+    }, false);
+}
 
 KoralDebugDraw* kengine_debug(KengineDocument* document)
 {

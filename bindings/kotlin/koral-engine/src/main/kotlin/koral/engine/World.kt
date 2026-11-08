@@ -93,6 +93,18 @@ class World internal constructor(internal val document: MemorySegment) {
     }
 
     /**
+     * How big, in pixels, the window is whose mouse [input] reads — the scene's, or the editor's Game panel: what
+     * `input.mousePosition` is from the top-left of, to make a ray of the cursor through the camera. Zero when no scene runs.
+     */
+    val viewportSize: Vec2 get() = Arena.ofConfined().use { a ->
+        val width = a.allocate(JAVA_FLOAT)
+        val height = a.allocate(JAVA_FLOAT)
+        if (Native.kengine_script_viewport.invokeExact(document, width, height) as Boolean)
+            Vec2(width.get(JAVA_FLOAT, 0), height.get(JAVA_FLOAT, 0))
+        else Vec2(0f, 0f)
+    }
+
+    /**
      * The lines and shapes a script draws to see what it does — contacts, normals, bounds: the scene's, shown over the
      * editor's view of it. Drawn in [Script.update] they last the frame; [Script.fixedUpdate] runs 0 to 8 times a frame,
      * so what is to be seen every frame is drawn in update, or given a duration.

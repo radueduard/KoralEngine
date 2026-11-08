@@ -390,7 +390,9 @@ shows a frame later.
 
 A script that is steered reads the window's keys and mouse: `input` in Kotlin — `input.isKeyHeld(Key.eW)`,
 `input.isMouseButtonHeld(MouseButton.eRight)`, `input.mousePositionDelta`, `input.mouseScrollDelta` — and `Input`
-in C#, `Input.IsKeyHeld(Key.eW)`. In the editor it is the Game panel's: while the pointer is over it, or it was the
+in C#, `Input.IsKeyHeld(Key.eW)`. `world.viewportSize` (C#: `World.ViewportSize`) is how big, in pixels, the window is
+that `input.mousePosition` is from the top-left of: with the camera's matrices, a ray of the cursor into the scene.
+In the editor it is the Game panel's: while the pointer is over it, or it was the
 last thing clicked.
 
 Kotlin has the same members in lowerCamel: `world.create`, `world.with("Enemy")`, `world.read<Enemy>(entity)`.

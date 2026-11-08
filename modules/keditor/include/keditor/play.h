@@ -72,8 +72,13 @@ namespace keditor
          * @brief Whose keys and mouse the scene's own scripts read (FlyCamera): the scene's window's, unless an
          *        editor showing the scene in a panel says its own.
          */
-        void SetInput(const kor::Input* input) { _input = input; }
+        void SetInput(const kor::Input* input, const kor::Window* window = nullptr) { _input = input; _inputWindow = window; }
         [[nodiscard]] const kor::Input& ScriptInput() { return _input ? *_input : SceneInput(); }
+        /**
+         * @brief How big, in pixels, the window is whose mouse the scripts read (ScriptInput): what its positions are
+         *        from the top-left of — to make a ray of the cursor through the scene's camera.
+         */
+        [[nodiscard]] kor::UVec2 ScriptViewport() const { return _inputWindow ? _inputWindow->Extent() : SceneWindow().Extent(); }
 
     private:
         std::filesystem::path _file;
@@ -84,6 +89,7 @@ namespace keditor
         std::uint64_t _restarts = 0;
         std::function<void()> _onFrame;
         const kor::Input* _input = nullptr;
+        const kor::Window* _inputWindow = nullptr;      // whose that input is: the size its mouse is in
         bool _edited = false;
         std::unique_ptr<keditor::Overlay> _overlay, _overlayBefore;     // (the one before, as _replaced is kept)
     };
