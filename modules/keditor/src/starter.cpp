@@ -3,6 +3,7 @@
 //
 
 #include <keditor/starter.h>
+#include <keditor/project.h>
 
 #include <cstdlib>
 #include <format>
@@ -269,6 +270,12 @@ namespace keditor
         // The C# scripts as a project of their own: nothing builds it — a project's scripts are compiled when it runs
         // — but it is what tells an editor which names there are. It names this machine's assemblies, so it is written
         // again each time, and is not the project's to commit.
+        // What the project imports: its modules' scripts are named in the project's, as the engine compiles them with it.
+        Project opened;
+        std::vector<std::filesystem::path> modules;
+        if (std::string unread; Project::Open(project, opened, unread)) modules = opened.ImportedDirectories();
+        const auto generic = [](const std::filesystem::path& folder) { return folder.lexically_normal().generic_string(); };
+
         const std::filesystem::path assemblies = KEDITOR_DOTNET;
         if (std::filesystem::exists(assemblies / "Koral.Engine.dll", ignored)) {
             std::string references;
@@ -276,6 +283,10 @@ namespace keditor
                 if (std::filesystem::exists(assemblies / (std::string(assembly) + ".dll"), ignored))
                     references += std::format("    <Reference Include=\"{}\"><HintPath>{}</HintPath><Private>false</Private></Reference>\n", assembly,
                                               (assemblies / (std::string(assembly) + ".dll")).generic_string());
+            std::string imported;
+            for (const auto& module : modules)
+                imported += std::format("    <Compile Include=\"{}/scripts/**/*.cs\" Link=\"modules/{}/%(RecursiveDir)%(Filename)%(Extension)\" />\n",
+                                        generic(module), module.filename().string());
             write(std::filesystem::path(name + ".Scripts.csproj"), std::format(R"xml(<!-- Written by the Koral Engine editor, for an editor of code to know the engine's names by. Nothing builds it. -->
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
@@ -287,10 +298,65 @@ namespace keditor
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="scripts/**/*.cs" />
-    <Compile Include="{}/scripts/*.cs" Link="koral/%(Filename)%(Extension)" />
+{}    <Compile Include="{}/scripts/*.cs" Link="koral/%(Filename)%(Extension)" />
 {}  </ItemGroup>
 </Project>
-)xml", (kscript::PackageDirectory()).generic_string(), references), true);
+)xml", imported, (kscript::PackageDirectory()).generic_string(), references), true);
+        }
+
+        // The Kotlin scripts as a Gradle build that is never run to build anything — the editor and the player compile
+        // the scripts themselves, as they run — but that an editor of code imports to know which names there are: the
+        // project's scripts, its modules', the engine's own, and the engine's libraries. It names this machine's files,
+        // so it is written again each time, and is not the project's to commit.
+        const std::filesystem::path kotlin = KEDITOR_KOTLIN;
+        if (opened.Language() == 'k' && std::filesystem::exists(kotlin / "lib" / "koral-engine.jar", ignored)) {
+            std::string sources = "            \"scripts\",\n";
+            for (const auto& module : modules) sources += std::format("            \"{}/scripts\",\n", generic(module));
+            sources += std::format("            \"{}/scripts\",\n", generic(kscript::PackageDirectory()));
+            write("build.gradle.kts", std::format(R"kts(// Written by the Koral Engine editor, for an editor of code to know the engine's names by: the scripts it reads, and the
+// libraries they are compiled against. Nothing builds the scripts with it — the editor and the player compile them as
+// they run. It names this machine's files, and is written again each time the project is opened.
+plugins {{
+    kotlin("jvm") version "2.4.20"
+}}
+
+repositories {{
+    mavenCentral()
+}}
+
+// The JVM the engine's own Kotlin is built for.
+kotlin {{
+    compilerOptions {{ jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }}
+}}
+java {{
+    targetCompatibility = JavaVersion.VERSION_25
+}}
+
+sourceSets {{
+    main {{
+        kotlin.setSrcDirs(listOf(
+{}        ))
+        resources.setSrcDirs(emptyList<String>())
+    }}
+}}
+
+dependencies {{
+    // The engine's Kotlin libraries, Kotlin's own among them.
+    compileOnly(fileTree("{}") {{ include("*.jar") }})
+}}
+)kts", sources, generic(kotlin / "lib")), true);
+            write("settings.gradle.kts", std::format("// Written by the Koral Engine editor: see build.gradle.kts.\nrootProject.name = \"{}\"\n", name), true);
+            std::string properties = "# Written by the Koral Engine editor: see build.gradle.kts.\nkotlin.stdlib.default.dependency=false\n";
+            if (const std::filesystem::path java = KEDITOR_JAVA_HOME; !java.empty()) properties += std::format("org.gradle.java.home={}\n", generic(java));
+            write("gradle.properties", properties, true);
+            // The wrapper, so that it is imported without a Gradle of this machine's own.
+            const std::filesystem::path wrapper = KEDITOR_GRADLE_WRAPPER;
+            for (const char* file : { "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties" }) {
+                if (std::filesystem::exists(project / file, ignored) || !std::filesystem::exists(wrapper / file, ignored)) continue;
+                std::filesystem::create_directories((project / file).parent_path(), ignored);
+                std::filesystem::copy_file(wrapper / file, project / file, ignored);
+                written.push_back(file);
+            }
         }
         return written;
     }

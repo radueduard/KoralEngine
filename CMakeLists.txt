@@ -219,5 +219,9 @@ endif()
 if(TARGET keditor)
     target_compile_definitions(keditor PRIVATE
         KEDITOR_DOTNET="${CMAKE_BINARY_DIR}/dotnet"
+        # And its Kotlin libraries, the Gradle wrapper and the JDK, for the Gradle description of a project's Kotlin scripts.
+        KEDITOR_KOTLIN="${CMAKE_BINARY_DIR}/kotlin"
+        KEDITOR_GRADLE_WRAPPER="${CMAKE_SOURCE_DIR}/bindings/kotlin"
+        KEDITOR_JAVA_HOME="${KORAL_ENGINE_JAVA_HOME}"
         KEDITOR_PROJECTS="${KORAL_ENGINE_PROJECTS}")
 endif()
