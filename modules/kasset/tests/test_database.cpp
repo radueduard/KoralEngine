@@ -46,10 +46,10 @@ TEST_F(Project, EveryAssetIsGivenAMeta)
     Database database(root);
     EXPECT_TRUE(database.Scan().empty());
     EXPECT_EQ(database.Size(), 5u);
-    EXPECT_TRUE(fs::exists(root / "assets/textures/wall.png.meta"));
-    EXPECT_FALSE(fs::exists(root / "assets/models/ship/Ship.bin.meta"));
-    EXPECT_FALSE(fs::exists(root / "cache/textures/abc.ktx2.meta"));
-    EXPECT_FALSE(fs::exists(root / "scripts/bin/Debug/x.png.meta"));
+    EXPECT_TRUE(fs::exists(root / ".koral/meta/assets/textures/wall.png.meta"));
+    EXPECT_FALSE(fs::exists(root / ".koral/meta/assets/models/ship/Ship.bin.meta"));
+    EXPECT_FALSE(fs::exists(root / ".koral/meta/cache/textures/abc.ktx2.meta"));
+    EXPECT_FALSE(fs::exists(root / ".koral/meta/scripts/bin/Debug/x.png.meta"));
 
     const Entry* wall = database.FindFile("assets/textures/wall.png");
     ASSERT_TRUE(wall);
@@ -81,9 +81,26 @@ TEST_F(Project, AFileMovedWithItsMetaKeepsItsId)
 
     fs::create_directories(root / "assets/textures");
     fs::rename(root / "assets/wall.png", root / "assets/textures/brick.png");
-    fs::rename(root / "assets/wall.png.meta", root / "assets/textures/brick.png.meta");
+    fs::create_directories(root / ".koral/meta/assets/textures");
+    fs::rename(root / ".koral/meta/assets/wall.png.meta", root / ".koral/meta/assets/textures/brick.png.meta");
     EXPECT_TRUE(database.Scan().empty());
     EXPECT_EQ(database.FindFile("assets/textures/brick.png")->meta.id, id);
+}
+
+TEST_F(Project, AMetaBesideItsFileIsMovedToWhereMetasAreKept)
+{
+    // Where metas were kept before .koral/meta: beside their files. Found there, each is moved, and keeps its ID.
+    File("scripts/solver/Crew.kt");
+    Meta meta;
+    meta.id = Id::New();
+    meta.kind = *KindOfFile("scripts/solver/Crew.kt");
+    ASSERT_TRUE(Save(root / "scripts/solver/Crew.kt.meta", meta));
+    Database database(root);
+    EXPECT_TRUE(database.Scan().empty());
+    EXPECT_EQ(database.FindFile("scripts/solver/Crew.kt")->meta.id, meta.id);
+    EXPECT_FALSE(fs::exists(root / "scripts/solver/Crew.kt.meta"));
+    EXPECT_TRUE(fs::exists(root / ".koral/meta/scripts/solver/Crew.kt.meta"));
+    EXPECT_EQ(database.MetaOf("scripts/solver/Crew.kt"), fs::weakly_canonical(root / ".koral/meta/scripts/solver/Crew.kt.meta"));
 }
 
 TEST_F(Project, AFileMovedWithoutItsMetaIsFoundByItsName)
@@ -97,8 +114,8 @@ TEST_F(Project, AFileMovedWithoutItsMetaIsFoundByItsName)
     fs::rename(root / "assets/wall.png", root / "assets/textures/wall.png");      // as `git mv` of the file alone does
     EXPECT_TRUE(database.Scan().empty());
     EXPECT_EQ(database.FindFile("assets/textures/wall.png")->meta.id, id);
-    EXPECT_FALSE(fs::exists(root / "assets/wall.png.meta"));
-    EXPECT_TRUE(fs::exists(root / "assets/textures/wall.png.meta"));
+    EXPECT_FALSE(fs::exists(root / ".koral/meta/assets/wall.png.meta"));
+    EXPECT_TRUE(fs::exists(root / ".koral/meta/assets/textures/wall.png.meta"));
 }
 
 TEST_F(Project, AMetaOfNoFileIsSaidOf)
@@ -120,7 +137,8 @@ TEST_F(Project, ACopyIsAnotherAsset)
     database.Scan();
     fs::create_directories(root / "assets/b");
     fs::copy_file(root / "assets/a/wall.png", root / "assets/b/wall.png");
-    fs::copy_file(root / "assets/a/wall.png.meta", root / "assets/b/wall.png.meta");
+    fs::create_directories(root / ".koral/meta/assets/b");
+    fs::copy_file(root / ".koral/meta/assets/a/wall.png.meta", root / ".koral/meta/assets/b/wall.png.meta");
 
     EXPECT_EQ(database.Scan().size(), 1u);
     const Entry* a = database.FindFile("assets/a/wall.png");
@@ -286,8 +304,10 @@ TEST_F(Project, AnAssetMovedGoesWithItsMetaAndWhatItNames)
     EXPECT_EQ(database.Find(ship)->file, "assets/models/boat/Boat.gltf");
     EXPECT_EQ(database.FindFile("assets/models/boat/Boat.gltf")->meta.id, ship);
     EXPECT_FALSE(database.FindFile("assets/models/ship/Ship.gltf"));
-    for (const char* moved : { "Boat.gltf", "Boat.gltf.meta", "Ship.bin", "textures/hull.png", "textures/hull.png.meta" })
+    for (const char* moved : { "Boat.gltf", "Ship.bin", "textures/hull.png" })
         EXPECT_TRUE(fs::exists(root / "assets/models/boat" / moved)) << moved;
+    for (const char* meta : { "Boat.gltf.meta", "textures/hull.png.meta" })
+        EXPECT_TRUE(fs::exists(root / ".koral/meta/assets/models/boat" / meta)) << meta << ": a meta goes with its file, where metas are kept";
     EXPECT_EQ(database.Find(hull)->file, "assets/models/boat/textures/hull.png") << "a picture it names went with it, and is the same asset";
     EXPECT_TRUE(Database(root).Scan().empty()) << "as the folders have it";
 

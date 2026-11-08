@@ -36,8 +36,8 @@ TEST(Manifest, WhatTheScenesReachAndNothingElse)
 
     const Manifest manifest = Reach(assets, { main });
     const auto has = [&](const char* path) { return std::ranges::contains(manifest.files, fs::path(path)); };
-    for (const char* path : { "scenes/main.scene.json", "scenes/main.scene.json.meta", "assets/Red.kmat", "assets/textures/wall.png", "assets/textures/wall.png.meta",
-                              "prefabs/Boat.prefab", "assets/models/ship/Ship.gltf", "assets/models/ship/Ship.gltf.meta", "assets/models/ship/Ship.bin",
+    for (const char* path : { "scenes/main.scene.json", ".koral/meta/scenes/main.scene.json.meta", "assets/Red.kmat", "assets/textures/wall.png", ".koral/meta/assets/textures/wall.png.meta",
+                              "prefabs/Boat.prefab", "assets/models/ship/Ship.gltf", ".koral/meta/assets/models/ship/Ship.gltf.meta", "assets/models/ship/Ship.bin",
                               "project.json", "shaders/lit.slang", "scripts/Spin.cs" })
         EXPECT_TRUE(has(path)) << path;
     EXPECT_FALSE(has("assets/textures/unused.png")) << "what no scene of it has";

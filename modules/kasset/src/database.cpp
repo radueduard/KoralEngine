@@ -34,8 +34,8 @@ namespace kasset
             return value;
         }
 
-        /** The file a meta is of: `wall.png.meta` → `wall.png`. */
-        std::filesystem::path SourceOf(const std::filesystem::path& meta)
+        /** The file a meta kept beside it is of: `wall.png.meta` → `wall.png`. */
+        std::filesystem::path FileBeside(const std::filesystem::path& meta)
         {
             std::filesystem::path source = meta;
             source.replace_extension();
@@ -44,6 +44,14 @@ namespace kasset
     }
 
     Database::Database(std::filesystem::path root) : _root(std::move(root)) {}
+
+    std::filesystem::path Database::MetaOf(const std::filesystem::path& file) const
+    {
+        std::error_code failed;
+        const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
+        const std::filesystem::path root = std::filesystem::weakly_canonical(ModuleOf(whole).value_or(_root), failed);
+        return MetaPathOf(root, whole);
+    }
 
     std::string Database::Relative(const std::filesystem::path& file) const
     {
@@ -83,7 +91,7 @@ namespace kasset
         return at == _entries.end() ? nullptr : &at->second;
     }
 
-    std::expected<void, std::string> Database::Store(Entry& entry) { return Save(MetaPathOf(_root / entry.file), entry.meta); }
+    std::expected<void, std::string> Database::Store(Entry& entry) { return Save(MetaOf(entry.file), entry.meta); }
 
     std::vector<std::string> Database::Scan()
     {
@@ -91,14 +99,17 @@ namespace kasset
         _byFile.clear();
         std::vector<std::string> problems;
 
-        // What is in the folders: the files that are assets, and the metas.
-        std::vector<std::filesystem::path> sources, metas;
+        // What is in the folders: the files that are assets; and the metas, each with the folder it is kept under — the
+        // project's, or a module's (MetaFolder).
+        std::vector<std::filesystem::path> sources;
+        std::vector<std::pair<std::filesystem::path, std::filesystem::path>> metas;
         std::error_code failed;
         // The project's folders, then each module's: a module's own scenes are for trying it out, and not the project's.
         std::vector<std::filesystem::path> roots { _root };
         roots.insert(roots.end(), _modules.begin(), _modules.end());
         for (const auto& root : roots) {
             const bool module = root != _root;
+            std::vector<std::filesystem::path> beside;      // metas where they were kept before MetaFolder: beside their files
             for (auto it = std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, failed);
                  !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed)) {
                 if (it->is_directory(failed)) {
@@ -107,13 +118,34 @@ namespace kasset
                 }
                 if (!it->is_regular_file(failed)) continue;
                 if (module && it.depth() == 0 && it->path().filename() == "project.json") continue;
-                if (IsMeta(it->path())) metas.push_back(it->path());
+                if (IsMeta(it->path())) beside.push_back(it->path());
                 else if (KindOfFile(it->path())) sources.push_back(it->path());
             }
             if (failed) {
                 problems.push_back(std::format("{}'s folders could not all be read: {}", module ? root.filename().string() : std::string("The project"), failed.message()));
                 failed.clear();
             }
+            // Each kept beside its file, moved to where metas are kept now — unless one is there already, which is the one.
+            for (const auto& meta : beside) {
+                const std::filesystem::path kept = MetaPathOf(root, FileBeside(meta));
+                if (std::filesystem::exists(kept, failed)) {
+                    problems.push_back(std::format("{} is a meta beside its file, where they are kept no more, and {} is its file's: it is left", Relative(meta), Relative(kept)));
+                    continue;
+                }
+                std::filesystem::create_directories(kept.parent_path(), failed);
+                std::filesystem::rename(meta, kept, failed);
+                if (failed) {
+                    problems.push_back(std::format("{} could not be moved to {}: {}", Relative(meta), Relative(kept), failed.message()));
+                    failed.clear();
+                }
+            }
+            // The metas where they are kept.
+            const std::filesystem::path folder = root / MetaFolder;
+            if (!std::filesystem::is_directory(folder, failed)) { failed.clear(); continue; }
+            for (auto it = std::filesystem::recursive_directory_iterator(folder, std::filesystem::directory_options::skip_permission_denied, failed);
+                 !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed))
+                if (it->is_regular_file(failed) && IsMeta(it->path())) metas.emplace_back(root, it->path());
+            failed.clear();
         }
         // In order, so that which of two copies keeps its ID is the same each time.
         std::ranges::sort(sources);
@@ -122,15 +154,17 @@ namespace kasset
         // A meta whose file is gone goes to the one file of that name with none: a file moved without it.
         std::set<std::filesystem::path> withMeta;
         for (const auto& source : sources)
-            if (KindOfFile(source) == Kind::eGenerated || std::filesystem::exists(MetaPathOf(source), failed)) withMeta.insert(source);
-        for (const auto& meta : metas) {
-            const std::filesystem::path source = SourceOf(meta);
+            if (KindOfFile(source) == Kind::eGenerated || std::filesystem::exists(MetaOf(source), failed)) withMeta.insert(source);
+        for (const auto& [root, meta] : metas) {
+            const std::filesystem::path source = FileOfMeta(root, meta);
             if (std::filesystem::exists(source, failed)) continue;
             std::vector<std::filesystem::path> named;
             for (const auto& candidate : sources)
                 if (candidate.filename() == source.filename() && !withMeta.contains(candidate)) named.push_back(candidate);
             if (named.size() == 1) {
-                std::filesystem::rename(meta, MetaPathOf(named.front()), failed);
+                const std::filesystem::path now = MetaOf(named.front());
+                std::filesystem::create_directories(now.parent_path(), failed);
+                std::filesystem::rename(meta, now, failed);
                 if (!failed) { withMeta.insert(named.front()); continue; }
                 problems.push_back(std::format("{} is {} moved, but its meta could not go with it: {}", Relative(named.front()), source.filename().string(), failed.message()));
                 failed.clear();
@@ -144,7 +178,7 @@ namespace kasset
         for (const auto& source : sources) {
             Entry entry;
             entry.file = Relative(source);
-            const std::filesystem::path metaPath = MetaPathOf(source);
+            const std::filesystem::path metaPath = MetaOf(source);
             if (withMeta.contains(source)) {
                 auto meta = Load(metaPath);
                 if (!meta) {
@@ -201,7 +235,7 @@ namespace kasset
         Entry entry;
         entry.file = relative;
         std::error_code failed;
-        if (const auto metaPath = MetaPathOf(whole); std::filesystem::exists(metaPath, failed)) {
+        if (const auto metaPath = MetaOf(whole); std::filesystem::exists(metaPath, failed)) {
             auto meta = Load(metaPath);
             if (!meta) return std::unexpected(meta.error());
             entry.meta = std::move(*meta);
@@ -332,6 +366,7 @@ namespace kasset
         if (legacy.starts_with("script:") && !legacy.contains('#')) return fileIn("script:", "scripts", "");
         if (legacy.starts_with("prefab:") && !legacy.contains('#')) return fileIn("prefab:", "prefabs", "");
         if (legacy.starts_with("scene:") && !legacy.contains('#')) return fileIn("scene:", "scenes", ".scene.json");
+        if (legacy.starts_with("function:") && !legacy.contains('#')) return fileIn("function:", "functions", ".kfunc");
 
         if (!legacy.starts_with('@')) return std::nullopt;
         const std::string_view rest = legacy.substr(1);
@@ -384,7 +419,7 @@ namespace kasset
             const std::string name = file.filename().string();
             return "scene:" + name.substr(0, name.size() - std::string_view(".scene.json").size());
         }
-        case Kind::eFunction: return {};
+        case Kind::eFunction: return "function:" + file.stem().string();     // what a call keeps it by (its `file`)
         default: return named();
         }
     }
@@ -407,6 +442,7 @@ namespace kasset
         if (text.starts_with("script:")) return fileIn("script:", "scripts", "");
         if (text.starts_with("prefab:")) return fileIn("prefab:", "prefabs", "");
         if (text.starts_with("scene:")) return fileIn("scene:", "scenes", ".scene.json");
+        if (text.starts_with("function:")) return fileIn("function:", "functions", ".kfunc");
         if (!text.starts_with('@')) return std::nullopt;
         const std::string_view rest = text.substr(1);
         const auto hash = rest.rfind('#');
@@ -513,7 +549,7 @@ namespace kasset
         std::filesystem::create_directories(into.parent_path(), failed);
         // What goes with it: its meta, and for a model what it names beside it — kept where it is from it.
         std::vector<std::pair<std::filesystem::path, std::filesystem::path>> moves { { from, into } };
-        if (MetaPathOf(from) != from) moves.emplace_back(MetaPathOf(from), MetaPathOf(into));
+        if (KindOfFile(from) != Kind::eGenerated) moves.emplace_back(MetaOf(from), MetaOf(into));     // a generator's is its own
         if (entry->meta.kind == Kind::eModel) {
             if (std::filesystem::path changes = std::filesystem::path(from).concat(".materials.json"); std::filesystem::exists(changes, failed))
                 moves.emplace_back(changes, std::filesystem::path(into).concat(".materials.json"));
@@ -522,7 +558,7 @@ namespace kasset
                     const std::filesystem::path was = from.parent_path() / beside;
                     if (!std::filesystem::exists(was, failed)) continue;
                     moves.emplace_back(was, into.parent_path() / beside);
-                    if (std::filesystem::exists(MetaPathOf(was), failed)) moves.emplace_back(MetaPathOf(was), MetaPathOf(into.parent_path() / beside));
+                    if (std::filesystem::exists(MetaOf(was), failed)) moves.emplace_back(MetaOf(was), MetaOf(into.parent_path() / beside));
                 }
         }
         for (std::size_t i = 0; i < moves.size(); ++i) {

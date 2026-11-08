@@ -51,14 +51,20 @@ namespace kasset
         [[nodiscard]] const std::vector<std::filesystem::path>& Modules() const { return _modules; }
         /** @brief The folder of the module @p file is in, when it is in one of them rather than in the project. */
         [[nodiscard]] std::optional<std::filesystem::path> ModuleOf(const std::filesystem::path& file) const;
+        /**
+         * @brief Where @p file 's meta is, whole: in the MetaFolder of the project — or of the module @p file is in — in
+         *        the folders @p file is in there (MetaPathOf). @p file is whole or from the project's folder.
+         */
+        [[nodiscard]] std::filesystem::path MetaOf(const std::filesystem::path& file) const;
         /** @brief Where a file named by an old `@` reference is: the project's `assets` folder. */
         [[nodiscard]] std::filesystem::path AssetDirectory() const { return _root / "assets"; }
 
         /**
-         * @brief Finds every asset in the project's folders, and reads its meta. A file without one is given one, with
-         *        a new ID. A meta whose file is gone is given to the one file of that name without a meta, wherever it
-         *        is (a file moved without its meta), or else left and said of. A file copied with its meta is given a
-         *        new ID. Hidden folders, `cache`, and what scripts are built into (`bin`, `obj`, `build`) are passed by.
+         * @brief Finds every asset in the project's folders, and reads its meta (MetaOf). A file without one is given
+         *        one, with a new ID. A meta whose file is gone is given to the one file of that name without a meta,
+         *        wherever it is (a file moved without its meta), or else left and said of. A file copied with its meta
+         *        is given a new ID. A meta beside its file, where they were kept before MetaFolder, is moved there.
+         *        Hidden folders, `cache`, and what scripts are built into (`bin`, `obj`, `build`) are passed by.
          *
          * @return What was wrong, a sentence each: a meta that could not be read or written, one left of no file.
          */

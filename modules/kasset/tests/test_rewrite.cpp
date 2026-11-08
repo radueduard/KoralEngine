@@ -37,12 +37,14 @@ TEST(Rewrite, AMovedFileIsFoundByItsId)
         EXPECT_EQ(FromIds(kept, assets), scene) << "read back, it is as it was";
         std::ofstream(root / "scene.json") << kept;
     }
-    // The picture moved, and the model renamed, both with their metas: read again, the scene names them where they are.
+    // The picture moved, and the model renamed, both with their metas (kept under .koral/meta): read again, the scene
+    // names them where they are.
     fs::create_directories(root / "assets" / "brick");
     fs::rename(root / "assets" / "textures" / "wall.png", root / "assets" / "brick" / "red.png");
-    fs::rename(root / "assets" / "textures" / "wall.png.meta", root / "assets" / "brick" / "red.png.meta");
+    fs::create_directories(root / ".koral/meta/assets/brick");
+    fs::rename(root / ".koral/meta/assets/textures/wall.png.meta", root / ".koral/meta/assets/brick/red.png.meta");
     fs::rename(root / "assets" / "ship.gltf", root / "assets" / "boat.gltf");
-    fs::rename(root / "assets" / "ship.gltf.meta", root / "assets" / "boat.gltf.meta");
+    fs::rename(root / ".koral/meta/assets/ship.gltf.meta", root / ".koral/meta/assets/boat.gltf.meta");
     Database assets(root);
     assets.Scan();
     assets.AddBuiltIn(Kind::eMesh, "mesh/cube", "$cube");
@@ -52,7 +54,7 @@ TEST(Rewrite, AMovedFileIsFoundByItsId)
     EXPECT_EQ(FromIds(kept, assets, &missing), R"({ "mesh": "@boat.gltf#2", "picture": "@brick/red.png", "shape": "$cube", "name": "@nothing.png", "label": "wall", "assets": "PbrMaterial @boat.gltf#material:1\nToon $cube" })");
     EXPECT_EQ(missing, 0u);
     fs::remove(root / "assets" / "boat.gltf");
-    fs::remove(root / "assets" / "boat.gltf.meta");
+    fs::remove(root / ".koral/meta/assets/boat.gltf.meta");
     assets.Scan();
     (void)FromIds(kept, assets, &missing);
     EXPECT_EQ(missing, 2u) << "what is gone is said of: the mesh, and the material that was of it";

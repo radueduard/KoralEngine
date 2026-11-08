@@ -85,9 +85,24 @@ namespace kasset
         return nullptr;
     }
 
-    std::filesystem::path MetaPathOf(const std::filesystem::path& file)
+    std::filesystem::path MetaPathOf(const std::filesystem::path& root, const std::filesystem::path& file)
     {
         if (KindOfFile(file) == Kind::eGenerated) return file;
+        const std::filesystem::path relative = file.is_absolute() && !root.empty() ? file.lexically_normal().lexically_relative(root.lexically_normal()) : file;
+        std::filesystem::path meta = root / MetaFolder / relative;
+        meta += ".meta";
+        return meta;
+    }
+
+    std::filesystem::path FileOfMeta(const std::filesystem::path& root, const std::filesystem::path& meta)
+    {
+        std::filesystem::path file = root / meta.lexically_normal().lexically_relative((root / MetaFolder).lexically_normal());
+        file.replace_extension();
+        return file;
+    }
+
+    std::filesystem::path MetaBeside(const std::filesystem::path& file)
+    {
         std::filesystem::path meta = file;
         meta += ".meta";
         return meta;
@@ -179,6 +194,9 @@ namespace kasset
         std::filesystem::path written = path;
         written += ".writing";
         {
+            // The folders it is in: a meta is kept apart from its file, in folders of its own (MetaFolder).
+            std::error_code made;
+            if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), made);
             std::ofstream out(written, std::ios::binary | std::ios::trunc);
             if (!out) return std::unexpected(std::format("{} could not be written", path.string()));
             out << Write(meta);

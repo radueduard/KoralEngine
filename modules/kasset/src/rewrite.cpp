@@ -73,8 +73,9 @@ namespace kasset
     std::string ToIds(const std::string_view json, Database& assets)
     {
         const auto replace = [&](const std::string_view text) -> std::optional<std::string> {
-            // Only a file's: the engine's own never move, and keep the names every program knows them by.
-            if (!text.starts_with('@')) return std::nullopt;
+            // Only a file's — and a function's, as a call keeps it (`function:Scale`): the engine's own never move, and keep the
+            // names every program knows them by.
+            if (!text.starts_with('@') && !text.starts_with("function:")) return std::nullopt;
             const auto reference = assets.FromLegacy(text);
             if (!reference) return std::nullopt;
             return reference->Text();

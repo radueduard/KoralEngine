@@ -24,6 +24,12 @@ namespace kasset
             std::error_code failed;
             if (std::filesystem::is_regular_file(assets.Root() / path, failed) && files.insert(path.lexically_normal()).second) manifest.files.push_back(path.lexically_normal());
         };
+        // An asset's meta, from the project's folder as the rest are: where the project — or its module — keeps it.
+        const auto metaOf = [&](const std::filesystem::path& path) {
+            if (KindOfFile(path) == Kind::eGenerated) return;       // a generator's is its own file
+            std::error_code failed;
+            file(assets.MetaOf(path).lexically_relative(std::filesystem::weakly_canonical(assets.Root(), failed)));
+        };
         std::deque<Id> next(scenes.begin(), scenes.end());
         while (!next.empty()) {
             const Id id = next.front();
@@ -32,13 +38,13 @@ namespace kasset
             if (!entry || !reached.insert(id).second) continue;     // the engine's own are no file of the project's
             manifest.assets.push_back(id);
             file(entry->file);
-            if (MetaPathOf(entry->file) != entry->file) file(MetaPathOf(entry->file));
+            metaOf(entry->file);
             if (entry->meta.kind == Kind::eModel) {
                 file(std::filesystem::path(entry->file).concat(".materials.json"));
                 for (const auto& beside : NamedBeside(assets.Root() / entry->file)) {
                     const std::filesystem::path path = entry->file.parent_path() / beside;
                     file(path);
-                    file(MetaPathOf(path));
+                    metaOf(path);
                 }
             }
             for (const Reference& use : assets.Uses(id)) next.push_back(use.asset);
@@ -51,7 +57,10 @@ namespace kasset
             for (auto it = std::filesystem::recursive_directory_iterator(assets.Root() / folder, failed); !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed))
                 if (it->is_regular_file(failed)) found.push_back(it->path().lexically_relative(assets.Root()));
             std::ranges::sort(found);
-            for (const auto& path : found) file(path);
+            for (const auto& path : found) {
+                file(path);
+                if (KindOfFile(path)) metaOf(path);         // kept apart from it, in the project's MetaFolder
+            }
         }
         return manifest;
     }

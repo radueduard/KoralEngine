@@ -2,7 +2,7 @@
 
 /**
  * @file meta.h
- * @brief What is kept beside an asset's file, in `<file>.meta`: its ID, its kind, what makes it and from what
+ * @brief What is kept of an asset's file in its meta — `.koral/meta/<file>.meta` in its project's folder: its ID, its kind, what makes it and from what
  *        parameters, the IDs of its parts, and what was changed of them here. The only place an asset's settings are.
  *        A generator's asset (`.kgen`) is a meta of no file.
  */
@@ -70,8 +70,19 @@ namespace kasset
         bool operator==(const Meta&) const = default;
     };
 
-    /** @brief Where @p file 's meta is: `wall.png` → `wall.png.meta`. A `.kgen` is its own. */
-    [[nodiscard]] std::filesystem::path MetaPathOf(const std::filesystem::path& file);
+    /** @brief Where a project's — or a module's — metas are kept, from its folder: out of the way of its own files. */
+    inline constexpr std::string_view MetaFolder = ".koral/meta";
+
+    /**
+     * @brief Where @p file 's meta is: under @p root 's MetaFolder, in the folders @p file is in from @p root —
+     *        `<root>/scripts/Crew.kt` → `<root>/.koral/meta/scripts/Crew.kt.meta`. @p file is whole or from @p root ;
+     *        with no @p root , and @p file from it, the meta's path is from it too. A `.kgen` is its own.
+     */
+    [[nodiscard]] std::filesystem::path MetaPathOf(const std::filesystem::path& root, const std::filesystem::path& file);
+    /** @brief The file meta @p meta (whole, under @p root 's MetaFolder) is of: the other way from MetaPathOf. */
+    [[nodiscard]] std::filesystem::path FileOfMeta(const std::filesystem::path& root, const std::filesystem::path& meta);
+    /** @brief Where a meta was kept before MetaFolder, beside its file: `wall.png` → `wall.png.meta`. Moved when found. */
+    [[nodiscard]] std::filesystem::path MetaBeside(const std::filesystem::path& file);
     /** @brief Whether @p file is a meta: `.meta`. */
     [[nodiscard]] bool IsMeta(const std::filesystem::path& file);
 
