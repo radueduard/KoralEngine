@@ -1562,6 +1562,10 @@ namespace kgraph
         std::size_t unreadOf = 0;                           // and how many passes' uses it was of
         std::set<std::string, std::less<>> batched;
         std::map<std::string, std::string, std::less<>> unbatched;
+        /// The Repeats whose count is wired, as the graph was written out (Expansion::wiredCounts), and how many turns each
+        /// was written out with — as what it is wired from last gave.
+        std::map<std::string, Link, std::less<>> wiredCounts;
+        std::map<std::string, int, std::less<>> loopCounts;
 
         /** Whether a Bundle gave node @p id its input @p name, rather than a wire or a value of its own. */
         [[nodiscard]] bool FromBundle(const std::string_view id, const std::string& name) const
@@ -5403,6 +5407,28 @@ namespace kgraph
                 stale = true;
                 ++it;
             }
+        }
+
+        /**
+         * Each frame: whether a Repeat whose count is wired was written out with another count than what it is wired from
+         * gives now — a whole number, from 0 to 256 — and so is to be written out again (Run). Said once for each change.
+         */
+        bool Recount()
+        {
+            bool changed = false;
+            for (const auto& [repeat, link] : wiredCounts) {
+                const auto source = built.find(link.node);
+                if (source == built.end() || !source->second.status.ok) continue;
+                const auto output = source->second.outputs.find(link.output);
+                const double* number = output == source->second.outputs.end() ? nullptr : output->second.value.Number();
+                if (!number || !std::isfinite(*number)) continue;
+                const int count = static_cast<int>(std::clamp(std::llround(*number), -1ll, 257ll));
+                const auto known = loopCounts.find(repeat);
+                if ((known == loopCounts.end() ? 1 : known->second) == count) continue;
+                loopCounts[repeat] = count;
+                changed = true;
+            }
+            return changed;
         }
 
         void Arrive()
@@ -9875,7 +9901,7 @@ namespace kgraph
                 if (const std::string_view type = LayoutTypeOf(field.type); !type.empty()) fields.emplace_back(field.name, type);
             return fields;
         };
-        Expansion expansion = Expand(_graph, elementOf, fieldsOf);
+        Expansion expansion = Expand(_graph, elementOf, fieldsOf, _impl->loopCounts);
         _impl->before.clear();
         // What is watched is copied out by two nodes more, sized by what the node made when last it was built.
         for (auto& [id, watching] : _impl->watched) {
@@ -9935,6 +9961,7 @@ namespace kgraph
         _impl->bundleNotes = std::move(expansion.notes);
         _impl->batched = std::move(expansion.batched);
         _impl->unbatched = std::move(expansion.unbatched);
+        _impl->wiredCounts = std::move(expansion.wiredCounts);
         // What is found by id is the running graph's ids, seen, not kept: forgotten before that graph goes, as even
         // clearing it reads its keys.
         _impl->currentById.clear();
@@ -9995,6 +10022,8 @@ namespace kgraph
         WriteBack();
         _impl->EachFrame();
         if (std::exchange(_impl->stale, false)) { _impl->Evaluate(_running); return; }
+        // A loop whose count is wired, and what it is wired from gives another now: written out again with that many turns.
+        if (_impl->Recount()) { Run(); return; }
         if (_impl->PrepareAll()) _impl->Resolve();
     }
 

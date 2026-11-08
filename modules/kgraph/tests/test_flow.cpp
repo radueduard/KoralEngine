@@ -173,6 +173,70 @@ TEST_F(FlowTest, ALoopIsWrittenOutATurnANode) {
     EXPECT_FALSE(runtime.Ok());
 }
 
+// A loop's count wired: from what gives a number, which the loop is not of. As many turns as it gives once the graph
+// has run — one until then — and written out again with as many when it gives another.
+TEST_F(FlowTest, ALoopsCountIsWhatItIsWiredFrom) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("n", "Double").Set("value", 4);
+    graph.Add("turns", "Repeat").Wire("count", "n");
+    graph.Add("tens", "Multiply").Wire("a", "turns", "index").Set("b", 10);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 3; ++i) Frame();
+    ASSERT_TRUE(runtime.Ok());
+    EXPECT_EQ(runtime.TurnsOf("tens").size(), 4u) << "as many as it is wired from";
+    EXPECT_EQ(runtime.ValueOf("tens [3]"), Value(30));
+
+    graph.Find("n")->Set("value", 2);
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(runtime.TurnsOf("tens").size(), 2u) << "and as many again, when it gives another";
+    EXPECT_EQ(runtime.ValueOf("tens [1]"), Value(10));
+    EXPECT_EQ(runtime.Current(), graph) << "the graph is kept as it was written";
+}
+
+// A loop in a loop: a Repeat wired from one — here how many turns it has, one more on each turn of the outer — is in
+// it, written out a loop a turn. What is wired from both is in the inner, a node for each turn of each; a Previous is
+// the inner's turn before, and an Element of one takes the outer's last turn and the inner's its index says.
+TEST_F(FlowTest, ALoopInALoopIsWrittenOutATurnOfEach) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("rows", "Repeat").Set("count", 3);
+    graph.Add("more", "Add").Wire("a", "rows", "index").Set("b", 1);
+    graph.Add("columns", "Repeat").Wire("count", "more");
+    graph.Add("tens", "Multiply").Wire("a", "rows", "index").Set("b", 10);
+    graph.Add("cell", "Add").Wire("a", "tens").Wire("b", "columns", "index");
+    graph.Add("zero", "Double").Set("value", 0);
+    graph.Add("before", "Previous").Set("of", "sum").Set("first", "zero");
+    graph.Add("sum", "Add").Wire("a", "cell").Wire("b", "before");
+    graph.Add("last", "Element").Set("of", "cell");
+    graph.Add("first of the last", "Element").Set("of", "cell").Set("index", 0);
+    graph.Add("total", "Element").Set("of", "sum");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    EXPECT_EQ(runtime.TurnsOf("cell"), (std::vector<std::string> { "cell [0] [0]", "cell [1] [0]", "cell [1] [1]", "cell [2] [0]", "cell [2] [1]", "cell [2] [2]" }))
+        << "one, two, three turns of the inner on each of the outer";
+    EXPECT_EQ(runtime.ValueOf("cell [2] [1]"), Value(21)) << "the outer's ten times, and the inner's";
+    EXPECT_EQ(runtime.ValueOf("cell [1] [0]"), Value(10));
+    EXPECT_EQ(runtime.ValueOf("sum [2] [2]"), Value(63)) << "the inner's turn before: 20, 41, 63";
+    EXPECT_EQ(runtime.ValueOf("last"), Value(22)) << "the outer's last turn, the inner's last";
+    EXPECT_EQ(runtime.ValueOf("first of the last"), Value(20)) << "the outer's last, the inner's first";
+    EXPECT_EQ(runtime.ValueOf("total"), Value(63));
+
+    // Two loops neither in the other: no node is in both.
+    graph.Add("other", "Repeat").Set("count", 2);
+    graph.Find("cell")->Wire("b", "other", "index");
+    graph.Find("tens")->Wire("a", "rows", "index");
+    runtime.Set(graph);
+    ASSERT_NE(runtime.Status("cell"), nullptr);
+    EXPECT_NE(runtime.Status("cell")->error.find("neither in the other"), std::string::npos) << runtime.Status("cell")->error;
+}
+
 // Any level and layer of an image is copied out, and the rest of it is said: how many levels and layers, its usage, how big.
 TEST_F(FlowTest, AnyLevelAndLayerOfAnImageIsLookedAt) {
     auto& runtime = *scene->runtime;

@@ -49,6 +49,9 @@ namespace kgraph
         std::set<std::string, std::less<>> batched;
         /// A Draw `batched` that could not be, and why: it draws one at a time.
         std::map<std::string, std::string, std::less<>> unbatched;
+        /// A Repeat whose count is wired, by its id as written out (`inner [2]`, of a loop in a loop): what it is wired from.
+        /// How many turns it has is what that gives once the graph has run — Expand's `counts` — and one until then.
+        std::map<std::string, Link, std::less<>> wiredCounts;
     };
 
     /**
@@ -71,7 +74,10 @@ namespace kgraph
 
     /** @brief What a node of a loop is called on turn @p turn. */
     [[nodiscard]] std::string TurnId(std::string_view id, int turn);
-    [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {}, const FieldsOf& fieldsOf = {});
+    /// @p counts: how many turns each Repeat whose count is wired has, by its id as written out (Expansion::wiredCounts), as
+    /// the graph last gave it: one, for any not in it.
+    [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {}, const FieldsOf& fieldsOf = {},
+                                   const std::map<std::string, int, std::less<>>& counts = {});
     /**
      * @brief Why the Draw @p draw of @p graph (a graph as it runs: its calls and Bundles written out) cannot be written out
      *        as one indirect draw of every element — `batched` — or nothing when it can. @p each, when given, is the

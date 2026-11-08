@@ -598,6 +598,219 @@ namespace kgraph
                     if (const auto found = extents.find(input.link->node); found != extents.end()) input.link = Link { found->second, "out" };
     }
 
+    /**
+     * The loops of @p in that are in no other, written out: each node of one — of a loop in it too — a node a turn, and
+     * what it takes from the Repeat that turn's numbers. A loop in a loop is a Repeat of it, written out a Repeat a turn
+     * (`inner [2]`), whose own turns the next call writes out. False when there was no loop to write out.
+     */
+    static bool WriteLevel(const Graph& in, std::vector<Node>& written, Expansion& out, const std::map<std::string, int, std::less<>>& counts)
+    {
+        std::map<std::string, const Node*, std::less<>> repeats;
+        for (const auto& node : in.nodes) if (node.type == "Repeat") repeats[node.id] = &node;
+        if (repeats.empty()) {
+            // No loop: each node as it is — but one that could not be written out, by what came before (a Bundle, a buffer).
+            for (const auto& node : in.nodes) if (!out.errors.contains(node.id)) written.push_back(node);
+            return false;
+        }
+
+        // Which loop each node is in, the innermost: the Repeat it is wired from, through whatever is between — a Repeat
+        // too, which is then a loop in that one. A Previous is in the loop of what it is the turn before of; an Element is
+        // in none for naming a node of one, which is its use.
+        std::map<std::string, std::string, std::less<>> loopOf, parent;
+        std::set<std::string, std::less<>> visiting;
+        const auto within = [&](std::string inner, const std::string& outer) {
+            while (!inner.empty()) {
+                if (inner == outer) return true;
+                const auto up = parent.find(inner);
+                inner = up == parent.end() ? std::string() : up->second;
+            }
+            return false;
+        };
+        const std::function<std::string(const std::string&)> find = [&](const std::string& id) -> std::string {
+            if (const auto known = loopOf.find(id); known != loopOf.end()) return known->second;
+            const Node* node = in.Find(id);
+            if (!node || !visiting.insert(id).second) return {};
+            std::set<std::string> loops;
+            const auto through = [&](const std::string& other) {
+                if (repeats.contains(other)) loops.insert(other);
+                else if (std::string loop = find(other); !loop.empty()) loops.insert(std::move(loop));
+            };
+            for (const auto& input : node->inputs | std::views::values)
+                if (input.link) through(input.link->node);
+            if (node->type == "Reference")
+                if (const std::string* target = Text(*node, "node")) through(*target);
+            if (node->type == "Previous")
+                if (const std::string* of = Text(*node, "of")) through(*of);
+            visiting.erase(id);
+            // Of several, the one in all the others: what is wired from a loop in a loop is in both.
+            std::string innermost;
+            for (const auto& loop : loops) {
+                if (innermost.empty() || within(loop, innermost)) innermost = loop;
+                else if (!within(innermost, loop)) {
+                    out.errors[id] = std::format("it is wired from two loops, '{}' and '{}', neither in the other: a node is in one, or in one in another", innermost, loop);
+                    return loopOf[id] = std::string();
+                }
+            }
+            // A Repeat wired from a loop is a loop in that one.
+            if (node->type == "Repeat" && !innermost.empty()) parent[id] = innermost;
+            return loopOf[id] = innermost;
+        };
+        for (const auto& node : in.nodes) (void)find(node.id);
+        // The loop in no other that each node is of: what is written out now.
+        const auto rootOf = [&](const std::string& id) {
+            const auto known = loopOf.find(id);
+            std::string loop = known == loopOf.end() ? std::string() : known->second;
+            while (!loop.empty()) {
+                const auto up = parent.find(loop);
+                if (up == parent.end()) break;
+                loop = up->second;
+            }
+            return loop;
+        };
+
+        // How many turns each of those has: given on it, or — wired — what that gives as the graph last ran, one until then.
+        std::map<std::string, int, std::less<>> turnsOf;
+        for (const auto& [id, node] : repeats) {
+            if (parent.contains(id)) continue;
+            const auto count = node->inputs.find("count");
+            if (count != node->inputs.end() && count->second.link) {
+                out.wiredCounts[id] = *count->second.link;
+                const auto said = counts.find(id);
+                turnsOf[id] = said == counts.end() ? 1 : said->second;
+                if (turnsOf[id] < 0 || turnsOf[id] > 256) {
+                    out.errors[id] = std::format("'count' is wired from what gives {}: a loop has from 0 to 256 turns", turnsOf[id]);
+                    turnsOf[id] = 0;
+                }
+                continue;
+            }
+            const double* turns = count == node->inputs.end() ? nullptr : count->second.value.Number();
+            if (!turns || *turns < 1 || *turns > 256 || std::floor(*turns) != *turns) {
+                out.errors[id] = "'count' is how many turns it has: a whole number from 1 to 256, or wired from what gives one";
+                turnsOf[id] = 0;
+            } else {
+                turnsOf[id] = static_cast<int>(*turns);
+            }
+        }
+
+        std::vector<Node> made;
+        for (const auto& node : in.nodes) {
+            if (out.errors.contains(node.id)) continue;
+            if (node.type == "Repeat" && !parent.contains(node.id)) continue;      // written out now: what is wired from it has its numbers
+            const std::string root = rootOf(node.id);
+            const bool innermost = !root.empty() && loopOf[node.id] == root;       // of this loop alone: its Previous, its Element, are worked out now
+            const int count = root.empty() ? 1 : turnsOf[root];
+            const auto ofTheLoop = [&](const std::string& id) {
+                return !root.empty() && rootOf(id) == root && !(repeats.contains(id) && !parent.contains(id));
+            };
+            for (int turn = 0; turn < count; ++turn) {
+                Node one = node;
+                if (!root.empty()) {
+                    one.id = TurnId(node.id, turn);
+                    out.turns[node.id].push_back(one.id);
+                }
+                // What it is wired to of its loop is that turn's: the Repeat's numbers as they are on it, and the other
+                // nodes of the loop — of a loop in it too — as they are on it.
+                for (auto& [name, input] : one.inputs) {
+                    if (!input.link) continue;
+                    if (input.link->node == root) {
+                        const std::string& output = input.link->output;
+                        const Value value = output == "reverse" ? Value(count - 1 - turn) : output == "count" ? Value(count) : output == "first" ? Value(turn == 0)
+                                          : output == "last" ? Value(turn == count - 1) : Value(turn);
+                        input = Input { value, std::nullopt };
+                    } else if (ofTheLoop(input.link->node)) {
+                        input.link->node = TurnId(input.link->node, turn);
+                    }
+                }
+                const auto stands = [&](std::string target) {
+                    one.type = "Reference";
+                    one.inputs.clear();
+                    one.inputs["node"] = Input { Value(std::move(target)), std::nullopt };
+                };
+                const auto renamed = [&](const char* name) {
+                    if (const std::string* named = Text(one, name); named && ofTheLoop(*named)) one.inputs[name] = Input { Value(TurnId(*named, turn)), std::nullopt };
+                };
+                if (node.type == "Reference") {
+                    renamed("node");
+                } else if (node.type == "Previous") {
+                    const std::string* of = Text(node, "of");
+                    const std::string* first = Text(node, "first");
+                    if (!of || root.empty()) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made the turn before"; break; }
+                    if (!innermost) { renamed("of"); renamed("first"); }      // of a loop in this one: its own turns say which
+                    else if (turn > 0) stands(TurnId(*of, turn - 1));
+                    else if (first) stands(*first);
+                    else { out.errors[node.id] = "'first' is the node it is on the first turn, when there is no turn before"; break; }
+                } else if (node.type == "Element") {
+                    const std::string* of = Text(node, "of");
+                    // Of a call: of the node its output comes from — the first, or the one `output` names.
+                    std::string ofCall;
+                    if (of && !in.Find(*of))
+                        if (const auto call = out.calls.find(*of); call != out.calls.end() && !call->second.outputs.empty()) {
+                            const std::string* named = Text(node, "output");
+                            const std::string& output = named ? *named : call->second.outputs.front();
+                            const auto gives = call->second.gives.find(output);
+                            if (gives == call->second.gives.end()) { out.errors[node.id] = std::format("'{}' calls a function with no output '{}'", *of, output); break; }
+                            if (gives->second.output != "out") {
+                                out.errors[node.id] = std::format("'{}' of '{}' is '{}' of what is in it: take the Element of a node of the loop whose 'out' it is", output, *of, gives->second.output);
+                                break;
+                            }
+                            ofCall = gives->second.node;
+                            of = &ofCall;
+                        }
+                    if (!of || !in.Find(*of)) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made on one turn"; break; }
+                    const std::string theirs = rootOf(*of);
+                    if (theirs.empty()) {
+                        // Of a node no loop has now — of none, or one written out a level before, by its turn: that one.
+                        stands(*of);
+                        made.push_back(std::move(one));
+                        continue;
+                    }
+                    if (loopOf[*of] != theirs) {
+                        // Of a loop in a loop: the outer's last turn now, and the inner's own `index` when that one is written out.
+                        one.inputs["of"] = Input { Value(TurnId(*of, turnsOf[theirs] - 1)), std::nullopt };
+                        made.push_back(std::move(one));
+                        continue;
+                    }
+                    const int turns = turnsOf[theirs];
+                    const auto index = one.inputs.find("index");
+                    const double* which = index == one.inputs.end() ? nullptr : index->second.value.Number();
+                    if (index != one.inputs.end() && (index->second.link || (!which && !index->second.value.IsNull()))) {
+                        out.errors[node.id] = "'index' is a turn's number: given on the node, or wired straight from a Repeat";
+                        break;
+                    }
+                    const int at = which ? static_cast<int>(std::llround(*which)) : turns - 1;
+                    if (at < 0 || at >= turns) { out.errors[node.id] = std::format("'{}' has {} turns, from 0: there is no turn {}", theirs, turns, at); break; }
+                    stands(TurnId(*of, at));
+                }
+                made.push_back(std::move(one));
+            }
+        }
+        // A node that could not be written out takes its turns with it.
+        for (const auto& id : out.errors | std::views::keys) {
+            std::erase_if(made, [&](const Node& node) { return node.id == id || node.id.starts_with(id + " ["); });
+            out.turns.erase(id);
+        }
+        // A loop's turns one after another, each with every node of the loop — where its first node is among the rest:
+        // so that its passes, which with nothing they use to say run in the order of the nodes, run a turn at a time
+        // (count, then scan, then scatter; and then the next turn's), not each node's turns together.
+        std::map<std::string, std::size_t, std::less<>> at;
+        for (std::size_t i = 0; i < made.size(); ++i) at.emplace(made[i].id, i);
+        std::vector<bool> taken(made.size(), false);
+        const auto take = [&](const std::string& id) {
+            if (const auto it = at.find(id); it != at.end() && !taken[it->second]) { taken[it->second] = true; written.push_back(std::move(made[it->second])); }
+        };
+        std::set<std::string> done;
+        for (const auto& node : in.nodes) {
+            const std::string root = rootOf(node.id);
+            if (root.empty()) { take(node.id); continue; }
+            if (!done.insert(root).second) continue;
+            for (int turn = 0; turn < turnsOf[root]; ++turn)
+                for (const auto& member : in.nodes)
+                    if (rootOf(member.id) == root) take(TurnId(member.id, turn));
+        }
+        for (std::size_t i = 0; i < made.size(); ++i) if (!taken[i]) written.push_back(std::move(made[i]));
+        return true;
+    }
+
     /** What a wire of @p graph comes from, past References. */
     static const Node* OriginOf(const Graph& graph, const std::string_view id)
     {
@@ -775,7 +988,7 @@ namespace kgraph
         }
     }
 
-    Expansion Expand(const Graph& given, const ElementOf& elementOf, const FieldsOf& fieldsOf)
+    Expansion Expand(const Graph& given, const ElementOf& elementOf, const FieldsOf& fieldsOf, const std::map<std::string, int, std::less<>>& counts)
     {
         Expansion out;
         // The calls first: what a function holds may be a loop, and a call may be in one. Then the Bundles, which a
@@ -795,144 +1008,30 @@ namespace kgraph
         out.graph.texturePacks = written.texturePacks;
         out.graph.defaultMeshTangents = written.defaultMeshTangents;
 
-        // The loops: a Repeat, and how many turns it has.
-        std::map<std::string, int, std::less<>> loops;
-        for (const auto& node : written.nodes) {
-            if (node.type != "Repeat") continue;
-            const auto count = node.inputs.find("count");
-            const double* turns = count == node.inputs.end() || count->second.link ? nullptr : count->second.value.Number();
-            if (!turns || *turns < 1 || *turns > 256 || std::floor(*turns) != *turns) {
-                out.errors[node.id] = count != node.inputs.end() && count->second.link ? "'count' is given on the node: how many turns there are is known before anything is worked out"
-                                                                                      : "'count' is how many turns it has: a whole number from 1 to 256";
-                loops[node.id] = 0;
-            } else {
-                loops[node.id] = static_cast<int>(*turns);
-            }
+        // The loops, a level at a time: those in no other first — a loop in one written out a Repeat a turn — then those.
+        Graph level;
+        level.nodes = std::move(written.nodes);
+        for (int depth = 0; depth < 8; ++depth) {
+            std::vector<Node> next;
+            const bool any = WriteLevel(level, next, out, counts);
+            level.nodes = std::move(next);
+            if (!any) break;
         }
-
-        // Which loop each node is in: the Repeat it is wired from, through whatever is between. A Previous is in the
-        // loop of what it is the turn before of; an Element is in none for naming a node of one, which is its use.
-        std::map<std::string, std::string, std::less<>> loopOf;
-        std::set<std::string, std::less<>> visiting;
-        const std::function<std::string(const std::string&)> find = [&](const std::string& id) -> std::string {
-            if (const auto known = loopOf.find(id); known != loopOf.end()) return known->second;
-            const Node* node = written.Find(id);
-            if (!node || node->type == "Repeat" || !visiting.insert(id).second) return {};
-            std::set<std::string> in;
-            const auto through = [&](const std::string& other) {
-                if (loops.contains(other)) in.insert(other);
-                else if (std::string loop = find(other); !loop.empty()) in.insert(std::move(loop));
-            };
-            for (const auto& input : node->inputs | std::views::values)
-                if (input.link) through(input.link->node);
-            if (node->type == "Reference")
-                if (const std::string* target = Text(*node, "node")) through(*target);
-            if (node->type == "Previous")
-                if (const std::string* of = Text(*node, "of")) through(*of);
-            visiting.erase(id);
-            if (in.size() > 1) out.errors[id] = std::format("it is wired from two loops, '{}' and '{}': a node is in one", *in.begin(), *std::next(in.begin()));
-            return loopOf[id] = in.size() == 1 ? *in.begin() : std::string();
-        };
-        for (const auto& node : written.nodes) (void)find(node.id);
-
-        for (const auto& node : written.nodes) {
-            if (node.type == "Repeat" || out.errors.contains(node.id)) continue;
-            const std::string& loop = loopOf[node.id];
-            const int count = loop.empty() ? 1 : loops[loop];
-            for (int turn = 0; turn < count; ++turn) {
-                Node made = node;
-                if (!loop.empty()) {
-                    made.id = TurnId(node.id, turn);
-                    out.turns[node.id].push_back(made.id);
-                }
-                // What it is wired to of its loop is that turn's: the Repeat's numbers as they are on it, and the
-                // other nodes of the loop as they are on it.
-                for (auto& [name, input] : made.inputs) {
-                    if (!input.link) continue;
-                    if (input.link->node == loop) {
-                        const std::string& output = input.link->output;
-                        const Value value = output == "reverse" ? Value(count - 1 - turn) : output == "count" ? Value(count) : output == "first" ? Value(turn == 0)
-                                          : output == "last" ? Value(turn == count - 1) : Value(turn);
-                        input = Input { value, std::nullopt };
-                    } else if (!loop.empty() && loopOf[input.link->node] == loop) {
-                        input.link->node = TurnId(input.link->node, turn);
-                    }
-                }
-                const auto stands = [&](std::string target) {
-                    made.type = "Reference";
-                    made.inputs.clear();
-                    made.inputs["node"] = Input { Value(std::move(target)), std::nullopt };
-                };
-                if (node.type == "Reference") {
-                    if (const std::string* target = Text(node, "node"); target && !loop.empty() && loopOf[*target] == loop) stands(TurnId(*target, turn));
-                } else if (node.type == "Previous") {
-                    const std::string* of = Text(node, "of");
-                    const std::string* first = Text(node, "first");
-                    if (!of || loop.empty()) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made the turn before"; break; }
-                    if (turn > 0) stands(TurnId(*of, turn - 1));
-                    else if (first) stands(*first);
-                    else { out.errors[node.id] = "'first' is the node it is on the first turn, when there is no turn before"; break; }
-                } else if (node.type == "Element") {
-                    const std::string* of = Text(node, "of");
-                    // Of a call: of the node its output comes from — the first, or the one `output` names.
-                    std::string ofCall;
-                    if (of && !written.Find(*of))
-                        if (const auto call = out.calls.find(*of); call != out.calls.end() && !call->second.outputs.empty()) {
-                            const std::string* named = Text(node, "output");
-                            const std::string& output = named ? *named : call->second.outputs.front();
-                            const auto gives = call->second.gives.find(output);
-                            if (gives == call->second.gives.end()) { out.errors[node.id] = std::format("'{}' calls a function with no output '{}'", *of, output); break; }
-                            if (gives->second.output != "out") {
-                                out.errors[node.id] = std::format("'{}' of '{}' is '{}' of what is in it: take the Element of a node of the loop whose 'out' it is", output, *of, gives->second.output);
-                                break;
-                            }
-                            ofCall = gives->second.node;
-                            of = &ofCall;
-                        }
-                    if (!of || !written.Find(*of)) { out.errors[node.id] = "'of' is a node of a loop, by its id: this is what that node made on one turn"; break; }
-                    const std::string& theirs = loopOf[*of];
-                    if (theirs.empty()) { stands(*of); out.graph.nodes.push_back(std::move(made)); continue; }
-                    const int turns = loops[theirs];
-                    const auto index = made.inputs.find("index");
-                    const double* which = index == made.inputs.end() ? nullptr : index->second.value.Number();
-                    if (index != made.inputs.end() && (index->second.link || (!which && !index->second.value.IsNull()))) {
-                        out.errors[node.id] = "'index' is a turn's number: given on the node, or wired straight from a Repeat";
-                        break;
-                    }
-                    const int at = which ? static_cast<int>(std::llround(*which)) : turns - 1;
-                    if (at < 0 || at >= turns) { out.errors[node.id] = std::format("'{}' has {} turns, from 0: there is no turn {}", theirs, turns, at); break; }
-                    stands(TurnId(*of, at));
-                }
-                out.graph.nodes.push_back(std::move(made));
-            }
-        }
-        // A node that could not be written out takes its turns with it.
-        for (const auto& id : out.errors | std::views::keys) {
-            std::erase_if(out.graph.nodes, [&](const Node& node) { return node.id == id || node.id.starts_with(id + " ["); });
-            out.turns.erase(id);
-        }
-        // A loop's turns one after another, each with every node of the loop — where its first node is among the rest:
-        // so that its passes, which with nothing they use to say run in the order of the nodes, run a turn at a time
-        // (count, then scan, then scatter; and then the next turn's), not each node's turns together.
+        out.graph.nodes = std::move(level.nodes);
+        // A node of a loop in a loop is, by its id, each turn of the innermost one: `x` is `x [0] [0]`, `x [0] [1]`...
         {
-            std::map<std::string, std::size_t, std::less<>> at;
-            for (std::size_t i = 0; i < out.graph.nodes.size(); ++i) at.emplace(out.graph.nodes[i].id, i);
-            std::vector<Node> placed;
-            std::vector<bool> taken(out.graph.nodes.size(), false);
-            const auto take = [&](const std::string& id) {
-                if (const auto it = at.find(id); it != at.end() && !taken[it->second]) { taken[it->second] = true; placed.push_back(std::move(out.graph.nodes[it->second])); }
+            const std::function<void(const std::string&, std::vector<std::string>&, int)> leaves = [&](const std::string& id, std::vector<std::string>& into, const int depth) {
+                const auto it = out.turns.find(id);
+                if (it == out.turns.end() || depth > 8) { into.push_back(id); return; }
+                for (const auto& turn : it->second) leaves(turn, into, depth + 1);
             };
-            std::set<std::string> done;
-            for (const auto& node : written.nodes) {
-                const std::string& loop = loopOf[node.id];
-                if (loop.empty()) { take(node.id); continue; }
-                if (!done.insert(loop).second) continue;
-                for (int turn = 0; turn < loops[loop]; ++turn)
-                    for (const auto& member : written.nodes)
-                        if (loopOf[member.id] == loop) take(TurnId(member.id, turn));
+            std::map<std::string, std::vector<std::string>, std::less<>> flat;
+            for (const auto& [id, list] : out.turns) {
+                std::vector<std::string> all;
+                for (const auto& turn : list) leaves(turn, all, 0);
+                flat[id] = std::move(all);
             }
-            for (std::size_t i = 0; i < out.graph.nodes.size(); ++i) if (!taken[i]) placed.push_back(std::move(out.graph.nodes[i]));
-            out.graph.nodes = std::move(placed);
+            out.turns = std::move(flat);
         }
         WriteBatches(out);
         return out;

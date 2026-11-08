@@ -430,6 +430,17 @@ once for each turn, and what it takes from the Repeat is that turn's number — 
 
 is six views, six pipelines and six passes, each reading the level the turn before wrote.
 
+A Repeat's `count` may be wired, from what gives a number of a node in no loop of its own: a ForEach's `count`, a value
+worked out. The loop is written out with one turn until the graph has run, then with as many turns as that gives (from
+0 to 256), and again whenever it gives another.
+
+A **loop in a loop** is a Repeat wired from a loop: its `count` from that loop's `index`, or from a node of it. It is
+written out once for each turn of the outer (`columns [0]`, `columns [1]`), each a loop of its own, so that how many
+turns each has may differ. What is wired from both is in the inner: a node for each turn of each, `cell [2] [1]`, and
+`TurnsOf("cell")` lists every one of the innermost. A Previous is the inner's turn before; an Element of a node of the
+inner takes the last turn of the outer and the inner's turn its `index` says. A node wired from two loops neither in the
+other is an error.
+
 - **Previous** is what a node of the loop (`of`, by id) made the turn before. On the first turn it is the node
   `first` names.
 - **Element** is what a node of a loop made on one turn (`index`; the last, when not given). It is in no loop
@@ -1496,8 +1507,10 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - The view a DebugDraw node and `Runtime::ViewProjection()` go by is that of the main View. A light casts a shadow
   only when a graph draws one: ShadowCascades gives the sun's matrices, and
   `samples/forward-plus` draws with them.
-- A Repeat's `count` is given on the node, not wired, and a node is in one loop: a loop in a loop is an error.
-  An Element's `index` is given, or wired straight from a Repeat.
+- A Repeat's `count` wired is written out once with one turn, and again once the graph has run with as many as it
+  gives: each time that changes, the graph is written out again. A node is in one loop, or in one in another: two loops
+  neither in the other are an error. An Element's `index` is the innermost loop's turn: of the loops outside it, the last.
+  It is given, or wired straight from a Repeat.
 - A model's meshes are handed to the device in one go when the file is read, laid out as the device holds them on
   the thread that read it: the frame they arrive in makes their buffers, and copies them over. Forty thousand vertices
   cost that frame about 30 ms in Debug (`ScaleTest.AModelOfManyVerticesArrivesInAFrameOfLittleWork`); laid out on the
