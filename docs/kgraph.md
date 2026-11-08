@@ -1481,8 +1481,11 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A ShaderBuffer reads the struct of a buffer an entry point uses: a struct no entry point reaches is not in the
   compiled shader. Numbers of 16 or 64 bits, and arrays of arrays, are left as zero. Of a block with fields before
   its array (`buffer B { uint count; Light lights[]; }`) only the array is filled.
-- What is worked out between a ForEach and a buffer is worked out again for each element, each frame: fine for
-  lights, slow for tens of thousands of entities.
+- What is worked out between a ForEach and a buffer is worked out for each element whose entity changed: an element is
+  kept, not worked out again, while its entity, what is read of it, where it is and what the nodes between read besides
+  are as they were. Ten thousand lights, none changed, cost a frame about 18 ms in Debug, against 740 ms when all did
+  (`ScaleTest.ABufferOfThousandsWorksOutOnlyWhatChanged`). An element that reads the matrix of the frame before, a text
+  field, or a node between that reads the world (Time, Keep, Selected...) is worked out each frame.
 - No node works on a struct: a Bundle (see [Bundles](#bundles)) is many wires as one, written out into them before
   anything runs, so what a component holds, and what a View and a lens work out, is still worked out a value at a
   time. A graph saved with a View's `of`, `kind` or `face`, a ForEach's `struct`, a buffer's `instance` or a

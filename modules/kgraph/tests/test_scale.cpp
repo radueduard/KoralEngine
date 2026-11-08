@@ -855,3 +855,72 @@ TEST_F(ScaleTest, InstanceCullDrawsNothingBehindWhatItDrewFirst) {
     EXPECT_EQ(drawn("early"), 6) << "the wall gone, the four are seen, and drawn first from the frame after";
     EXPECT_EQ(drawn("late"), 0);
 }
+
+// A buffer of every point light, through what is worked out of each (its colour times two) and where each is: a frame in
+// which none of them changed works none of them out again, and costs a fraction of one in which all did. One changed is
+// in the buffer the frame after, and what is not worked out again is what would have been.
+TEST_F(ScaleTest, ABufferOfThousandsWorksOutOnlyWhatChanged) {
+    using kgraph::Value;
+    auto& runtime = *scene->runtime;
+    auto& world = scene->world;
+    const int count = Count();
+    std::vector<kecs::Entity> lamps;
+    for (int i = 0; i < count; ++i) {
+        const kecs::Entity lamp = world.Create();
+        support::Give(world, lamp, "PointLight", { { "color", { 0.25f, 0.5f, 1.f } }, { "range", { static_cast<float>(i % 100) } } });
+        world.SetPosition(lamp, { static_cast<float>(i), 0.f, 0.f });
+        lamps.push_back(lamp);
+    }
+    kgraph::Graph graph;
+    graph.Add("lamps", "ForEach").Set("component", "PointLight");
+    graph.Add("brighter", "Multiply").Wire("a", "lamps", "field.color").Set("b", 2);
+    graph.Add("lights", "ShaderBuffer").Set("module", "lights").Set("entry", "computeMain").Set("parameter", "lights")
+        .Wire("field.color", "brighter").Wire("field.range", "lamps", "field.range").Wire("field.position", "lamps", "worldPosition");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 3; ++i) Frame();
+
+    const kecs::ComponentId light = world.Find("PointLight");
+    ASSERT_NE(light, kecs::NoComponent);
+    const auto& description = world.Describe(light);
+    const auto range = std::ranges::find(description.fields, std::string("range"), &kecs::FieldDescription::name);
+    ASSERT_NE(range, description.fields.end());
+    const auto setRange = [&](const kecs::Entity lamp, const float to) {
+        auto* bytes = static_cast<std::byte*>(world.Mutable(lamp, light));
+        std::memcpy(bytes + range->offset, &to, sizeof(float));
+        world.MarkChanged(lamp, light);
+    };
+
+    const double still = Median(9, [](int) {});
+    const double all = Median(9, [&](const int frame) { for (int i = 0; i < count; ++i) setRange(lamps[i], static_cast<float>(frame + i % 7)); });
+    RecordProperty("still_ms", std::to_string(still));
+    RecordProperty("all_changed_ms", std::to_string(all));
+    std::printf("            a buffer of %d lights: %.3f ms a frame with none changed, %.3f ms with all\n", count, still, all);
+    EXPECT_LT(still, all / 4) << "a frame of nothing changed works nothing out";
+
+    // One changed: in the buffer, at its own element, and the rest as they were.
+    setRange(lamps[count / 2], 1234.f);
+    runtime.Watch("lights");
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto peek = runtime.Watched("lights");
+    ASSERT_TRUE(peek);
+    constexpr std::size_t stride = 48, rangeAt = 12, colorAt = 16;
+    ASSERT_GE(peek->bytes.size(), static_cast<std::size_t>(count) * stride);
+    const auto number = [&](const std::size_t element, const std::size_t at) {
+        float value = 0;
+        std::memcpy(&value, peek->bytes.data() + element * stride + at, sizeof(float));
+        return value;
+    };
+    EXPECT_EQ(number(count / 2, rangeAt), 1234.f) << "the one changed";
+    EXPECT_EQ(number(count / 2 + 1, rangeAt), static_cast<float>(8 + (count / 2 + 1) % 7)) << "the next as the last of the frames that changed all left it";
+    EXPECT_EQ(number(3, colorAt), 0.5f) << "its colour twice what it holds: worked out, and kept";
+    EXPECT_EQ(number(3, 0), 3.f) << "where it is";
+
+    // Kept is what would have been worked out: the same bytes as a buffer made anew.
+    const std::vector<std::byte> kept = peek->bytes;
+    runtime.Set(graph);
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto fresh = runtime.Watched("lights");
+    ASSERT_TRUE(fresh);
+    EXPECT_TRUE(fresh->bytes == kept) << "what was kept is what is worked out";
+}

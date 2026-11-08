@@ -440,6 +440,11 @@ namespace kgraph
             std::string source;                 // the ForEach its fields follow; empty for one element
             std::size_t most = 0;               // a BufferBuilder given a count: no more elements than that; 0 for as many as there are
             std::vector<std::string> chain;     // what is worked out between the two, in the order it is
+            // What each row of `bytes` was worked out of: its entity and what of it was read, a key a row. A row whose key
+            // is as it was — and what the chain reads besides (`context`) is too — is the row it was, not worked out again.
+            std::vector<std::byte> rowKeys;
+            std::size_t keySize = 0, keyedRows = 0, keyedBefore = 0;
+            std::vector<Value> context;
         };
 
         /** A click asking which entity is where: the pixel is copied out one frame, and read a few frames on. */
@@ -5982,6 +5987,86 @@ namespace kgraph
                     }
         }
 
+        /** The outputs of an element that are worked out of where its entity is: its world matrix is in its key when one is asked. */
+        static constexpr std::array<std::string_view, 10> PlacedOutputs { "matrix", "normalMatrix", "worldPosition", "forward", "up", "right", "position", "rotation", "orientation", "scale" };
+
+        /**
+         * How many bytes a row of @p source is keyed by, for buffer @p node: its entity, what is read of it — each field asked
+         * for, as its bytes; a resource as the one it is now — its world matrix when anything placed is asked, and its group.
+         * 0 when a row cannot be keyed so: a field that owns what it holds (a string), the matrix of the frame before, or a
+         * node between that reads the world itself. What the chain reads besides — wires from nodes that follow no entity,
+         * values given, how many there are — is @p context: a row is reused only while that is as it was too.
+         */
+        std::size_t RowKeySize(const Node& node, const Mapped& mapped, const Built& source, const std::set<std::string, std::less<>>& asked, std::vector<Value>& context) const
+        {
+            const EntityList& list = *source.listed;
+            if (asked.contains("previousMatrix")) return 0;
+            std::size_t size = sizeof(kecs::Entity);
+            for (const auto& read : list.fields) {
+                if (!asked.contains(read.output)) continue;
+                if (read.resource) { size += sizeof(void*); continue; }
+                if (read.field.assign || read.field.type == "string") return 0;
+                size += read.field.size;
+            }
+            if (std::ranges::any_of(PlacedOutputs, [&](const std::string_view name) { return asked.contains(name); })) size += sizeof(kecs::Mat4);
+            if (list.grouped) size += sizeof(std::uint32_t);
+
+            context = { Value(static_cast<double>(list.Rows())), Value(static_cast<double>(list.entities.size())) };
+            std::set<std::string_view> between(mapped.chain.begin(), mapped.chain.end());
+            const auto read = [&](const Node& of) {
+                for (const auto& [name, input] : of.inputs) {
+                    if (!input.link) { context.push_back(input.value); continue; }
+                    if (input.link->node == mapped.source || between.contains(input.link->node)) continue;
+                    const auto from = built.find(input.link->node);
+                    const auto output = from == built.end() ? decltype(from->second.outputs.end()) {} : from->second.outputs.find(input.link->output);
+                    if (from == built.end() || output == from->second.outputs.end()) { context.emplace_back(); continue; }
+                    context.push_back(output->second.value);
+                    context.emplace_back(static_cast<double>(reinterpret_cast<std::uintptr_t>(output->second.resource.get())));
+                }
+            };
+            read(node);
+            for (const auto& id : mapped.chain) {
+                const Node* each = current ? CurrentNode(id) : nullptr;
+                if (!each || ReadsTheWorld(each->type)) return 0;
+                read(*each);
+            }
+            return size;
+        }
+
+        /** Row @p index's key, as RowKeySize lays it out, into @p key. */
+        void RowKey(const Built& source, const std::size_t index, const std::set<std::string, std::less<>>& asked, std::byte* key) const
+        {
+            const EntityList& list = *source.listed;
+            const std::size_t repeat = std::max<std::size_t>(list.repeat, 1), which = index / repeat;
+            const bool present = world && which < list.entities.size();
+            const kecs::Entity entity = present ? list.entities[which] : kecs::NullEntity;
+            std::memcpy(key, &entity, sizeof(entity));
+            key += sizeof(entity);
+            for (const auto& read : list.fields) {
+                if (!asked.contains(read.output)) continue;
+                const auto* bytes = present ? static_cast<const std::byte*>(world->Get(entity, read.component)) : nullptr;
+                if (!bytes) bytes = list.nones.at(read.component).data();
+                if (read.resource) {
+                    const Resource* held = reinterpret_cast<const Held*>(bytes + read.field.offset)->get();
+                    while (held && held->replacedBy) held = held->replacedBy.get();
+                    std::memcpy(key, &held, sizeof(held));
+                    key += sizeof(held);
+                    continue;
+                }
+                std::memcpy(key, bytes + read.field.offset, read.field.size);
+                key += read.field.size;
+            }
+            if (std::ranges::any_of(PlacedOutputs, [&](const std::string_view name) { return asked.contains(name); })) {
+                const kecs::Mat4 matrix = present ? world->WorldMatrix(entity) : kecs::Mat4 {};
+                std::memcpy(key, &matrix, sizeof(matrix));
+                key += sizeof(matrix);
+            }
+            if (list.grouped) {
+                const std::uint32_t group = which < list.groupOf.size() ? list.groupOf[which] : 0;
+                std::memcpy(key, &group, sizeof(group));
+            }
+        }
+
         /**
          * A ShaderBuffer's elements as they stand, written when they are not what was last written: those of the
          * buffer it comes after, then one for each entity its fields follow — each field as that entity has it,
@@ -6034,20 +6119,41 @@ namespace kgraph
                 if (output == from->second.outputs.end()) return;
                 fields.emplace_back(field, &output->second.value);
             }
+            // Rows as they were are not worked out again: each is keyed by what it is worked out of, where that can be said.
+            std::vector<Value> context;
+            const std::size_t keySize = source ? RowKeySize(node, mapped, *source, asked, context) : 0;
+            std::vector<std::byte> keys(keySize * rows);
+            const bool reuse = keySize > 0 && mapped.keySize == keySize && mapped.keyedBefore == before && context == mapped.context
+                               && mapped.bytes.size() == bytes.size();
+            bool skipped = false;
             for (std::size_t row = 0; row < rows; ++row) {
+                std::byte* element = bytes.data() + layout.first + (before + row) * layout.stride;
+                if (keySize > 0) {
+                    std::byte* key = keys.data() + row * keySize;
+                    RowKey(*source, row, asked, key);
+                    if (reuse && row < mapped.keyedRows && std::memcmp(key, mapped.rowKeys.data() + row * keySize, keySize) == 0) {
+                        std::memcpy(element, mapped.bytes.data() + layout.first + (before + row) * layout.stride, layout.stride);
+                        skipped = true;
+                        continue;
+                    }
+                }
                 if (source) {
                     SetRow(*source, row, &asked);
                     for (const auto& id : mapped.chain) Refresh(id);
                 }
-                std::byte* element = bytes.data() + layout.first + (before + row) * layout.stride;
                 for (const auto& [field, value] : fields)
                     if (!value->IsNull()) Put(*field, *value, element);
             }
             // Anything else wired to those entities has the first of them, as it does without a buffer.
-            if (source && rows > 1) {
+            if (source && (rows > 1 || skipped)) {
                 SetRow(*source, 0);
                 for (const auto& id : mapped.chain) Refresh(id);
             }
+            mapped.rowKeys = std::move(keys);
+            mapped.keySize = keySize;
+            mapped.keyedRows = keySize > 0 ? rows : 0;
+            mapped.keyedBefore = before;
+            mapped.context = std::move(context);
             mapped.count = before + rows;
             out.outputs["count"].value = static_cast<double>(mapped.count);
             if (bytes == mapped.bytes) return;
