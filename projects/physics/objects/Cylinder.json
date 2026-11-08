@@ -1,9 +1,0 @@
-{
-  "template": "Cylinder",
-  "icon": "view_in_ar",
-  "name": "Cylinder",
-  "components": {
-    "Mesh": { "mesh": "$cylinder" },
-    "default": { "color": [0.85, 0.6, 1] }
-  }
-}

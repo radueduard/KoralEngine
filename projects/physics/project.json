@@ -1,8 +1,0 @@
-{
-  "koral-engine-project": 1,
-  "name": "physics",
-  "kind": "module",
-  "scenes": ["test"],
-  "start": "test",
-  "scripts": "kotlin"
-}

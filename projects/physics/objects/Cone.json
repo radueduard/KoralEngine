@@ -1,9 +1,0 @@
-{
-  "template": "Cone",
-  "icon": "change_history",
-  "name": "Cone",
-  "components": {
-    "Mesh": { "mesh": "$cone" },
-    "default": { "color": [0.85, 0.6, 1] }
-  }
-}

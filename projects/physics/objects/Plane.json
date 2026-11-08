@@ -1,9 +1,0 @@
-{
-  "template": "Plane",
-  "icon": "crop_square",
-  "name": "Plane",
-  "components": {
-    "Mesh": { "mesh": "$plane" },
-    "default": { "color": [0.85, 0.6, 1] }
-  }
-}

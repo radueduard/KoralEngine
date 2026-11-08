@@ -1,9 +1,0 @@
-{
-  "template": "Capsule",
-  "icon": "medication",
-  "name": "Capsule",
-  "components": {
-    "Mesh": { "mesh": "$capsule" },
-    "default": { "color": [0.85, 0.6, 1] }
-  }
-}
