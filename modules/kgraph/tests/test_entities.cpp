@@ -267,9 +267,10 @@ TEST_F(EntityTest, OneDispatchOfEveryEntityStampsWhatADispatchEachDoes) {
     ExpectColor(Quarter(3), 0, 255, 255, "the others as they were");
 }
 
-// More groups along z than one dispatch counts (65,535): four entities of 20,000 groups each are 80,000, run as several
-// dispatches from a base. Every element is counted as many times — its groups are its own, the whole grid's numbering.
-TEST_F(EntityTest, ADispatchOfMoreGroupsThanOneCountsRunsThemAll) {
+// One Dispatch of every entity counts its groups along z as one dispatch does: three entities of 20,000 groups each are
+// 60,000, run, every element's own; a fourth is 80,000, past the 65,535 a dispatch counts — and a dispatch from a base
+// counts no further — so it is not run, and its report says why. Nothing the device would not have.
+TEST_F(EntityTest, ADispatchOfEveryEntityRunsAsManyGroupsAsOneDispatchCounts) {
     Load(R"json({
       "kgraph": 1,
       "nodes": [
@@ -286,11 +287,13 @@ TEST_F(EntityTest, ADispatchOfMoreGroupsThanOneCountsRunsThemAll) {
     auto& runtime = *scene->runtime;
     const kecs::ComponentId counter = runtime.ComponentOf("counter");
     ASSERT_NE(counter, kecs::NoComponent);
-    for (int i = 0; i < 4; ++i) {
+    const auto make = [&](const int which) {
         const kecs::Entity entity = scene->world.Create();
         scene->world.Add(entity, counter);
-        Parameters(scene->world, entity, counter).Set("which", static_cast<float>(i));
-    }
+        Parameters(scene->world, entity, counter).Set("which", static_cast<float>(which));
+    };
+    const std::uint64_t before = kor::log::LastSequence();
+    for (int i = 0; i < 3; ++i) make(i);
     for (int i = 0; i < 3; ++i) Frame();        // the entities found, and run
     runtime.Watch("counts");
     for (int i = 0; i < 4; ++i) Frame();
@@ -300,8 +303,16 @@ TEST_F(EntityTest, ADispatchOfMoreGroupsThanOneCountsRunsThemAll) {
     ASSERT_TRUE(peek && peek->bytes.size() >= 4 * sizeof(std::uint32_t)) << "nothing to look at";
     std::uint32_t counts[4] {};
     std::memcpy(counts, peek->bytes.data(), sizeof(counts));
-    EXPECT_EQ(counts[0], 20000u) << "cleared each frame, then all 20,000 of its groups";
-    for (int i = 1; i < 4; ++i) EXPECT_EQ(counts[i], counts[0]) << "element " << i << " as many as the first";
+    for (int i = 0; i < 3; ++i) EXPECT_EQ(counts[i], 20000u) << "element " << i << ": cleared each frame, then all 20,000 of its groups";
+
+    make(3);
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto* report = runtime.ReportOf("run");
+    ASSERT_NE(report, nullptr) << "one past what a dispatch counts is said";
+    EXPECT_EQ(report->ran, 0u);
+    EXPECT_NE(report->why.find("65535"), std::string::npos) << report->why;
+    for (const auto& record : kor::log::HistorySince(before))
+        if (record.message.find("VUID") != std::string::npos) ADD_FAILURE() << record.message;
 }
 
 // An entity destroyed after the passes are readied and before they record — what stopping a scene that plays does to

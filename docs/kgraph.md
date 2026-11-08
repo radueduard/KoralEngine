@@ -1093,8 +1093,8 @@ What each is to the shader is its `[entity("PER_INSTANCE")]` buffer's, as a batc
 and the images it holds by their bindless indices: read, `[entity("TEXTURE")]`, or written, `[entity("STORAGE")]`
 (`kor_RWTexture2D[index]`). Every element runs as many groups as `groups` says, so where their images differ in size it
 is as many as the largest takes, and the shader looks at its own image's size. Nothing else of it can be each element's:
-one wired so is an error that says which. More groups along z than a dispatch counts (65,535)
-run as several dispatches, each from the group the last stopped at (`CommandBuffer::DispatchBase`), so that `SV_GroupID.z` is the whole grid's in each and the shader is none the wiser; past 32 bits of groups, they are not run, and its report says so. Ten thousand entities, an image each: a Dispatch each costs the CPU about 14 ms a
+one wired so is an error that says which. More elements than a dispatch counts along z (65,535, by its groups along z)
+are not run, and its report says so: a dispatch from a base (`vkCmdDispatchBase`) counts no further, its base and its count together within the device's limit. Ten thousand entities, an image each: a Dispatch each costs the CPU about 14 ms a
 frame (readying 4.4, recording 9.6), one Dispatch of all of them 0.3 ms (Release,
 `ScaleTest.OneDispatchOfTenThousandEntitiesCostsLess`), and stamps the same images
 (`EntityTest.OneDispatchOfEveryEntityStampsWhatADispatchEachDoes`).

@@ -306,7 +306,7 @@ past entities:
   [kgraph.md](kgraph.md#batched-a-draw-of-each-element-as-one)). A shadow's cascades too: each turn culled by its own
   of the matrices (`cullIndex`, through a new **Slice** node), and every turn sharing one pack.
 
-**Built** (2026-11-08): more elements than a dispatch counts along z (65,535) run as several dispatches, each from a base (`CommandBuffer::DispatchBase`, `vkCmdDispatchBase`, in the framework).
+Still to do: more elements than a dispatch counts along z (65,535). `vkCmdDispatchBase` (`CommandBuffer::DispatchBase`, in the framework since 2026-11-08) does not lift it: its base and its count together are within the device's limit. It takes folding the elements into y as well, and telling the shader how.
 
 ### E8: A graph made both to try ideas in and to make them fast
 
