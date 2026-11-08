@@ -22,6 +22,11 @@ option(KORAL_ENGINE_SANITIZE "Build with ASan and UBSan" OFF)
 if(KORAL_ENGINE_SANITIZE AND NOT MSVC)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
+elseif(KORAL_ENGINE_SANITIZE)
+    # MSVC has ASan only (no UBSan), and not with incremental linking or edit-and-continue.
+    add_compile_options(/fsanitize=address)
+    string(REPLACE "/ZI" "/Zi" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    add_link_options(/INCREMENTAL:NO)
 endif()
 
 if(KORAL_ENGINE_BUILD_TESTS)
