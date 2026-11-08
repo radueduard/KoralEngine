@@ -31,5 +31,6 @@ if(KORAL_ENGINE_BUILD_TESTS)
         KEDITOR_TEST_SHADERS="${CMAKE_SOURCE_DIR}/modules/keditor/tests/shaders"
         KENGINE_SHADOW_SHADERS="${CMAKE_CURRENT_SOURCE_DIR}/tests/shadow/shaders"
         KENGINE_SHADOW_PROJECT="${CMAKE_BINARY_DIR}/shadow-project")
-    gtest_discover_tests(kengine_tests DISCOVERY_MODE PRE_TEST)
+    # The gate writes the project the C# and Kotlin gates open (Shadow.Project runs it to make it): one at a time with them.
+    gtest_discover_tests(kengine_tests DISCOVERY_MODE PRE_TEST PROPERTIES RESOURCE_LOCK shadow_project)
 endif()

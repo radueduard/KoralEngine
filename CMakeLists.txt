@@ -205,7 +205,7 @@ if(Koral_FOUND)
     if(KORAL_ENGINE_BUILD_TESTS)
         # The gate's project, made by the engine's own gate: what the C# and Kotlin gates open.
         add_test(NAME Shadow.Project COMMAND kengine_tests "--gtest_filter=ShadowGate.*")
-        set_tests_properties(Shadow.Project PROPERTIES FIXTURES_SETUP shadow_project)
+        set_tests_properties(Shadow.Project PROPERTIES FIXTURES_SETUP shadow_project RESOURCE_LOCK shadow_project)
     endif()
 
     add_executable(koral-editor apps/editor/main.cpp apps/frames.h)
