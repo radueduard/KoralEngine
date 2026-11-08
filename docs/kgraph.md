@@ -1501,8 +1501,9 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - A model's meshes are handed to the device in one go when the file is read, laid out as the device holds them on
   the thread that read it: the frame they arrive in makes their buffers, and copies them over. Forty thousand vertices
   cost that frame about 30 ms in Debug (`ScaleTest.AModelOfManyVerticesArrivesInAFrameOfLittleWork`); laid out on the
-  frame, as they were, about 100. A model's meshes have no tangents; a shader that wants a normal map's frame works it out (as
-  `samples/forward-plus` does).
+  frame, as they were, about 100. A model with UVs has its tangents and bitangents worked out as it is read (`TANGENT`,
+  `BITANGENT`), for a normal map's frame; one leaving them out (an import's `leaveOut`) has the shader work it out, as
+  `samples/forward-plus` does.
 - A ShaderBuffer reads the struct of a buffer an entry point uses: a struct no entry point reaches is not in the
   compiled shader. Numbers of 16 or 64 bits, and arrays of arrays, are left as zero. Of a block with fields before
   its array (`buffer B { uint count; Light lights[]; }`) only the array is filled.

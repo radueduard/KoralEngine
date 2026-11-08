@@ -1307,7 +1307,7 @@ TEST_F(EntityTest, AModelsAttributesAreReadAsTheSceneSays) {
     std::string error;
     auto read = runtime.ReadMesh(id, &error);
     ASSERT_TRUE(read) << error;
-    for (const char* semantic : { "POSITION", "NORMAL", "UV" }) EXPECT_NE(read->Find(semantic), nullptr) << semantic;
+    for (const char* semantic : { "POSITION", "NORMAL", "UV", "TANGENT", "BITANGENT" }) EXPECT_NE(read->Find(semantic), nullptr) << semantic << ": a model with UVs has its tangents worked out";
     EXPECT_TRUE(read->buffers.empty()) << "all in one buffer, by default";
     const auto before = runtime.ResourceOf(id);
 
