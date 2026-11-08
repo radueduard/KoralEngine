@@ -4573,9 +4573,25 @@ namespace kgraph
          * A mesh of any attributes on the device: a vertex buffer for each of its buffers, the attributes it names side
          * by side in each vertex, and one more for what none names. What it has not is not anywhere.
          */
-        static Expected<Held> MeshOf(const VertexData& data)
+        static Expected<Held> MeshOf(const VertexData& data) { return MeshOf(Interleave(data)); }
+
+        /**
+         * A mesh as its buffers will hold it, and the box it is in: worked out of its attributes with nothing of the device,
+         * so off the frame — where a model is read — leaving the frame only the buffers to make (MeshOf).
+         */
+        struct Interleaved {
+            std::string problem;
+            kor::VertexLayout layout;
+            std::vector<std::vector<std::uint32_t>> buffers;
+            std::vector<std::uint32_t> indices;
+            float bounds[6] {};
+            bool bounded = false;
+        };
+
+        static Interleaved Interleave(const VertexData& data)
         {
-            if (const std::string why = data.Problem(); !why.empty()) return Fail(why);
+            Interleaved out;
+            if (out.problem = data.Problem(); !out.problem.empty()) return out;
             std::vector<std::vector<const VertexAttribute*>> groups;
             std::set<std::string_view> placed;
             for (const auto& buffer : data.buffers) {
@@ -4588,9 +4604,6 @@ namespace kgraph
             for (const auto& attribute : data.attributes) if (!placed.contains(attribute.semantic)) rest.push_back(&attribute);
             if (!rest.empty()) groups.push_back(std::move(rest));
 
-            kor::Mesh::Builder builder;
-            kor::VertexLayout layout;
-            std::vector<Held> buffers;
             for (std::size_t b = 0; b < groups.size(); ++b) {
                 std::uint32_t stride = 0;
                 for (const auto* attribute : groups[b]) stride += attribute->count;
@@ -4600,25 +4613,43 @@ namespace kgraph
                     for (std::uint32_t v = 0; v < data.vertexCount; ++v)
                         std::copy_n(attribute->words.begin() + static_cast<std::ptrdiff_t>(v) * attribute->count, attribute->count,
                                     words.begin() + static_cast<std::ptrdiff_t>(v) * stride + offset);
-                    layout.attributes.emplace_back(attribute->semantic, "", static_cast<kor::u32>(b), offset * 4u, ChannelOf(attribute->type), attribute->count);
+                    out.layout.attributes.emplace_back(attribute->semantic, "", static_cast<kor::u32>(b), offset * 4u, ChannelOf(attribute->type), attribute->count);
                     offset += attribute->count;
                 }
-                layout.bindings.emplace_back(static_cast<kor::u32>(b), stride * 4u);
+                out.layout.bindings.emplace_back(static_cast<kor::u32>(b), stride * 4u);
+                out.buffers.push_back(std::move(words));
+            }
+            out.indices = data.indices;
+            Resource box;
+            Bound(box, data, 0, data.vertexCount);
+            std::copy_n(box.bounds, 6, out.bounds);
+            out.bounded = box.bounded;
+            return out;
+        }
+
+        /** The mesh @p ready says, on the device: its buffers made and their data handed over, on the frame. */
+        static Expected<Held> MeshOf(Interleaved ready)
+        {
+            if (!ready.problem.empty()) return Fail(ready.problem);
+            kor::Mesh::Builder builder;
+            std::vector<Held> buffers;
+            for (std::size_t b = 0; b < ready.buffers.size(); ++b) {
                 // Each buffer a resource of its own, the mesh referring to it: what a compute shader reads of the mesh.
-                auto buffer = kor::Mesh::MakeBuffer(words, kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eVertex) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc);
+                auto buffer = kor::Mesh::MakeBuffer(ready.buffers[b], kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eVertex) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc);
                 builder.SetVertexBuffer(static_cast<kor::u32>(b), kor::ResourceRef<kor::Buffer>(buffer));
                 buffers.push_back(MakeResource(std::move(buffer)));
             }
-            if (!data.indices.empty()) {
-                auto buffer = kor::Mesh::MakeBuffer(data.indices, kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eIndex) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc);
+            if (!ready.indices.empty()) {
+                auto buffer = kor::Mesh::MakeBuffer(ready.indices, kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eIndex) | kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc);
                 builder.SetIndexBuffer(kor::ResourceRef<kor::Buffer>(buffer));
                 buffers.push_back(MakeResource(std::move(buffer)));
             }
-            auto mesh = builder.SetVertexLayout(std::move(layout)).Build();
+            auto mesh = builder.SetVertexLayout(std::move(ready.layout)).Build();
             if (!mesh.Valid()) return Fail(mesh.Failure() ? mesh.Failure()->message : std::string("the mesh could not be built"));
             Held held = MakeResource(std::move(mesh));
             held->buffers = std::move(buffers);
-            Bound(*held, data, 0, data.vertexCount);
+            std::copy_n(ready.bounds, 6, held->bounds);
+            held->bounded = ready.bounded;
             return held;
         }
 
@@ -4706,7 +4737,7 @@ namespace kgraph
          * indices. Parts that differ in what their vertices have cannot share a mesh, and are in one of their own. Each
          * part is all it is but the device's mesh (source), which the whole is made into on the frame.
          */
-        struct Whole { VertexData all; std::vector<Held> parts; };
+        struct Whole { VertexData all; std::vector<Held> parts; Interleaved ready; };    // ready: all, as its buffers hold it
         struct Arrived { std::vector<Whole> wholes; };     // a model's meshes, read and put together off the frame
 
         /** A model's meshes put together into wholes, each part bounded: the work of it, done where the file was read. */
@@ -4739,7 +4770,12 @@ namespace kgraph
                 whole.parts.push_back(std::move(part));
             }
             Arrived arrived;
-            for (auto& whole : wholes | std::views::values) arrived.wholes.push_back(std::move(whole));
+            // Laid out as the device will hold it here, off the frame: the frame it arrives in only makes the buffers.
+            for (auto& whole : wholes | std::views::values) {
+                whole.ready = Interleave(whole.all);
+                whole.all = {};
+                arrived.wholes.push_back(std::move(whole));
+            }
             return arrived;
         }
         std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
@@ -5241,7 +5277,7 @@ namespace kgraph
                 Arrived arrived = std::move(arrivedMeshes.front());
                 arrivedMeshes.pop_front();
                 for (auto& whole : arrived.wholes) {
-                    const auto made = MeshOf(whole.all);
+                    const auto made = MeshOf(std::move(whole.ready));
                     if (!made) {
                         for (const auto& part : whole.parts) unread[part->node] = std::format("'{}': {}", part->node, made.error());
                         continue;

@@ -924,3 +924,44 @@ TEST_F(ScaleTest, ABufferOfThousandsWorksOutOnlyWhatChanged) {
     ASSERT_TRUE(fresh);
     EXPECT_TRUE(fresh->bytes == kept) << "what was kept is what is worked out";
 }
+
+// A model of many vertices, read: laid out as the device holds it off the frame, so that the frame it arrives in makes its
+// buffers and no more. What the frames cost while it is read and as it arrives, the dearest of them.
+TEST_F(ScaleTest, AModelOfManyVerticesArrivesInAFrameOfLittleWork) {
+    constexpr int side = 200;      // 40,000 vertices, twice as many triangles less a row
+    const auto file = std::filesystem::temp_directory_path() / std::format("kgraph-scale-grid-{}.obj", side);
+    {
+        std::ofstream out(file);
+        for (int y = 0; y < side; ++y)
+            for (int x = 0; x < side; ++x) out << "v " << x << ' ' << y << " 0\nvn 0 0 1\nvt " << x / float(side) << ' ' << y / float(side) << '\n';
+        for (int y = 0; y + 1 < side; ++y)
+            for (int x = 0; x + 1 < side; ++x) {
+                const int a = y * side + x + 1, b = a + 1, c = a + side, d = c + 1;
+                out << std::format("f {0}/{0}/{0} {1}/{1}/{1} {2}/{2}/{2}\nf {1}/{1}/{1} {3}/{3}/{3} {2}/{2}/{2}\n", a, b, c, d);
+            }
+    }
+    auto& runtime = *scene->runtime;
+    runtime.Set(kgraph::Graph {});
+    const std::string id = "@" + file.generic_string() + "#0";
+    ASSERT_NE(runtime.ResourceOf(id), nullptr);
+    double dearest = 0.0;
+    bool arrived = false;
+    // Read on another thread, as long as that takes: a Debug build reads it in seconds.
+    const auto began = std::chrono::steady_clock::now();
+    while (!arrived && std::chrono::steady_clock::now() - began < std::chrono::seconds(60)) {
+        Frame();
+        dearest = std::max(dearest, scene->updateMs);
+        const auto now = runtime.ResourceOf(id);
+        arrived = now && !now->pending;
+    }
+    ASSERT_TRUE(arrived) << "read";
+    std::string error;
+    const auto read = runtime.ReadMesh(id, &error);
+    ASSERT_TRUE(read) << error;
+    EXPECT_EQ(read->vertexCount, static_cast<std::uint32_t>(side * side));
+    RecordProperty("dearest_frame_ms", std::to_string(dearest));
+    std::printf("            a model of %d vertices: its dearest frame %.3f ms\n", side * side, dearest);
+    // Laid out on the frame, as it was, the frame it arrived in took about 100 ms (Debug); laid out off it, about 30.
+    EXPECT_LT(dearest, 60.0) << "the frame it arrives in makes its buffers, and lays nothing out";
+    std::filesystem::remove(file);
+}
