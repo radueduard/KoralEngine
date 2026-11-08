@@ -42,7 +42,7 @@ namespace {
             private float _flicker = 3f;     // the object's own
             public float Doubled => Range * 2f;
             public static float Shared = 1f;
-            public string Label = "{";       // a type no script keeps... were it a field the host kept
+            public object Label = null;       // a type no script keeps... were it a field the host kept
             protected override void Update(float delta) { _flicker += delta; }
         }
         public abstract class Base : Script { public float X; }
@@ -53,7 +53,7 @@ namespace {
 // Each public field, where the C# host puts it, starting as written; what is no field, and what is no script, is not.
 TEST(Declarations, ACSharpScriptsFieldsAreItsComponent) {
     std::string source = Lamp;
-    source.erase(source.find("            public string Label"), std::string_view("            public string Label = \"{\";       // a type no script keeps... were it a field the host kept\n").size());
+    source.erase(source.find("            public object Label"), std::string_view("            public object Label = null;       // a type no script keeps... were it a field the host kept\n").size());
     const auto found = kscript::Declare(source, false, "Lamp.cs");
     for (const auto& problem : found.problems) ADD_FAILURE() << problem;
     ASSERT_EQ(found.types.size(), 1u) << "the abstract one and the one that is no script are not";
@@ -81,7 +81,7 @@ TEST(Declarations, ACSharpScriptsFieldsAreItsComponent) {
     const auto bad = kscript::Declare(Lamp, false, "Lamp.cs");
     EXPECT_TRUE(bad.types.empty());
     ASSERT_FALSE(bad.problems.empty());
-    EXPECT_NE(bad.problems.front().find("Lamp.cs: Lamp.Label is a string"), std::string::npos) << bad.problems.front();
+    EXPECT_NE(bad.problems.front().find("Lamp.cs: Lamp.Label is a object"), std::string::npos) << bad.problems.front();
 }
 
 // Kotlin's public vars, typed as written or as what they start as; private ones, vals and functions are not.

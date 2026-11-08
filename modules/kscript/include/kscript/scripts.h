@@ -15,6 +15,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <map>
 #include <vector>
 
 #include <kecs/kecs.h>
@@ -60,6 +61,9 @@ namespace kscript
         /// What a new one starts as, `size` bytes: what its source initialises its fields to. Empty, every field is zero —
         /// or, for a type registered again without one, what it started as before, field by field.
         std::vector<std::byte> initial;
+        /// What each of its text fields — a `string`, kept where the field is as a std::string — starts as, by its name: what
+        /// its source says, or nothing. A text field's bytes in `initial` are none of it.
+        std::map<std::string, std::string, std::less<>> texts;
         Callbacks callbacks;
         /// What it takes besides Setup, as its source says (`PerFrame`, `MeshGenerator`): what an editor offers it for.
         std::vector<std::string> pieces;

@@ -83,6 +83,15 @@ Write("Spin.cs", """
         protected override void Update(float delta) { Angle += Speed; ++Updates; ++_mine; }
     }
     """);
+Write("Sign.cs", """
+    // Text: the engine's own, read into the field each frame and written back after.
+    public sealed class Sign : Script
+    {
+        public string Words = "";
+        public int Frames;
+        protected override void Update(float delta) { ++Frames; Words += "!"; }
+    }
+    """);
 Write("Feeder.cs", """
     // The graphics half: what a pass reads, written from an entity's data before anything is drawn.
     public sealed class Feeder : Setup, BeforeDraw
@@ -166,7 +175,7 @@ using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
 // The project's: the engine's package is compiled with them, so that a script reads a light as it reads its own, but
 // its cameras, lights and sky are Data, which no host runs.
-Check(host.Scripts.Order().SequenceEqual(["Checker", "Feeder", "Pyramid", "Restarter", "Roller", "Spin", "Watcher"]),
+Check(host.Scripts.Order().SequenceEqual(["Checker", "Feeder", "Pyramid", "Restarter", "Roller", "Sign", "Spin", "Watcher"]),
       $"each is a script, and the package's data none: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 {
@@ -429,7 +438,7 @@ Frames(1);
 Equal(world.FieldJson(wheel, "Spin", "Laps"), "3", "the scripts that were running carry on");
 
 // A field of a kind a script cannot keep is refused the same way, and said plainly.
-Write("Spin.cs", "public sealed class Spin : Script { public float Angle; public string Name = \"\"; }");
+Write("Spin.cs", "public sealed class Spin : Script { public float Angle; public System.Collections.Generic.List<int> Name = new(); }");
 Check(!host.Reload(), "a field a script cannot keep is refused");
 Check(host.Errors.Count == 1 && host.Errors[0].Contains("Spin.Name") && host.Errors[0].Contains("private"), $"saying which, and what to do: {host.Errors.FirstOrDefault()}");
 Frames(1);
@@ -480,6 +489,18 @@ Equal(world.FieldJson(wheel, "Spin", "Laps"), "17", "and runs, with what the ent
 var previous = host.PreviousContext;
 for (var i = 0; i < 20 && previous is { IsAlive: true }; ++i) { GC.Collect(); GC.WaitForPendingFinalizers(); Frames(1); }
 Check(previous is { IsAlive: false }, "a build that was replaced is unloaded");
+
+// ---- a text field: the engine's text, both ways ------------------------------------------------------------------
+{
+    var sign = world.Create("Sign");
+    Check(world.Add(sign, "Sign"), "a script with a text field is a component");
+    world.Set(sign, "Sign", "Words", "héllo, \"you\"");
+    Frames(2);
+    Equal(world.FieldJson(sign, "Sign", "Words"), "\"héllo, \\\"you\\\"!!\"", "text set from outside, read by the script, and written back, twice over");
+    world.Set(sign, "Sign", "Words", new string('x', 300));
+    Frames(1);
+    Equal(world.FieldJson(sign, "Sign", "Words").Length, 300 + 1 + 2, "a long one, too: 300 and one, quoted");
+}
 
 var laps = world.FieldJson(wheel, "Spin", "Laps");
 host.Dispose();

@@ -97,3 +97,10 @@ class Checker : koral.engine.Setup(), koral.engine.ImageGenerator {
         }
     }
 }
+
+/** Text: the engine's own, read into the property each frame and written back after. */
+class Sign : Script() {
+    var words = ""
+    var frames = 0
+    override fun update(delta: Float) { ++frames; words += "!" }
+}

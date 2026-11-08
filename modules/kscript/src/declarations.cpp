@@ -39,12 +39,14 @@ namespace kscript
                 { "IVec2", { "ivec2", 8, 4, 'i', 2 } }, { "IVec3", { "ivec3", 12, 4, 'i', 3 } }, { "IVec4", { "ivec4", 16, 4, 'i', 4 } },
                 { "UVec2", { "uvec2", 8, 4, 'u', 2 } }, { "UVec3", { "uvec3", 12, 4, 'u', 3 } }, { "UVec4", { "uvec4", 16, 4, 'u', 4 } },
                 { "Mat4", { "mat4", 64, 4, 'f', 16 } }, { "Quat", { "quat", 16, 4, 'f', 4 } }, { "Entity", { "entity", 8, 4, 'e', 2 } },
+                { "string", { "string", sizeof(std::string), alignof(std::string), 's', 0 } },
             };
             static const std::map<std::string, Kind, std::less<>> kotlinTypes {
                 { "Float", { "f32", 4, 4, 'f', 1 } }, { "Double", { "f64", 8, 8, 'd', 1 } }, { "Int", { "i32", 4, 4, 'i', 1 } },
                 { "Long", { "i64", 8, 8, 'i', 1 } }, { "Boolean", { "bool", 1, 1, 'b', 1 } },
                 { "Vec2", { "vec2", 8, 4, 'f', 2 } }, { "Vec3", { "vec3", 12, 4, 'f', 3 } }, { "Vec4", { "vec4", 16, 4, 'f', 4 } },
                 { "Mat4", { "mat4", 64, 4, 'f', 16 } }, { "Quat", { "quat", 16, 4, 'f', 4 } }, { "Entity", { "entity", 8, 4, 'e', 2 } },
+                { "String", { "string", sizeof(std::string), alignof(std::string), 's', 0 } },
             };
             const auto& types = kotlin ? kotlinTypes : csharp;
             // `Koral.Vec3`, `koral.Vec3`: the same type.
@@ -549,7 +551,24 @@ namespace kscript
                     offset = (offset + kind->alignment - 1) / kind->alignment * kind->alignment;
                     type.fields.push_back({ .name = name, .type = kind->name, .offset = offset, .size = kind->size });
                     Limits(statement, type.fields.back());
-                    if (kind == &TextureKind) {
+                    if (kind->scalar == 's') {
+                        // Text: what is between its quotes, as it is written there — or nothing.
+                        static const std::regex quoted(R"rx(^@?"((?:[^"\\]|\\.)*)"$)rx");
+                        std::smatch found;
+                        if (value.empty() || value == "null" || value == "\"\"" || value == "string.Empty" || value == "String.Empty") {}
+                        else if (std::regex_match(value, found, quoted)) {
+                            std::string text;
+                            const std::string said = found[1].str();
+                            for (std::size_t i = 0; i < said.size(); ++i) {
+                                if (said[i] != '\\' || i + 1 == said.size()) { text += said[i]; continue; }
+                                const char next = said[++i];
+                                text += next == 'n' ? '\n' : next == 't' ? '\t' : next;
+                            }
+                            type.texts[name] = std::move(text);
+                        } else {
+                            out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts empty", where, type.name, name, value));
+                        }
+                    } else if (kind == &TextureKind) {
                         const auto picture = PictureOf(value);
                         if (!picture) out.problems.push_back(std::format("{}{}.{} starts as '{}', which is not understood without running it: it starts white", where, type.name, name, value));
                         type.textures.emplace_back(name, picture.value_or("$white"));

@@ -1,10 +1,12 @@
 package koral.engine
 
+import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout.JAVA_BYTE
 import java.lang.foreign.ValueLayout.JAVA_DOUBLE_UNALIGNED
 import java.lang.foreign.ValueLayout.JAVA_FLOAT_UNALIGNED
 import java.lang.foreign.ValueLayout.JAVA_INT_UNALIGNED
+import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.lang.foreign.ValueLayout.JAVA_LONG_UNALIGNED
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
@@ -313,7 +315,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
                 if (!getter || !setter) continue
                 val (typeName, size, alignment) = describe(field.type)
                     ?: throw EngineException("${type.simpleName}.${field.name} is a ${field.type.simpleName}, which a script cannot keep: its properties are " +
-                                             "Float, Double, Int, Long, Boolean, Vec2, Vec3, Vec4, Mat4, Quat and Entity. Make it private if it is only this run's.")
+                                             "Float, Double, Int, Long, Boolean, Vec2, Vec3, Vec4, Mat4, Quat, Entity and String. Make it private if it is only this run's.")
                 offset = (offset + alignment - 1) / alignment * alignment
                 field.isAccessible = true
                 found += Property(field, typeName, offset, size)
@@ -338,6 +340,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
                 "i32" -> { p.field.setInt(script, data.get(JAVA_INT_UNALIGNED, at)); continue }
                 "i64" -> { p.field.setLong(script, data.get(JAVA_LONG_UNALIGNED, at)); continue }
                 "bool" -> { p.field.setBoolean(script, data.get(JAVA_BYTE, at) != 0.toByte()); continue }
+                "string" -> { p.field.set(script, textAt(data.asSlice(at))); continue }
             }
             val value: Any = when (p.type) {
                 "vec2" -> Vec2(f(0), f(1))
@@ -362,6 +365,7 @@ internal class ScriptLayout private constructor(type: Class<*>) {
                 "i32" -> { data.set(JAVA_INT_UNALIGNED, at, p.field.getInt(script)); continue }
                 "i64" -> { data.set(JAVA_LONG_UNALIGNED, at, p.field.getLong(script)); continue }
                 "bool" -> { data.set(JAVA_BYTE, at, if (p.field.getBoolean(script)) 1 else 0); continue }
+                "string" -> { setTextAt(data.asSlice(at), p.field.get(script) as String? ?: ""); continue }
             }
             when (val value = p.field.get(script)) {
                 is Float -> f(0, value)
@@ -403,7 +407,36 @@ internal class ScriptLayout private constructor(type: Class<*>) {
             Quat::class.java -> Triple("quat", 16, 4)
             Mat4::class.java -> Triple("mat4", 64, 4)
             Entity::class.java -> Triple("entity", 8, 4)
+            // Text: the engine's own, laid out as it is there, and read and written through it.
+            String::class.java -> Triple("string", textLayout.first, textLayout.second)
             else -> null
+        }
+
+        /** How big the engine's text is, and on what: where a text property goes. */
+        private val textLayout: Pair<Int, Int> by lazy {
+            Arena.ofConfined().use { a ->
+                val size = a.allocate(JAVA_LONG)
+                val alignment = a.allocate(JAVA_LONG)
+                Native.kengine_text_layout.invokeExact(size, alignment)
+                Pair(size.get(JAVA_LONG, 0).toInt(), alignment.get(JAVA_LONG, 0).toInt())
+            }
+        }
+
+        /** The text at [at], a text property in a script's data. */
+        fun textAt(at: MemorySegment): String = Arena.ofConfined().use { a ->
+            val length = a.allocate(JAVA_LONG)
+            val bytes = Native.kengine_text_get.invokeExact(at, length) as MemorySegment
+            val count = length.get(JAVA_LONG, 0)
+            if (count == 0L) "" else String(bytes.reinterpret(count).toArray(JAVA_BYTE), Charsets.UTF_8)
+        }
+
+        /** Sets the text at [at], a text property in a script's data. */
+        fun setTextAt(at: MemorySegment, text: String): Unit = Arena.ofConfined().use { a ->
+            val bytes = text.toByteArray(Charsets.UTF_8)
+            val native = a.allocate(maxOf(bytes.size, 1).toLong())
+            MemorySegment.copy(bytes, 0, native, JAVA_BYTE, 0, bytes.size)
+            Native.kengine_text_set.invokeExact(at, native, bytes.size.toLong())
+            Unit
         }
     }
 }

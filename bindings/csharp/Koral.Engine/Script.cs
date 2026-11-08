@@ -407,6 +407,8 @@ internal sealed unsafe class ScriptLayout
         if (type == typeof(Mat4)) return ("mat4", 64, 4);
         if (type == typeof(Quat)) return ("quat", 16, 4);
         if (type == typeof(Entity)) return ("entity", 8, 4);
+        // Text: the engine's own, laid out as it is there, and read and written through it.
+        if (type == typeof(string)) { var (size, alignment) = TextLayout; return ("string", size, alignment); }
         return null;
     }
 
@@ -444,7 +446,7 @@ internal sealed unsafe class ScriptLayout
                 if (typeof(ResourceScript.Resource).IsAssignableFrom(info.FieldType)) continue;    // what a ResourceScript makes: no setting
                 var described = Describe(info.FieldType)
                     ?? throw new EngineException($"{type.Name}.{info.Name} is a {info.FieldType.Name}, which a script cannot keep: its fields are numbers, bool, " +
-                                                 "Koral's vectors, Mat4, Quat and Entity. Make it private if it is only this run's.");
+                                                 "Koral's vectors, Mat4, Quat, Entity and string. Make it private if it is only this run's.");
                 offset = (offset + described.Alignment - 1) / described.Alignment * described.Alignment;
                 fields.Add(new Field(info, described.Type, offset, described.Size));
                 offset += described.Size;
@@ -456,12 +458,32 @@ internal sealed unsafe class ScriptLayout
         Size = (offset + alignment - 1) / alignment * alignment;
     }
 
+    /// <summary>How big the engine's text is, and on what: where a text field goes.</summary>
+    private static (int Size, int Alignment) TextLayout
+    {
+        get
+        {
+            if (s_textLayout is { } known) return known;
+            nuint size, alignment;
+            Native.kengine_text_layout(&size, &alignment);
+            return (s_textLayout = ((int)size, (int)alignment)).Value;
+        }
+    }
+    private static (int Size, int Alignment)? s_textLayout;
+
     /// <summary>The engine's bytes into the object's fields.</summary>
     public void Load(object script, IntPtr data)
     {
         foreach (var field in Fields)
         {
             var at = data + field.Offset;
+            if (field.Info.FieldType == typeof(string))
+            {
+                nuint length;
+                var text = Native.kengine_text_get((void*)at, &length);
+                field.Info.SetValue(script, System.Text.Encoding.UTF8.GetString(text, (int)length));
+                continue;
+            }
             field.Info.SetValue(script, field.Info.FieldType == typeof(bool) ? *(byte*)at != 0 : Marshal.PtrToStructure(at, field.Info.FieldType));
         }
     }
@@ -472,6 +494,12 @@ internal sealed unsafe class ScriptLayout
         foreach (var field in Fields)
         {
             var at = data + field.Offset;
+            if (field.Info.FieldType == typeof(string))
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes((string?)field.Info.GetValue(script) ?? "");
+                fixed (byte* utf8 = bytes) Native.kengine_text_set((void*)at, utf8, (nuint)bytes.Length);
+                continue;
+            }
             var value = field.Info.GetValue(script)!;
             if (value is bool flag) *(byte*)at = flag ? (byte)1 : (byte)0;
             else Marshal.StructureToPtr(value, at, false);

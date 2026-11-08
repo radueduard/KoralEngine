@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cstring>
 #include <format>
+#include <map>
+#include <new>
 #include <ranges>
 #include <utility>
 
@@ -22,29 +24,80 @@ namespace kscript
             return false;
         }
 
+        /** What a script's component starts as: its bytes, and what each text field — a std::string where it is — says. */
+        struct Start {
+            std::vector<std::byte> bytes;
+            std::map<std::string, std::string, std::less<>> texts;
+            bool operator==(const Start&) const = default;
+        };
+
+        bool IsText(const kecs::FieldDescription& field) { return field.type == "string"; }
+        std::string* TextAt(void* data, const kecs::FieldDescription& field) { return std::launder(reinterpret_cast<std::string*>(static_cast<std::byte*>(data) + field.offset)); }
+        const std::string* TextAt(const void* data, const kecs::FieldDescription& field)
+        {
+            return std::launder(reinterpret_cast<const std::string*>(static_cast<const std::byte*>(data) + field.offset));
+        }
+
         // What marks a component type as a script's: nothing else constructs one with this. It starts as its source
-        // says (the description's context: its bytes), or as zeros.
+        // says (the description's context: its bytes and its texts), or as zeros and nothing.
         void ConstructScript(void* at, const kecs::ComponentDescription& type)
         {
             std::memset(at, 0, type.size);
-            if (const auto* initial = static_cast<const std::vector<std::byte>*>(type.context.get()))
-                std::memcpy(at, initial->data(), std::min(initial->size(), type.size));
+            const auto* start = static_cast<const Start*>(type.context.get());
+            if (start) std::memcpy(at, start->bytes.data(), std::min(start->bytes.size(), type.size));
+            for (const auto& field : type.fields) {
+                if (!IsText(field)) continue;
+                const auto said = start ? start->texts.find(field.name) : decltype(start->texts.end()) {};
+                new (static_cast<std::byte*>(at) + field.offset) std::string(start && said != start->texts.end() ? said->second : std::string());
+            }
+        }
+        // Of one with text: its bytes as they are, and each text a std::string of its own.
+        void CopyScript(void* to, const void* from, const kecs::ComponentDescription& type)
+        {
+            std::memcpy(to, from, type.size);
+            for (const auto& field : type.fields)
+                if (IsText(field)) new (static_cast<std::byte*>(to) + field.offset) std::string(*TextAt(from, field));
+        }
+        void RelocateScript(void* to, void* from, const kecs::ComponentDescription& type)
+        {
+            std::memcpy(to, from, type.size);
+            for (const auto& field : type.fields)
+                if (IsText(field)) {
+                    std::string* was = TextAt(from, field);
+                    new (static_cast<std::byte*>(to) + field.offset) std::string(std::move(*was));
+                    was->~basic_string();
+                }
+        }
+        void DestroyScript(void* at, const kecs::ComponentDescription& type)
+        {
+            for (const auto& field : type.fields)
+                if (IsText(field)) TextAt(at, field)->~basic_string();
+        }
+        /** A text field carried from one shape to the next, a script edited: both alive, at the field. */
+        void AssignText(void* to, const void* from, const kecs::FieldDescription&)
+        {
+            *std::launder(static_cast<std::string*>(to)) = *std::launder(static_cast<const std::string*>(from));
         }
 
         /** What a type registered again without a start of its own starts as: what each field of the same name and type did before. */
-        std::vector<std::byte> Carried(const kecs::ComponentDescription& before, const ScriptType& type)
+        Start Carried(const kecs::ComponentDescription& before, const ScriptType& type)
         {
-            const auto* was = static_cast<const std::vector<std::byte>*>(before.context.get());
-            if (!was || was->empty()) return {};
-            std::vector<std::byte> initial(std::max<std::size_t>(type.size, 1), std::byte { 0 });
+            const auto* was = static_cast<const Start*>(before.context.get());
+            if (!was || (was->bytes.empty() && was->texts.empty())) return {};
+            Start start;
+            start.bytes.assign(std::max<std::size_t>(type.size, 1), std::byte { 0 });
             bool any = false;
             for (const auto& field : type.fields)
-                for (const auto& old : before.fields)
-                    if (old.SameAs(field) && old.offset + old.size <= was->size() && field.offset + field.size <= initial.size()) {
-                        std::memcpy(initial.data() + field.offset, was->data() + old.offset, field.size);
+                for (const auto& old : before.fields) {
+                    if (!old.SameAs(field)) continue;
+                    if (IsText(field)) {
+                        if (const auto text = was->texts.find(old.name); text != was->texts.end()) { start.texts[field.name] = text->second; any = true; }
+                    } else if (old.offset + old.size <= was->bytes.size() && field.offset + field.size <= start.bytes.size()) {
+                        std::memcpy(start.bytes.data() + field.offset, was->bytes.data() + old.offset, field.size);
                         any = true;
                     }
-            return any ? initial : std::vector<std::byte> {};
+                }
+            return any ? start : Start {};
         }
     }
 
@@ -81,8 +134,11 @@ namespace kscript
                     field.logarithmic = was->logarithmic;
                 }
         description.fields = type.fields;
-        if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent && type.initial.empty())
-            type.initial = Carried(_world.Describe(existing), type);
+        if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent && type.initial.empty() && type.texts.empty()) {
+            Start carried = Carried(_world.Describe(existing), type);
+            type.initial = std::move(carried.bytes);
+            type.texts = std::move(carried.texts);
+        }
         // An entity a field holds starts as none: all zeros would be the first entity there is.
         for (const auto& field : type.fields) {
             if (field.type != "entity" || field.size < sizeof(kecs::Entity)) continue;
@@ -92,10 +148,18 @@ namespace kscript
             if (std::all_of(at, at + sizeof(kecs::Entity), [](const std::byte b) { return b == std::byte { 0 }; }))
                 std::memcpy(at, &kecs::NullEntity, sizeof(kecs::Entity));
         }
-        if (type.abstract) type.initial.clear();
-        if (!type.initial.empty()) {
-            type.initial.resize(description.size, std::byte { 0 });
-            description.context = std::make_shared<const std::vector<std::byte>>(type.initial);
+        if (type.abstract) { type.initial.clear(); type.texts.clear(); }
+        if (!type.initial.empty() || !type.texts.empty()) {
+            if (!type.initial.empty()) type.initial.resize(description.size, std::byte { 0 });
+            description.context = std::make_shared<const Start>(Start { type.initial, type.texts });
+        }
+        // Text is a std::string where its field is: made, copied, moved and let go of as one, and carried over a reload.
+        if (!type.abstract && std::ranges::any_of(description.fields, IsText)) {
+            description.copy = &CopyScript;
+            description.relocate = &RelocateScript;
+            description.destroy = &DestroyScript;
+            for (auto& field : description.fields)
+                if (IsText(field)) field.assign = &AssignText;
         }
 
         const auto known = std::ranges::find_if(_types, [&](const auto& t) { return t->description.name == type.name; });
@@ -122,8 +186,8 @@ namespace kscript
                     return kecs::NoComponent;
                 }
             }
-            const auto* before = static_cast<const std::vector<std::byte>*>(now.context.get());
-            const auto* after = static_cast<const std::vector<std::byte>*>(description.context.get());
+            const auto* before = static_cast<const Start*>(now.context.get());
+            const auto* after = static_cast<const Start*>(description.context.get());
             const bool same = now.size == description.size && now.construct == description.construct && now.abstract == description.abstract && now.kinds == description.kinds
                 && std::ranges::equal(now.fields, description.fields, [](const auto& a, const auto& b) { return a.SameAs(b) && a.offset == b.offset; })
                 && (before == after || (before && after && *before == *after));

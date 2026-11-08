@@ -44,7 +44,7 @@ class ScriptsTest {
             install("a")
             val host = ScriptHost(world, classes)
             assertTrue(host.load(), "the scripts load: ${host.errors}")
-            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Restarter", "Spin", "Watcher"), host.scripts)
+            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Restarter", "Sign", "Spin", "Watcher"), host.scripts)
             assertTrue(world.hasComponentType("Spin"), "a script is a component type, by its class name")
 
             // What initialize reads, changed from outside: the script starts over, a new object, once. Nothing else does that.
@@ -72,6 +72,19 @@ class ScriptsTest {
                 world.destroy(restarted)
             }
 
+
+            // ---- a text property: the engine's text, both ways ----------------------------------------------------
+            run {
+                val sign = world.create("Sign")
+                assertTrue(world.add(sign, "Sign"), "a script with a text property is a component")
+                world.set(sign, "Sign", "words", "héllo, \"you\"")
+                frames(2)
+                assertEquals("\"héllo, \\\"you\\\"!!\"", world.fieldJson(sign, "Sign", "words"), "set from outside, read by the script, and written back, twice over")
+                world.set(sign, "Sign", "words", "x".repeat(300))
+                frames(1)
+                assertEquals(300 + 1 + 2, world.fieldJson(sign, "Sign", "words").length, "a long one, too: 300 and one, quoted")
+                world.destroy(sign)
+            }
             val wheel = world.create("Wheel")
             assertTrue(world.add(wheel, "Spin"))
             world.set(wheel, "Spin", "speed", 2)

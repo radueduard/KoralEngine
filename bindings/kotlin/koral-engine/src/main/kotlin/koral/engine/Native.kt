@@ -180,6 +180,9 @@ internal object Native {
 
     val kengine_script_register = call("kengine_script_register", JAVA_INT, ADDRESS, ADDRESS, JAVA_LONG, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
     val kengine_script_unregister = call("kengine_script_unregister", null, ADDRESS, ADDRESS)
+    val kengine_text_layout = call("kengine_text_layout", null, ADDRESS, ADDRESS)
+    val kengine_text_get = call("kengine_text_get", ADDRESS, ADDRESS, ADDRESS)
+    val kengine_text_set = call("kengine_text_set", null, ADDRESS, ADDRESS, JAVA_LONG)
     /** KengineResourceScriptCallbacks: user, then fill. */
     val RESOURCE_CALLBACKS: StructLayout = MemoryLayout.structLayout(ADDRESS, ADDRESS)
     /** KengineScriptResource: name, kind, settings. */

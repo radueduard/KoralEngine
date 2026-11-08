@@ -114,6 +114,7 @@ entity has set itself. A scene opened has what the file says now.
 | True or false | `bool` | `Boolean` |
 | Vectors | `Vec2`, `Vec3`, `Vec4`, and the `IVec` and `UVec` ones | `Vec2`, `Vec3`, `Vec4` |
 | Others | `Mat4`, `Quat`, `Entity` | `Mat4`, `Quat`, `Entity` |
+| Text | `string` | `String` |
 
 A public field (a public `var` in Kotlin) of one of these is the component's. A private one is the
 object's own: it lasts while the script runs and is gone on a reload. A public field of any other type is
@@ -121,7 +122,7 @@ an error when the scripts load, which names the field.
 
 A new component starts as its class initialises its fields: the engine reads the scripts' sources for it
 (`kscript::Declare`), so it does whether or not anything runs them. A number, true or false, and a vector,
-quaternion or matrix made of numbers (`new(1f, 0.5f, 0)`, `Vec3(1f, 0.5f, 0f)`) are understood; anything else
+quaternion or matrix made of numbers (`new(1f, 0.5f, 0)`, `Vec3(1f, 0.5f, 0f)`), and text in quotes (`"hello"`), are understood; anything else
 starts at zero, and the editor's notes say so. The same reading is how an editor whose scripts are not running yet
 knows its scripts' components: to give an entity one, and to offer a node of it.
 
@@ -569,7 +570,8 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 
 ## Not yet
 
-- **Text, lists and resources as fields.** A script reaches a resource through `World`, by node id.
+- **Lists and resources as fields.** A script reaches a resource through `World`, by node id. Text is a field (`string`,
+  `String`): the engine's own text where the field is, read into the script before each call and written back after.
 - **A ResourceScript runs only with its project's scripts**, as every script does: until they are compiled, or
   where they cannot be run, what it makes is made with nothing in it, and its node says so.
 - **Scripts run only while the scene plays** in the editor (Play, in the Scene panel): nothing is created, enabled

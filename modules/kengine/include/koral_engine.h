@@ -320,6 +320,16 @@ KENGINE_API uint32_t kengine_script_register(KengineDocument* document, const ch
 /** Stops calling a script type's functions: its code is about to go. Its data stays, on every entity. */
 KENGINE_API void kengine_script_unregister(KengineDocument* document, const char* name);
 
+/**
+ * A script's text field, a field of type "string": kept in its data as the engine's own text, which is @p size bytes on
+ * @p alignment — what a host lays such a field out by. Read and written through these, never as bytes.
+ */
+KENGINE_API void kengine_text_layout(size_t* size, size_t* alignment);
+/** The text at @p at, a text field in a script's data: UTF-8, @p length bytes (no zero after it to count on). Valid until it is next written. */
+KENGINE_API const char* kengine_text_get(const void* at, size_t* length);
+/** Sets the text at @p at, a text field in a script's data, to @p length bytes of UTF-8. */
+KENGINE_API void kengine_text_set(void* at, const char* utf8, size_t length);
+
 /* ---- scripts that make resources --------------------------------------------------------------------------------- */
 
 /** One of the resources a resource script makes: an output of the Script node that runs it, by its name. */

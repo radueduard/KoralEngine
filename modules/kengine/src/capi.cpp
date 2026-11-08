@@ -6,6 +6,7 @@
 #include <format>
 #include <optional>
 #include <set>
+#include <new>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -655,6 +656,25 @@ uint32_t kengine_script_register(KengineDocument* document, const char* name, co
 void kengine_script_unregister(KengineDocument* document, const char* name)
 {
     Guarded([&] { Doc(document).Scripts().Unregister(Text(name)); return 0; }, 0);
+}
+
+void kengine_text_layout(size_t* size, size_t* alignment)
+{
+    if (size) *size = sizeof(std::string);
+    if (alignment) *alignment = alignof(std::string);
+}
+
+const char* kengine_text_get(const void* at, size_t* length)
+{
+    const auto* text = at ? std::launder(static_cast<const std::string*>(at)) : nullptr;
+    if (length) *length = text ? text->size() : 0;
+    return text ? text->data() : "";
+}
+
+void kengine_text_set(void* at, const char* utf8, const size_t length)
+{
+    if (!at) return;
+    *std::launder(static_cast<std::string*>(at)) = utf8 ? std::string(utf8, length) : std::string();
 }
 
 bool kengine_resource_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,

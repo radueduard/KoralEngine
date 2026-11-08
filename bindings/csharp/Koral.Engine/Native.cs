@@ -233,6 +233,9 @@ internal static unsafe partial class Native
     public static partial uint kengine_script_register(IntPtr document, string name, nuint size, nuint alignment, KecsField* fields, nuint fieldCount,
                                                        KengineScriptCallbacks* callbacks);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_script_unregister(IntPtr document, string name);
+    [LibraryImport(Lib)] public static partial void kengine_text_layout(nuint* size, nuint* alignment);
+    [LibraryImport(Lib)] public static partial byte* kengine_text_get(void* at, nuint* length);
+    [LibraryImport(Lib)] public static partial void kengine_text_set(void* at, byte* utf8, nuint length);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_resource_script_register(IntPtr document, string name, nuint size, KecsField* fields, nuint fieldCount,
                                                                 KengineScriptResource* resources, nuint resourceCount, KengineResourceScriptCallbacks* callbacks);

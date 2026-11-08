@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include <kscript/declarations.h>
 #include <kscript/scripts.h>
 
 namespace {
@@ -306,4 +307,62 @@ TEST(Scripts, WhatAScriptDoesIsATagOfItsEntities) {
     world.Add(f, preparer);
     scripts.Prepare();
     EXPECT_TRUE(world.Has(f, world.Find("BeforeDraw")));
+}
+
+// A text field: the engine's own text where the field is, starting as its source says. It is copied, moved and let go
+// of as text, and a script loaded again keeps it, as it keeps any field whose name and type are the same.
+TEST(Scripts, ATextFieldIsTextWhereverItsEntityGoes) {
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    const auto declared = kscript::Declare(R"(
+public sealed class Sign : Script
+{
+    public string Words = "hello, \"you\"";
+    public float Size = 2f;
+    public string Empty;
+}
+)", false, "Sign.cs");
+    ASSERT_TRUE(declared.problems.empty()) << declared.problems.front();
+    ASSERT_EQ(declared.types.size(), 1u);
+    const kscript::ScriptType& type = declared.types.front();
+    const auto* words = std::ranges::find_if(type.fields, [](const kecs::FieldDescription& f) { return f.name == "Words"; }) != type.fields.end()
+                            ? &*std::ranges::find_if(type.fields, [](const kecs::FieldDescription& f) { return f.name == "Words"; }) : nullptr;
+    ASSERT_NE(words, nullptr);
+    EXPECT_EQ(words->type, "string");
+    EXPECT_EQ(words->size, sizeof(std::string));
+    const kecs::ComponentId sign = scripts.Register(type);
+    ASSERT_NE(sign, kecs::NoComponent);
+    const auto text = [&](const kecs::Entity entity, const char* field) {
+        const auto* data = static_cast<const std::byte*>(std::as_const(world).Get(entity, sign));
+        const kecs::FieldDescription* found = world.Describe(sign).FindField(field);
+        return data && found ? *reinterpret_cast<const std::string*>(data + found->offset) : std::string("(none)");
+    };
+
+    const kecs::Entity one = world.Create();
+    world.Add(one, sign);
+    EXPECT_EQ(text(one, "Words"), "hello, \"you\"") << "as its source says";
+    EXPECT_EQ(text(one, "Empty"), "");
+    // Longer than fits inside a string's own bytes: on the heap, and moved with it.
+    auto* data = static_cast<std::byte*>(world.Mutable(one, sign));
+    *reinterpret_cast<std::string*>(data + world.Describe(sign).FindField("Words")->offset) = std::string(200, 'x');
+    for (int i = 0; i < 40; ++i) world.Add(world.Create(), sign);      // more of them: the column grows, and moves what it holds
+    world.Add(one, world.Register(kecs::ComponentDescription { .name = "Tag" }));        // another archetype
+    EXPECT_EQ(text(one, "Words"), std::string(200, 'x')) << "moved as text";
+
+    // Loaded again with another field: the text kept.
+    const auto again = kscript::Declare(R"(
+public sealed class Sign : Script
+{
+    public string Words = "hello";
+    public int Lines = 3;
+}
+)", false, "Sign.cs");
+    ASSERT_TRUE(again.problems.empty());
+    ASSERT_EQ(scripts.Register(again.types.front()), sign);
+    EXPECT_EQ(text(one, "Words"), std::string(200, 'x')) << "kept over the reload";
+    const kecs::Entity two = world.Create();
+    world.Add(two, sign);
+    EXPECT_EQ(text(two, "Words"), "hello") << "a new one starts as the source says now";
+    world.Destroy(one);
+    world.Destroy(two);
 }
