@@ -3,6 +3,7 @@
 // are an element for each entity, where the shader reads it. Offscreen, with no windowing system.
 
 #include <gtest/gtest.h>
+#include <bit>
 
 #include <algorithm>
 #include <cstring>
@@ -409,4 +410,28 @@ TEST_F(BufferTest, AComponentBufferHoldsTheFieldsOfItsComponent) {
     graph.Find("spots")->Set("fields", Value::List { "color" }).Set("component", "Nothing");
     runtime.Set(graph);
     EXPECT_NE(runtime.Status("spots")->error.find("no component 'Nothing'"), std::string::npos) << runtime.Status("spots")->error;
+}
+
+// A buffer's fields from a struct only as the graph runs: each light's element, through a Switch, filled by name into
+// the field of each member's name — and a field given by itself before it.
+TEST_F(BufferTest, ABuffersFieldsAreFilledFromAStructAsTheGraphRuns) {
+    using kgraph::Value;
+    Lamp({ 1, 0, 0 }, 1.f, 2.f, { 3, 0, 0 });
+    Lamp({ 0, 1, 0 }, 1.f, 5.f, { 0, 4, 0 });
+    kgraph::Graph graph;
+    graph.Add("lamps", "ForEach").Set("component", "PointLight");
+    graph.Add("which", "Switch").Set("index", 0).Wire("option[0]", "lamps", "element");
+    graph.Add("lamp data", "ShaderBuffer").Set("module", "lights").Set("entry", "computeMain").Set("parameter", "lights")
+        .Wire("fields", "which").Set("field.kind", 1);
+    scene->runtime->Set(graph);
+    for (const auto& problem : scene->runtime->Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 3; ++i) Frame();
+    ASSERT_TRUE(scene->runtime->Ok());
+    const auto floats = Floats("lamp data");
+    ASSERT_GE(floats.size(), 24u);
+    // Light: position (0), range (3), color (4..6), kind (8), cone (10): twelve numbers an element.
+    EXPECT_EQ(floats[3], 2.f) << "the first's range, by its name";
+    EXPECT_EQ(floats[12 + 3], 5.f) << "the second's";
+    EXPECT_EQ(floats[12 + 5], 1.f) << "its colour's green";
+    EXPECT_EQ(std::bit_cast<std::uint32_t>(floats[8]), 1u) << "a field given by itself";
 }

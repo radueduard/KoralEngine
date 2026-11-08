@@ -1070,6 +1070,23 @@ namespace kgraph
         /** Numbers, or vectors a component at a time: a number goes with every component of a vector. */
         Expected<Value> Each(const std::vector<const Value*>& values, const std::function<double(const double*)>& apply)
         {
+            // Of structs, member by member — in the first one's order — and a number or a vector with every member.
+            if (const auto shape = std::ranges::find_if(values, [](const Value* value) { return value->Named() != nullptr; }); shape != values.end()) {
+                Value::Members out;
+                for (const auto& name : *(*shape)->Named() | std::views::keys) {
+                    std::vector<const Value*> parts;
+                    for (const Value* value : values) {
+                        if (!value->Named()) { parts.push_back(value); continue; }
+                        const Value* member = value->Find(name);
+                        if (!member) return Fail(std::format("one struct has '{}' and another has not: of two, each has what the other has", name));
+                        parts.push_back(member);
+                    }
+                    auto each = Each(parts, apply);
+                    if (!each) return Fail(std::format("'{}': {}", name, each.error()));
+                    out.emplace_back(name, std::move(*each));
+                }
+                return Value(std::move(out));
+            }
             std::size_t count = 0;
             for (const Value* value : values) {
                 if (value->Number() || value->Bool()) continue;
@@ -4275,6 +4292,43 @@ namespace kgraph
 
         Expected<void> BuildValue(const Node& node, const Inputs& inputs, Built& out)
         {
+            // One of what is wired to it, by number: in a ForEach's chain too, worked out again for each element.
+            if (node.type == "Switch") {
+                const auto index = inputs.find("index");
+                const Value chosen = index == inputs.end() ? Value(0) : index->second.value;
+                const int which = chosen.Bool() ? (*chosen.Bool() ? 1 : 0) : chosen.Number() ? static_cast<int>(std::llround(*chosen.Number())) : -1;
+                const auto option = inputs.find(std::format("option[{}]", which));
+                if (option == inputs.end()) return Fail(std::format("'index' is {}, and there is no 'option[{}]' wired", chosen.ToJson(), which));
+                out.outputs["out"].value = option->second.value;
+                out.outputs["out"].resource = option->second.resource;
+                return {};
+            }
+            // A Bundle is wiring where it can be written out before anything runs (a buffer's `fields`, a draw's `push`); and
+            // a value besides, its members by name, for what takes it whole — a Switch, a Previous, a function's edge.
+            if (node.type == "Bundle") {
+                Value::Members members;
+                if (const auto base = inputs.find("base"); base != inputs.end() && base->second.value.Named()) members = *base->second.value.Named();
+                std::vector<std::string> order;
+                if (const auto names = inputs.find("names"); names != inputs.end() && names->second.value.Items())
+                    for (const auto& name : *names->second.value.Items())
+                        if (name.String()) order.push_back(*name.String());
+                for (const auto& name : inputs | std::views::keys)
+                    if (name.starts_with("field.") && !std::ranges::contains(order, name.substr(6))) order.push_back(name.substr(6));
+                for (const auto& member : order) {
+                    const auto given = inputs.find("field." + member);
+                    if (given == inputs.end() || given->second.value.IsNull()) continue;     // a resource is wiring alone
+                    if (const auto had = std::ranges::find(members, member, &Value::Members::value_type::first); had != members.end()) had->second = given->second.value;
+                    else members.emplace_back(member, given->second.value);
+                }
+                out.outputs["out"].value = Value(std::move(members));
+                return {};
+            }
+            // Taken apart as it runs, when what it takes is a struct only then (a Switch of two): an output for each member.
+            if (node.type == "Unbundle") {
+                if (const auto of = inputs.find("of"); of != inputs.end() && of->second.value.Named())
+                    for (const auto& [name, value] : *of->second.value.Named()) out.outputs[name].value = value;
+                return {};
+            }
             const auto value = [&](const char* name) -> const Value& {
                 static const Value none;
                 const auto it = inputs.find(name);
@@ -6025,7 +6079,9 @@ namespace kgraph
         void SetRow(Built& out, const std::size_t index, const std::set<std::string, std::less<>>* only = nullptr) const
         {
             const EntityList& list = *out.listed;
-            const auto wanted = [&](const std::string_view name) { return !only || only->contains(name); };
+            // Its element, a struct of all of it, asks for all of it.
+            const bool whole = !only || only->contains("element");
+            const auto wanted = [&](const std::string_view name) { return whole || only->contains(name); };
             const auto set = [&](const std::string_view name, Value value) {
                 if (!wanted(name)) return;
                 const auto it = out.outputs.find(name);
@@ -6074,6 +6130,29 @@ namespace kgraph
             const kecs::Quat turned = present ? world->OrientationOf(entity) : kecs::Quat {};
             set("orientation", Value(Value::List { turned.x, turned.y, turned.z, turned.w }));
             set("scale", Value(Value::List { scale.x, scale.y, scale.z }));
+            // The element as one value, a struct: where it is, then its fields by name — its own component's before any
+            // other's of the same name — as Expand's element has them (a resource is wiring alone).
+            if (!whole) return;
+            Value::Members element;
+            const auto value = [&](const std::string& output) -> const Value* {
+                const auto it = out.outputs.find(output);
+                return it == out.outputs.end() || it->second.resource ? nullptr : &it->second.value;
+            };
+            for (const char* place : { "entityId", "matrix", "normalMatrix", "previousMatrix", "worldPosition", "forward", "up", "right", "position", "rotation", "orientation", "scale" })
+                if (const Value* got = value(place)) element.emplace_back(place, *got);
+            for (const auto& read : list.fields) {
+                if (read.resource || read.field.type == "string") continue;
+                const Value* got = value(read.output);
+                if (!got) continue;
+                const bool own = read.output.starts_with("field.");
+                const std::string name = read.field.name;
+                if (const auto had = std::ranges::find(element, name, &Value::Members::value_type::first); had != element.end()) {
+                    if (own) had->second = *got;
+                } else {
+                    element.emplace_back(name, *got);
+                }
+            }
+            set("element", Value(std::move(element)));
         }
 
         /**
@@ -6224,7 +6303,7 @@ namespace kgraph
         std::size_t RowKeySize(const Node& node, const Mapped& mapped, const Built& source, const std::set<std::string, std::less<>>& asked, std::vector<Value>& context) const
         {
             const EntityList& list = *source.listed;
-            if (asked.contains("previousMatrix")) return 0;
+            if (asked.contains("previousMatrix") || asked.contains("element")) return 0;     // the element has the matrix of the frame before
             std::size_t size = sizeof(kecs::Entity);
             for (const auto& read : list.fields) {
                 if (!asked.contains(read.output)) continue;
@@ -6324,6 +6403,13 @@ namespace kgraph
             // Where each field's value is: on the node, or in what another node gives — which changes where it is, a
             // row after another. And which of the entities' values anything asks for: only those are worked out.
             std::vector<std::pair<const BlockField*, const Value*>> fields, headers;
+            // The whole element, when `fields` is a struct only as the graph runs: what it was wired from.
+            const Value* whole = nullptr;
+            if (const auto struct_ = node.inputs.find("fields"); struct_ != node.inputs.end() && struct_->second.link) {
+                const auto from = built.find(struct_->second.link->node);
+                if (from == built.end() || !from->second.status.ok) return;
+                if (const auto output = from->second.outputs.find(struct_->second.link->output); output != from->second.outputs.end()) whole = &output->second.value;
+            }
             std::set<std::string, std::less<>> asked;
             const auto asks = [&](const Node& of) {
                 for (const auto& input : of.inputs | std::views::values)
@@ -6370,6 +6456,10 @@ namespace kgraph
                 }
                 for (const auto& [field, value] : fields)
                     if (!value->IsNull()) Put(*field, *value, element);
+                // A struct as the graph runs (a Switch of two Bundles): each member where the field of its name is, unless given by itself.
+                if (whole && whole->Named())
+                    for (const auto& [name, member] : *whole->Named())
+                        if (const BlockField* field = layout.Find(name); field && !node.inputs.contains("field." + name) && !member.IsNull()) Put(*field, member, element);
             }
             // Anything else wired to those entities has the first of them, as it does without a buffer.
             if (source && (rows > 1 || skipped)) {
@@ -6587,10 +6677,14 @@ namespace kgraph
             const auto follows = [&](const std::string& name) {
                 if (const auto wired = node.inputs.find(name); wired != node.inputs.end() && wired->second.link) Follows(wired->second.link->node, sources, mapped->chain, seen);
             };
+            follows("fields");      // a struct as the graph runs, of each element: what it follows, its fields do
+            if (const auto whole = inputs.find("fields"); whole != inputs.end() && (whole->second.resource || !whole->second.value.Named()))
+                return Fail(std::format("'fields' takes a Bundle — a Bundle node's, a ForEach's element, or a struct as the graph runs — and is given {}",
+                                        whole->second.resource ? std::string("a resource") : whole->second.value.ToJson()));
             for (const auto& [name, input] : inputs) {
                 if (name == "instance") return Fail("'instance' is no more: wire each of its fields, `field.<name>`, from what holds it");
                 if (!name.starts_with("field.")) continue;
-                if (!layout.Find(std::string_view(name).substr(6))) {
+                if (!layout.Find(std::string_view(name).substr(6)) && !layout.FindHeader(std::string_view(name).substr(6))) {
                     if (FromBundle(node.id, name)) continue;     // given by a Bundle, by name: let pass, and said on the node
                     return Fail(std::format("{} has no field '{}'. It has: {}", layout.type, name.substr(6), has));
                 }
@@ -7395,14 +7489,12 @@ namespace kgraph
         {
             const NodeType* type = FindType(node.type);
             if (!type) return Fail(std::format("there is no node type '{}'", node.type));
-            // A Bundle is wiring, written out before anything runs: what makes one, or takes one apart, builds nothing.
-            if (node.type == "Bundle" || node.type == "Unbundle") return {};
             if (type->builder) {
                 return IsPipeline(type->name) ? BuildPipeline(node, *type->builder, inputs, out) : BuildBuilder(node, *type->builder, inputs, out);
             }
             // The engine's own: only the inputs its type lists.
             // A ShaderBuffer has its struct's fields besides: which, it says itself, once it has read its shader.
-            const bool fields = IsMapped(node.type);
+            const bool fields = IsMapped(node.type) || node.type == "Bundle";     // a Bundle has its members'
             // A Script node has its script's: its fields, and what each of its resources is made with — its to say.
             const bool script = node.type == "Script";
             // A Draw or a Dispatch has its pipeline's besides, which it says once it is built: and what it took before, to say where that went.
@@ -7447,16 +7539,6 @@ namespace kgraph
                 if (picture == inputs.end() || !picture->second.resource) return Fail("'picture' is the picture shown in its place: wire an image to it");
                 out.outputs["out"].resource = picture->second.resource;
                 out.outputs["shown"].value = Value(node.id == debugView);
-                return {};
-            }
-            if (node.type == "Switch") {
-                const auto index = inputs.find("index");
-                const Value chosen = index == inputs.end() ? Value(0) : index->second.value;
-                const int which = chosen.Bool() ? (*chosen.Bool() ? 1 : 0) : chosen.Number() ? static_cast<int>(std::llround(*chosen.Number())) : -1;
-                const auto option = inputs.find(std::format("option[{}]", which));
-                if (option == inputs.end()) return Fail(std::format("'index' is {}, and there is no 'option[{}]' wired", chosen.ToJson(), which));
-                out.outputs["out"].value = option->second.value;
-                out.outputs["out"].resource = option->second.resource;
                 return {};
             }
             if (node.type == "Screen") {
@@ -10551,6 +10633,10 @@ namespace kgraph
         // An Unbundle gives each member of what it takes apart.
         if (node->type == "Unbundle") {
             for (const auto& name : BundleOf(id, "of")) ports.push_back({ name, PortKind::eValue, "value", false, std::format("The member '{}'.", name), nullptr });
+            // Of a struct only as the graph runs: its members as it last was.
+            if (ports.empty())
+                if (const auto* made = _impl->Find(id))
+                    for (const auto& name : made->outputs | std::views::keys) ports.push_back({ name, PortKind::eValue, "value", false, std::format("The member '{}'.", name), nullptr });
             return ports;
         }
         // What a node says of itself comes first: an Entities node is its component's fields before anything else.

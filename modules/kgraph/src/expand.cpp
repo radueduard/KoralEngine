@@ -354,11 +354,10 @@ namespace kgraph
             }
             for (auto& node : graph.nodes) {
                 // What an Unbundle gives, by name, is what its Bundle has of that name.
+                // One that is no Bundle here — a Switch of two, a Previous — is a struct as the graph runs: taken apart then.
                 if (node.type == "Unbundle")
-                    if (const auto of = node.inputs.find("of"); of != node.inputs.end() && of->second.link) {
+                    if (const auto of = node.inputs.find("of"); of != node.inputs.end() && of->second.link)
                         if (auto members = resolve(*of->second.link, 0)) out.bundles[node.id + ".of"] = std::move(*members);
-                        else out.errors[node.id] = std::format("'of' is wired from '{}' of '{}', which is no Bundle: a Bundle node's, or a ForEach's element", of->second.link->output, of->second.link->node);
-                    }
                 std::vector<std::string> taken;
                 for (const auto& name : node.inputs | std::views::keys)
                     if (!BundleTaken(node.type, name).empty()) taken.push_back(name);
@@ -368,7 +367,10 @@ namespace kgraph
                     if (!given.link) continue;
                     const auto members = resolve(*given.link, 0);
                     if (!members) {
-                        out.errors[node.id] = std::format("'{}' takes a Bundle — a Bundle node's, or a ForEach's element — and is wired from '{}' of '{}'", name, given.link->output, given.link->node);
+                        // A buffer's fields of a struct only as the graph runs (a Switch of two): filled from it then, by name.
+                        if (name == "fields" && (node.type == "ShaderBuffer" || node.type == "BufferBuilder")) { node.inputs[name] = given; continue; }
+                        out.errors[node.id] = std::format("'{}' takes a Bundle — a Bundle node's, a ForEach's element, or a struct as the graph runs, for a buffer's fields — "
+                                                          "and is wired from '{}' of '{}'", name, given.link->output, given.link->node);
                         continue;
                     }
                     const std::string prefix = BundleTaken(node.type, name);
@@ -395,10 +397,18 @@ namespace kgraph
                     if (!note.empty()) out.notes[node.id] = std::move(note);
                 }
             }
-            // What a Bundle is made on, and what an Unbundle takes apart, is written out: no wire of it is left to follow.
+            // What a Bundle is made on, and what an Unbundle takes apart, is written out: no wire of it is left to follow. A
+            // Bundle has what it is made on as inputs of its own, for its value as the graph runs. What is a struct only as it
+            // runs is left wired, for then.
             for (auto& node : graph.nodes) {
-                if (node.type == "Bundle") node.inputs.erase("base");
-                if (node.type == "Unbundle") node.inputs.erase("of");
+                if (node.type == "Bundle")
+                    if (const auto base = node.inputs.find("base"); base != node.inputs.end() && base->second.link)
+                        if (const auto under = resolve(*base->second.link, 0)) {
+                            for (const auto& [member, input] : *under)
+                                if (!node.inputs.contains("field." + member)) node.inputs["field." + member] = input;
+                            node.inputs.erase("base");
+                        }
+                if (node.type == "Unbundle" && out.bundles.contains(node.id + ".of")) node.inputs.erase("of");
             }
             // What is wired from an Unbundle is wired from its member of that name.
             for (auto& node : graph.nodes)

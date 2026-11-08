@@ -237,6 +237,40 @@ TEST_F(FlowTest, ALoopInALoopIsWrittenOutATurnOfEach) {
     EXPECT_NE(runtime.Status("cell")->error.find("neither in the other"), std::string::npos) << runtime.Status("cell")->error;
 }
 
+// A Bundle is a value too, as the graph runs: its members by name. So what takes one value takes it — a Switch picks one
+// of two, and an Unbundle takes that apart then — and what works out numbers works out a struct, member by member.
+TEST_F(FlowTest, AStructIsAValueThatGoesWhereAValueGoes) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("near", "Bundle").Set("names", Value::List { "distance", "tint" }).Set("field.distance", 1).Set("field.tint", Value::List { 1, 0, 0 });
+    graph.Add("far", "Bundle").Set("names", Value::List { "distance", "tint" }).Set("field.distance", 10).Set("field.tint", Value::List { 0, 0, 1 });
+    graph.Add("which", "Switch").Set("index", 1).Wire("option[0]", "near").Wire("option[1]", "far");
+    graph.Add("parts", "Unbundle").Wire("of", "which");
+    graph.Add("further", "Add").Wire("a", "parts", "distance").Set("b", 1);
+    graph.Add("both", "Add").Wire("a", "near").Wire("b", "far");
+    graph.Add("twice", "Multiply").Wire("a", "near").Set("b", 2);
+    graph.Add("halfway", "Lerp").Wire("a", "near").Wire("b", "far").Set("t", 0.5);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+
+    const Value farValue(Value::Members { { "distance", Value(10) }, { "tint", Value(Value::List { 0, 0, 1 }) } });
+    EXPECT_EQ(runtime.ValueOf("which"), farValue) << "the one its index says, whole";
+    EXPECT_EQ(runtime.ValueOf("parts", "distance"), Value(10)) << "taken apart as the graph runs";
+    EXPECT_EQ(runtime.ValueOf("further"), Value(11));
+    EXPECT_EQ(runtime.ValueOf("both"), Value(Value::Members { { "distance", Value(11) }, { "tint", Value(Value::List { 1, 0, 1 }) } })) << "member by member";
+    EXPECT_EQ(runtime.ValueOf("twice"), Value(Value::Members { { "distance", Value(2) }, { "tint", Value(Value::List { 2, 0, 0 }) } })) << "a number with every member";
+    EXPECT_EQ(runtime.ValueOf("halfway"), Value(Value::Members { { "distance", Value(5.5) }, { "tint", Value(Value::List { 0.5, 0, 0.5 }) } }));
+    const auto outputs = runtime.OutputsOf("parts");
+    EXPECT_NE(std::ranges::find(outputs, "tint", &kgraph::Port::name), outputs.end()) << "an output for each member it took apart";
+
+    // Two structs of different members do not go together.
+    graph.Find("far")->Set("names", Value::List { "distance" }).inputs.erase("field.tint");
+    runtime.Set(graph);
+    ASSERT_NE(runtime.Status("both"), nullptr);
+    EXPECT_NE(runtime.Status("both")->error.find("'tint'"), std::string::npos) << runtime.Status("both")->error;
+}
+
 // Any level and layer of an image is copied out, and the rest of it is said: how many levels and layers, its usage, how big.
 TEST_F(FlowTest, AnyLevelAndLayerOfAnImageIsLookedAt) {
     auto& runtime = *scene->runtime;

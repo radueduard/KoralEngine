@@ -872,11 +872,20 @@ each `field.<name>` (or `push.<name>`) of the same name — names match exactly,
 is a buffer of the lights whose `position` and `range` are each lamp's, and whose `color` is wired by itself: an input
 given by itself, a wire or a value, takes its own. What matches nothing, on either side, is said on the node
 (`Status(id)->note`): the bundle's `intensity`, which the struct has not; the layout's `glow`, which the bundle has not.
-Wired from what is no Bundle, `fields` is an error on the node.
+Wired from what is no Bundle, and gives no struct as the graph runs, `fields` is an error on the node.
 
 Nothing new is worked out. Before the graph runs, after its calls are written out and before its loops are, each
 Bundle is written out into the wires it stands for (`Runtime::BundleOf(id, output)` says what one holds), so a buffer
 filled from an `element` is filled once an element, as one wired a field at a time is.
+
+**A Bundle is a value too**, as the graph runs: its members by name (`Value::Members`). Where it is not written out —
+wired to what takes one value, not one it is written out into — it goes as any value goes: a **Switch** picks one of
+two Bundles; a Previous, an Element, a function's edge carries one; an **Unbundle** of what is a struct only then takes
+it apart then, an output for each member as it was last. What works out numbers works out a struct member by member, in
+the first one's order, and a number or a vector with every member: `near + far`, `near * 2`, a Lerp of two; two of
+different members are an error that names the member. A buffer's `fields` wired from a struct only as the graph runs —
+a Switch of two elements — is filled from it then, by name, element by element; given what is no struct, it says so. A
+member that is a resource is wiring alone: it is not in the value. A Draw's `push` takes a Bundle it is written out from.
 
 ### A buffer laid out on its node
 
@@ -1528,9 +1537,7 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   are as they were. Ten thousand lights, none changed, cost a frame about 18 ms in Debug, against 740 ms when all did
   (`ScaleTest.ABufferOfThousandsWorksOutOnlyWhatChanged`). An element that reads the matrix of the frame before, a text
   field, or a node between that reads the world (Time, Keep, Selected...) is worked out each frame.
-- No node works on a struct: a Bundle (see [Bundles](#bundles)) is many wires as one, written out into them before
-  anything runs, so what a component holds, and what a View and a lens work out, is still worked out a value at a
-  time. A graph saved with a View's `of`, `kind` or `face`, a ForEach's `struct`, a buffer's `instance` or a
+- A graph saved with a View's `of`, `kind` or `face`, a ForEach's `struct`, a buffer's `instance` or a
   ShadowCascades' `camera` says so on the node: each is the View, the lens and the wires of [The scene](#the-scene).
 - A Paraboloid gives what a shader needs to bend a picture, not a matrix that does: a lens's matrix is straight lines
   in, straight lines out, and a paraboloid's is not.
