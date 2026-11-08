@@ -142,7 +142,8 @@ if(Koral_FOUND)
             set_tests_properties(CSharp.Scripts PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}")
             # E6's gate in C#, on the project the engine's own gate saves.
             add_test(NAME CSharp.ShadowGate COMMAND ${KORAL_ENGINE_DOTNET} "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll" shadow "${CMAKE_BINARY_DIR}/shadow-project")
-            set_tests_properties(CSharp.ShadowGate PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}" FIXTURES_REQUIRED shadow_project)
+            set_tests_properties(CSharp.ShadowGate PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}" FIXTURES_REQUIRED shadow_project
+                RESOURCE_LOCK shadow_project)     # it writes the project's scripts: the Kotlin gate opens the project too
         endif()
         message(STATUS "C# scripts: building the engine's C# layer, which koral-editor and koral-play run them with")
     else()
@@ -193,7 +194,7 @@ if(Koral_FOUND)
         if(KORAL_ENGINE_BUILD_TESTS)
             # Its scripts test, and E6's gate in Kotlin on the project the engine's own gate saves.
             add_test(NAME Kotlin.Scripts COMMAND ${KORAL_ENGINE_GRADLE} :tests:test "-PshadowProject=${CMAKE_BINARY_DIR}/shadow-project")
-            set_tests_properties(Kotlin.Scripts PROPERTIES FIXTURES_REQUIRED shadow_project)
+            set_tests_properties(Kotlin.Scripts PROPERTIES FIXTURES_REQUIRED shadow_project RESOURCE_LOCK shadow_project)
         endif()
         message(STATUS "Kotlin scripts: building koral-engine's Kotlin library with ${KORAL_ENGINE_JAVA_HOME}")
     else()
