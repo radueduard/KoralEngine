@@ -584,6 +584,25 @@ TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {
         EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(13)) << "it works out what it did, open";
         ASSERT_TRUE(doc.SetInput(call + "/twice", "b", 4));
         EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(17)) << "and what it is changed to, at once";
+        EXPECT_EQ(doc.Runtime().ValueOf(other, "twice"), Value(8)) << "written as it is done: every other call follows, open: 1 * 2 * 4";
+        // Another call of it opened is the same page; a function of its own, a page more.
+        EXPECT_EQ(doc.OpenFunction(other, &error), page);
+        doc.AddNode("Double", 0, 600, "k");
+        doc.SetInput("k", "value", 3);
+        doc.AddNode("Multiply", 300, 600, "triple");
+        doc.SetInput("triple", "b", 3);
+        ASSERT_TRUE(doc.Connect("k", "out", "triple", "a"));
+        const std::string tripled = doc.MakeFunction({ "triple" }, "Triple", &error);
+        ASSERT_FALSE(tripled.empty()) << error;
+        const std::string second = doc.OpenFunction(tripled, &error);
+        ASSERT_FALSE(second.empty()) << error;
+        EXPECT_NE(second, page);
+        EXPECT_EQ(doc.OpenedFunctions().size(), 2u) << "both open at once";
+        ASSERT_NE(doc.OpenedOn(page), nullptr);
+        EXPECT_EQ(doc.OpenedOn(page)->function, "Scale");
+        ASSERT_TRUE(doc.CloseFunctionOn(second, true, &error)) << error;
+        EXPECT_NE(doc.Graph().Find(tripled), nullptr) << "closed, its call is back";
+        EXPECT_EQ(doc.OpenedFunctions().size(), 1u);
         ASSERT_TRUE(doc.CloseFunction(true, &error)) << error;
         EXPECT_FALSE(doc.Opened().has_value());
         EXPECT_EQ(std::ranges::find(doc.Passes(), page), doc.Passes().end()) << "its page is gone";
@@ -591,11 +610,30 @@ TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {
         EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(17));
         EXPECT_EQ(doc.Runtime().ValueOf(other, "twice"), Value(8)) << "every call follows: 1 * 2 * 4";
 
-        // Opened and put back as it was: nothing of it changed.
+        // Opened and put back as it was: nothing of it changed — what was written while it was open taken back, and every call with it.
         ASSERT_FALSE(doc.OpenFunction(other, &error).empty()) << error;
         ASSERT_TRUE(doc.SetInput(other + "/twice", "b", 100));
+        EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(401)) << "written as it is done: 2 * 2 * 100 + 1";
         ASSERT_TRUE(doc.CloseFunction(false, &error)) << error;
         EXPECT_EQ(doc.Runtime().ValueOf(other, "twice"), Value(8));
+        EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(17));
+
+        // Its ports in the order its edges say, before where they are on its page.
+        {
+            kgraph::Graph function;
+            function.Add("in a", "FunctionInput").Set("name", "a").Set("order", 1).y = 0;
+            function.Add("in b", "FunctionInput").Set("name", "b").Set("order", 0).y = 100;
+            function.Add("sum", "Add").Wire("a", "in a", "out").Wire("b", "in b", "out");
+            function.Add("out", "FunctionOutput").Set("name", "sum").Wire("value", "sum", "out");
+            std::ofstream(project.directory / "functions" / "Ordered.kfunc") << std::format("{{\n\"koral-function\": 1,\n\"graph\": {}\n}}\n", function.ToJson());
+            const std::string ordered = doc.AddNode("Function", 0, 900, "ordered");
+            doc.SetInput(ordered, "function", "Ordered");
+            const auto ports = doc.Runtime().PortsOf(ordered);
+            std::vector<std::string> names;
+            for (const auto& port : ports) if (port.name == "a" || port.name == "b") names.push_back(port.name);
+            EXPECT_EQ(names, (std::vector<std::string> { "b", "a" })) << "b says it is first, though it is lower";
+            doc.RemoveNodes({ ordered });
+        }
 
         // Written out, a call is its nodes, wired as the call was, and no call of anything.
         ASSERT_TRUE(doc.WriteOut(other, &error)) << error;
@@ -998,7 +1036,8 @@ TEST_F(DocumentTest, AFunctionOpenedAndKeptLeavesItsCallWiredAsItWas) {
     ASSERT_FALSE(call.empty()) << error;
     ASSERT_EQ(doc.Runtime().ValueOf("show"), Value(11));
     const auto inputs = doc.Graph().Find(call)->inputs;
-    ASSERT_EQ(inputs.size(), 3u) << "function, a, b";
+    ASSERT_EQ(inputs.size(), 4u) << "function, a, b — and the file it calls, kept by its ID";
+    EXPECT_TRUE(inputs.contains("file"));
 
     ASSERT_FALSE(doc.OpenFunction(call, &error).empty()) << error;
     ASSERT_TRUE(doc.CloseFunction(true, &error)) << error;

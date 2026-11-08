@@ -1067,6 +1067,24 @@ namespace keditor
             for (const auto& node : graph.nodes)
                 if (!graph.overview.contains(node.id)) graph.overview[node.id] = { node.x, node.y };
         }
+        // Each call of a project's function keeps it as its file is known — saved by the file's ID — so that renamed or
+        // moved, the call finds it again (FromJson). One of the engine's or a module's keeps none: it never moves.
+        if (const std::filesystem::path functions = FunctionsDirectory(); !functions.empty())
+            for (auto& node : graph.nodes) {
+                if (node.type != "Function") continue;
+                const auto fn = node.inputs.find("function");
+                const std::string* name = fn == node.inputs.end() || fn->second.link ? nullptr : fn->second.value.String();
+                std::error_code ignored;
+                const bool own = name && std::filesystem::exists(functions / (*name + ".kfunc"), ignored);
+                const kgraph::Value file = own ? kgraph::Value("function:" + *name) : kgraph::Value();
+                const auto at = node.inputs.find("file");
+                if (own && (at == node.inputs.end() || at->second.value != file)) node.inputs["file"] = kgraph::Input { file, std::nullopt };
+                else if (!own && at != node.inputs.end()) node.inputs.erase(at);
+            }
+        // A function whose page is gone (taken back past its opening) is open no more.
+        std::erase_if(_opened, [&](const OpenedFunction& opened) { return !std::ranges::contains(graph.passes, opened.pass); });
+        // A function open in place is written as its page is: every other call of it follows, now.
+        WriteOpenedFunctions(graph);
         WithFunctions(graph);
         _runtime->Set(std::move(graph));
         Changed();
@@ -1205,6 +1223,10 @@ namespace keditor
         *at = std::string(name);
         std::ranges::replace(graph.setup, std::string(pass), std::string(name));
         std::ranges::replace(graph.fixed, std::string(pass), std::string(name));
+        for (auto& [page, before] : graph.after) {
+            if (page == pass) page = std::string(name);
+            if (before == pass) before = std::string(name);
+        }
         for (auto& node : graph.nodes)
             if (node.pass == pass) node.pass = std::string(name);
         Apply(std::move(graph));
@@ -1223,6 +1245,94 @@ namespace keditor
         const auto to = std::clamp<std::ptrdiff_t>(index, first, end);
         graph.passes.insert(graph.passes.begin() + to, name);
         RatesInOrder(graph);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    namespace {
+        /**
+         * Each two pages of the same rate that both write something, with what they write, as @p graph lists them
+         * (the first of each pair before the second): what the runtime says each resource node's uses are.
+         */
+        std::map<std::pair<std::string, std::string>, std::vector<std::string>> SharedWrites(const kgraph::Graph& graph, const kgraph::Runtime& runtime)
+        {
+            const auto at = [&](const std::string& page) { return std::ranges::find(graph.passes, page) - graph.passes.begin(); };
+            std::map<std::pair<std::string, std::string>, std::vector<std::string>> shared;
+            for (const auto& node : graph.nodes)
+                for (const auto& port : runtime.OutputsOf(node.id)) {
+                    if (port.kind != kgraph::PortKind::eResource) continue;
+                    std::set<std::string> writers;
+                    for (const auto& use : runtime.UsesOf(node.id, port.name))
+                        if (use.write && !use.pass.empty() && std::ranges::contains(graph.passes, use.pass)) writers.insert(use.pass);
+                    for (const auto& a : writers)
+                        for (const auto& b : writers) {
+                            if (a == b || graph.RateOf(a) != graph.RateOf(b) || at(a) > at(b)) continue;
+                            auto& names = shared[{ a, b }];
+                            if (!std::ranges::contains(names, node.id)) names.push_back(node.id);
+                        }
+                }
+            return shared;
+        }
+
+        /** The links an order makes: the later of each pair that writes the same thing after the earlier, but for what others say already. */
+        std::vector<std::pair<std::string, std::string>> LinksOfOrder(const kgraph::Graph& graph, const kgraph::Runtime& runtime)
+        {
+            std::vector<std::pair<std::string, std::string>> links;
+            for (const auto& [pair, names] : SharedWrites(graph, runtime)) links.emplace_back(pair.second, pair.first);
+            // One that others in a row say already is said again for nothing.
+            kgraph::Graph by;
+            std::vector<std::pair<std::string, std::string>> kept;
+            for (const auto& link : links) {
+                by.after.clear();
+                for (const auto& other : links) if (other != link) by.after.push_back(other);
+                if (!by.RunsAfter(link.first, link.second)) kept.push_back(link);
+            }
+            return kept;
+        }
+    }
+
+    std::vector<std::pair<std::string, std::string>> Document::OrderLinks() const
+    {
+        return Graph().orderSettled ? Graph().after : LinksOfOrder(Graph(), *_runtime);
+    }
+
+    std::vector<Document::OrderTie> Document::OrderTies() const
+    {
+        std::vector<OrderTie> ties;
+        const kgraph::Graph& graph = Graph();
+        if (!graph.orderSettled) return ties;
+        for (const auto& [pair, names] : SharedWrites(graph, *_runtime))
+            if (!graph.RunsAfter(pair.first, pair.second) && !graph.RunsAfter(pair.second, pair.first)) ties.push_back({ pair.first, pair.second, names });
+        return ties;
+    }
+
+    void Document::SettleOrder()
+    {
+        if (Graph().orderSettled) return;
+        kgraph::Graph graph = Graph();
+        graph.after = LinksOfOrder(graph, *_runtime);
+        graph.orderSettled = true;
+        Apply(std::move(graph));
+    }
+
+    bool Document::RunAfter(const std::string_view page, const std::string_view before)
+    {
+        SettleOrder();
+        kgraph::Graph graph = Graph();
+        if (page == before || !std::ranges::contains(graph.passes, page) || !std::ranges::contains(graph.passes, before) || graph.RateOf(page) != graph.RateOf(before)) return false;
+        std::erase(graph.after, std::pair { std::string(before), std::string(page) });
+        if (graph.RunsAfter(before, page)) return false;    // it would close a ring
+        if (graph.RunsAfter(page, before) && std::ranges::contains(graph.after, std::pair { std::string(page), std::string(before) })) return true;
+        graph.after.emplace_back(page, before);
+        Apply(std::move(graph));
+        return true;
+    }
+
+    bool Document::StopRunningAfter(const std::string_view page, const std::string_view before)
+    {
+        SettleOrder();
+        kgraph::Graph graph = Graph();
+        if (std::erase(graph.after, std::pair { std::string(page), std::string(before) }) == 0) return false;
         Apply(std::move(graph));
         return true;
     }
@@ -2178,6 +2288,16 @@ namespace keditor
         kgraph::Graph graph;
         if (!kgraph::Graph::FromJson(graphText->raw, graph, error)) return false;
         ImportSettingsInto(graph);
+        // A call of a function whose file was renamed or moved since: called what its file is now.
+        for (auto& node : graph.nodes) {
+            const auto text = [&](const char* input) -> const std::string* {
+                const auto it = node.type == "Function" ? node.inputs.find(input) : node.inputs.end();
+                return it == node.inputs.end() || it->second.link ? nullptr : it->second.value.String();
+            };
+            const std::string* file = text("file");
+            const std::string* name = text("function");
+            if (file && file->starts_with("function:") && (!name || *name != file->substr(9))) node.Set("function", file->substr(9));
+        }
         // The graph first: it makes the components its pipelines' entities have, and the resources they hold.
         WithFunctions(graph);
         _runtime->Set(std::move(graph));
@@ -2277,13 +2397,16 @@ namespace keditor
     bool Document::Save(const std::filesystem::path& path, std::string& error)
     {
         // A function open in place is closed first, keeping what was done to it: its page is no part of the scene.
-        if (_opened && !CloseFunction(true, &error)) return false;
+        while (!_opened.empty())
+            if (!CloseFunction(true, &error)) return false;
         if (_runtime->AssetDirectory().empty()) SetAssetDirectory(std::filesystem::absolute(path).parent_path().parent_path() / "assets");
         std::error_code ec;
         if (path.has_parent_path()) std::filesystem::create_directories(path.parent_path(), ec);
         std::ofstream out(path, std::ios::binary | std::ios::trunc);
         if (!out) { error = std::format("'{}' cannot be written", path.string()); return false; }
         StoreImportSettings();
+        // Its pages' order saved as links: what the list's order made of it, the graph's own from now on.
+        SettleOrder();
         // Its files kept by their IDs: moved or renamed, they are still its.
         out << (_assets ? kasset::ToIds(ToJson(), *_assets) : ToJson());
         if (!out.flush()) { error = std::format("'{}' could not be written whole", path.string()); return false; }
@@ -2795,7 +2918,6 @@ namespace keditor
     std::string Document::OpenFunction(const std::string_view call, std::string* error)
     {
         const auto fail = [&](std::string why) { if (error) *error = std::move(why); return std::string(); };
-        if (_opened) return fail(std::format("'{}' is open already: close it first", _opened->function));
         kgraph::Graph graph = Graph();
         const kgraph::Node* found = graph.Find(call);
         if (!found || found->type != "Function") return fail(std::format("'{}' is no call of a function", call));
@@ -2803,17 +2925,33 @@ namespace keditor
         const kgraph::Node at = *found;
         const kgraph::Node* node = &at;
         const std::string* name = TextOf(*node, "function");
+        // One open already is where it is: its page.
+        if (name)
+            if (const auto open = std::ranges::find(_opened, *name, &OpenedFunction::function); open != _opened.end()) return open->pass;
         const auto function = name ? graph.functions.find(*name) : graph.functions.end();
         if (function == graph.functions.end() || !function->second) return fail(name ? std::format("there is no function '{}' among the project's functions", *name) : std::string("it calls no function yet"));
-        _beforeOpened = graph;
         OpenedFunction opened { *node, *name, {}, std::string(call) + "/" };
+        // Its file as it is, the project's own: what Discard puts back. (One of the engine's or a module's is the
+        // project's own once it is changed, and Discard takes that away.)
+        if (const std::filesystem::path own = FunctionsDirectory().empty() ? std::filesystem::path() : FunctionsDirectory() / (*name + FunctionEnding); !own.empty()) {
+            std::ifstream in(own, std::ios::binary);
+            if (in) { std::stringstream text; text << in.rdbuf(); opened.original = text.str(); opened.hadFile = true; }
+        }
         // Its page: a pass of its own, after the call's.
         opened.pass = Unique(std::format("{} (function)", *name), [&](const std::string& p) { return std::ranges::find(graph.passes, p) != graph.passes.end(); });
         const auto after = std::ranges::find(graph.passes, node->pass);
         graph.passes.insert(after == graph.passes.end() ? graph.passes.end() : after + 1, opened.pass);
-        // Run as often as the call is.
+        // Run as often as the call is, and where it is: after its page, and before and after what that is.
         if (graph.IsSetup(node->pass)) graph.setup.push_back(opened.pass);
         else if (graph.IsFixed(node->pass)) graph.fixed.push_back(opened.pass);
+        if (graph.orderSettled && !node->pass.empty()) {
+            std::vector<std::pair<std::string, std::string>> inherited { { opened.pass, node->pass } };
+            for (const auto& [page, before] : graph.after) {
+                if (before == node->pass) inherited.emplace_back(page, opened.pass);
+                if (page == node->pass) inherited.emplace_back(opened.pass, before);
+            }
+            for (auto& link : inherited) graph.after.push_back(std::move(link));
+        }
         RatesInOrder(graph);
         std::map<std::string, std::string> outputEdge;      // a port of the call, the FunctionOutput it is
         for (const auto& inner : function->second->nodes) {
@@ -2835,24 +2973,20 @@ namespace keditor
                 if (input.link && input.link->node == call)
                     if (const auto edge = outputEdge.find(input.link->output); edge != outputEdge.end()) input.link = kgraph::Link { edge->second, "out" };
         std::erase_if(graph.nodes, [&](const kgraph::Node& n) { return n.id == call; });
-        _opened = std::move(opened);
+        // What its page is as the function, now: what is written of it when it is otherwise.
+        {
+            kgraph::Graph scratch = graph;
+            kgraph::Node putBack = opened.call;
+            opened.written = FunctionOfPage(scratch, opened, putBack).ToJson();
+        }
+        const std::string page = opened.pass;
+        _opened.push_back(std::move(opened));
         Apply(std::move(graph));
-        return _opened->pass;
+        return page;
     }
 
-    bool Document::CloseFunction(const bool keep, std::string* error)
+    kgraph::Graph Document::FunctionOfPage(kgraph::Graph& graph, const OpenedFunction& opened, kgraph::Node& call) const
     {
-        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
-        if (!_opened) return fail("no function is open");
-        if (!keep) {
-            kgraph::Graph before = std::move(_beforeOpened);
-            _opened.reset();
-            Apply(std::move(before));
-            return true;
-        }
-        const OpenedFunction opened = std::move(*_opened);
-        _opened.reset();
-        kgraph::Graph graph = Graph();
         std::set<std::string> page;
         for (const auto& node : graph.nodes) if (node.pass == opened.pass) page.insert(node.id);
         // What a node of the page is called in the function: without the call's name before it, where that names none other.
@@ -2865,7 +2999,6 @@ namespace keditor
             inFunction[id] = stripped;
         }
         kgraph::Graph function;
-        kgraph::Node call = opened.call;
         for (auto it = call.inputs.begin(); it != call.inputs.end();) it = it->first == "function" ? std::next(it) : call.inputs.erase(it);
         std::set<std::string> ports;
         double left = 1e300, right = -1e300;
@@ -2934,13 +3067,57 @@ namespace keditor
         }
         std::erase_if(graph.nodes, [&](const kgraph::Node& node) { return page.contains(node.id); });
         std::erase(graph.passes, opened.pass);
-        graph.nodes.push_back(call);
-        std::string why;
-        // Into the project, always: one of the engine's changed is the project's own from then on.
+        return function;
+    }
+
+    void Document::WriteOpenedFunctions(const kgraph::Graph& graph)
+    {
+        if (FunctionsDirectory().empty()) return;
+        for (auto& opened : _opened) {
+            if (!std::ranges::contains(graph.passes, opened.pass)) continue;
+            kgraph::Graph scratch = graph;
+            kgraph::Node call = opened.call;
+            const kgraph::Graph function = FunctionOfPage(scratch, opened, call);
+            std::string json = function.ToJson();
+            if (json == opened.written) continue;
+            std::string why;
+            // Into the project, always: one of the engine's changed is the project's own from then on, with what it says it is for.
+            if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, AboutFunction(opened.function), why, _assets.get())) { _notes.push_back(why); continue; }
+            opened.written = std::move(json);
+            _functionFiles.erase(opened.function);
+        }
+    }
+
+    bool Document::CloseFunction(const bool keep, std::string* error)
+    {
+        if (_opened.empty()) { if (error) *error = "no function is open"; return false; }
+        return CloseFunctionOn(_opened.back().pass, keep, error);
+    }
+
+    bool Document::CloseFunctionOn(const std::string_view pass, const bool keep, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        const auto it = std::ranges::find(_opened, pass, &OpenedFunction::pass);
+        if (it == _opened.end()) return fail(std::format("no function is open on '{}'", pass));
         if (FunctionsDirectory().empty()) return fail("a function is kept in a project, and this scene is in none");
-        // What it says it is for goes with it: the engine's, for one of the engine's saved as the project's own.
-        if (!WriteFunction(FunctionsDirectory() / (opened.function + FunctionEnding), function, AboutFunction(opened.function), why, _assets.get())) return fail(why);
-        _functionFiles.erase(opened.function);
+        kgraph::Graph graph = Graph();
+        // Written as its page is, before it goes: what was done last is kept too.
+        if (keep) WriteOpenedFunctions(graph);
+        const OpenedFunction opened = std::move(*it);
+        _opened.erase(it);
+        kgraph::Node call = opened.call;
+        (void)FunctionOfPage(graph, opened, call);
+        if (!keep) {
+            // Its file as it was: the project's own as it was opened, or none — the engine's or a module's again.
+            const std::filesystem::path file = FunctionsDirectory() / (opened.function + FunctionEnding);
+            std::error_code ec;
+            if (opened.hadFile) {
+                std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                out << opened.original;
+            } else std::filesystem::remove(file, ec);
+            _functionFiles.erase(opened.function);
+        }
+        graph.nodes.push_back(call);
         WireAcrossPasses(graph, { call.id });
         Apply(std::move(graph));
         return true;

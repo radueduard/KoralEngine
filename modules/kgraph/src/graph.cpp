@@ -8,6 +8,7 @@
 #include <charconv>
 #include <cmath>
 #include <format>
+#include <set>
 
 #include <kecs/json.h>
 
@@ -107,11 +108,47 @@ namespace kgraph
         const auto gone = [&](const std::string& pass) { return std::ranges::find(passes, pass) == passes.end(); };
         std::erase_if(setup, gone);
         std::erase_if(fixed, [&](const std::string& pass) { return gone(pass) || IsSetup(pass); });
+        std::erase_if(after, [&](const auto& link) { return gone(link.first) || gone(link.second) || link.first == link.second; });
+        // Each rate's pages, as they were; then in the order the links say, those they say nothing of kept where they are:
+        // the first of them that has nothing left to run after, again and again.
+        const auto byLinks = [&](std::vector<std::string> pages) {
+            std::vector<std::string> done;
+            while (!pages.empty()) {
+                auto next = std::ranges::find_if(pages, [&](const std::string& page) {
+                    return std::ranges::none_of(after, [&](const auto& link) { return link.first == page && std::ranges::contains(pages, link.second); });
+                });
+                if (next == pages.end()) next = pages.begin();     // a ring: broken at the earliest
+                done.push_back(*next);
+                pages.erase(next);
+            }
+            return done;
+        };
+        std::vector<std::string> frame;
+        for (const auto& pass : passes)
+            if (RateOf(pass) == PassRate::eFrame) frame.push_back(pass);
+        setup = byLinks(setup);
+        fixed = byLinks(fixed);
         std::vector<std::string> ordered = setup;
         ordered.insert(ordered.end(), fixed.begin(), fixed.end());
-        for (const auto& pass : passes)
-            if (RateOf(pass) == PassRate::eFrame) ordered.push_back(pass);
+        for (auto& pass : byLinks(std::move(frame))) ordered.push_back(std::move(pass));
         passes = std::move(ordered);
+    }
+
+    bool Graph::RunsAfter(const std::string_view page, const std::string_view before) const
+    {
+        std::vector<std::string_view> look { page };
+        std::set<std::string_view> seen;
+        while (!look.empty()) {
+            const std::string_view at = look.back();
+            look.pop_back();
+            if (!seen.insert(at).second) continue;
+            for (const auto& [later, earlier] : after) {
+                if (later != at) continue;
+                if (earlier == before) return true;
+                look.push_back(earlier);
+            }
+        }
+        return false;
     }
 
     Node& Graph::Add(std::string id, std::string type)
@@ -137,6 +174,12 @@ namespace kgraph
         list("setup", PassRate::eSetup);
         list("fixed", PassRate::eFixed);
         list("passes", PassRate::eFrame);
+        // Which page runs after which, where what they use does not say: written once the order is the links'.
+        if (orderSettled) {
+            std::string links;
+            for (const auto& [page, before] : after) links += std::format("{}[{}, {}]", links.empty() ? "" : ", ", json::Quote(page), json::Quote(before));
+            out += std::format("\n  \"after\": [{}],", links);
+        }
         if (fixedStepsAtMost != Graph().fixedStepsAtMost) out += std::format("\n  \"fixedStepsAtMost\": {},", fixedStepsAtMost);
         if (!meshImports.empty()) {
             // How model files are read: each file's attributes left out, and its buffers.
@@ -320,6 +363,14 @@ namespace kgraph
         // A node of a pass the list does not have: the pass is there all the same, after those it does.
         for (const auto& node : graph.nodes)
             if (!node.pass.empty() && std::ranges::find(graph.passes, node.pass) == graph.passes.end()) graph.passes.push_back(node.pass);
+        // Which page runs after which: the order is the links' when it says so, the list's when it was saved before there were any.
+        if (const json::Value* links = root.Find("after"); links && links->kind == json::Value::Kind::eArray) {
+            graph.orderSettled = true;
+            for (const auto& link : links->items)
+                if (link.items.size() == 2 && link.items[0].kind == json::Value::Kind::eString && link.items[1].kind == json::Value::Kind::eString)
+                    graph.after.emplace_back(link.items[0].string, link.items[1].string);
+            graph.OrderByRate();
+        }
         out = std::move(graph);
         return true;
     }

@@ -32,8 +32,8 @@ would (its window is open while it does).
 
 | Panel | |
 |---|---|
-| **Graph** | The scene's pass graph, a page a pass: the one picked in **Passes**. Right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. |
-| **Passes** | The graph's passes, under the Scene tree: pressed, a pass's page is shown in the Graph panel. See [Passes](#passes). |
+| **Graph** | The scene's pass graph, at the depth it is looked at: the whole **frame** (its pages as cards, in a lane for each rate), a **page** gone into, or a **function** opened on a page. A bar over it says where it is, each step pressed to go back to. On a page: right-click where nothing is, or press Control+Space, to add a node. Drag from a port to wire it, drag a node to move it, Delete removes what is picked. A node that failed is outlined in red and says why. See [The frame](#the-frame). |
+| **Outline** | Under the Scene tree: the frame, every node at once, and the pages in their lanes; under the page shown, what runs on it — its passes and its functions' calls. Pressed, each is gone to. See [Passes](#passes). |
 | **Here to use** | Beside the Assets panel: what the page shown can use of the passes before it, a picture each, to drag onto the page. See [Passes](#passes). |
 | **Scene** | The scene as it runs, sized to the panel. |
 | **Scene tree** | The entities, as a tree, and a button that makes one. Each is shown by what it is — a mesh, a light, a camera, a script's — and one with nothing of its own but what is under it by a group's mark. Right-clicked, an entity has a short menu: Rename, Duplicate, Delete; **Create under it ▸**, the objects there are, a submenu each for meshes, lights and cameras; how it is seen (framed, shown or hidden, moved to the top); and **Prefab ▸**, made one, or of an instance its prefab edited, applied, reverted or let go. Right-clicked where no entity is, it offers what can be made at the top. A submenu opens beside its menu as the pointer comes onto its line. |
@@ -62,15 +62,16 @@ The menus:
 
 ### Passes
 
-The graph is split into passes, listed in the **Passes** panel in the order they are drawn, each
+The graph is split into passes, listed in the **Outline** panel in the order they are drawn, each
 with how many nodes it has (and how many are wrong). Its pills are all one grey: a pass that takes more of the frame says its time brighter, never in a colour of its own. Press one to see its page: the nodes it makes
-and runs, and nothing of any other pass. **Find a node**, at the top, goes to the first node whose name or
+and runs, and nothing of any other pass. Under the page shown are what runs on it — its pass nodes and its functions'
+calls — each pressed to go to it. **Find a node**, at the top, goes to the first node whose name or
 kind has what is typed; Enter again goes on to the next.
 
-The passes are under a tab for each rate they run at (see [kgraph: How often a pass runs](kgraph.md#how-often-a-pass-runs)):
-**Every frame**; **Fixed step**, the passes run on the fixed step while the scene plays; and **Setup**, the passes made
-once. Setup's run first, then the fixed step's, then every frame's, each in their own order. The tab follows the page
-shown: going to a node of a setup page turns to Setup.
+The passes are in a lane for each rate they run at (see [kgraph: How often a pass runs](kgraph.md#how-often-a-pass-runs)),
+all listed at once, each folded by the arrow on its heading: **Setup**, the passes made once; **Fixed step**, the passes
+run on the fixed step while the scene plays; and **Every frame**. Setup's run first, then the fixed step's, then every
+frame's, each in their own order.
 
 Only the pages of what the graph's choices choose are listed (`Session::PagesNotChosen`): a page each of whose passes
 idles — or is switched off — by a choice's value, a Switch's driver compared with an option (`NotEqual`, `Equal`,
@@ -87,9 +88,11 @@ before, in the order they are drawn, so that none is over another. Moving or arr
 move them on their pages, and moving them on a page does not move them there. A node made there is where it
 was put. The layout is saved with the graph (`overview`).
 
-- **+** beside the tab's heading makes a new pass of that tab: type its name, then Enter (Escape calls it off). Drag
-  a pass up or down to make it earlier or later among its tab's. Right-click it to move it, to make it run every frame, on
-  the fixed step or once as setup, or to delete it (with its nodes, or keeping them in no pass).
+- **+** beside a lane's heading makes a new pass of that lane: type its name, then Enter (Escape calls it off). A
+  page is listed where it runs, which is no list's to say: what it uses orders it, and where two write the same thing, a
+  link (see [The frame](#the-frame)). Right-click it for **Run after ▸** and **Run before ▸** — the other pages of its
+  lane, those it ties with first, a dot on each it is linked to (pressed again, the link goes) — to make it run every
+  frame, on the fixed step or once as setup, or to delete it (with its nodes, or keeping them in no pass).
 - Under THIS PASS: the pass's name, to type over; **Create a node** makes a node in it (an image, a
   framebuffer, a pipeline, a pass node), as right-clicking its page or Control+Space does for every kind.
 - The **Here to use** panel, beside Assets, is what the page shown can use: what the passes before it made, setup's
@@ -241,6 +244,15 @@ three lights and a sky. The mesh objects name the standard graph's `default` com
 offered in any project, one made before an object was among them included; a file of the project's of the same
 name is what it says instead.
 
+### Assets or files
+
+The two buttons beside **+ Create** choose how the Assets panel shows the project. **Assets** (the default) shows what
+it is made of: each script's components, Data and kinds by name, models, pictures, scenes, prefabs. It shows only the
+folders that have something of these in them. **Files** shows the folders as they are on disk, empty ones too, and every
+file in them. A script is shown as its file, whether or not it declares a component. A file that is an asset by itself
+(a model, a picture, a scene, a shader module) is still shown as that asset. Names starting with a dot and the `.meta`
+beside each asset are left out. A folder made with **New folder** is empty, so the panel switches to Files to show it.
+
 ### Default meshes and materials
 
 Every project's Assets panel has the editor's own, of no file: **Resources, Meshes** lists the procedural meshes beside
@@ -263,7 +275,11 @@ A graphics pipeline has a vertex shader and a fragment shader, which can be take
 
 ### Functions
 
-A `.kfunc` pressed twice in the Assets panel, or **Open in the graph** in its inspector, opens as a page of the graph: by a call of it the scene has, or with none, by a call made for the page that goes when it closes. What is done there is done for every call of it.
+A `.kfunc` pressed twice in the Assets panel, or **Open in the graph** in its inspector, opens as a page of the graph: by a call of it the scene has, or with none, by a call made for the page that goes when it closes. A call pressed twice opens its function too. What is done there is done for every call of it, **as it is done**: the function's file is written at each edit, and every other call follows at once. Several functions may be open at once, each its own page; the bar over the graph says which (`Frame › main › Triple · every call`), with **Close** — the call put back where the page was — and **Discard**, the function as it was when it was opened, and every call with it. Saving the scene closes them all.
+
+The Outline, on a function's page, has its **signature**: what every call takes and gives, in the order the calls have them as ports. Each is its name to type over, its kind to choose, arrows to move it earlier or later (each edge is given its `order`, so that where it is on the page no longer says), and pressed, its edge picked; **+** gives it an input or an output more.
+
+A `.kfunc` dragged from the Assets panel onto a page is a call of it, there; onto the frame, a page of its own in the lane it is let go in, with a call of it. A call keeps its function by the file's ID, so a function renamed or moved with **Rename or move...** is still what every call calls. One of the engine's or a module's is made the project's own from a call's menu (**Make it the project's own**): copied into `functions/`, it is called in their place.
 
 ### Looking at a material
 
@@ -606,9 +622,28 @@ A node's card shows its level (kgraph.md, *Node types*) as five steps at its tit
 and one — a number lights one, a Function's call all five — and says it in words under its title (`Draw · command`).
 A card made of other nodes (a Function's call) is a stack of cards. Its colour stays its category's: what it is for.
 
-## The Pass flow panel
+## The frame
 
-A tab beside the Graph: the pages as cards, left to right in the order they run, each wired from the pages whose work
+The Graph panel at its highest: **Frame** in the bar over it, or in the Outline, goes up to it; a page's card pressed
+twice goes into the page, and a function's call pressed twice on a page goes into the function (its bar says so, with
+**Close** and **Discard**). A node gone to — found, a problem pressed — is shown on its page, from the frame too.
+
+**The order of the pages is no list's.** What a page uses orders it: one that reads what another writes runs after it.
+Where two pages of a lane both write the same thing, a **link** says which runs first: each card has an **after** port
+and a **then** port, and a wire from one's *then* to another's *after* makes the second run after the first (drawn
+again, a link is taken off by its wire; right-clicked, a card has **Run after ▸** and **Run before ▸** too). Two that
+both write something with no link between them are **tied**: the card says *Tied with …*, and the log says so, until
+they are linked. A scene made before there were links runs in the order its list had, and that order is made links —
+only where two write the same thing — when it is saved or a link is drawn (see
+[kgraph: Order](kgraph.md#order)).
+
+The frame has a lane for each rate, left to right in the order they run: **Setup**, **Fixed step**, **Every frame**.
+Every lane is there, an empty one holding a card that says so — pressed twice, it makes the lane's first page. A page's
+card let go in another lane runs at that lane's rate from then on. Right-clicked, a card is opened, run at another rate,
+put back where the flow has it, or deleted (with its nodes, or keeping them); where no card is, the menu makes a new page
+of the lane it is asked in, shows every node at once, arranges the flow or frames everything.
+
+In each lane, the pages as cards, left to right in the order they run, each wired from the pages whose work
 it uses — the last page before it to write what it reads, not the one that made it (what a page reads of the frame
 before, a history, is wired too, and has no say in where either goes). Each page is in the column, between those it
 takes from and those that take from it, that keeps its wires shortest — a wire from a page that feeds many counting
@@ -618,8 +653,8 @@ is that option (or are on only then), or when only that option is reached from i
 columns, is above them. A Switch that
 chooses between branches is a card of its own, with a list to choose by; a page whose passes did not run, or idle
 (a branch not chosen), is dimmed. Its cards show their cost on the GPU, and — a page being made of nodes — a stack,
-and the steps of its most abstract node. Pressed twice, a page is shown in the Graph. A card can be dragged, and its
-menu puts it back or shows its page; the flow's own menu has **Arrange the flow** — every card where the flow puts it,
+and the steps of its most abstract node. A card can be dragged, and its
+menu puts it back or opens its page; the bar has **Arrange the flow** — every card where the flow puts it,
 what was dragged forgotten, all of it framed — and **Frame everything**. Nothing else is edited there.
 
 ## The Scene panel
@@ -865,12 +900,16 @@ that again after the panels have been moved.
   fixed array). Its fields are ports from the start, as a ShaderBuffer's are.
 - A new node goes where the pointer asked for it, or in the middle of what the graph shows.
 
-- **Each file is an asset, known by an ID** kept beside it in `<file>.meta` (see
-  [ADR 0003](adr/0003-assets-are-made-by-producers.md)): a scene, a prefab and a material name what they have by that ID
-  on disk, and by where it is in the editor. So a file is **renamed or moved** from its menu (*Rename or move...*): its
-  meta goes with it, a model's files with it too, and every scene still has it — the one open is saved first, and read
-  again after. A file moved outside the editor with its meta is the same asset; moved without it, it is found again by
-  its name when it is the one file of that name with no meta.
+- **Each file is an asset, known by an ID** kept in its meta (see
+  [ADR 0003](adr/0003-assets-are-made-by-producers.md)): `.koral/meta/<file>.meta` in the project's folder — or in a
+  module's, for one of its files — in the same folders as the file, out of the way of the project's own files. A scene,
+  a prefab and a material name what they have by that ID on disk, and by where it is in the editor. So a file is
+  **renamed or moved** from its menu (*Rename or move...*): its meta goes with it, a model's files with it too, and every
+  scene still has it — the one open is saved first, and read again after. A file moved outside the editor is found again
+  by its name, its meta following it, when it is the one file of that name with no meta; moved with its meta (under
+  `.koral/meta` too), it is the same asset. A meta beside its file, where they were kept before, is moved to
+  `.koral/meta` when the project is read. `.koral/meta` is the project's, to keep with it — in git too; `.koral/cache` is
+  made again from it.
 - **Used by**, in a picked asset's inspector, is the project's files that name it, as they are saved; moving one to the
   trash says first what would have nothing.
 - **A scene pressed twice is opened**: the one open saved first, when it has changed.

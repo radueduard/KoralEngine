@@ -61,6 +61,8 @@ namespace kgraph
             graph.passes = given.passes;
             graph.setup = given.setup;
             graph.fixed = given.fixed;
+            graph.after = given.after;
+            graph.orderSettled = given.orderSettled;
             graph.fixedStepsAtMost = given.fixedStepsAtMost;
             graph.meshImports = given.meshImports;
             graph.textureImports = given.textureImports;
@@ -94,13 +96,18 @@ namespace kgraph
                     Expansion::Call& record = out.calls[call.id];
                     record.function = *name;
                     record.called = call.id;
-                    // Its edges, in the order they are on its page: top to bottom, then left to right.
+                    // Its edges, in the order they say (`order`) — and those that say none after them, as they are on its page: top
+                    // to bottom, then left to right.
                     std::vector<const Node*> ins, outs;
                     for (const auto& node : function.nodes) {
                         if (node.type == "FunctionInput") ins.push_back(&node);
                         if (node.type == "FunctionOutput") outs.push_back(&node);
                     }
-                    const auto byPlace = [](const Node* a, const Node* b) { return a->y != b->y ? a->y < b->y : a->x < b->x; };
+                    const auto orderOf = [](const Node* edge) { const auto it = edge->inputs.find("order"); const double* n = it == edge->inputs.end() || it->second.link ? nullptr : it->second.value.Number(); return n ? *n : 1e300; };
+                    const auto byPlace = [&](const Node* a, const Node* b) {
+                        if (orderOf(a) != orderOf(b)) return orderOf(a) < orderOf(b);
+                        return a->y != b->y ? a->y < b->y : a->x < b->x;
+                    };
                     std::ranges::stable_sort(ins, byPlace);
                     std::ranges::stable_sort(outs, byPlace);
                     const auto portName = [](const Node& edge) { const std::string* named = Text(edge, "name"); return named ? *named : edge.id; };
@@ -777,6 +784,8 @@ namespace kgraph
         out.graph.passes = written.passes;
         out.graph.setup = written.setup;
         out.graph.fixed = written.fixed;
+        out.graph.after = written.after;
+        out.graph.orderSettled = written.orderSettled;
         out.graph.fixedStepsAtMost = written.fixedStepsAtMost;
         out.graph.meshImports = written.meshImports;
         out.graph.textureImports = written.textureImports;

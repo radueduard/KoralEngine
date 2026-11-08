@@ -495,8 +495,19 @@ namespace keditor
         /** @brief The pass whose page the graph panel shows; none while it shows every node at once. */
         [[nodiscard]] const std::string& Pass() const { return _pass; }
         [[nodiscard]] bool ShowsEveryPass() const { return _everyPass; }
-        void ShowPass(std::string pass) { _pass = std::move(pass); _everyPass = false; ++_changes; }
-        void ShowEveryPass() { _everyPass = true; ++_changes; }
+        void ShowPass(std::string pass) { _pass = std::move(pass); _everyPass = false; _atFrame = false; ++_changes; }
+        void ShowEveryPass() { _everyPass = true; _atFrame = false; ++_changes; }
+        /**
+         * @brief Whether the Graph panel shows the whole frame — its pages as cards, in a lane for each rate they run at,
+         *        wired by what each uses of the others — rather than a page's nodes. A page shown, or every node, is gone into.
+         */
+        [[nodiscard]] bool ShowsFrame() const { return _atFrame; }
+        /** @brief The Graph panel shows the whole frame: the page that was shown is the one gone into again from there. */
+        void ShowFrame() { _atFrame = true; ++_changes; }
+        /** @brief Two pages that both write something and that nothing orders (Document::OrderTies), as the document is now. */
+        /** @brief The links of the pages' order (Document::OrderLinks), as the document is now. */
+        [[nodiscard]] const std::vector<std::pair<std::string, std::string>>& Links() { if (_linksOf != Doc().Version()) { _links = Doc().OrderLinks(); _linksOf = Doc().Version(); } return _links; }
+        [[nodiscard]] const std::vector<Document::OrderTie>& Ties() { if (_tiesOf != Doc().Version()) { _ties = Doc().OrderTies(); _tiesOf = Doc().Version(); } return _ties; }
         /**
          * @brief Whether the Here to use panel — what the page shown can use of the passes before it — is in sight: its
          *        images are pictured while it is. The editor says so as its panels are laid out.
@@ -630,7 +641,7 @@ namespace keditor
          * @brief The graph as its pages run: each page a step, wired from every page it uses something of — a resource
          *        or a value one of its nodes made, brought in by a Reference or wired straight — and each Switch that
          *        chooses between branches (a Choice) a step of its own, between the pages its options come from and
-         *        those that use what it chose. What the Pass flow panel shows; none of it is edited there but the choice.
+         *        those that use what it chose. What the Graph panel shows at the frame, a lane for each rate.
          */
         struct PassFlow {
             struct Step {
@@ -825,13 +836,29 @@ namespace keditor
         void SetDrawerList(const bool lines) { drawerList = lines; ++_changes; }
         std::set<std::string> assetsOpened; ///< The models whose meshes are shown after them, by id.
         /**
-         * @brief Every folder the Assets panel has: the project's own, empty ones too, and those the things in
-         *        @p assets are in. By path, sorted; a folder's parents are there before it.
+         * @brief How the Assets panel shows the project. False, by what it is made of: the scripts' components, Data,
+         *        kinds, models, textures, each by itself, and only the folders something of these is in. True, as the
+         *        folders are on disk: every folder, empty ones too, and every file in it, a script by its file.
+         */
+        bool assetFiles = false;
+        void SetAssetFiles(const bool files) { assetFiles = files; ++_changes; }
+        /**
+         * @brief Every folder the Assets panel has: those the things in @p assets are in — and, in the files view
+         *        (assetFiles), every folder of the project's and its modules', empty ones too. By path, sorted; a
+         *        folder's parents are there before it.
          */
         [[nodiscard]] std::vector<std::string> AssetFolders(const std::vector<Asset>& assets) const;
+        /**
+         * @brief The files in a folder of the panel, as they are on disk, by name: not those whose name starts with a
+         *        dot, nor the `.meta` each asset has beside it. Nothing for a folder of no folder on disk.
+         */
+        [[nodiscard]] std::vector<std::filesystem::path> AssetFolderFiles(std::string_view folder) const;
         /** @brief Where a folder of the panel is on disk; empty for one that is not a folder of the project's. */
         [[nodiscard]] std::filesystem::path AssetFolderPath(std::string_view folder) const;
-        /** @brief Makes a folder called @p name in the folder that is shown. False, with Status saying why, when it cannot. */
+        /**
+         * @brief Makes a folder called @p name in the folder that is shown. False, with Status saying why, when it cannot.
+         *        Made, the panel shows the files view: an empty folder is shown nowhere else.
+         */
         bool NewAssetFolder(const std::string& name);
         /** @brief What pressing a listed thing twice does: a shader or a script is opened to be written, a model shows or hides its meshes. */
         void OpenAsset(const Asset& asset);
@@ -1078,6 +1105,11 @@ namespace keditor
         std::set<kecs::Entity> _folded;
         std::string _pass;
         bool _everyPass = false;
+        bool _atFrame = false;
+        std::uint64_t _tiesOf = ~std::uint64_t(0);    ///< The document's version the ties were found for.
+        std::vector<Document::OrderTie> _ties;
+        std::uint64_t _linksOf = ~std::uint64_t(0);
+        std::vector<std::pair<std::string, std::string>> _links;
         bool _drawer = false;      // the Here to use panel is in sight
         std::string _snapshot;              // the entities as they were when play began
         std::vector<ObjectTemplate> _objects;
@@ -1188,7 +1220,7 @@ namespace keditor
         std::unique_ptr<MaterialPreview> _materialPreview;
         std::shared_ptr<kgraph::Resource> _previewPictureHeld;
         std::string _previewMesh = "$sphere", _previewedAs;
-        std::string _callForOpening;        // the call made only to open a function, gone when that closes
+        std::set<std::string> _callsForOpening;     // the calls made only to open a function, each gone when that closes
         std::vector<std::pair<std::string, kgraph::Value>> _materialTried;     // what is tried out in the viewer, by field
         void UpdateMaterialPreview();
         std::shared_ptr<kgraph::Resource> _viewMeshHeld, _viewPictureHeld;

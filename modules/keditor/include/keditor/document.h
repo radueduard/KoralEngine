@@ -160,8 +160,34 @@ namespace keditor
         bool SetPassRate(std::string_view pass, kgraph::PassRate rate);
         /** @brief Gives a pass another name, and every node of it with it. */
         bool RenamePass(std::string_view pass, std::string_view name);
-        /** @brief Moves a pass to @p index among them: earlier is drawn first. A pass of setup stays before those of every frame. */
+        /**
+         * @brief Moves a pass to @p index among them, where nothing orders it otherwise: what `after` says still holds.
+         *        For code that builds a graph; the editor orders pages by links (RunAfter).
+         */
         bool MovePass(std::string_view pass, int index);
+
+        // ---- the order of the pages ------------------------------------------------------------------------------
+        //
+        // What the pages read and write orders them: a page reading what another writes runs after it. Where two of the
+        // same rate both write something, a link says which runs first (kgraph::Graph::after) — or they are a tie, said
+        // among the problems. A graph not settled yet (made in code, or saved before there were links) is in the order
+        // its list has, and its links are those that order makes: settled when it is saved, or a link is drawn.
+
+        /** @brief Every link, `{ page, before }`: the graph's once settled; of one not settled, those its list's order makes. */
+        [[nodiscard]] std::vector<std::pair<std::string, std::string>> OrderLinks() const;
+        /** @brief Two pages of the same rate that both write what @p shared names (nodes, by id), and nothing orders. */
+        struct OrderTie {
+            std::string first, second;          ///< As they run now: `first` before `second`, for want of a link.
+            std::vector<std::string> shared;
+        };
+        /** @brief Every tie: none while the graph is not settled, its list ordering them all. */
+        [[nodiscard]] std::vector<OrderTie> OrderTies() const;
+        /** @brief Makes @p page run after @p before: a link, the reverse one gone. False for no such page, another rate, or a ring it would close. */
+        bool RunAfter(std::string_view page, std::string_view before);
+        /** @brief Takes away the link that makes @p page run after @p before. False when there is none. */
+        bool StopRunningAfter(std::string_view page, std::string_view before);
+        /** @brief Makes the order the links': those the list's order makes, from now on the graph's own. Nothing, when it is already. */
+        void SettleOrder();
         /** @brief Takes a pass away: with its nodes, or — @p keepNodes — leaving them in no pass. */
         bool RemovePass(std::string_view pass, bool keepNodes = false);
         /** @brief Puts a node in a pass; in none, for an empty name. */
@@ -399,19 +425,37 @@ namespace keditor
         struct OpenedFunction {
             kgraph::Node call;
             std::string function, pass, prefix;
+            /// Its file as it was when it was opened — empty when the project had none (one of the engine's or a module's):
+            /// what Discard puts back.
+            std::string original;
+            bool hadFile = false;
+            std::string written;        ///< What its page was last written to its file as: written again when it is otherwise.
         };
         /**
          * @brief Opens call @p call's function in place: its nodes on a page of their own — a pass after the call's —
          *        each FunctionInput given what the call was given, and what was wired from the call wired from its
-         *        FunctionOutputs. What is done there is the function's. The page's pass; empty, with @p error saying why.
+         *        FunctionOutputs. What is done there is the function's, written to its file as it is done: every other
+         *        call of it follows at once. Several may be open, each a function of its own; one open already, its page
+         *        is given. The page's pass; empty, with @p error saying why.
          */
         std::string OpenFunction(std::string_view call, std::string* error = nullptr);
         /**
-         * @brief Closes the function opened: with @p keep, what its page holds now is written to its file — every call
-         *        of it follows — and the call is put back, wired as its page's edges were; without, as it was opened.
+         * @brief Closes the function last opened: the call put back, wired as its page's edges were. With @p keep, as its
+         *        page is (written already); without, its file as it was when it was opened, and every call with it.
          */
         bool CloseFunction(bool keep, std::string* error = nullptr);
-        [[nodiscard]] const std::optional<OpenedFunction>& Opened() const { return _opened; }
+        /** @brief Closes the function whose page is @p pass, as CloseFunction does. */
+        bool CloseFunctionOn(std::string_view pass, bool keep, std::string* error = nullptr);
+        /** @brief The function last opened, if any is. */
+        [[nodiscard]] std::optional<OpenedFunction> Opened() const { return _opened.empty() ? std::nullopt : std::optional(_opened.back()); }
+        /** @brief Every function open, in the order they were opened. */
+        [[nodiscard]] const std::vector<OpenedFunction>& OpenedFunctions() const { return _opened; }
+        /** @brief The function opened on page @p pass; null for a page that is none's. */
+        [[nodiscard]] const OpenedFunction* OpenedOn(std::string_view pass) const
+        {
+            const auto it = std::ranges::find(_opened, pass, &OpenedFunction::pass);
+            return it == _opened.end() ? nullptr : &*it;
+        }
         /** @brief Call @p call written out into its nodes, in its place: no longer a call of its function. */
         bool WriteOut(std::string_view call, std::string* error = nullptr);
         /** @brief Reads the project's functions again: one changed outside, every call of it follows. */
@@ -635,9 +679,16 @@ namespace keditor
         int _rebuilding = 0;                        // instances being made again from their prefabs: nothing done to them is their own
         /** Gives @p graph the functions its calls name, read from the project's files — those inside them as well. */
         void WithFunctions(kgraph::Graph& graph);
+        /**
+         * What the page of function @p opened holds, as the function: its nodes by their names in it, edges for what is
+         * wired across the page's edge. @p graph and @p call are made as they are with the call put back: wired from
+         * outside where its page was.
+         */
+        kgraph::Graph FunctionOfPage(kgraph::Graph& graph, const OpenedFunction& opened, kgraph::Node& call) const;
+        /** Each function open whose page is not what was last written of it, written: every other call of it follows. */
+        void WriteOpenedFunctions(const kgraph::Graph& graph);
         std::map<std::string, std::pair<std::filesystem::file_time_type, std::shared_ptr<const kgraph::Graph>>> _functionFiles;
-        std::optional<OpenedFunction> _opened;
-        kgraph::Graph _beforeOpened;                // the graph as it was when the function was opened: what Close without keeping puts back
+        std::vector<OpenedFunction> _opened;
         std::set<std::string> _scriptResources;     // the nodes whose resource a script was handed
 
         kecs::World _world;                         // before the runtime, which is gone first

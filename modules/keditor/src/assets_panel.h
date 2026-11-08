@@ -441,14 +441,49 @@ namespace keditor
                 // A shader's entries by their module's name, as it declares them.
                 const auto named = [&](const Session::Asset& asset) { return lower(asset.kind == Kind::eShader ? asset.group : asset.label); };
                 std::ranges::stable_sort(assets, [&](const Session::Asset& a, const Session::Asset& b) { return named(a) < named(b); });
-                for (const auto& asset : assets) {
+                const auto entriesOf = [&](const Session::Asset& asset) {
+                    if (asset.kind == Kind::eShader && _session->assetsOpened.contains(asset.id))
+                        for (const auto& inner : assets)
+                            if (inner.kind != Kind::eModel && inner.parent == asset.id) tileOf(inner);
+                };
+                if (_session->assetFiles && !_session->AssetFolderPath(shown).empty()) {
+                    // As the folder is on disk: every file in it, by name. One that is an asset by itself — a model, a
+                    // picture, a scene, a shader module — is shown as that asset; any other, a script's too, as a file.
+                    std::map<std::string, const Session::Asset*> ofFile;
+                    for (const auto& asset : assets)
+                        if (!asset.file.empty() && asset.parent.empty() && !asset.builtIn && asset.kind != Kind::eScript && asset.kind != Kind::eMesh
+                            && asset.kind != Kind::eLight && asset.kind != Kind::eCamera)
+                            ofFile.try_emplace(asset.file.lexically_normal().generic_string(), &asset);
+                    static const std::set<std::string> written { ".kt", ".kts", ".cs", ".csproj", ".json", ".md", ".txt", ".slang", ".toml", ".yaml", ".yml", ".xml",
+                                                                 ".gradle", ".props", ".ini", ".cfg", ".glsl", ".hlsl", ".kmat", ".kgen", ".kfunc", ".prefab" };
+                    for (const auto& file : _session->AssetFolderFiles(shown)) {
+                        if (const auto it = ofFile.find(file.lexically_normal().generic_string()); it != ofFile.end()) {
+                            tileOf(*it->second);
+                            entriesOf(*it->second);
+                            continue;
+                        }
+                        const std::string ending = lower(file.extension().string());
+                        const bool source = ending == ".kt" || ending == ".kts" || ending == ".cs";
+                        const bool text = written.contains(ending);
+                        const std::string key = file.generic_string();
+                        std::vector<kui::MenuItem> menu;
+                        if (text) menu.push_back({ "Open in Visual Studio Code", [this, file] { _session->OpenInCode(file); } });
+                        for (auto& item : FileMenu(file, true)) menu.push_back(std::move(item));
+                        kui::Widget icon = kui::SizedBox(preview, preview, kui::Icon(source ? "code" : "description", kui::IconStyle::eFilled, source ? kui::Color::Hex(0x7DBB4B) : t.textMuted));
+                        // Pressed twice, what is written is opened to be written; anything else shown where it is.
+                        tiles.push_back(Tile("file " + key, std::move(icon), file.filename().string(), key == _folderPicked, false, size,
+                                             [this, key, file, text] {
+                                                 Pressed("file " + key, [&] { SetState([&] { _folderPicked = key; }); },
+                                                         [&] { if (text) _session->OpenInCode(file); else _session->ShowInFiles(file); });
+                                             }, std::move(menu)));
+                    }
+                }
+                else for (const auto& asset : assets) {
                     // What is of a model is in the model; a module's entries, after it.
                     if (asset.folder != shown || asset.kind == Kind::eMesh || (asset.kind == Kind::eShader && !asset.parent.empty())
                         || (asset.kind == Kind::eMaterial && !asset.parent.empty())) continue;
                     tileOf(asset);
-                    if (asset.kind == Kind::eShader && _session->assetsOpened.contains(asset.id))
-                        for (const auto& inner : assets)
-                            if (inner.kind != Kind::eModel && inner.parent == asset.id) tileOf(inner);
+                    entriesOf(asset);
                 }
             }
             kui::Widget content = !sections.empty() ? kui::Padding(kui::EdgeInsets::All(8.f), Rows(std::move(sections), 4.f))
@@ -561,6 +596,13 @@ namespace keditor
                             _dialog = index == 0 ? Dialog::eNewFolder : index == 1 ? Dialog::eNewShader : index == 2 ? Dialog::eNewScript : Dialog::eImportModel;
                         });
                     }, kui::DropdownOptions {}.SetPlaceholder("+  Create").SetWidth(120.f))),
+                // What it is made of, or its files as they are on disk.
+                kui::Row({
+                    Tool("category", "Assets: what the project is made of — the scripts' components, Data, kinds, models, pictures — and only the folders they are in",
+                         !_session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(false); _folderPicked.clear(); }); }),
+                    Tool("folder_open", "Files: the folders as they are on disk, empty ones too, and every file in them",
+                         _session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(true); _folderPicked.clear(); }); }),
+                }, kui::FlexOptions {}.SetGap(2.f)),
                 kui::Expanded(kui::TextField(kui::TextFieldOptions { .text = _session->assetFilter, .placeholder = "Search: part of a name, in every folder",
                     .onChanged = [this](const std::string& typed) { SetState([&] { _session->assetFilter = typed; }); } }).Key("asset filter")),
                 kui::Tooltip("Shows only one kind of thing, wherever it is.",

@@ -177,6 +177,7 @@ namespace keditor
         if (!_project.Save(error)) { Say(error, true); return false; }
         _project.Use();
         Doc().ReloadModules();
+        WriteEditorSetup(_project.directory, _project.name);     // what an editor of code reads: the modules' scripts with its own
         LoadObjects();
         ScanAssets();
         Say(said);
@@ -325,6 +326,14 @@ namespace keditor
             }
         }
         for (const auto& note : Doc().Notes()) problems.push_back({ note, {}, true });
+        // Two pages that both write something, and nothing says which runs first: a link between them, drawn in the frame.
+
+        for (const auto& tie : Ties()) {
+            std::string what;
+            for (const auto& id : tie.shared) what += (what.empty() ? "" : ", ") + id;
+            problems.push_back({ std::format("{} and {} both write {}, and nothing says which runs first: link them in the frame (or right-click either: Run after...).",
+                                             tie.first, tie.second, what), tie.shared.empty() ? std::string() : tie.shared.front(), true });
+        }
         return problems;
     }
 
@@ -522,6 +531,8 @@ namespace keditor
 
     void Session::GoTo(const std::string& id)
     {
+        // A node gone to is shown on its page: from the whole frame, gone into.
+        if (Doc().Graph().Find(id)) _atFrame = false;
         if (const kgraph::Node* node = Doc().Graph().Find(id); node && !_everyPass && node->pass != _pass) {
             if (node->pass.empty()) _everyPass = true;
             else _pass = node->pass;
@@ -571,13 +582,15 @@ namespace keditor
         const std::string page = Doc().OpenFunction(call, &error);
         if (page.empty()) { Say(error, true); return false; }
         ShowPass(page);
-        Say(std::format("{} is open: what is done on this page is the function's, for every call of it. Done keeps it; Discard puts it back.", Doc().Opened()->function));
+        if (const auto* opened = Doc().OpenedOn(page))
+            Say(std::format("{} is open: what is done on this page is the function's, written as it is done — every call of it follows. Close it when it is done.", opened->function));
         return true;
     }
 
     bool Session::OpenFunctionNamed(const std::string& name)
     {
-        if (const auto& opened = Doc().Opened(); opened && opened->function == name) { ShowPass(opened->pass); return true; }
+        for (const auto& opened : Doc().OpenedFunctions())
+            if (opened.function == name) { ShowPass(opened.pass); return true; }
         for (const auto& node : Doc().Graph().nodes) {
             if (node.type != "Function") continue;
             const auto function = node.inputs.find("function");
@@ -587,21 +600,23 @@ namespace keditor
         const std::string call = Doc().AddNode(name, 0.0, 0.0);
         if (call.empty()) { Say(std::format("'{}' could not be opened.", name), true); return false; }
         if (!OpenFunction(call)) { Doc().RemoveNodes({ call }); return false; }
-        _callForOpening = call;
+        _callsForOpening.insert(call);
         return true;
     }
 
     bool Session::CloseFunction(const bool keep)
     {
-        const auto opened = Doc().Opened();
+        // The one shown, when a function's page is; else the one last opened.
+        const auto* shown = Doc().OpenedOn(_pass);
+        const auto opened = shown ? std::optional(*shown) : Doc().Opened();
         if (!opened) return false;
         std::string error;
-        if (!Doc().CloseFunction(keep, &error)) { Say(error, true); return false; }
+        if (!Doc().CloseFunctionOn(opened->pass, keep, &error)) { Say(error, true); return false; }
         if (!opened->call.pass.empty()) ShowPass(opened->call.pass);
-        if (std::exchange(_callForOpening, {}) == opened->call.id) Doc().RemoveNodes({ opened->call.id });
+        if (_callsForOpening.erase(opened->call.id)) Doc().RemoveNodes({ opened->call.id });
         else Select(opened->call.id);
-        Say(keep ? std::format("Kept: functions/{}.kfunc is what its page was, and every call follows.", opened->function)
-                 : std::format("{} is as it was.", opened->function));
+        Say(keep ? std::format("Closed: functions/{}.kfunc is what its page was, and every call follows.", opened->function)
+                 : std::format("{} is as it was when it was opened, and every call with it.", opened->function));
         return true;
     }
 
@@ -3353,8 +3368,13 @@ public extension {0} : IKoralMaterial {{
                             doc.SetInput(made, std::string(stage) + ".entry", kgraph::Value(*found));
                         }
             }
+        } else if (asset->kind == Asset::Kind::eFunction) {
+            // A function dropped is a call of it.
+            const std::string name = asset->file.stem().string();
+            made = doc.AddNode("Function", x, y, name, pass);
+            if (!made.empty()) doc.SetInput(made, "function", kgraph::Value(name));
         } else {
-            Say(std::format("{} is not a node: a texture is an ImageFile, a shader a pipeline.", asset->label), true);
+            Say(std::format("{} is not a node: a texture is an ImageFile, a shader a pipeline, a function a call of it.", asset->label), true);
             return {};
         }
         if (!made.empty()) { Select(made); Say(std::format("Made {} of {}.", made, asset->label)); }
@@ -5232,8 +5252,8 @@ public extension {0} : IKoralMaterial {{
                     if (text.str().find("\"here\"") == std::string::npos) _layout->Dock("here", kui::DockArea::eBottomRight);
                     // From before the frame was a panel: a tab beside what is wrong.
                     if (text.str().find("\"frame\"") == std::string::npos) { _layout->Dock("frame", kui::DockSide::eCenter, "problems"); _layout->Activate("assets"); }
-                    // From before the pass flow was a panel: a tab beside the graph.
-                    if (text.str().find("\"flow\"") == std::string::npos) { _layout->Dock("flow", kui::DockSide::eCenter, "graph"); _layout->Activate("graph"); }
+                    // The pass flow was a tab of its own: it is the Graph panel's, gone back up to the frame.
+                    _layout->Close("flow");
                 }
                 _layout->Activate("scene");     // what it opens on, however it was left
             }
@@ -5259,8 +5279,6 @@ public extension {0} : IKoralMaterial {{
                         .Dock("assets", kui::DockSide::eCenter, "problems")
                         // And the frame as it runs, a tab beside them: what each pass costs, in the order they run.
                         .Dock("frame", kui::DockSide::eCenter, "problems")
-                        // The pages as a flow, a tab beside the graph: which uses what of which, and the branches chosen between.
-                        .Dock("flow", kui::DockSide::eCenter, "graph")
                         // Beside them, what the page shown can use of the passes before it: things to drag onto it, as files are.
                         .Dock("here", kui::DockArea::eBottomRight)
                         // What is looked at closely is a tab beside the scene, there once something is.
@@ -5334,12 +5352,11 @@ public extension {0} : IKoralMaterial {{
                         ScenePanelDocked(),
                         GamePanelDocked(),
                         Docked("outliner", "Scene tree", "list", Outliner()),
-                        Docked("passes", "Passes", "layers", PassList()),
+                        Docked("passes", "Outline", "layers", PassList()),
                         Docked("here", "Here to use", "inventory_2", HereToUse()),
                         Docked("inspector", "Inspector", "tune", Inspector()),
                         Docked("problems", "Log", "terminal", kui::Make<LogPanel>(_session)),
                         Docked("frame", "Frame", "timeline", FramePanel()),
-                        Docked("flow", "Pass flow", "account_tree", FlowPanel()),
                         Docked("assets", "Assets", "folder", _assets.AssetsPanel()),
                         ViewerDocked(),
                     }, kui::DockOptions {}.OnChanged([this] { SaveLayout(); }).OnClosed([this](const std::string& panel) {
@@ -6684,19 +6701,6 @@ public extension {0} : IKoralMaterial {{
                 const auto name = [](std::string text, const bool picked) { return ListName(std::move(text), picked); };
 
                 std::vector<kui::Widget> rows;
-                // A function open in place: what its page is, and the way out — keeping what was done, or not.
-                if (const auto& opened = Doc().Opened()) {
-                    // Said in the panel's own colours, the theme's accent on its icon: not a colour of its own.
-                    const kui::Color accent = t.primary;
-                    rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(10.f))
-                                                      .SetDecoration(kui::Decoration {}.SetColor(t.text.WithAlpha(0.05f)).SetBorderWidth(1.f).SetBorderColor(t.border).SetRadius(6.f)),
-                        Rows({ kui::Row({ icon("functions", accent), kui::Expanded(kui::Text(std::format("Function {} is open", opened->function), kui::TextStyle {}.SetSize(13.f).SetColor(t.text), kui::TextAlign::eStart, false, 1, true)) },
-                                        kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
-                               kgui::Muted(std::format("What is done on its page is the function's, for every call. Its inputs are what {} was given.", opened->call.id), 11.f),
-                               kui::Row({ Chip("Done", [this] { _session->CloseFunction(true); }), Chip("Discard", [this] { _session->CloseFunction(false); }),
-                                          kui::Expanded(kui::Text("")), SmallIcon("open_in_new", [this, pass = opened->pass] { _session->ShowPass(pass); }) },
-                                        kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)) }, 6.f)));
-                }
                 rows.push_back(kui::TextField(kui::TextFieldOptions { .placeholder = "Find a node",
                     .onSubmitted = [this](const std::string& typed) {
                         if (typed.empty()) return;
@@ -6716,154 +6720,136 @@ public extension {0} : IKoralMaterial {{
                         _session->Say(std::format("No node's name or kind has '{}' in it.", typed), true);
                     } }).Key("find node"));
 
-                // Every node at once: a page of its own, laid out apart from the passes' pages.
+                // The whole frame, and every node at once: the two ways of seeing more than a page.
+                const bool atFrame = _session->ShowsFrame();
+                rows.push_back(kui::Tooltip("The whole frame: every page as a card, in a lane for how often it runs, wired by what each uses of the others.",
+                    entry("@frame", atFrame, { icon("account_tree", atFrame ? t.primary : t.textMuted), name("Frame", atFrame),
+                                               chip(std::to_string(passes.size()), t.textMuted) }, [this] { _session->ShowFrame(); })));
+                const bool everyNode = !atFrame && shown.empty();
                 rows.push_back(kui::Tooltip("Every node of every pass, on one page laid out by itself: moving a node here does not move it on its pass's page.",
-                    entry("*", shown.empty(), { icon("grid_view", shown.empty() ? t.primary : t.textMuted), name("Every node at once", shown.empty()),
-                                                chip(std::to_string(Doc().Graph().nodes.size()), t.textMuted) }, [this] { _session->ShowEveryPass(); })));
+                    entry("*", everyNode, { icon("grid_view", everyNode ? t.primary : t.textMuted), name("Every node at once", everyNode),
+                                            chip(std::to_string(Doc().Graph().nodes.size()), t.textMuted) }, [this] { _session->ShowEveryPass(); })));
 
-                // By how often they run — every frame, on the fixed step, once as setup — a tab each. The tab follows the
-                // page shown, when something else — a node gone to, a problem clicked — turns to a page of another.
+                // The pages by how often they run, a lane each as the frame has them: setup, the fixed step, every frame.
+                // Under the page shown, what runs on it: its passes and its functions' calls.
+                // (Dragged up or down, a page runs earlier or later among its lane's: until the order is the data's alone.)
                 using Rate = kgraph::PassRate;
-                if (!shown.empty() && shown != _tabPass) { _rateTab = Doc().RateOf(shown); _tabPass = shown; }
-                const Rate rateTab = _rateTab;
-                const bool setupTab = rateTab == Rate::eSetup, fixedTab = rateTab == Rate::eFixed;
-                std::vector<std::string> listed;
-                std::size_t setups = 0, fixeds = 0;
-                for (const auto& pass : passes) {
-                    const Rate rate = Doc().RateOf(pass);
-                    setups += rate == Rate::eSetup;
-                    fixeds += rate == Rate::eFixed;
-                    if (rate == rateTab) listed.push_back(pass);
-                }
-                // Where the tab's passes start among them all: setup first, then the fixed step, then every frame.
-                const int offset = setupTab ? 0 : static_cast<int>(fixedTab ? setups : setups + fixeds);
-                const Rate tabs[] { Rate::eFrame, Rate::eFixed, Rate::eSetup };
-                const auto counted = [](const char* label, const std::size_t n) { return n ? std::format("{}  {}", label, n) : std::string(label); };
-                rows.push_back(kui::Padding(kui::EdgeInsets::Only(0.f, 8.f, 0.f, 0.f),
-                    kui::TabBar({ "Every frame", counted("Fixed step", fixeds), counted("Setup", setups) }, setupTab ? 2 : fixedTab ? 1 : 0,
-                                [this, passes, tabs](const int tab) {
-                        const Rate rate = tabs[std::clamp(tab, 0, 2)];
-                        if (rate == _rateTab) return;
-                        // Its first page shown, when it has one; the page stays as it is, when it has none.
-                        const auto first = std::ranges::find_if(passes, [&](const std::string& pass) { return Doc().RateOf(pass) == rate; });
-                        SetState([&] { _rateTab = rate; _addingPass = false; });
-                        if (first != passes.end()) { _tabPass = *first; _session->ShowPass(*first); }
-                        else _tabPass = _session->Pass();
-                    })));
-
-                rows.push_back(section(setupTab ? "MADE ONCE, BEFORE ANY FRAME" : fixedTab ? "ON THE FIXED STEP, BEFORE THE FRAME" : "PASSES, AS THEY ARE DRAWN",
-                    kui::Tooltip(setupTab ? "A new setup pass, made after the rest of setup" : fixedTab ? "A new pass of the fixed step, run after the rest of it" : "A new pass, drawn after the rest",
-                                 SmallIcon("add", [this] { SetState([&] { _addingPass = !_addingPass; ++_passFocus; }); }))));
-                if (setupTab && listed.empty())
-                    rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(
-                        "Nothing is made once yet. A setup pass records when it is built — a noise texture, a table worked out on the GPU, "
-                        "a buffer cleared to start with — and again only when what it uses is: resized, its shader edited, its picture read — "
-                        "and when the scene starts or stops playing. + makes the first.", 11.f)));
-                if (fixedTab && listed.empty())
-                    rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(
-                        "Nothing runs on the fixed step yet. A fixed pass runs on the frames that have a fixed step in them while the scene "
-                        "plays, and rests on the rest: a simulation that must not go faster or slower with the frame rate. A FixedStep node "
-                        "gives its dt. + makes the first.", 11.f)));
-                // The pages of what the choices do not choose — another renderer's — left out, but for the one shown.
                 const auto unchosen = _session->PagesNotChosen();
                 std::size_t leftOut = 0;
-                for (std::size_t i = 0; i < listed.size(); ++i) {
-                    const std::string& pass = listed[i];
-                    const bool notChosen = unchosen.contains(pass);
-                    if (notChosen && !_everyChoice && pass != shown) { ++leftOut; continue; }
-                    std::size_t nodes = 0, failed = 0;
-                    for (const auto& node : Doc().Graph().nodes) {
-                        if (node.pass != pass) continue;
-                        ++nodes;
-                        if (const auto* status = runtime.Status(node.id); status && !status->ok) ++failed;
-                    }
-                    const bool picked = pass == shown;
-                    const int index = offset + static_cast<int>(i);   // among them all: what the document moves it by
-                    std::vector<kui::Widget> line;
-                    line.push_back(kui::SizedBox(18.f, -1.f, kui::Text(std::to_string(i + 1), kui::TextStyle {}.SetSize(11.f).SetColor(picked ? t.primary : t.textMuted), kui::TextAlign::eEnd, false)));
-                    line.push_back(notChosen ? kui::Tooltip("Of what the choices do not choose now: its passes idle", kui::Opacity(0.5f, name(pass, picked))) : name(pass, picked));
-                    if (failed) line.push_back(kui::Tooltip(std::format("{} of its nodes could not be made", failed), chip(std::format("{} wrong", failed), t.text)));
-                    // What the page's passes cost the GPU together, coloured by their share of the frame.
-                    line.push_back(kui::Tooltip("What its passes take of the GPU together, averaged over recent frames", kui::Make<LiveValue>(_session, [this, pass] {
-                        const Timings timings = Doc().Runtime().Timings();
-                        double ms = 0.0;
-                        bool measured = false;
-                        for (const auto& node : Doc().Graph().nodes)
-                            if (node.pass == pass)
-                                if (const auto cost = CostOf(timings, node.id)) { ms += cost->gpuMs; measured = measured || cost->gpuMeasured; }
-                        const double frame = FrameGpuMs(timings);
-                        return measured ? Value(Value::List { Value(ms), Value(frame > 0.0 ? ms / frame : 0.0) }) : Value();
-                    }, [](const Value& said) -> kui::Widget {
-                        const auto* both = said.Items();
-                        if (!both || both->size() != 2) return kui::SizedBox(0.f, 0.f);
-                        return ListPill(std::format("{:.2f} ms", *(*both)[0].Number()), HeatColor(*(*both)[1].Number()));
-                    })));
-                    line.push_back(chip(std::to_string(nodes), t.textMuted));
-                    const int first = offset, last = offset + static_cast<int>(listed.size()) - 1;
-                    kui::Widget row = kui::ContextMenu({
-                        { "Earlier", [this, pass, index] { Doc().MovePass(pass, index - 1); }, i > 0 },
-                        { "Later", [this, pass, index] { Doc().MovePass(pass, index + 1); }, i + 1 < listed.size() },
-                        { "First", [this, pass, first] { Doc().MovePass(pass, first); }, i > 0 },
-                        { "Last", [this, pass, last] { Doc().MovePass(pass, last); }, i + 1 < listed.size() },
-                        { .separator = true },
-                        { "Run it every frame", [this, pass] { if (Doc().SetPassRate(pass, Rate::eFrame)) _session->Say(std::format("{} is done every frame now.", pass)); },
-                          rateTab != Rate::eFrame },
-                        { "Run it on the fixed step", [this, pass] {
+                bool anyUnchosen = false;
+                int offset = 0;
+                for (const Rate rate : { Rate::eSetup, Rate::eFixed, Rate::eFrame }) {
+                    std::vector<std::string> listed;
+                    for (const auto& pass : passes) if (Doc().RateOf(pass) == rate) listed.push_back(pass);
+                    const std::string laneKey = std::format("lane {}", static_cast<int>(rate));
+                    const bool open = !_lanesShut.contains(laneKey);
+                    const char* title = rate == Rate::eSetup ? "SETUP  ·  MADE ONCE" : rate == Rate::eFixed ? "FIXED STEP" : "EVERY FRAME";
+                    rows.push_back(section(listed.empty() ? std::string(title) : std::format("{}  ·  {}", title, listed.size()), kui::Row({
+                        kui::Tooltip(rate == Rate::eSetup ? "A new setup page, made after the rest of setup" : rate == Rate::eFixed ? "A new page of the fixed step, run after the rest of it" : "A new page, drawn after the rest",
+                                     SmallIcon("add", [this, rate] { SetState([&] { _addingPass = true; _addingRate = rate; ++_passFocus; _lanesShut.erase(std::format("lane {}", static_cast<int>(rate))); }); })),
+                        kui::Tooltip(open ? "Fold it" : "Unfold it", SmallIcon(open ? "expand_less" : "expand_more", [this, laneKey, open] { SetState([&] { if (open) _lanesShut.insert(laneKey); else _lanesShut.erase(laneKey); }); })) },
+                        kui::FlexOptions {}.SetGap(2.f))));
+                    const int laneOffset = offset;
+                    offset += static_cast<int>(listed.size());
+                    if (!open) continue;
+                    if (listed.empty() && !(_addingPass && _addingRate == rate))
+                        rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(rate == Rate::eSetup
+                            ? "Nothing is made once yet: a noise texture, a table worked out on the GPU, a buffer cleared to start with. + makes a page."
+                            : rate == Rate::eFixed ? "Nothing runs on the fixed step yet: a simulation that must not go faster or slower with the frame rate. + makes a page."
+                                                   : "None yet: every node is on one page. + makes the first.", 11.f)));
+                    for (std::size_t i = 0; i < listed.size(); ++i) {
+                        const std::string& pass = listed[i];
+                        const bool notChosen = unchosen.contains(pass);
+                        anyUnchosen = anyUnchosen || notChosen;
+                        if (notChosen && !_everyChoice && pass != shown) { ++leftOut; continue; }
+                        std::size_t nodes = 0, failed = 0;
+                        for (const auto& node : Doc().Graph().nodes) {
+                            if (node.pass != pass) continue;
+                            ++nodes;
+                            if (const auto* status = runtime.Status(node.id); status && !status->ok) ++failed;
+                        }
+                        const bool picked = !atFrame && pass == shown;
+                        const int index = laneOffset + static_cast<int>(i);   // among them all: what the document moves it by
+                        std::vector<kui::Widget> line;
+                        line.push_back(kui::SizedBox(18.f, -1.f, kui::Text(std::to_string(i + 1), kui::TextStyle {}.SetSize(11.f).SetColor(picked ? t.primary : t.textMuted), kui::TextAlign::eEnd, false)));
+                        line.push_back(notChosen ? kui::Tooltip("Of what the choices do not choose now: its passes idle", kui::Opacity(0.5f, name(pass, picked))) : name(pass, picked));
+                        if (failed) line.push_back(kui::Tooltip(std::format("{} of its nodes could not be made", failed), chip(std::format("{} wrong", failed), t.text)));
+                        // What the page's passes cost the GPU together, coloured by their share of the frame.
+                        line.push_back(kui::Tooltip("What its passes take of the GPU together, averaged over recent frames", kui::Make<LiveValue>(_session, [this, pass] {
+                            const Timings timings = Doc().Runtime().Timings();
+                            double ms = 0.0;
+                            bool measured = false;
+                            for (const auto& node : Doc().Graph().nodes)
+                                if (node.pass == pass)
+                                    if (const auto cost = CostOf(timings, node.id)) { ms += cost->gpuMs; measured = measured || cost->gpuMeasured; }
+                            const double frame = FrameGpuMs(timings);
+                            return measured ? Value(Value::List { Value(ms), Value(frame > 0.0 ? ms / frame : 0.0) }) : Value();
+                        }, [](const Value& said) -> kui::Widget {
+                            const auto* both = said.Items();
+                            if (!both || both->size() != 2) return kui::SizedBox(0.f, 0.f);
+                            return ListPill(std::format("{:.2f} ms", *(*both)[0].Number()), HeatColor(*(*both)[1].Number()));
+                        })));
+                        line.push_back(chip(std::to_string(nodes), t.textMuted));
+                        std::vector<kui::MenuItem> menu = OrderItems(pass);
+                        menu.push_back(MenuLine());
+                        menu.push_back({ "Run it every frame", [this, pass] { if (Doc().SetPassRate(pass, Rate::eFrame)) _session->Say(std::format("{} is done every frame now.", pass)); },
+                                         rate != Rate::eFrame });
+                        menu.push_back({ "Run it on the fixed step", [this, pass] {
                             if (Doc().SetPassRate(pass, Rate::eFixed))
                                 _session->Say(std::format("{} runs on the fixed step now: on frames with a step in them, while the scene plays.", pass));
-                        }, rateTab != Rate::eFixed },
-                        { "Make it once, as setup", [this, pass] {
+                        }, rate != Rate::eFixed });
+                        menu.push_back({ "Make it once, as setup", [this, pass] {
                             if (Doc().SetPassRate(pass, Rate::eSetup))
                                 _session->Say(std::format("{} is setup now: made when it is built, and again only when what it uses is.", pass));
-                        }, rateTab != Rate::eSetup },
-                        { .separator = true },
-                        { nodes ? std::format("Delete, with its {} nodes", nodes) : std::string("Delete"), [this, pass] { Doc().RemovePass(pass); } },
-                        { "Delete the pass, keep its nodes", [this, pass] { Doc().RemovePass(pass, true); }, nodes > 0 },
-                    }, kui::Tooltip(setupTab ? std::format("{}: {} nodes, made once. Drag it up or down to make it earlier or later; right-click for more.", pass, nodes)
-                                    : fixedTab ? std::format("{}: {} nodes, run on the fixed step. Drag it up or down to run it earlier or later; right-click for more.", pass, nodes)
-                                             : std::format("{}: {} nodes. Drag it up or down to draw it earlier or later; right-click for more.", pass, nodes),
-                                    entry("pass " + pass, picked, std::move(line), [this, pass] { _session->ShowPass(pass); })));
-                    // Picked up and let go on another of its tab, it takes that one's place: done then, and the rest move along.
-                    row = kui::Draggable({ "pass", pass }, std::move(row));
-                    row = kui::DropTarget(kui::DropTargetOptions {}
-                        .Accepts([this, pass, rateTab](const kui::DragData& dragged) {
-                            const auto* other = dragged.As<std::string>();
-                            return dragged.type == "pass" && other && *other != pass && Doc().RateOf(*other) == rateTab;
-                        })
-                        .OnMove([this, index](const kui::DragData&, kor::Vec2) { if (_passDrop != index) SetState([&] { _passDrop = index; }); })
-                        .OnLeave([this, index] { if (_passDrop == index) SetState([&] { _passDrop = -1; }); })
-                        .OnDrop([this, index, offset, count = listed.size()](const kui::DragData& dragged, kor::Vec2) {
-                            _passDrop = -1;
-                            if (const auto* moved = dragged.As<std::string>()) {
-                                Doc().MovePass(*moved, index);
-                                _session->Say(std::format("{} is pass {} now, of {}.", *moved, index - offset + 1, count));
+                        }, rate != Rate::eSetup });
+                        menu.push_back(MenuLine());
+                        menu.push_back({ nodes ? std::format("Delete, with its {} nodes", nodes) : std::string("Delete"), [this, pass] { Doc().RemovePass(pass); } });
+                        menu.push_back({ "Delete the pass, keep its nodes", [this, pass] { Doc().RemovePass(pass, true); }, nodes > 0 });
+                        // In the order it runs, which what it uses and its links say: not moved by hand.
+                        kui::Widget row = kui::ContextMenu(std::move(menu),
+                            kui::Tooltip(std::format("{}: {} nodes. Pressed, its page is shown; right-click to say what it runs after, and more.", pass, nodes),
+                                         entry("pass " + pass, picked, std::move(line), [this, pass] { _session->ShowPass(pass); })));
+                        rows.push_back(std::move(row));
+                        // The page shown: what runs on it, a line each, gone to when pressed.
+                        if (picked)
+                            for (const auto& node : Doc().Graph().nodes) {
+                                if (node.pass != pass) continue;
+                                const kgraph::NodeType* type = kgraph::FindType(node.type);
+                                const bool call = node.type == "Function";
+                                if (!call && !(type && type->category == "Passes")) continue;
+                                const bool here = node.id == _session->selectedNode;
+                                std::string what = node.type;
+                                if (const auto function = node.inputs.find("function"); call && function != node.inputs.end())
+                                    if (const auto* text = function->second.value.String()) what = *text;
+                                rows.push_back(kui::Padding(kui::EdgeInsets::Only(22.f, 0.f, 0.f, 0.f),
+                                    entry("run " + node.id, here, { icon(call ? "functions" : type && !type->icon.empty() ? std::string_view(type->icon) : std::string_view("bolt"), call ? t.primary : t.textMuted),
+                                                                    name(node.title.empty() ? node.id : node.title, here), chip(what, t.textMuted) },
+                                          [this, id = node.id] { _session->GoTo(id); })));
                             }
-                        }), std::move(row));
-                    // Where it would go: a line over the one it is held over.
-                    if (_passDrop == index)
-                        row = kui::Stack({ std::move(row), kui::Positioned(kui::PositionedOptions { .left = 0.f, .top = -1.f, .right = 0.f, .height = 2.f },
-                            kui::IgnorePointer(kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.primary))))) });
-                    rows.push_back(std::move(row));
+                    }
+                    if (_addingPass && _addingRate == rate)
+                        rows.push_back(kui::TextField(kui::TextFieldOptions { .placeholder = "Its name, then Enter",
+                            .onSubmitted = [this, rate](const std::string& typed) {
+                                if (typed.empty()) { SetState([&] { _addingPass = false; }); return; }
+                                if (Doc().AddPass(typed, -1, rate)) { _session->ShowPass(typed); SetState([&] { _addingPass = false; }); }
+                                else _session->Say(std::format("There is a pass called '{}' already.", typed), true);
+                            }, .focus = _passFocus, .onEscape = [this] { SetState([&] { _addingPass = false; }); } }).Key(std::format("new pass {} {}", static_cast<int>(rate), passes.size())));
                 }
-                if (leftOut > 0 || (_everyChoice && std::ranges::any_of(listed, [&](const std::string& pass) { return unchosen.contains(pass); })))
-                    rows.push_back(kui::Tooltip("Pages whose passes all idle as the choices are — another renderer's, say — are left out of the list. Choose another in the Pass flow, or the scene view's switch, and its pages are listed.",
+                if (leftOut > 0 || (_everyChoice && anyUnchosen))
+                    rows.push_back(kui::Tooltip("Pages whose passes all idle as the choices are — another renderer's, say — are left out of the list. Choose another in the frame's Switch, or the scene view's switch, and its pages are listed.",
                         kui::Row({ kui::Expanded(kgui::Muted(_everyChoice ? std::string("Listing what the choices do not choose too") : std::format("{} {} of what the choices do not choose", leftOut, leftOut == 1 ? "page" : "pages"), 11.f)),
                                    Chip(_everyChoice ? "Hide them" : "Show them", [this] { SetState([&] { _everyChoice = !_everyChoice; }); }) },
                                  kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
-                if (passes.empty()) rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted("None yet: every node is on one page. + makes the first.", 11.f)));
-                if (_addingPass || passes.empty())
-                    rows.push_back(kui::TextField(kui::TextFieldOptions { .placeholder = "Its name, then Enter",
-                        .onSubmitted = [this, rateTab](const std::string& typed) {
-                            if (typed.empty()) { SetState([&] { _addingPass = false; }); return; }
-                            if (Doc().AddPass(typed, -1, rateTab)) { _tabPass = typed; _session->ShowPass(typed); SetState([&] { _addingPass = false; }); }
-                            else _session->Say(std::format("There is a pass called '{}' already.", typed), true);
-                        }, .focus = _passFocus, .onEscape = [this] { SetState([&] { _addingPass = false; }); } }).Key(std::format("new pass {} {}", static_cast<int>(rateTab), passes.size())));
 
-                if (!shown.empty()) {
+                // A function's page: what every call of it takes and gives, in order, each to rename, retype or move.
+                if (!shown.empty() && !atFrame)
+                    if (const auto* opened = Doc().OpenedOn(shown))
+                        for (auto& row : SignatureRows(*opened)) rows.push_back(std::move(row));
+                if (!shown.empty() && !atFrame) {
                     rows.push_back(section("THIS PASS"));
                     rows.push_back(kui::Tooltip("Its name: typed over, then Enter",
                         kui::TextField(kui::TextFieldOptions { .text = shown,
-                            .onSubmitted = [this, shown](const std::string& typed) { if (typed != shown && Doc().RenamePass(shown, typed)) { _tabPass = typed; _session->ShowPass(typed); } } }).Key("rename " + shown)));
+                            .onSubmitted = [this, shown](const std::string& typed) { if (typed != shown && Doc().RenamePass(shown, typed)) _session->ShowPass(typed); } }).Key("rename " + shown)));
                     // Something to make in it: the kinds of thing a pass has of its own.
                     std::vector<std::string> kinds;
                     for (const auto& type : kgraph::Catalog())
@@ -6879,8 +6865,182 @@ public extension {0} : IKoralMaterial {{
                 return SideList(std::move(rows));
             }
 
-            /** The graph: the page of the pass that is shown. Its passes, and what there is to use on it, are panels of their own. */
-            kui::Widget Graph() { return GraphPage(); }
+            /**
+             * The graph, at the depth it is looked at: the whole frame — its pages as cards in a lane for each rate, wired by
+             * what each uses — or a page gone into, or the function opened on it. Where it is, over it, a step each to go back to.
+             */
+            kui::Widget Graph()
+            {
+                return kui::Column({ GraphBar(), kui::Separator(), kui::Expanded(_session->ShowsFrame() ? FlowPanel() : GraphPage()) },
+                                   kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
+            }
+
+            /**
+             * Over the graph: where it is — the frame, the page, the function opened on it — each step pressed to go back to;
+             * and at its end what is done where it is.
+             */
+            kui::Widget GraphBar()
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const bool atFrame = _session->ShowsFrame();
+                const std::string page = atFrame ? std::string() : ShownPass();
+                const auto* opened = page.empty() ? nullptr : Doc().OpenedOn(page);
+                const bool inFunction = opened != nullptr;
+                std::vector<kui::Widget> steps;
+                const auto step = [&](const std::string_view icon, std::string label, const bool last, std::function<void()> go) {
+                    kui::Widget face = kui::Padding(kui::EdgeInsets::Symmetric(5.f, 3.f), kui::Row({
+                        kui::SizedBox(14.f, 14.f, kui::Icon(icon, kui::IconStyle::eFilled, last ? t.primary : t.textMuted)),
+                        kui::Text(std::move(label), kui::TextStyle {}.SetSize(12.f).SetColor(last ? t.text : t.textMuted), kui::TextAlign::eStart, false, 1, true) },
+                        kui::FlexOptions {}.SetGap(5.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                    if (!steps.empty()) steps.push_back(kgui::Muted("›", 13.f));
+                    steps.push_back(last ? std::move(face) : kui::Button(std::move(face), std::move(go), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+                };
+                step("account_tree", "Frame", atFrame, [this] { _session->ShowFrame(); });
+                if (!atFrame) {
+                    if (page.empty()) step("grid_view", "Every node at once", true, {});
+                    else if (inFunction) {
+                        if (!opened->call.pass.empty()) step("layers", opened->call.pass, false, [this, back = opened->call.pass] { _session->ShowPass(back); });
+                        step("functions", std::format("{}  ·  every call", opened->function), true, {});
+                    } else step(Doc().RateOf(page) == kgraph::PassRate::eSetup ? "build" : Doc().RateOf(page) == kgraph::PassRate::eFixed ? "timer" : "layers", page, true, {});
+                }
+                steps.push_back(kui::Expanded(kui::Text("")));
+                if (inFunction) {
+                    // A function open in place: what is done on its page is the function's, kept or put back as it was.
+                    // Written as it is done: closed, the call is put back; discarded, the function is as it was when it was opened.
+                    steps.push_back(kui::Tooltip("Closes it: the call is put back, the function as its page is (written as it was done)", Chip("Close", [this] { _session->CloseFunction(true); })));
+                    steps.push_back(kui::Tooltip("Puts the function back as it was when it was opened, and every call with it", Chip("Discard", [this] { _session->CloseFunction(false); })));
+                } else if (atFrame) {
+                    steps.push_back(kui::Tooltip("Every node of every page, on one page laid out by itself", Chip("Every node", [this] { _session->ShowEveryPass(); })));
+                    steps.push_back(kui::Tooltip("Every card where the flow puts it, what was dragged forgotten", SmallIcon("auto_fix_high", [this] { ArrangeFlow(); })));
+                    steps.push_back(kui::Tooltip("Frame everything", SmallIcon("fit_screen", [this] { _flowView->Frame(); SetState(); })));
+                } else if (!page.empty())
+                    steps.push_back(kui::Tooltip("Back to the whole frame (the page stays where it was left)", SmallIcon("zoom_out_map", [this] { _session->ShowFrame(); })));
+                return kui::Padding(kui::EdgeInsets { 6.f, 3.f, 6.f, 3.f }, kui::SizedBox(-1.f, 26.f,
+                    kui::Row(std::move(steps), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
+            }
+
+            /** A name for a new page, of none there is: `page`, `page 2`... */
+            std::string FreePageName() const
+            {
+                const auto& passes = const_cast<Root*>(this)->Doc().Passes();
+                std::string name = "page";
+                for (int n = 2; std::ranges::contains(passes, name); ++n) name = std::format("page {}", n);
+                return name;
+            }
+
+            /**
+             * What a page runs after and before, as menus of the other pages of its lane: each pressed is a link made — or,
+             * marked with a dot, taken away. Those it ties with (both write something, and nothing orders them) first.
+             */
+            std::vector<kui::MenuItem> OrderItems(const std::string& page)
+            {
+                const auto links = _session->Links();
+                std::set<std::string> tied;
+                for (const auto& tie : _session->Ties())
+                    if (tie.first == page || tie.second == page) tied.insert(tie.first == page ? tie.second : tie.first);
+                std::vector<kui::MenuItem> after, before;
+                std::vector<std::string> others;
+                for (const auto& other : Doc().Passes())
+                    if (other != page && Doc().RateOf(other) == Doc().RateOf(page)) others.push_back(other);
+                std::ranges::stable_partition(others, [&](const std::string& other) { return tied.contains(other); });
+                for (const auto& other : others) {
+                    const bool runsAfter = std::ranges::contains(links, std::pair { page, other });
+                    const bool runsBefore = std::ranges::contains(links, std::pair { other, page });
+                    const std::string mark = tied.contains(other) ? "  (tied)" : "";
+                    after.push_back({ (runsAfter ? "•  " : "") + other + mark, [this, page, other, runsAfter] {
+                        if (runsAfter) Doc().StopRunningAfter(page, other);
+                        else if (!Doc().RunAfter(page, other)) _session->Say(std::format("{} runs before {} already, by the links: that would be a ring.", page, other), true);
+                    } });
+                    before.push_back({ (runsBefore ? "•  " : "") + other + mark, [this, page, other, runsBefore] {
+                        if (runsBefore) Doc().StopRunningAfter(other, page);
+                        else if (!Doc().RunAfter(other, page)) _session->Say(std::format("{} runs after {} already, by the links: that would be a ring.", page, other), true);
+                    } });
+                }
+                return {
+                    { .label = "Run after", .enabled = !after.empty(), .items = std::move(after) },
+                    { .label = "Run before", .enabled = !before.empty(), .items = std::move(before) },
+                };
+            }
+
+            /**
+             * The signature of the function opened as @p opened: its inputs, then its outputs, in the order every call has
+             * them as ports — each its name to type over, its kind to choose, arrows to move it, and pressed, its edge picked.
+             */
+            std::vector<kui::Widget> SignatureRows(const Document::OpenedFunction& opened)
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                std::vector<kui::Widget> rows;
+                const std::vector<std::string> kinds { "eValue", "eEntities", "eMesh", "eBuffer", "eImage", "eResource" };
+                // In the order a call has them: what each says (`order`), then where it is on the page.
+                const auto edgesOf = [&](const char* type) {
+                    std::vector<const kgraph::Node*> edges;
+                    for (const auto& node : Doc().Graph().nodes)
+                        if (node.pass == opened.pass && node.type == type) edges.push_back(&node);
+                    const auto orderOf = [](const kgraph::Node* edge) {
+                        const auto it = edge->inputs.find("order");
+                        const double* n = it == edge->inputs.end() || it->second.link ? nullptr : it->second.value.Number();
+                        return n ? *n : 1e300;
+                    };
+                    std::ranges::stable_sort(edges, [&](const kgraph::Node* a, const kgraph::Node* b) {
+                        if (orderOf(a) != orderOf(b)) return orderOf(a) < orderOf(b);
+                        return a->y != b->y ? a->y < b->y : a->x < b->x;
+                    });
+                    std::vector<std::string> ids;
+                    for (const auto* edge : edges) ids.push_back(edge->id);
+                    return ids;
+                };
+                const auto side = [&](const char* type, const char* title) {
+                    const std::vector<std::string> ids = edgesOf(type);
+                    const bool input = std::string_view(type) == "FunctionInput";
+                    rows.push_back(ListHeading(std::format("{}  ·  {}", title, ids.size()),
+                        kui::Tooltip(input ? "A new input: a port more of every call" : "A new output: a port more of every call", SmallIcon("add", [this, type, input, page = opened.pass, count = ids.size()] {
+                            const std::string id = Doc().AddNode(type, input ? -400.0 : 900.0, 90.0 * static_cast<double>(count), {}, page);
+                            if (id.empty()) return;
+                            Doc().SetInput(id, "name", std::format("{} {}", input ? "input" : "output", count + 1));
+                            Doc().SetInput(id, "order", static_cast<double>(count));
+                            _session->Select(id);
+                        }))));
+                    // Moved, every edge of its side is given the place it has now: the order is theirs, not the page's.
+                    const auto move = [this, ids](const std::size_t from, const std::size_t to) {
+                        std::vector<std::string> order = ids;
+                        std::swap(order[from], order[to]);
+                        for (std::size_t i = 0; i < order.size(); ++i) Doc().SetInput(order[i], "order", static_cast<double>(i));
+                    };
+                    for (std::size_t i = 0; i < ids.size(); ++i) {
+                        const kgraph::Node* edge = Doc().Graph().Find(ids[i]);
+                        if (!edge) continue;
+                        const auto text = [&](const char* input) { const auto it = edge->inputs.find(input); return it != edge->inputs.end() && it->second.value.String() ? *it->second.value.String() : std::string(); };
+                        const std::string portName = text("name").empty() ? edge->id : text("name");
+                        const std::string kind = text("kind").empty() ? std::string("eValue") : text("kind");
+                        const int kindAt = static_cast<int>(std::ranges::find(kinds, kind) - kinds.begin());
+                        const bool picked = _session->selectedNode == edge->id;
+                        rows.push_back(kui::Row({
+                            kui::Tooltip("Pressed, its edge is picked", SmallIcon(input ? "login" : "logout", [this, id = edge->id] { _session->GoTo(id); })),
+                            kui::Expanded(kui::TextField(kui::TextFieldOptions { .text = portName,
+                                .onSubmitted = [this, id = edge->id, portName](const std::string& typed) { if (!typed.empty() && typed != portName) Doc().SetInput(id, "name", typed); } }).Key("port " + edge->id)),
+                            kui::Dropdown(kinds, std::min<int>(kindAt, static_cast<int>(kinds.size()) - 1), [this, id = edge->id, kinds](const int index) { Doc().SetInput(id, "kind", kinds[static_cast<std::size_t>(index)]); },
+                                          kui::DropdownOptions {}.SetWidth(96.f)),
+                            kui::Tooltip("Earlier among the ports", SmallIcon("arrow_upward", [move, i] { if (i > 0) move(i, i - 1); })),
+                            kui::Tooltip("Later among the ports", SmallIcon("arrow_downward", [move, i, n = ids.size()] { if (i + 1 < n) move(i, i + 1); })),
+                        }, kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                        if (picked) rows.back() = kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.primary.WithAlpha(0.12f)).SetRadius(5.f)), std::move(rows.back()));
+                    }
+                    if (ids.empty()) rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(input ? "It takes nothing: + gives it an input." : "It gives nothing: + gives it an output.", 11.f)));
+                };
+                rows.push_back(ListHeading(std::format("{}  ·  SIGNATURE", Upper(opened.function))));
+                side("FunctionInput", "TAKES");
+                side("FunctionOutput", "GIVES");
+                return rows;
+            }
+
+            /** A new page of @p rate, after the rest of its lane, gone into: its name is typed over in the Outline. */
+            void NewPage(const kgraph::PassRate rate)
+            {
+                const std::string name = FreePageName();
+                if (!Doc().AddPass(name, -1, rate)) return;
+                _session->ShowPass(name);
+                _session->Say(std::format("A new page, {}: its name is typed over in the Outline, its nodes made with Control+Space.", name));
+            }
 
             /**
              * What there is to use on page @p page: what the passes before it made — setup's first — and what is in no
@@ -6889,9 +7049,11 @@ public extension {0} : IKoralMaterial {{
              */
             kui::Widget HereToUse()
             {
-                const std::string page = ShownPass();
+                const std::string page = _session->ShowsFrame() ? std::string() : ShownPass();
                 if (page.empty())
-                    return SideList({ kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(Doc().Passes().empty()
+                    return SideList({ kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(_session->ShowsFrame()
+                        ? "The whole frame is shown. Go into a page — press its card twice — and what it can use of the pages before it is here, to drag onto it."
+                        : Doc().Passes().empty()
                         ? "What a pass can use of the passes before it is shown here, once the graph has passes."
                         : "Pick a pass's page, in Passes: what it can use of the passes before it is shown here, to drag onto it.", 11.f)) });
                 const kui::Theme& t = kui::Theme::Current();
@@ -7472,8 +7634,25 @@ public extension {0} : IKoralMaterial {{
                 if (picked.size() == 1)
                     if (const kgraph::Node* node = Doc().Graph().Find(picked.front()); node && node->type == "Function" && some) {
                         const std::string id = node->id;
-                        items.push_back({ "Open the function", [this, id] { _session->OpenFunction(id); }, !Doc().Opened() });
+                        items.push_back({ "Open the function", [this, id] { _session->OpenFunction(id); } });
                         items.push_back({ "Write it out here", [this, id] { _session->WriteOut(id); } });
+                        // One of the engine's or a module's, copied into the project: its own from then on, called in their place.
+                        const auto named = node->inputs.find("function");
+                        const std::string function = named != node->inputs.end() && named->second.value.String() ? *named->second.value.String() : std::string();
+                        const std::filesystem::path from = function.empty() ? std::filesystem::path() : Doc().FunctionFile(function);
+                        const std::filesystem::path to = Doc().FunctionsDirectory().empty() ? std::filesystem::path() : Doc().FunctionsDirectory() / (function + ".kfunc");
+                        std::error_code ignored;
+                        if (!from.empty() && !to.empty() && !std::filesystem::equivalent(from, to, ignored))
+                            items.push_back({ "Make it the project's own", [this, from, to, function] {
+                                std::error_code failed;
+                                std::filesystem::create_directories(to.parent_path(), failed);
+                                if (!std::filesystem::copy_file(from, to, std::filesystem::copy_options::skip_existing, failed) || failed) {
+                                    _session->Say(std::format("{} could not be copied into the project: {}.", function, failed ? failed.message() : std::string("there is one there")), true);
+                                    return;
+                                }
+                                Doc().ReloadFunctions();
+                                _session->Say(std::format("functions/{}.kfunc is the project's own now: every call of {} calls it, and what is done to it is the project's.", function, function));
+                            } });
                         items.push_back(MenuLine());
                     }
                 items.push_back({ own.size() > 1 ? std::format("Make a function of {} nodes...", own.size()) : std::string("Make a function of it..."), [this, own] {
@@ -8922,13 +9101,17 @@ public extension {0} : IKoralMaterial {{
             kui::Widget FlowPanel()
             {
                 return kui::Make<LiveValue>(_session, [this] {
-                    if (!_layout->IsShown("flow")) return Value();
+                    if (!_layout->IsShown("graph") || !_session->ShowsFrame()) return Value();
                     const auto flow = _session->Flow();
                     std::string seen;
                     for (const auto& step : flow.steps) seen += std::format("{}|{}|{}|{:.1f}|{};", step.id, step.ran, step.chosen, step.gpuMs, step.nodes);
                     for (const auto& link : flow.links) seen += std::format("{}>{}#{};", link.from, link.to, link.option);
-                    // And built again when a card was dragged.
+                    // And built again when a card was dragged, or a page moved to another lane.
                     for (const auto& [id, by] : _flowMoved) seen += std::format("{}@{},{};", id, by.x, by.y);
+                    for (const auto& step : flow.steps) seen += step.rate;
+                    // And when a link of the order, or a tie, is made or goes.
+                    for (const auto& [page, before] : _session->Links()) seen += std::format("{}<{};", page, before);
+                    for (const auto& tie : _session->Ties()) seen += std::format("{}~{};", tie.first, tie.second);
                     return Value(seen);
                 }, [this](const Value& seen) { return seen.IsNull() ? kui::SizedBox(0.f, 0.f) : FlowGraph(); });
             }
@@ -8942,19 +9125,81 @@ public extension {0} : IKoralMaterial {{
                 SetState();
             }
 
+            /** The lane a step of the flow is in: its page's rate; a Switch, every frame's. */
+            static kgraph::PassRate LaneOf(const Session::PassFlow::Step& step)
+            {
+                return step.rate == "setup" ? kgraph::PassRate::eSetup : step.rate == "fixed" ? kgraph::PassRate::eFixed : kgraph::PassRate::eFrame;
+            }
+            static const char* LaneName(const kgraph::PassRate rate)
+            {
+                return rate == kgraph::PassRate::eSetup ? "SETUP  ·  made once" : rate == kgraph::PassRate::eFixed ? "FIXED STEP  ·  while it plays" : "EVERY FRAME";
+            }
+
+            /** The colour of the order's ports and wires: quiet, beside what is used. */
+            static kui::Color OrderColor() { return kui::Theme::Current().textMuted; }
+
             kui::Widget FlowGraph()
             {
+                using Rate = kgraph::PassRate;
                 const auto flow = _session->Flow();
                 const kui::Theme& t = kui::Theme::Current();
+                const auto ties = _session->Ties();
                 // Laid out by how big each card was drawn last.
                 std::map<std::string, std::pair<float, float>> sizes;
                 for (const auto& [id, size] : _flowView->sizes) sizes[id] = { size.x, size.y };
-                const auto layout = Session::LayOut(flow, sizes);
+                // A lane for each rate, in the order they run — setup, the fixed step, every frame — each laid out by itself,
+                // left to right after the one before. Every lane is there, empty or not: a page is dragged into it.
+                constexpr float LaneGap = 120.f, LanePad = 48.f, EmptyLane = 260.f;
+                Session::FlowLayout layout;
+                _lanes.clear();
+                float left = 0.f, top = 0.f, bottom = 320.f;
+                for (const Rate rate : { Rate::eSetup, Rate::eFixed, Rate::eFrame }) {
+                    Session::PassFlow lane;
+                    for (const auto& step : flow.steps) if (LaneOf(step) == rate) lane.steps.push_back(step);
+                    for (const auto& link : flow.links)
+                        if (std::ranges::contains(lane.steps, link.from, &Session::PassFlow::Step::id) && std::ranges::contains(lane.steps, link.to, &Session::PassFlow::Step::id))
+                            lane.links.push_back(link);
+                    const auto laid = Session::LayOut(lane, sizes);
+                    float low = std::numeric_limits<float>::max(), high = std::numeric_limits<float>::lowest();
+                    for (const auto& [id, at] : laid.at) {
+                        const auto size = sizes.contains(id) ? sizes.at(id) : std::pair { 240.f, 90.f };
+                        low = std::min(low, at.first);
+                        high = std::max(high, at.first + size.first);
+                        top = std::min(top, at.second);
+                        bottom = std::max(bottom, at.second + size.second);
+                    }
+                    const float shift = laid.at.empty() ? 0.f : left + LanePad - low;
+                    for (const auto& [id, at] : laid.at) layout.at[id] = { at.first + shift, at.second };
+                    if (laid.at.empty()) layout.at[std::format("@lane {}", static_cast<int>(rate))] = { left + LanePad, 0.f };
+                    for (auto branch : laid.branches) layout.branches.push_back(std::move(branch));
+                    const float width = laid.at.empty() ? EmptyLane : high - low + 2.f * LanePad;
+                    _lanes.push_back({ rate, left, left + width });
+                    left += width + LaneGap;
+                }
                 // Framed whole again when the pages are others, or their cards were first measured: laid out anew then.
                 std::string pages = sizes.empty() ? std::string("?") : std::string();
-                for (const auto& step : flow.steps) pages += step.id + "|";
+                for (const auto& step : flow.steps) pages += step.id + step.rate + "|";
                 if (pages != _flowFramed) { _flowFramed = pages; _flowView->Frame(); }
                 kui::NodeGraph graph;
+                // An empty lane holds a card that says what it is for: pressed twice, a page of it is made.
+                for (const auto& lane : _lanes) {
+                    const std::string id = std::format("@lane {}", static_cast<int>(lane.rate));
+                    if (!layout.at.contains(id)) continue;
+                    kui::GraphNode empty;
+                    empty.id = id;
+                    empty.title = lane.rate == Rate::eSetup ? "No setup page" : lane.rate == Rate::eFixed ? "No fixed-step page" : "No page";
+                    empty.icon = "add";
+                    empty.accent = t.textMuted;
+                    empty.width = EmptyLane - 2.f * LanePad;
+                    empty.position = { layout.at.at(id).first, layout.at.at(id).second };
+                    empty.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 6.f), kgui::Muted("Drag a page here, or press twice to make one.", 11.f));
+                    graph.nodes.push_back(std::move(empty));
+                }
+                // The lanes, behind everything: as tall as the tallest, each named for when its pages run.
+                for (const auto& lane : _lanes)
+                    graph.comments.push_back({ .id = std::format("lane {}", static_cast<int>(lane.rate)), .text = LaneName(lane.rate),
+                                               .rect = kui::Rect::LTRB(lane.left, top - 2.f * LanePad, lane.right, bottom + LanePad),
+                                               .color = lane.rate == Rate::eSetup ? kui::Color::Hex(0xB0892F) : lane.rate == Rate::eFixed ? kui::Color::Hex(0x3FA37C) : t.primary });
                 // Each branch a band of its own, framed and named: a colour each, the same one it is in every time.
                 static const std::uint32_t hues[] { 0x4C8DD6, 0xC58A2E, 0x9B6ADA, 0x3FA37C, 0xCF5C7A, 0x6C8A9E };
                 for (std::size_t b = 0; b < layout.branches.size(); ++b) {
@@ -8986,10 +9231,24 @@ public extension {0} : IKoralMaterial {{
                                 if (const kgraph::NodeType* type = kgraph::FindType(each.type); type && each.type != "Reference")
                                     node.level = std::max(node.level, static_cast<int>(type->level));
                         node.inputs.push_back({ .id = "in", .label = "uses", .type = "flow", .multiple = true });
+                        // Where what it uses does not say: what it runs after, wired from that one's `then`.
+                        node.inputs.push_back({ .id = "after", .label = "after", .type = "order", .color = OrderColor(), .shape = kui::PortShape::eDiamond, .multiple = true });
+                        node.outputs.push_back({ .id = "then", .label = "then", .type = "order", .color = OrderColor(), .shape = kui::PortShape::eDiamond });
                         if (!step.ran) node.accent = t.textMuted;
-                        const std::string said = !step.ran ? std::format("{} nodes  ·  not run", step.nodes)
-                                                           : std::format("{} nodes  ·  {:.2f} ms", step.nodes, step.gpuMs);
-                        node.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 4.f), kgui::Muted(said, 11.f));
+                        std::string said = !step.ran ? std::format("{} nodes  ·  not run", step.nodes)
+                                                     : std::format("{} nodes  ·  {:.2f} ms", step.nodes, step.gpuMs);
+                        // Tied with another: both write something, and nothing says which runs first.
+                        std::vector<std::string> tied;
+                        for (const auto& tie : ties)
+                            if (tie.first == step.id || tie.second == step.id) tied.push_back(tie.first == step.id ? tie.second : tie.first);
+                        std::vector<kui::Widget> lines { kgui::Muted(said, 11.f) };
+                        if (!tied.empty()) {
+                            std::string with;
+                            for (const auto& other : tied) with += (with.empty() ? "" : ", ") + other;
+                            lines.push_back(kui::Tooltip("Both write something, and nothing says which runs first: wire one's then to the other's after, or right-click: Run after.",
+                                kui::Text(std::format("Tied with {}", with), kui::TextStyle {}.SetSize(11.f).SetColor(kui::Color::Hex(0xE0A040)), kui::TextAlign::eStart, false, 2, true)));
+                        }
+                        node.body = kui::Padding(kui::EdgeInsets::Symmetric(8.f, 4.f), Rows(std::move(lines), 2.f));
                     }
                     graph.nodes.push_back(std::move(node));
                 }
@@ -8997,29 +9256,103 @@ public extension {0} : IKoralMaterial {{
                     const auto to = std::ranges::find(flow.steps, link.to, &Session::PassFlow::Step::id);
                     graph.wires.push_back({ { link.from, "out" }, { link.to, to != flow.steps.end() && to->isSwitch ? std::format("option[{}]", link.option) : std::string("in") } });
                 }
-                return kui::NodeEditor(std::move(graph), kui::NodeEditorOptions {}
-                    .CanConnect([](const kui::NodePort&, const kui::NodePort&) { return false; })
-                    .OnMove([this](const std::vector<std::string>& nodes, const kor::Vec2 by) { SetState([&] { for (const auto& id : nodes) _flowMoved[id] = _flowMoved[id] + by; }); })
-                    // Laid out again: what was dragged put back where the flow has it, and all of it in sight.
-                    .Menu([this](const std::vector<std::string>& picked, kor::Vec2) {
+                // The links of the order: each from the page it runs after.
+                for (const auto& [page, before] : _session->Links()) {
+                    const auto isPage = [&](const std::string& id) { return std::ranges::any_of(flow.steps, [&](const auto& step) { return step.id == id && !step.isSwitch; }); };
+                    if (isPage(page) && isPage(before)) graph.wires.push_back({ { before, "then" }, { page, "after" } });
+                }
+                // Where each card is, as laid out: what a card let go in another lane is moved by.
+                auto places = std::make_shared<std::map<std::string, std::pair<kor::Vec2, Rate>>>();
+                for (const auto& card : graph.nodes)
+                    if (const auto step = std::ranges::find(flow.steps, card.id, &Session::PassFlow::Step::id); step != flow.steps.end() && !step->isSwitch)
+                        (*places)[card.id] = { card.position + (_flowView->sizes.contains(card.id) ? _flowView->sizes.at(card.id) * 0.5f : kor::Vec2 { 120.f, 45.f }), LaneOf(*step) };
+                // A function dropped on the frame is a page of its own, in the lane it is dropped in, with a call of it.
+                return kui::DropTarget(kui::DropTargetOptions {}
+                    .Accepts([](const kui::DragData& dragged) { const auto* id = dragged.As<std::string>(); return dragged.type == "asset" && id && id->starts_with("function:"); })
+                    .OnDrop([this](const kui::DragData& dragged, const kor::Vec2 local) {
+                        const auto* id = dragged.As<std::string>();
+                        if (!id) return;
+                        const kor::Vec2 at = _flowView->centre + (local - _flowView->size * 0.5f) / std::max(_flowView->zoom, 0.01f);
+                        const auto lane = std::ranges::find_if(_lanes, [&](const Lane& each) { return at.x >= each.left && at.x < each.right; });
+                        const std::string name = id->substr(9);
+                        std::string page = name;
+                        for (int n = 2; std::ranges::contains(Doc().Passes(), page); ++n) page = std::format("{} {}", name, n);
+                        if (!Doc().AddPass(page, -1, lane != _lanes.end() ? lane->rate : kgraph::PassRate::eFrame)) return;
+                        const std::string call = Doc().AddNode("Function", 0.0, 0.0, name, page);
+                        if (!call.empty()) Doc().SetInput(call, "function", kgraph::Value(name));
+                        _session->Say(std::format("A page of its own, {}, with a call of {}: pressed twice, it is gone into, and the call wired there.", page, name));
+                    }), kui::NodeEditor(std::move(graph), kui::NodeEditorOptions {}
+                    // Only the order is wired here: a page's then to another's after, that one running after it.
+                    .CanConnect([](const kui::NodePort& from, const kui::NodePort& to) { return from.type == "order" && to.type == "order"; })
+                    .OnConnect([this](const kui::GraphWire& wire) {
+                        if (!Doc().RunAfter(wire.to.node, wire.from.node))
+                            _session->Say(std::format("{} cannot run after {}: another lane's, or it runs before it already.", wire.to.node, wire.from.node), true);
+                        else _session->Say(std::format("{} runs after {} now.", wire.to.node, wire.from.node));
+                    })
+                    .OnDisconnect([this](const kui::GraphWire& wire) { if (wire.to.port == "after") Doc().StopRunningAfter(wire.to.node, wire.from.node); })
+                    // A page let go in another lane runs at that lane's rate; let go in its own, it stays where it was put.
+                    .OnMove([this, places](const std::vector<std::string>& nodes, const kor::Vec2 by) {
+                        for (const auto& id : nodes) {
+                            const auto place = places->find(id);
+                            if (place != places->end()) {
+                                const float x = place->second.first.x + by.x;
+                                const auto lane = std::ranges::find_if(_lanes, [&](const Lane& each) { return x >= each.left && x < each.right; });
+                                if (lane != _lanes.end() && lane->rate != place->second.second) {
+                                    if (Doc().SetPassRate(id, lane->rate)) {
+                                        _flowMoved.erase(id);
+                                        _session->Say(std::format("{} runs {} now.", id, lane->rate == Rate::eSetup ? "once, as setup" : lane->rate == Rate::eFixed ? "on the fixed step" : "every frame"));
+                                    }
+                                    continue;
+                                }
+                            }
+                            _flowMoved[id] = _flowMoved[id] + by;
+                        }
+                        SetState();
+                    })
+                    .Menu([this](const std::vector<std::string>& picked, const kor::Vec2 at) {
                         std::vector<kui::MenuItem> items;
+                        const auto& passes = Doc().Passes();
+                        if (!picked.empty() && std::ranges::contains(passes, picked.front())) {
+                            const std::string page = picked.front();
+                            const Rate rate = Doc().RateOf(page);
+                            std::size_t nodes = 0;
+                            for (const auto& node : Doc().Graph().nodes) nodes += node.pass == page;
+                            items.push_back({ "Open the page", [this, page] { _session->ShowPass(page); } });
+                            for (auto& item : OrderItems(page)) items.push_back(std::move(item));
+                            items.push_back(MenuLine());
+                            items.push_back({ "Run it every frame", [this, page] { Doc().SetPassRate(page, Rate::eFrame); }, rate != Rate::eFrame });
+                            items.push_back({ "Run it on the fixed step", [this, page] { Doc().SetPassRate(page, Rate::eFixed); }, rate != Rate::eFixed });
+                            items.push_back({ "Make it once, as setup", [this, page] { Doc().SetPassRate(page, Rate::eSetup); }, rate != Rate::eSetup });
+                            items.push_back(MenuLine());
+                            items.push_back({ "Put back where the flow has it", [this, picked] { SetState([&] { for (const auto& id : picked) _flowMoved.erase(id); }); } });
+                            items.push_back({ nodes ? std::format("Delete, with its {} nodes", nodes) : std::string("Delete"), [this, page] { Doc().RemovePass(page); } });
+                            items.push_back({ "Delete the page, keep its nodes", [this, page] { Doc().RemovePass(page, true); }, nodes > 0 });
+                            return items;
+                        }
                         if (!picked.empty()) {
                             items.push_back({ "Put back", [this, picked] { SetState([&] { for (const auto& id : picked) _flowMoved.erase(id); }); } });
-                            if (std::ranges::find(Doc().Passes(), picked.front()) != Doc().Passes().end())
-                                items.push_back({ "Show this page", [this, page = picked.front()] { _session->ShowPass(page); _layout->Activate("graph"); } });
                             items.push_back(MenuLine());
                         }
+                        // A new page, of the lane it is asked for in.
+                        const auto lane = std::ranges::find_if(_lanes, [&](const Lane& each) { return at.x >= each.left && at.x < each.right; });
+                        const Rate rate = lane != _lanes.end() ? lane->rate : Rate::eFrame;
+                        items.push_back({ rate == Rate::eSetup ? "New setup page" : rate == Rate::eFixed ? "New page of the fixed step" : "New page", [this, rate] { NewPage(rate); } });
+                        items.push_back({ "Every node at once", [this] { _session->ShowEveryPass(); } });
+                        items.push_back(MenuLine());
                         items.push_back({ "Arrange the flow", [this] { ArrangeFlow(); } });
                         items.push_back({ "Frame everything", [this] { _flowView->Frame(); SetState(); } });
                         return items;
                     })
+                    // Pressed twice, a page is gone into; an empty lane's card makes the lane's first.
                     .OnActivate([this](const std::string& id) {
-                        if (std::ranges::find(Doc().Passes(), id) == Doc().Passes().end()) return;
-                        _session->ShowPass(id);
-                        _layout->Activate("graph");
+                        if (std::ranges::contains(Doc().Passes(), id)) _session->ShowPass(id);
+                        else if (id.starts_with("@lane ")) NewPage(static_cast<Rate>(std::stoi(id.substr(6))));
                     })
-                    .SetView(_flowView));
+                    .SetView(_flowView)));
             }
+            /** A lane of the frame, as last laid out: the rate of its pages, and where it starts and ends across. */
+            struct Lane { kgraph::PassRate rate; float left, right; };
+            std::vector<Lane> _lanes;
             int _arrangeWait = 0;                                           // frames the page to be put in order has been drawn
             std::map<std::string, kor::Vec2> _flowMoved;                    // where the flow's cards were dragged to, from where they are laid out
             std::string _flowFramed;                                        // the pages the flow was last framed with
@@ -9542,8 +9875,8 @@ public extension {0} : IKoralMaterial {{
             bool _addingPass = false;  // the pass list asks for a new pass's name
             bool _everyChoice = false;  // the pass list lists the pages of what the choices do not choose too
             Session::ShaderChoice _shaderChoice;    // what the New shader dialog has ticked
-            kgraph::PassRate _rateTab = kgraph::PassRate::eFrame;     // which passes the pass list shows: those of every frame, the fixed step's or setup's
-            std::string _tabPass;       // the page shown when the tab was last set: another shown, the tab follows it
+            kgraph::PassRate _addingRate = kgraph::PassRate::eFrame;  // the lane of the Outline a new page's name is asked for in
+            std::set<std::string> _lanesShut;   // the Outline's lanes folded
             bool _drawerValues = false; // and it lists values too, not only resources
             std::uint32_t _passFocus = 0;
             std::vector<std::string> _functionOf;   // the nodes a function is being made of
@@ -10161,7 +10494,7 @@ public extension {0} : IKoralMaterial {{
         _session->LoadObjects();
         // The editor's view, its gizmo and its picking, as the scene updates: in the frame being made.
         _play->EditAs();                    // picked from and drawn over, whatever its graph is
-        _play->SetInput(&_game->SceneInput());  // a script that is steered reads the Game panel's keys and mouse
+        _play->SetInput(&_game->SceneInput(), &_game->SceneWindow());   // a script that is steered reads the Game panel's keys and mouse, in its size
         _play->OnFrame([this] { if (_session) _session->Tick(SceneInput(), static_cast<float>(SceneTime().FrameTime())); });
         Document::Alias(&Graph(), &_play->Graph());     // whoever is handed this scene is after the one it edits
         _session->HostScripts(_scriptsHost);

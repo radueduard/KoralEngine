@@ -15,6 +15,7 @@
 
 #include <keditor/starter.h>
 #include <kecs/json.h>
+#include <kscript/declarations.h>
 #include <kgraph/scene.h>
 
 #include <cstdlib>
@@ -1067,6 +1068,50 @@ TEST_F(EditorTest, ThePassFlowHasNoWayRound) {
     EXPECT_EQ(ordered, waiting.size()) << "a step is in a cycle";
 }
 
+// The pages' order is what they use, and links where two write the same thing: the list's order, until the graph is
+// settled, made links of where it matters; after, a link taken away is a tie, and a link drawn the other way turns them.
+TEST_F(EditorTest, ThePagesAreOrderedByWhatTheyUseAndByLinks) {
+    const auto project = scene::MakeProject("order");
+    keditor::WriteLitShaders(project.ShaderDirectory());
+    Open();
+    std::string error;
+    ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
+    keditor::AddLitScene(Doc());
+    for (int i = 0; i < 6; ++i) Frame();
+    using Link = std::pair<std::string, std::string>;
+    const auto at = [&](const std::string& page) { return std::ranges::find(Doc().Passes(), page) - Doc().Passes().begin(); };
+    ASSERT_FALSE(Doc().Graph().orderSettled) << "made in code: in its list's order";
+    EXPECT_TRUE(std::ranges::contains(Doc().OrderLinks(), Link { "sky", "scene" })) << "both draw into the picture: the list's order is a link";
+    EXPECT_FALSE(std::ranges::contains(Doc().OrderLinks(), Link { "show", "sky" })) << "show only reads it: what it uses orders it";
+    EXPECT_TRUE(Doc().OrderTies().empty());
+
+    Doc().SettleOrder();
+    EXPECT_TRUE(Doc().Graph().orderSettled);
+    EXPECT_TRUE(std::ranges::contains(Doc().Graph().after, Link { "sky", "scene" }));
+    EXPECT_NE(Doc().Graph().ToJson().find("\"after\": [[\"sky\", \"scene\"]"), std::string::npos) << "saved as links";
+
+    // Taken away, the two are a tie, said among the problems; drawn the other way, sky runs first.
+    ASSERT_TRUE(Doc().StopRunningAfter("sky", "scene"));
+    ASSERT_EQ(Doc().OrderTies().size(), 1u);
+    EXPECT_TRUE(std::ranges::contains(Doc().OrderTies().front().shared, std::string("color")));
+    EXPECT_TRUE(HasProblem("both write color"));
+    ASSERT_TRUE(Doc().RunAfter("scene", "sky"));
+    EXPECT_LT(at("sky"), at("scene"));
+    EXPECT_TRUE(Doc().OrderTies().empty());
+    EXPECT_FALSE(Doc().RunAfter("scene", "scene"));
+    // A link the other way turns them back: the one it takes the place of goes.
+    ASSERT_TRUE(Doc().RunAfter("sky", "scene"));
+    EXPECT_LT(at("scene"), at("sky"));
+    EXPECT_FALSE(std::ranges::contains(Doc().Graph().after, Link { "scene", "sky" }));
+
+    // Read again, it is as it was saved.
+    kgraph::Graph read;
+    ASSERT_TRUE(kgraph::Graph::FromJson(Doc().Graph().ToJson(), read, error)) << error;
+    EXPECT_TRUE(read.orderSettled);
+    EXPECT_EQ(read.after, Doc().Graph().after);
+    EXPECT_EQ(read.passes, Doc().Passes());
+}
+
 // The pages as a flow: each wired from the pages whose work it uses — the last before it to write what it reads — and a
 // Switch that chooses between two pages' pictures a step between them and what uses its choice.
 TEST_F(EditorTest, ThePagesAreAFlowAndASwitchChoosesABranch) {
@@ -1118,7 +1163,28 @@ TEST_F(EditorTest, ThePagesAreAFlowAndASwitchChoosesABranch) {
     for (int i = 0; i < 4; ++i) Frame();
     flow = Session().Flow();
     EXPECT_EQ(std::ranges::find(flow.steps, std::string("which picture"), &keditor::Session::PassFlow::Step::id)->chosen, 1);
+
+    // The flow is the Graph panel's, gone up to the whole frame: a lane for each rate, every lane there, empty or not.
+    Session().ShowFrame();
+    EXPECT_TRUE(Session().ShowsFrame());
+    for (int i = 0; i < 6; ++i) Frame();
+    EXPECT_TRUE(Shows("No setup page")) << "an empty lane, to drag a page into";
+    EXPECT_TRUE(Shows("No fixed-step page"));
     Sheet("flow");
+    // A page moved to another rate is in that lane.
+    ASSERT_TRUE(Doc().SetPassRate("other", kgraph::PassRate::eSetup));
+    for (int i = 0; i < 4; ++i) Frame();
+    flow = Session().Flow();
+    EXPECT_EQ(std::ranges::find(flow.steps, std::string("other"), &keditor::Session::PassFlow::Step::id)->rate, "setup");
+    // Gone into, a page is shown; a node gone to is shown on its page, from the frame too.
+    Session().ShowPass("sky");
+    EXPECT_FALSE(Session().ShowsFrame());
+    Session().ShowFrame();
+    Session().GoTo("paint other");
+    EXPECT_FALSE(Session().ShowsFrame());
+    EXPECT_EQ(Session().Pass(), "other");
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Shows("No fixed-step page"));
 }
 
 // What an editor does with the standard scene: looks at it from a view of its own, outlines and picks, plays and
@@ -1404,7 +1470,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
 // What is made once is a tab of its own: its passes come first, and stay first. What a page can use is in a drawer
 // beside it, by the page it was made on; brought in, it says what it is, what the page does with it and what was done
 // to it before, and goes again when the last wire from it does.
-TEST_F(EditorTest, SetupIsATabOfItsOwnAndWhatAPageCanUseIsBesideIt) {
+TEST_F(EditorTest, SetupIsALaneOfItsOwnAndWhatAPageCanUseIsBesideIt) {
     const auto project = scene::MakeProject("setup");
     keditor::WriteLitShaders(project.ShaderDirectory());
     Open();
@@ -1432,13 +1498,12 @@ TEST_F(EditorTest, SetupIsATabOfItsOwnAndWhatAPageCanUseIsBesideIt) {
     EXPECT_EQ(std::ranges::find(importable, "color"), importable.end()) << "setup comes before any frame: what a frame makes is not there yet";
     EXPECT_TRUE(std::ranges::contains(Doc().Importable("show"), texture)) << "and what setup made is there for every frame";
 
-    // A tab each.
+    // A lane each, in the Outline as in the frame.
     Session().ShowPass("noise");
-    EXPECT_TRUE(Shows("Setup  1"));
-    EXPECT_TRUE(Shows("MADE ONCE, BEFORE ANY FRAME"));
-    EXPECT_FALSE(Shows("PASSES, AS THEY ARE DRAWN")) << "the passes of every frame are under the other tab";
+    EXPECT_TRUE(Shows("SETUP  ·  MADE ONCE  ·  1"));
+    EXPECT_TRUE(Shows("EVERY FRAME  ·  ")) << "every lane listed at once";
+    EXPECT_TRUE(Shows("Frame")) << "where the page is: the whole frame, gone back up to";
     Session().ShowPass("show");
-    EXPECT_TRUE(Shows("PASSES, AS THEY ARE DRAWN"));
 
     // In a panel of its own, what the page can use, by where it was made.
     EXPECT_TRUE(Shows("WHAT SHOW CAN USE"));
@@ -1744,8 +1809,15 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_NE(Session().Status().find("in Kotlin"), std::string::npos) << Session().Status();
     ASSERT_TRUE(Session().NewScript("Roller", "Kotlin")) << Session().Status();
     EXPECT_NE(text(directory / "scripts", "Drifter.kt").find("class Drifter : Setup(), PerFrame"), std::string::npos);
-    for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew" })
-        EXPECT_FALSE(std::filesystem::exists(directory / file)) << file << ": Kotlin is compiled by the program that runs it, with no build of the project's";
+    // Kotlin is compiled by the program that runs it; what is written is only what an editor of code imports to know the
+    // names: the scripts, the engine's own, and the engine's libraries.
+    for (const char* file : { "build.gradle.kts", "settings.gradle.kts", "gradle.properties", "gradlew", "gradle/wrapper/gradle-wrapper.jar" })
+        EXPECT_TRUE(std::filesystem::exists(directory / file)) << file << ": what an editor of code imports the scripts by";
+    const std::string build = text(directory, "build.gradle.kts");
+    EXPECT_NE(build.find("\"scripts\""), std::string::npos) << build;
+    EXPECT_NE(build.find((kscript::PackageDirectory() / "scripts").lexically_normal().generic_string()), std::string::npos) << "the engine's own scripts";
+    EXPECT_NE(build.find("/kotlin/lib"), std::string::npos) << "and the engine's libraries";
+    EXPECT_NE(build.find("Nothing builds the scripts with it"), std::string::npos);
     EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos) << "the player runs the scripts itself: " << Session().RunCommand();
     // One in the other language, put there by hand, runs nowhere: it is said so.
     std::ofstream(directory / "scripts" / "Stray.cs") << "// not the project's language";
@@ -1925,17 +1997,38 @@ TEST_F(EditorTest, AFunctionIsMadeOpenedAndClosedFromTheEditor) {
     ASSERT_TRUE(Session().CloseFunction(false));
 
     ASSERT_TRUE(Session().OpenFunction(call)) << Session().Status();
-    EXPECT_TRUE(Shows("Function Triple is open"));
+    EXPECT_TRUE(Shows("Triple  ·  every call")) << "where the graph is: in the function, on the call's page";
     EXPECT_TRUE(Shows("Discard"));
     ASSERT_TRUE(Doc().SetInput(call + "/times", "b", 5));
     ASSERT_TRUE(Session().CloseFunction(true)) << Session().Status();
-    EXPECT_FALSE(Shows("Function Triple is open"));
+    EXPECT_FALSE(Shows("Triple  ·  every call"));
     EXPECT_EQ(Doc().Runtime().ValueOf("show"), kgraph::Value(11));
     EXPECT_EQ(Session().selectedNode, call);
     // Saved while open, it is closed first, keeping what was done: its page is no part of the scene.
     ASSERT_TRUE(Session().OpenFunction(call));
     ASSERT_TRUE(Session().Save()) << Session().Status();
     EXPECT_FALSE(Doc().Opened().has_value());
+
+    // Its signature, beside its page: what every call takes and gives, each to rename, retype or move.
+    ASSERT_TRUE(Session().OpenFunction(call));
+    EXPECT_TRUE(Shows("TRIPLE  ·  SIGNATURE"));
+    EXPECT_TRUE(Shows("TAKES  ·  1"));
+    EXPECT_TRUE(Shows("GIVES  ·  1"));
+    ASSERT_TRUE(Session().CloseFunction(true));
+
+    // A call keeps its function by the file's ID: renamed in the Assets panel, every call finds it by its new name.
+    EXPECT_EQ(*Doc().Graph().Find(call)->inputs.at("file").value.String(), "function:Triple");
+    ASSERT_TRUE(Session().MoveAsset("function:Triple", "functions/Thrice.kfunc")) << Session().Status();
+    ASSERT_NE(Doc().Graph().Find(call), nullptr);
+    EXPECT_EQ(*Doc().Graph().Find(call)->inputs.at("function").value.String(), "Thrice") << Doc().Graph().Find(call)->inputs.at("file").value.ToJson();
+    EXPECT_EQ(Doc().Runtime().ValueOf("show"), kgraph::Value(11)) << "and works out what it did";
+    file.file = Doc().FunctionsDirectory() / "Thrice.kfunc";
+
+    // Dropped on a page from the Assets panel, a function is a call of it.
+    const std::string dropped = Session().AssetToNode("function:Thrice", 0, 600);
+    ASSERT_FALSE(dropped.empty()) << Session().Status();
+    EXPECT_EQ(Doc().Graph().Find(dropped)->type, "Function");
+    EXPECT_EQ(*Doc().Graph().Find(dropped)->inputs.at("function").value.String(), "Thrice");
 
     // With no call of it in the scene, one is made for the page and goes with it.
     std::vector<std::string> calls;
@@ -2171,9 +2264,9 @@ TEST_F(EditorTest, AnImportedAssetIsTheProjectsAndNotYetTheScenes) {
     const kasset::Entry* imported = database->FindFile(models / "crate" / "crate.obj");
     ASSERT_TRUE(imported) << "an imported file is an asset at once";
     EXPECT_EQ(imported->meta.kind, kasset::Kind::eModel);
-    EXPECT_TRUE(std::filesystem::exists(models / "crate" / "crate.obj.meta"));
-    EXPECT_FALSE(std::filesystem::exists(models / "crate" / "crate.mtl.meta"));
-    EXPECT_FALSE(std::filesystem::exists(models / "lamp" / "data" / "lamp.bin.meta"));
+    EXPECT_TRUE(std::filesystem::exists(project.directory / ".koral/meta/assets/models" / "crate" / "crate.obj.meta"));
+    EXPECT_FALSE(std::filesystem::exists(project.directory / ".koral/meta/assets/models" / "crate" / "crate.mtl.meta"));
+    EXPECT_FALSE(std::filesystem::exists(project.directory / ".koral/meta/assets/models" / "lamp" / "data" / "lamp.bin.meta"));
     EXPECT_EQ(database->FromLegacy(crate)->asset, imported->meta.id) << "its old name is that asset";
     EXPECT_EQ(database->ToLegacy({ imported->meta.id, {} }), crate);
     EXPECT_EQ(database->FromLegacy("$cube")->asset, kasset::Id::Named("mesh/cube")) << "the engine's own are known too";
@@ -2301,8 +2394,8 @@ TEST_F(EditorTest, AnAssetMovedIsStillWhatTheScenesHave) {
 
     ASSERT_TRUE(Session().MoveAsset(wall, "assets/brick/red.png")) << Session().Status();
     EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "brick" / "red.png"));
-    EXPECT_TRUE(std::filesystem::exists(project.directory / "assets" / "brick" / "red.png.meta"));
-    EXPECT_FALSE(std::filesystem::exists(textures / "wall.png.meta"));
+    EXPECT_TRUE(std::filesystem::exists(project.directory / ".koral/meta/assets/brick/red.png.meta"));
+    EXPECT_FALSE(std::filesystem::exists(project.directory / ".koral/meta/assets/textures/wall.png.meta"));
     EXPECT_EQ(Session().selectedAsset, "@brick/red.png") << "picked where it is now";
     const kecs::Entity again = Doc().World().FindEntity("Crate");
     ASSERT_FALSE(again.IsNull());
@@ -2418,7 +2511,7 @@ TEST_F(EditorTest, TheGameExportedIsWhatItsScenesHave) {
     const auto out = std::filesystem::temp_directory_path() / "keditor-exported-game";
     std::filesystem::remove_all(out);
     ASSERT_TRUE(Session().ExportGame(out)) << Session().Status();
-    for (const char* file : { "manifest.json", "project.json", "scenes/main.scene.json", "assets/textures/wall.png", "assets/textures/wall.png.meta", "assets/models/tri.obj" })
+    for (const char* file : { "manifest.json", "project.json", "scenes/main.scene.json", "assets/textures/wall.png", ".koral/meta/assets/textures/wall.png.meta", "assets/models/tri.obj" })
         EXPECT_TRUE(std::filesystem::exists(out / file)) << file;
     EXPECT_FALSE(std::filesystem::exists(out / "assets/textures/unused.png")) << "what no scene has is not the game's";
     bool readAhead = false;
@@ -3286,6 +3379,48 @@ TEST_F(EditorTest, AnEntityDraggedIsFollowedWithoutTheInterfaceBuiltAgainAndIsTa
     EXPECT_EQ(world.PositionOf(world.FindEntity(name)).x, was.x) << "taken back to where it was";
 }
 
+TEST_F(EditorTest, TheAssetsPanelShowsWhatTheProjectIsMadeOfOrItsFiles) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "files-view";
+    std::filesystem::remove_all(directory);
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory));
+    ASSERT_TRUE(Session().NewStandardScene());
+    std::filesystem::create_directories(directory / "empty" / "deeper");
+    std::filesystem::create_directories(directory / "notes");
+    std::ofstream(directory / "notes" / "Plain.kt") << "class Plain(val x: Int)\n";     // of no component
+    std::ofstream(directory / "notes" / "readme.md") << "notes\n";
+    std::ofstream(directory / "notes" / ".hidden") << "\n";
+    keditor::Session& session = Session();
+
+    // What it is made of: only the folders something of it is in.
+    session.SetAssetFiles(false);
+    auto folders = session.AssetFolders(session.Assets());
+    EXPECT_FALSE(std::ranges::contains(folders, "empty"));
+    EXPECT_FALSE(std::ranges::contains(folders, "notes")) << "a file of plain classes is no asset";
+    EXPECT_TRUE(std::ranges::contains(folders, "Materials/PBR"));
+
+    // Its files: every folder, empty ones too, and every file in them.
+    session.SetAssetFiles(true);
+    folders = session.AssetFolders(session.Assets());
+    EXPECT_TRUE(std::ranges::contains(folders, "empty"));
+    EXPECT_TRUE(std::ranges::contains(folders, "empty/deeper"));
+    EXPECT_TRUE(std::ranges::contains(folders, "notes"));
+    const auto files = session.AssetFolderFiles("notes");
+    ASSERT_EQ(files.size(), 2u) << "not what starts with a dot";
+    EXPECT_EQ(files[0].filename(), "Plain.kt");
+    EXPECT_EQ(files[1].filename(), "readme.md");
+    session.assetFolder = "notes";
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(Shows("Plain.kt"));
+    EXPECT_TRUE(Shows("readme.md"));
+
+    // Back to what it is made of: the folder of nothing is not shown, nor gone on being in.
+    session.SetAssetFiles(false);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_FALSE(Shows("Plain.kt"));
+    EXPECT_TRUE(session.assetFolder.empty());
+}
+
 TEST_F(EditorTest, TheDefaultMeshesAndMaterialsAreAssetsOfEveryProject) {
     const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "defaults";
     std::filesystem::remove_all(directory);
@@ -3391,8 +3526,7 @@ TEST_F(EditorTest, APassRunsEveryFrameOnTheFixedStepOrOnceAndTheFixedStepIsTaken
     ASSERT_TRUE(Session().Undo());
     EXPECT_EQ(Doc().RateOf("simulate"), kgraph::PassRate::eFixed);
     Session().ShowPass("simulate");
-    EXPECT_TRUE(Shows("Fixed step")) << "its tab";
-    EXPECT_TRUE(Shows("ON THE FIXED STEP, BEFORE THE FRAME"));
+    EXPECT_TRUE(Shows("FIXED STEP  ·  1")) << "its lane";
 
     // Its steps are taken while the scene plays, and not while it is paused.
     kgraph::Graph graph = Doc().Graph();
@@ -3851,6 +3985,11 @@ TEST_F(EditorTest, AModuleIsImportedAndWhatItHasIsTheProjects) {
     ASSERT_TRUE(Session().NewProject(root / "game", 'k', false, { root / "physics" })) << Session().Status();
     EXPECT_FALSE(Session().CurrentProject().module);
     EXPECT_EQ(Session().CurrentProject().modules, std::vector<std::string> { "../physics" }) << "kept from its own folder";
+    {
+        std::ifstream in(root / "game" / "build.gradle.kts");
+        const std::string build((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        EXPECT_NE(build.find((root / "physics" / "scripts").lexically_normal().generic_string()), std::string::npos) << "an editor of code reads the module's scripts too: " << build;
+    }
     ASSERT_EQ(Doc().Modules().size(), 1u);
     kecs::World& world = Doc().World();
     ASSERT_NE(world.Find("SphereCollider"), kecs::NoComponent) << "the module's components";

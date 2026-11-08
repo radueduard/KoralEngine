@@ -1181,15 +1181,17 @@ namespace kgraph
                 kind.initial = Value("eValue");
                 Port initial { "default", PortKind::eValue, "value", false, "What a call that is given nothing there takes: a value's.", nullptr };
                 initial.optional = true;
+                Port order { "order", PortKind::eValue, "number", false, "Where it is among the call's ports of its side, from 0: those that say none come after, as they are on the page, top to bottom.", nullptr };
+                order.optional = true;
                 Port given { "value", PortKind::eValue, "value", false, "What it is given, while the function is opened in place: what the call is given there.", nullptr };
                 given.optional = true;
-                types.push_back({ "FunctionInput", "Functions", { edge("The input's name: a port of every call, in the order the inputs are on the page, top to bottom."), kind, std::move(initial), given },
+                types.push_back({ "FunctionInput", "Functions", { edge("The input's name: a port of every call, where its order says (or, saying none, as the inputs are on the page, top to bottom)."), kind, std::move(initial), given, order },
                                   { { "out", PortKind::eValue, "value", false, "What the call is given there.", nullptr } },
                                   "An edge of a function: what a call is given at one of its inputs, for the function's nodes to take.", nullptr });
                 Port wired = given;
                 wired.optional = false;
                 wired.doc = "What it gives: wired from a node of the function.";
-                types.push_back({ "FunctionOutput", "Functions", { edge("The output's name: a port of every call, in the order the outputs are on the page, top to bottom."), kind, wired },
+                types.push_back({ "FunctionOutput", "Functions", { edge("The output's name: a port of every call, where its order says (or, saying none, as the outputs are on the page, top to bottom)."), kind, wired, order },
                                   { { "out", PortKind::eValue, "value", false, "What it gives, for what is wired from it while the function is opened in place.", nullptr } },
                                   "The other edge of a function: what a call gives at one of its outputs, wired from inside it.", nullptr });
             }

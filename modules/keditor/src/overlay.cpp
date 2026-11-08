@@ -36,6 +36,11 @@
 
 #include <kgraph/entities.h>
 #include <kscript/declarations.h>
+#include <koralImageImport.h>
+#include <atomic>
+#include <numbers>
+#include <optional>
+#include <thread>
 #include <log.h>
 
 namespace keditor
@@ -1099,7 +1104,9 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
     // ---- a material, looked at -----------------------------------------------------------------------------------------
 
     namespace {
-        constexpr std::uint32_t CubeSize = 256, CubeMips = 7;
+        constexpr std::uint32_t CubeSize = 1024, CubeMips = 7;
+        /** The light the preview is in: a photographed studio (Poly Haven's studio_small_09, CC0), in the engine's package. */
+        constexpr const char* EnvironmentFile = "studio_small_09_4k.exr";
 
         /** A half, of a float. */
         std::uint16_t Half(const float value)
@@ -1165,9 +1172,163 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
             default: return kor::Normalize(kor::Vec3(-u, -v, -1.f));
             }
         }
+
+        float FromHalf(const std::uint16_t half)
+        {
+            const std::uint32_t sign = (half & 0x8000u) << 16, exponent = (half >> 10) & 0x1Fu, mantissa = half & 0x3FFu;
+            if (exponent == 0) return std::bit_cast<float>(sign) + (sign ? -1.f : 1.f) * static_cast<float>(mantissa) * 5.9604645e-8f;     // subnormal
+            if (exponent == 31) return std::bit_cast<float>(sign | 0x7F800000u | (mantissa << 13));
+            return std::bit_cast<float>(sign | ((exponent + 112) << 23) | (mantissa << 13));
+        }
+
+        /**
+         * A photographed panorama of light, latitude by longitude, and the same halved again and again down to a few
+         * texels: what a rougher surface's wider samples are read from, each from the level as wide as it is.
+         */
+        struct Panorama {
+            struct Level {
+                std::uint32_t width = 0, height = 0;
+                std::vector<kor::Vec3> texels;
+                [[nodiscard]] kor::Vec3 At(const std::int64_t x, const std::int64_t y) const
+                {
+                    const auto w = static_cast<std::int64_t>(width), h = static_cast<std::int64_t>(height);
+                    return texels[static_cast<std::size_t>(std::clamp<std::int64_t>(y, 0, h - 1) * w + ((x % w) + w) % w)];
+                }
+                /** At @p u across (wrapping round) and @p v down, between its four nearest texels. */
+                [[nodiscard]] kor::Vec3 Sample(const float u, const float v) const
+                {
+                    const float x = u * static_cast<float>(width) - 0.5f, y = v * static_cast<float>(height) - 0.5f;
+                    const float fx = std::floor(x), fy = std::floor(y), ax = x - fx, ay = y - fy;
+                    const auto ix = static_cast<std::int64_t>(fx), iy = static_cast<std::int64_t>(fy);
+                    const kor::Vec3 top = At(ix, iy) * (1.f - ax) + At(ix + 1, iy) * ax, bottom = At(ix, iy + 1) * (1.f - ax) + At(ix + 1, iy + 1) * ax;
+                    return top * (1.f - ay) + bottom * ay;
+                }
+            };
+            std::vector<Level> levels;
+
+            /** The file's light; nothing, said why, when it cannot be read. */
+            static std::optional<Panorama> Read(const std::filesystem::path& file)
+            {
+                auto decoded = kimg::DecodeImageFile(file);
+                if (!decoded) { kor::log::Warn("The material preview's environment {} could not be read: {}", file.generic_string(), decoded.error().message); return std::nullopt; }
+                const kimg::CpuImage& image = *decoded;
+                const bool halves = image.format == kor::Image::Format::eRGBA16_SFLOAT, floats = image.format == kor::Image::Format::eRGBA32_SFLOAT;
+                if (!halves && !floats) { kor::log::Warn("The material preview's environment {} is not of floats in four channels.", file.generic_string()); return std::nullopt; }
+                Panorama panorama;
+                Level first { image.extent.x, image.extent.y, {} };
+                first.texels.resize(static_cast<std::size_t>(first.width) * first.height);
+                for (std::size_t i = 0; i < first.texels.size(); ++i) {
+                    float rgb[3];
+                    for (std::size_t c = 0; c < 3; ++c) {
+                        if (halves) { std::uint16_t h; std::memcpy(&h, image.pixels.data() + (i * 4 + c) * 2, 2); rgb[c] = FromHalf(h); }
+                        else std::memcpy(&rgb[c], image.pixels.data() + (i * 4 + c) * 4, 4);
+                        if (!std::isfinite(rgb[c]) || rgb[c] < 0.f) rgb[c] = 0.f;
+                    }
+                    first.texels[i] = kor::Vec3(rgb[0], rgb[1], rgb[2]);
+                }
+                panorama.levels.push_back(std::move(first));
+                while (panorama.levels.back().width > 4 && panorama.levels.back().height > 2) {
+                    const Level& from = panorama.levels.back();
+                    Level half { from.width / 2, from.height / 2, {} };
+                    half.texels.resize(static_cast<std::size_t>(half.width) * half.height);
+                    for (std::uint32_t y = 0; y < half.height; ++y)
+                        for (std::uint32_t x = 0; x < half.width; ++x)
+                            half.texels[static_cast<std::size_t>(y) * half.width + x] = (from.At(2 * x, 2 * y) + from.At(2 * x + 1, 2 * y) + from.At(2 * x, 2 * y + 1) + from.At(2 * x + 1, 2 * y + 1)) * 0.25f;
+                    panorama.levels.push_back(std::move(half));
+                }
+                return panorama;
+            }
+
+            /** The solid angle a texel of the widest level has, at the horizon. */
+            [[nodiscard]] float TexelAngle() const
+            {
+                return 2.f * std::numbers::pi_v<float> / static_cast<float>(levels[0].width) * std::numbers::pi_v<float> / static_cast<float>(levels[0].height);
+            }
+
+            /** What is seen along @p direction, as blurred as level @p lod is, between the two levels nearest it. */
+            [[nodiscard]] kor::Vec3 Seen(const kor::Vec3 direction, const float lod) const
+            {
+                const float u = 0.5f + std::atan2(direction.x, -direction.z) / (2.f * std::numbers::pi_v<float>);
+                const float v = std::acos(std::clamp(direction.y, -1.f, 1.f)) / std::numbers::pi_v<float>;
+                const float at = std::clamp(lod, 0.f, static_cast<float>(levels.size() - 1));
+                const auto low = static_cast<std::size_t>(at);
+                const float between = at - static_cast<float>(low);
+                const kor::Vec3 seen = levels[low].Sample(u, v);
+                return between > 0.f && low + 1 < levels.size() ? seen * (1.f - between) + levels[low + 1].Sample(u, v) * between : seen;
+            }
+        };
+
+        /**
+         * The light a surface of @p roughness (as the shading takes it: GGX's alpha is its square) sends back along its
+         * normal, for each texel of a cube's face @p size wide: importance-sampled, each sample read from the panorama's
+         * level as wide as the sample is (Karis's filtered importance sampling). Of roughness 0, the panorama as it is.
+         */
+        void Prefilter(const Panorama& panorama, const std::uint32_t size, const float roughness, std::uint16_t* out)
+        {
+            const float texel = panorama.TexelAngle();
+            const float faceTexel = 4.f / static_cast<float>(size * size);     // a face's texel, at its middle
+            struct Toward { kor::Vec3 direction; float lod; };
+            std::vector<Toward> towards;
+            // A lobe narrower than a texel of the face is the panorama as it is, read as wide as the texel; one a few texels
+            // wide wants few samples, a wide one more.
+            const float alpha = roughness * roughness, a2 = alpha * alpha, faceTexelWidth = 2.f / static_cast<float>(size);
+            if (alpha <= faceTexelWidth) towards.push_back({ kor::Vec3(0.f, 0.f, 1.f), std::max(0.f, 0.5f * std::log2(faceTexel / texel)) });
+            else {
+                const std::uint32_t count = alpha < 4.f * faceTexelWidth ? 16 : 64;
+                for (std::uint32_t i = 0; i < count; ++i) {
+                    // Hammersley's points: evenly spread, the same for every texel.
+                    std::uint32_t bits = i;
+                    bits = (bits << 16u) | (bits >> 16u);
+                    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+                    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+                    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+                    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+                    const float xi1 = (static_cast<float>(i) + 0.5f) / static_cast<float>(count), xi2 = static_cast<float>(bits) * 2.3283064e-10f;
+                    const float phi = 2.f * std::numbers::pi_v<float> * xi1;
+                    const float cosH = std::sqrt((1.f - xi2) / (1.f + (a2 - 1.f) * xi2)), sinH = std::sqrt(1.f - cosH * cosH);
+                    // Seen along the normal, the light comes in mirrored about the half vector.
+                    const kor::Vec3 light(2.f * cosH * sinH * std::cos(phi), 2.f * cosH * sinH * std::sin(phi), 2.f * cosH * cosH - 1.f);
+                    if (light.z <= 0.f) continue;
+                    const float d = (cosH * cosH * (a2 - 1.f) + 1.f), D = a2 / (std::numbers::pi_v<float> * d * d);
+                    const float sampleAngle = 1.f / (static_cast<float>(count) * D * 0.25f + 1e-6f);
+                    towards.push_back({ light, std::max(0.f, 0.5f * std::log2(sampleAngle / texel) + 1.f) });
+                }
+            }
+            const std::uint32_t rows = 6 * size;
+            std::atomic<std::uint32_t> next = 0;
+            const auto work = [&] {
+                for (std::uint32_t row; (row = next.fetch_add(1)) < rows;) {
+                    const std::uint32_t face = row / size, y = row % size;
+                    std::uint16_t* line = out + static_cast<std::size_t>(row) * size * 4;
+                    for (std::uint32_t x = 0; x < size; ++x) {
+                        const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size) * 2.f - 1.f, v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size) * 2.f - 1.f;
+                        const kor::Vec3 normal = CubeDirection(face, u, v);
+                        const kor::Vec3 up = std::abs(normal.y) < 0.999f ? kor::Vec3(0.f, 1.f, 0.f) : kor::Vec3(1.f, 0.f, 0.f);
+                        const kor::Vec3 across = kor::Normalize(kor::Cross(up, normal)), along = kor::Cross(normal, across);
+                        kor::Vec3 sum(0.f);
+                        float weight = 0.f;
+                        for (const auto& [l, lod] : towards) {
+                            sum = sum + panorama.Seen(across * l.x + along * l.y + normal * l.z, lod) * l.z;
+                            weight += l.z;
+                        }
+                        const kor::Vec3 light = sum * (1.f / std::max(weight, 1e-6f));
+                        line[x * 4 + 0] = Half(light.x);
+                        line[x * 4 + 1] = Half(light.y);
+                        line[x * 4 + 2] = Half(light.z);
+                        line[x * 4 + 3] = Half(1.f);
+                    }
+                }
+            };
+            std::vector<std::jthread> workers(std::max(1u, std::thread::hardware_concurrency()) - 1);
+            for (auto& worker : workers) worker = std::jthread(work);
+            work();
+        }
     }
 
-    /** The room, as a cube map: each mip level as a rougher surface sees it. One, shared by every preview there is. */
+    /**
+     * The photographed studio, as a cube map: each mip level as a rougher surface sees it — or, when its file cannot be
+     * read, a room made up of panels of light. One, shared by every preview there is.
+     */
     struct MaterialPreview::Cube {
         kor::Resource<kor::Image> image;
         std::uint32_t index = 0;
@@ -1178,22 +1339,53 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
                 .SetArrayLayers(6).SetMipLevels(CubeMips)
                 .SetUsage(kor::Flags<kor::Image::Usage>(kor::Image::Usage::eSampled) | kor::Image::Usage::eTransferDst | kor::Image::Usage::eTransferSrc).Build();
             if (!image.Valid()) return;
-            std::vector<std::uint16_t> texels;
+            // Where each mip level's faces are, one after the other.
             std::vector<kor::Copy> copies;
+            std::vector<std::size_t> levels;
+            std::size_t count = 0;
             for (std::uint32_t mip = 0; mip < CubeMips; ++mip) {
                 const std::uint32_t size = CubeSize >> mip;
-                const float t = static_cast<float>(mip) / static_cast<float>(CubeMips - 1), roughness = t * t;
-                for (std::uint32_t face = 0; face < 6; ++face) {
-                    copies.push_back(kor::Copy { .bufferOffset = texels.size() * sizeof(std::uint16_t), .imageOffset = { 0, 0, 0 },
+                levels.push_back(count);
+                for (std::uint32_t face = 0; face < 6; ++face, count += static_cast<std::size_t>(size) * size * 4)
+                    copies.push_back(kor::Copy { .bufferOffset = count * sizeof(std::uint16_t), .imageOffset = { 0, 0, 0 },
                                                  .imageExtent = kor::IVec3(static_cast<int>(size), static_cast<int>(size), 1),
                                                  .imageBaseArrayLayer = face, .imageLayerCount = 1, .imageMipLevel = mip });
-                    for (std::uint32_t y = 0; y < size; ++y)
-                        for (std::uint32_t x = 0; x < size; ++x) {
-                            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size) * 2.f - 1.f, v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size) * 2.f - 1.f;
-                            const kor::Vec3 light = Studio(CubeDirection(face, u, v), roughness);
-                            texels.insert(texels.end(), { Half(light.x), Half(light.y), Half(light.z), Half(1.f) });
-                        }
-                }
+            }
+            std::vector<std::uint16_t> texels(count);
+            const auto roughnessOf = [](const std::uint32_t mip) { const float t = static_cast<float>(mip) / static_cast<float>(CubeMips - 1); return t * t; };
+
+            // Prefiltered once, and kept: by the panorama's file as it is now, and how big the cube is.
+            const std::filesystem::path file = kscript::PackageDirectory() / "editor" / EnvironmentFile;
+            std::error_code ec;
+            const auto bytes = std::filesystem::file_size(file, ec);
+            const auto written = std::filesystem::last_write_time(file, ec).time_since_epoch().count();
+            const std::filesystem::path kept = std::filesystem::temp_directory_path(ec) / "koral-engine" / "editor-environment"
+                / std::format("{:016x}.bin", std::hash<std::string> {}(std::format("{}|{}|{}|{}|{}|1", file.generic_string(), bytes, written, CubeSize, CubeMips)));
+            bool read = false;
+            if (std::filesystem::file_size(kept, ec) == count * sizeof(std::uint16_t))
+                read = static_cast<bool>(std::ifstream(kept, std::ios::binary).read(reinterpret_cast<char*>(texels.data()), static_cast<std::streamsize>(count * sizeof(std::uint16_t))));
+            if (!read) {
+                const auto began = std::chrono::steady_clock::now();
+                if (const std::optional<Panorama> panorama = Panorama::Read(file)) {
+                    for (std::uint32_t mip = 0; mip < CubeMips; ++mip) Prefilter(*panorama, CubeSize >> mip, roughnessOf(mip), texels.data() + levels[mip]);
+                    std::filesystem::create_directories(kept.parent_path(), ec);
+                    const std::filesystem::path partial = kept.string() + ".part";
+                    if (std::ofstream(partial, std::ios::binary | std::ios::trunc).write(reinterpret_cast<const char*>(texels.data()), static_cast<std::streamsize>(count * sizeof(std::uint16_t))))
+                        std::filesystem::rename(partial, kept, ec);
+                    kor::log::Info("The material preview's light, {}, prefiltered in {} ms.", EnvironmentFile,
+                                   std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count());
+                } else
+                    for (std::uint32_t mip = 0; mip < CubeMips; ++mip) {
+                        const std::uint32_t size = CubeSize >> mip;
+                        std::uint16_t* out = texels.data() + levels[mip];
+                        for (std::uint32_t face = 0; face < 6; ++face)
+                            for (std::uint32_t y = 0; y < size; ++y)
+                                for (std::uint32_t x = 0; x < size; ++x) {
+                                    const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(size) * 2.f - 1.f, v = (static_cast<float>(y) + 0.5f) / static_cast<float>(size) * 2.f - 1.f;
+                                    const kor::Vec3 light = Studio(CubeDirection(face, u, v), roughnessOf(mip));
+                                    for (const std::uint16_t half : { Half(light.x), Half(light.y), Half(light.z), Half(1.f) }) *out++ = half;
+                                }
+                    }
             }
             const auto staging = kor::Buffer::Builder<std::uint16_t>().SetDataView(std::span<const std::uint16_t>(texels))
                 .SetUsage(kor::Buffer::Usage::eTransferSrc).SetType(kor::Buffer::Type::eStaging).Build();

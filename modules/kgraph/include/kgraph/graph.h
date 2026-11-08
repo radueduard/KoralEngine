@@ -95,6 +95,20 @@ namespace kgraph
          */
         std::vector<std::string> fixed;
         /**
+         * Which page runs after which, where what they use does not say: each `{ page, before }` — `page` runs after
+         * `before`. What the pages read and write orders the rest (a page that reads what another writes runs after it,
+         * whatever is said here); two that both write something need one of these between them, or they are a tie
+         * (an editor says so). Only pages of the same rate are ordered by them: setup, the fixed step and every frame
+         * run in that order whatever. `passes` is put in an order that keeps them (OrderByRate). Saved as `"after"`.
+         */
+        std::vector<std::pair<std::string, std::string>> after;
+        /**
+         * Whether the order is `after`'s: true for a graph read with an `"after"` (even an empty one), or settled by an
+         * editor. False for one made in code or saved before there were links: its pages are in the order `passes` lists
+         * them, which an editor makes links of where it matters (each pair that writes the same thing), once it knows.
+         */
+        bool orderSettled = false;
+        /**
          * How many fixed steps a frame runs at most: its fixed pages are in the frame that many times over, each time
          * after the last, and those beyond the steps it has rest. A frame with more steps than this loses the rest —
          * the simulation slows rather than falling further behind. Saved when it is not 4 (`"fixedStepsAtMost"`).
@@ -146,10 +160,14 @@ namespace kgraph
         /** @brief Makes @p pass one of @p rate — the last of them — and puts the passes in order. False for no such pass. */
         bool SetRate(std::string_view pass, PassRate rate);
         /**
-         * @brief Puts the passes in the order of their rates — setup, then fixed, then every frame — each list in its own
-         *        order, and forgets in `setup` and `fixed` what is no pass (or, in `fixed`, what is setup already).
+         * @brief Puts the passes in the order of their rates — setup, then fixed, then every frame — and in each the
+         *        order `after` says, those it says nothing of keeping their places; forgets in `setup` and `fixed` what
+         *        is no pass (or, in `fixed`, what is setup already), and in `after` what names no pass. A ring of links
+         *        is broken where it closes, the earliest first.
          */
         void OrderByRate();
+        /** @brief Whether @p page runs after @p before by `after`'s links, one or several in a row. */
+        [[nodiscard]] bool RunsAfter(std::string_view page, std::string_view before) const;
         /** @brief Adds a node of @p type, and returns it to be filled in. */
         Node& Add(std::string id, std::string type);
 

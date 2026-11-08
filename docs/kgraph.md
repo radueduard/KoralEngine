@@ -49,7 +49,8 @@ A graph is laid out in passes. `Graph::passes` is their names in the order they 
 A pass holds what it makes for itself and what it runs. What it uses of an earlier pass it brings in with a
 **Reference** node, which gives every output the node it stands for gives. Passes are a way of laying a
 graph out, not a boundary: a wire may go from any node to any other. Their order decides one thing: which
-of two passes runs first when nothing they use says (see [Order](#order)).
+of two passes runs first when nothing they use says — and that is said by links, not by where a page is in a list
+(see [Order](#order)).
 
 ### How often a pass runs
 
@@ -160,7 +161,8 @@ and `Graph::FromJson` round-trip a graph exactly.
 A **Function** node is a call: the nodes of a function, as one. A function is a graph of its own — kept by
 whoever has the graph (`Graph::functions`, by name; a project's `functions/<name>.kfunc`, for the editor) — whose
 **FunctionInput** and **FunctionOutput** nodes are its edges. Each edge is a port of every call, by its `name`, in
-the order the edges are on the function's page, top to bottom; its `kind` says what it carries: `eValue`,
+the order its `order` says (from 0; an edge that says none comes after, as the edges are on the function's page, top to
+bottom); its `kind` says what it carries: `eValue`,
 `eEntities` (what a Filter keeps some of), or a resource — `eMesh`, `eBuffer`, `eImage`, `eResource`. An input a
 call is given nothing at takes its `default`; an `eBuffer` given nothing is a small buffer of zeros made in the call's
 place, so that a buffer a function can do without — with a count of 0 beside it — may be left unwired.
@@ -184,6 +186,9 @@ the nodes, so a function's passes run where it is called, and a loop's in turns.
 A function's file says what it is for beside its graph, for the editor's list of nodes to offer it under and find it by
 (`Document::AboutFunction`): `"purpose"` (`"Physics"`), `"description"`, and `"tags"` (`["prefix sum", "scan"]`). One
 of the engine's saved as the project's own keeps them.
+
+A call of a project's function also keeps it as its `file` (`function:Scale`), which a scene saves by the file's ID: the
+file renamed or moved, the call is called what it is now when the scene is read again (an editor keeps `file`).
 
 **The engine's functions** are there in every project (`packages/koral/functions`, beside its shaders in
 `packages/koral/shaders`); a project's function of the same name is called in its place, and one of the engine's
@@ -1432,6 +1437,20 @@ same resource run in the order of the passes they are in, and within a pass in n
 does not say which is first. A pass that only overwrites goes before one that reads and writes only within one page,
 or when the overwriting page is the earlier one: what a later page clears, it clears after what an earlier page drew.
 Setup pages come first, so what setup does to a resource is done before anything a frame does to it.
+
+Which of two pages of the same rate runs first, where what they use does not say, is a **link**: `Graph::after`, each
+`{ page, before }` — `page` runs after `before` — saved as `"after": [["sky", "scene"]]`. `Graph::OrderByRate` puts
+`passes` in an order that keeps every link (one by one in a row too: `RunsAfter`), each page the links say nothing of
+keeping its place; a ring of links is broken where it closes. Only two pages that both *write* something need one: a
+page that reads what another writes runs after it whatever, so a link between them says nothing the data does not.
+Two that both write something with no link between them are a **tie**: they run in the order they happen to be in,
+and an editor says so (`keditor::Document::OrderTies`) until one is linked.
+
+A graph made in code, or saved before there were links, is **not settled** (`Graph::orderSettled` false): its pages
+run in the order its list has them, as they always did. An editor makes links of that order where it matters — each
+pair of the same rate that writes the same thing, the later after the earlier, less those others in a row say already
+(`Document::SettleOrder`) — when the graph is saved or a link is drawn, and the order is the links' from then on. A
+graph read with an `"after"` (even an empty one) is settled.
 
 A pass that only reads a resource runs after every pass that writes it. The one exception is a reader whose own
 output a later writer of that resource takes: a trace that reads the picture into an image which the next pass adds

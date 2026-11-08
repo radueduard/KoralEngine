@@ -105,5 +105,5 @@ public float4 skyFragment(KoralPreviewSkyRaster raster) : SV_Target
 {
     const float4 far = mul(float4(raster.at, 1.0, 1.0), view.inverseViewProjection);
     const float3 direction = normalize(far.xyz / far.w - KoralPreviewEye());
-    return float4(Shown(KoralPreviewAround().Specular(direction, 0.12)), 1.0);
+    return float4(Shown(KoralPreviewAround().Specular(direction, 0.0)), 1.0);
 }

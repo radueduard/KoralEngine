@@ -212,7 +212,8 @@ namespace keditor
                         assets.insert(assets.end() - static_cast<std::ptrdiff_t>(std::ranges::count(assets, asset.id, &Asset::parent)), asset);
                         continue;
                     } else {
-                        asset.id = prefix + entry.path().filename().string();
+                        // A function by its name, as a call knows it (`function:Scale`); anything else by its file's.
+                        asset.id = prefix + (kind == Asset::Kind::eFunction ? entry.path().stem().string() : entry.path().filename().string());
                         asset.label = entry.path().filename().string();
                     }
                     assets.push_back(std::move(asset));
@@ -351,18 +352,28 @@ namespace keditor
             }
         };
         for (const auto& asset : assets) add(asset.folder);
-        if (_hasProject) {
-            // The project's own, whether or not anything is in them — but not what a tool keeps for itself.
+        if (_hasProject && assetFiles) {
+            // As they are on disk: the project's own and its modules', whether or not anything is in them — but not
+            // what a tool keeps for itself.
             static const std::set<std::string> skipped { "bin", "obj", "build", "node_modules", "out" };
             std::error_code ignored;
-            for (auto it = std::filesystem::recursive_directory_iterator(_project.directory, std::filesystem::directory_options::skip_permission_denied, ignored);
-                 it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
-                if (!it->is_directory(ignored)) continue;
-                const std::string name = it->path().filename().string();
-                // Nor the textures compressed into its cache: each the machine's own copy of a file shown elsewhere.
-                const bool cache = name == "cache" && it.depth() == 0;
-                if (name.starts_with(".") || skipped.contains(name) || cache) { it.disable_recursion_pending(); continue; }
-                add(it->path().lexically_relative(_project.directory).generic_string());
+            const auto walk = [&](const std::filesystem::path& top, const std::string& under) {
+                for (auto it = std::filesystem::recursive_directory_iterator(top, std::filesystem::directory_options::skip_permission_denied, ignored);
+                     it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
+                    if (!it->is_directory(ignored)) continue;
+                    const std::string name = it->path().filename().string();
+                    // Nor the textures compressed into its cache: each the machine's own copy of a file shown elsewhere.
+                    const bool cache = name == "cache" && it.depth() == 0;
+                    if (name.starts_with(".") || skipped.contains(name) || cache) { it.disable_recursion_pending(); continue; }
+                    const std::string relative = it->path().lexically_relative(top).generic_string();
+                    add(under.empty() ? relative : under + "/" + relative);
+                }
+            };
+            walk(_project.directory, {});
+            for (const auto& module : const_cast<Session*>(this)->Doc().Modules()) {
+                const std::string under = std::format("{}/{}", ModulesFolder, module.filename().string());
+                add(under);
+                walk(module, under);
             }
         }
         // The project's own first, by name; its modules' after them; what is outside it last.
@@ -390,6 +401,22 @@ namespace keditor
         return _project.directory / folder;
     }
 
+    std::vector<std::filesystem::path> Session::AssetFolderFiles(const std::string_view folder) const
+    {
+        std::vector<std::filesystem::path> files;
+        const std::filesystem::path in = AssetFolderPath(folder);
+        std::error_code ignored;
+        if (in.empty() || !std::filesystem::is_directory(in, ignored)) return files;
+        for (const auto& entry : std::filesystem::directory_iterator(in, std::filesystem::directory_options::skip_permission_denied, ignored)) {
+            if (!entry.is_regular_file(ignored)) continue;
+            if (entry.path().filename().string().starts_with(".") || entry.path().extension() == ".meta") continue;
+            files.push_back(entry.path());
+        }
+        const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+        std::ranges::sort(files, {}, [&](const std::filesystem::path& file) { return lower(file.filename().string()); });
+        return files;
+    }
+
     bool Session::NewAssetFolder(const std::string& name)
     {
         const std::filesystem::path in = AssetFolderPath(assetFolder);
@@ -398,6 +425,8 @@ namespace keditor
         std::error_code error;
         if (std::filesystem::exists(in / name, error)) { Say(std::format("There is a '{}' here already.", name), true); return false; }
         if (!std::filesystem::create_directory(in / name, error)) { Say(std::format("The folder could not be made: {}.", error.message()), true); return false; }
+        // Empty, it is shown in the files view and nowhere else.
+        assetFiles = true;
         Say(std::format("Made the folder {}.", name));
         ++_changes;
         return true;
@@ -450,7 +479,10 @@ namespace keditor
             return launch ? launch(command) : std::system((command + " >/dev/null 2>&1").c_str()) == 0;
         };
         if (!trash(path)) { Say(std::format("'{}' could not be moved to the trash (gio trash).", relative.generic_string()), true); return false; }
-        if (const auto meta = kasset::MetaPathOf(path); meta != path && std::filesystem::exists(meta, ignored)) trash(meta);
+        // Its meta goes with it: where the project keeps it, or — not yet moved there — beside it.
+        const auto metaOf = [&] { return Doc().Assets() ? Doc().Assets()->MetaOf(path) : kasset::MetaPathOf(_project.directory, path); };
+        if (kasset::KindOfFile(path) != kasset::Kind::eGenerated)
+            for (const auto& meta : { metaOf(), kasset::MetaBeside(path) }) if (std::filesystem::exists(meta, ignored)) trash(meta);
         if (Doc().Assets()) Doc().Assets()->Scan();
         if (!selectedAsset.empty()) selectedAsset.clear();
         Say(std::format("Moved {} to the trash.", relative.generic_string()));
@@ -624,7 +656,9 @@ namespace keditor
     bool Session::MoveAsset(const std::string& id, const std::filesystem::path& to)
     {
         kasset::Database* assets = AssetDatabase();
-        const auto reference = assets ? assets->Lookup(id) : std::nullopt;
+        auto reference = assets ? assets->Lookup(id) : std::nullopt;
+        // One made since the project's files were last looked at — a function just made — is found once they are.
+        if (assets && !reference) { (void)assets->Scan(); reference = assets->Lookup(id); }
         if (!reference || reference->part || assets->BuiltInKind(reference->asset)) { Say("Only a file of the project's is moved: a model's mesh goes with its model.", true); return false; }
         if (InPlayMode()) Stop();
         if (_prefab) ClosePrefab(true);

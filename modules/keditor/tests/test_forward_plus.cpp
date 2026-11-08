@@ -555,6 +555,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     EXPECT_FALSE(session.NewAssetFolder("props")) << "there is one already";
     EXPECT_FALSE(session.NewAssetFolder("a/b"));
     EXPECT_TRUE(std::filesystem::is_directory(directory / "assets" / "props"));
+    EXPECT_TRUE(session.assetFiles) << "empty, it is shown among the files";
     EXPECT_TRUE(std::ranges::contains(session.AssetFolders(session.Assets()), std::string("assets/props")));
     EXPECT_TRUE(shows("props"));
     // What is thrown away goes to the trash by the system's own tool, and only what is the project's.
@@ -572,6 +573,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     }
     std::filesystem::remove(directory / "assets" / "props");
     session.assetFolder.clear();
+    session.assetFiles = false;
     session.SelectAsset("shader:forward#fragment");
     EXPECT_TRUE(shows("Fragment shader") && shows("In its module")) << "the inspector says what a picked asset is";
     {
