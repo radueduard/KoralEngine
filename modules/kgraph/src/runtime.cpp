@@ -9546,6 +9546,9 @@ namespace kgraph
         _impl->bundleNotes = std::move(expansion.notes);
         _impl->batched = std::move(expansion.batched);
         _impl->unbatched = std::move(expansion.unbatched);
+        // What is found by id is the running graph's ids, seen, not kept: forgotten before that graph goes, as even
+        // clearing it reads its keys.
+        _impl->currentById.clear();
         _running = std::move(expansion.graph);
         _impl->Evaluate(_running);
     }
