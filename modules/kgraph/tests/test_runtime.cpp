@@ -2109,3 +2109,94 @@ TEST_F(RuntimeTest, TheEnginesBloomBleedsWhatIsBright) {
     ASSERT_TRUE(read.Items()) << read.ToJson();
     EXPECT_GT(*(*read.Items())[0].Number(), 4.0) << "brighter than it was: its own light bled back into it";
 }
+
+// Transient images: the frame graph's, made for the frame. Two never needed at the same time — the second written from
+// what the first was copied into — share their memory, and the picture goes through both as through images of their own.
+// What stood in for each until the frame graph made it is gone; and an image that cannot be one says why.
+TEST_F(RuntimeTest, TransientImagesShareTheirMemoryAndHoldWhatTheyAreGiven) {
+    auto& runtime = *scene->runtime;
+    const std::uint64_t logged = kor::log::LastSequence();
+    using kgraph::Value;
+    kgraph::Graph graph;
+    const auto image = [&](const std::string& id, const bool transient) -> kgraph::Node& {
+        auto& node = graph.Add(id, "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 16, 16 })
+            .Set("usage", Value::List { "eTransferSrc", "eTransferDst" });
+        if (transient) node.Set("transient", true);
+        return node;
+    };
+    image("first", true);
+    image("between", false);
+    image("second", true);
+    image("out", false);
+    graph.Add("paint", "Clear").Wire("image", "first").Set("color", Value::List { 1, 0, 0, 1 });
+    graph.Add("keep", "Blit").Wire("source", "first").Wire("destination", "between");
+    graph.Add("again", "Blit").Wire("source", "between").Wire("destination", "second");
+    graph.Add("show", "Blit").Wire("source", "second").Wire("destination", "out");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    const std::weak_ptr<kgraph::Resource> standIn = runtime.ResourceOf("first");
+    runtime.Watch("out");
+    for (int i = 0; i < 8; ++i) Frame();
+
+    const auto made = runtime.ResourceOf("first");
+    ASSERT_TRUE(made);
+    EXPECT_TRUE(made->transient);
+    EXPECT_NE(made, standIn.lock()) << "the frame graph's, not what stood in for it";
+    EXPECT_TRUE(standIn.expired()) << "what stood in is gone";
+    const auto report = runtime.Frame();
+    EXPECT_GT(report.unsharedBytes, report.bytes) << "the two share: " << report.bytes << " of " << report.unsharedBytes;
+    const auto out = runtime.Watched("out");
+    ASSERT_TRUE(out);
+    ASSERT_GE(out->bytes.size(), 4u);
+    EXPECT_EQ(out->bytes[0], std::byte { 255 }) << "red, through both";
+    EXPECT_EQ(out->bytes[1], std::byte { 0 });
+    for (const auto& record : kor::log::HistorySince(logged))
+        if (record.message.find("VUID") != std::string::npos || record.level >= kor::log::Level::eError) ADD_FAILURE() << record.message;
+
+    // One of three dimensions is no transient.
+    graph.Find("second")->Set("extent", Value::List { 16, 16, 4 }).Set("type", "e3D");
+    runtime.Set(graph);
+    const auto* status = runtime.Status("second");
+    ASSERT_NE(status, nullptr);
+    EXPECT_NE(status->error.find("2D image"), std::string::npos) << status->error;
+}
+
+// A transient buffer: made by the frame graph, zeroed, counted up once and copied out, each frame. And the frame graph
+// made again — another pass in it — makes its transients again: what is wired from them follows, and nothing is run with
+// what is gone. Nothing the device would not have, all the while.
+TEST_F(RuntimeTest, ATransientBufferIsTheFrameGraphsAndFollowsItWhenItIsMadeAgain) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    const std::uint64_t logged = kor::log::LastSequence();
+    kgraph::Graph graph;
+    graph.Add("count", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" }).Set("transient", true);
+    graph.Add("kept", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("zero", "ClearBuffer").Wire("buffer", "count");
+    graph.Add("add one", "ComputePass").Set("module", "increment").Set("entry", "computeMain").Wire("param.counter", "count").Set("groups", Value::List { 1, 1, 1 });
+    graph.Add("copy", "CopyBuffer").Wire("source", "count").Wire("destination", "kept");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    runtime.Watch("kept");
+    const auto counted = [&] {
+        for (int i = 0; i < 8; ++i) Frame();
+        const auto peek = runtime.Watched("kept");
+        std::uint32_t value = 0;
+        if (peek && peek->bytes.size() >= 4) std::memcpy(&value, peek->bytes.data(), 4);
+        else ADD_FAILURE() << "nothing to look at";
+        return value;
+    };
+    EXPECT_EQ(counted(), 1u) << "zeroed, then one more, each frame";
+    const auto made = runtime.ResourceOf("count");
+    ASSERT_TRUE(made);
+    EXPECT_TRUE(made->transient);
+
+    // Another pass: the frame graph is made again, and its buffer with it.
+    graph.Add("other", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eStorage", "eTransferDst" });
+    graph.Add("clear other", "ClearBuffer").Wire("buffer", "other");
+    runtime.Set(graph);
+    EXPECT_EQ(counted(), 1u) << "and the same, with the frame graph made again";
+    for (const auto& record : kor::log::HistorySince(logged))
+        if (record.message.find("VUID") != std::string::npos || record.level >= kor::log::Level::eError) ADD_FAILURE() << record.message;
+}

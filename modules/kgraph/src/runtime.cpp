@@ -22,6 +22,7 @@
 #include <format>
 #include <functional>
 #include <limits>
+#include <mutex>
 #include <optional>
 #include <ranges>
 #include <regex>
@@ -108,6 +109,7 @@ namespace kgraph
             const void* id = nullptr;
             kor::ResourceRef<const kor::Image> image;
             kor::ResourceRef<const kor::Buffer> buffer;
+            std::string transient;      // a transient's: the node it is of, which the frame graph knows it by
         };
         struct Use {
             Member what;
@@ -134,6 +136,9 @@ namespace kgraph
             Member member;
             if ((member.image = ImageRefOf(resource)).Get()) member.id = member.image.Get();
             else if ((member.buffer = BufferRefOf(resource)).Get()) member.id = member.buffer.Get();
+            // A transient's, or a view of one.
+            if (resource && resource->transient) member.transient = resource->node;
+            else if (resource && resource->source && resource->source->transient) member.transient = resource->source->node;
             return member;
         }
         Member MemberOf(kor::ResourceRef<const kor::Image> image)
@@ -684,11 +689,47 @@ namespace kgraph
             bool async = false;     // run on the async compute queue (its node's `async`)
         };
 
+        /**
+         * What the frame graph made of each transient, by the node it is of: as the pass that creates it found it, in its
+         * Initialize. What a node made in its place stands in until what is wired from it is built again with this.
+         */
+        struct TransientBoard {
+            std::mutex mutex;
+            std::map<std::string, Member, std::less<>> made;
+        };
+
+        /** A transient: how the frame graph is to make it, and which object of the frame graph's what is wired from it was last built with (null: what stands in). */
+        struct Transient {
+            std::optional<kor::ImageDesc> image;
+            std::optional<kor::BufferDesc> buffer;
+            const void* made = nullptr;
+            const void* standIn = nullptr;      // what its node made in its place
+        };
+
+        bool SameDesc(const std::optional<kor::ImageDesc>& a, const std::optional<kor::ImageDesc>& b)
+        {
+            if (a.has_value() != b.has_value()) return false;
+            return !a || (a->format == b->format && a->usage == b->usage && a->scale == b->scale && a->sizeOf == b->sizeOf && a->extent == b->extent && a->mipLevels == b->mipLevels);
+        }
+        bool SameDesc(const std::optional<kor::BufferDesc>& a, const std::optional<kor::BufferDesc>& b)
+        {
+            if (a.has_value() != b.has_value()) return false;
+            return !a || (a->size == b->size && a->usage == b->usage && a->type == b->type);
+        }
+
         /** What a pass declares to the frame graph, under the name the resource — or the set it is in — is imported by. */
         struct Declared {
             std::string name;
             bool read = false, write = false;
-            bool operator==(const Declared&) const = default;
+            /// A transient's, by its node: the frame graph makes it, in the one pass of them that is given how (image, buffer).
+            std::string transient;
+            std::optional<kor::ImageDesc> image;
+            std::optional<kor::BufferDesc> buffer;
+            bool operator==(const Declared& other) const
+            {
+                return name == other.name && read == other.read && write == other.write && transient == other.transient
+                    && SameDesc(image, other.image) && SameDesc(buffer, other.buffer);
+            }
         };
 
         class GraphPass final : public kor::RenderPass {
@@ -700,6 +741,9 @@ namespace kgraph
             {
                 bool writes = plan->writesScreen;
                 for (const auto& use : declared) {
+                    // A transient, made here: by the frame graph, for the frame.
+                    if (use.image) { builder.Create(use.name, *use.image); writes = true; continue; }
+                    if (use.buffer) { builder.Create(use.name, *use.buffer); writes = true; continue; }
                     if (use.write) { builder.Write(use.name); writes = true; }
                     else builder.Read(use.name);
                 }
@@ -711,6 +755,27 @@ namespace kgraph
             void Initialize(const kor::PassResources& resources) override
             {
                 if (plan->readsScreen || plan->writesScreen) _context.screen = resources.ImageNamed(kor::FrameGraph::Screen);
+                // What the frame graph made of the transients made here, for what is wired from them to be built with.
+                if (!board) return;
+                for (const auto& use : declared) {
+                    if (!use.image && !use.buffer) continue;
+                    Member made;
+                    made.transient = use.transient;
+                    if (use.image) made.id = (made.image = resources.ImageNamed(use.name)).Get();
+                    else made.id = (made.buffer = resources.BufferNamed(use.name)).Get();
+                    const std::scoped_lock lock(board->mutex);
+                    board->made[use.transient] = std::move(made);
+                }
+            }
+            /** Whether a transient this pass was built with is not what the frame graph has made of it now: it records nothing then. */
+            [[nodiscard]] bool HoldsAStandIn() const
+            {
+                if (!board || holds.empty()) return false;
+                const std::scoped_lock lock(board->mutex);
+                return std::ranges::any_of(holds, [&](const auto& held) {
+                    const auto made = board->made.find(held.first);
+                    return made == board->made.end() || made->second.id != held.second;
+                });
             }
             void Prepare() override
             {
@@ -720,11 +785,15 @@ namespace kgraph
             void Record(kor::CommandBuffer& commands) const override
             {
                 if (steps && step >= steps->load()) return;     // a further fixed step this frame does not have
+                // Built with what stood in for a transient: the frame it is built again with the frame graph's, it records.
+                if (HoldsAStandIn()) return;
                 if (plan->record && !plan->resting->load()) plan->record(commands, _context);
             }
 
             std::shared_ptr<const PassPlan> plan;
             std::vector<Declared> declared;
+            std::shared_ptr<TransientBoard> board;      // the runtime's: what the frame graph made of each transient
+            std::vector<std::pair<std::string, const void*>> holds;    // the transients it was built with: by node, which object
             /// A pass of the fixed step again, for the frame's step after the first: which (1 the second), and how many
             /// the frame being made has. Null for any other.
             std::uint32_t step = 0;
@@ -2134,7 +2203,7 @@ namespace kgraph
             const Inputs& inputs = chosen || madeFor ? automatic : given;
             if (chosen) out.automaticType = automatic.at("type").value.String() ? *automatic.at("type").value.String() : std::string();
             std::vector<kb::Value> constructor;
-            const auto calls = Calls(description, inputs, constructor, [](std::string_view) { return false; });
+            const auto calls = Calls(description, inputs, constructor, [&](const std::string_view name) { return name == "transient" && MadeForItsUse(description.name); });
             if (!calls) return Fail(calls.error());
             // A framebuffer's images have to have been made to be drawn into.
             if (description.name == "Framebuffer")
@@ -2155,8 +2224,38 @@ namespace kgraph
                 // Told when the file is edited: what was built from it is built again (Update).
                 Watch(out, kor::capi::ShaderOf((*resource)->handle));
             }
+            if (const auto transient = given.find("transient"); MadeForItsUse(description.name) && transient != given.end() && transient->second.value.Bool() && *transient->second.value.Bool()) {
+                if (auto made = TransientOf(**resource); !made) return Fail(made.error());
+                else transients[node.id] = std::move(*made);
+                (*resource)->transient = true;
+            } else {
+                transients.erase(node.id);
+            }
             out.outputs["out"].resource = std::move(*resource);
             return {};
+        }
+
+        /**
+         * How the frame graph is to make a transient: as @p standIn — what its node made in its place — is. A 2D image of one
+         * layer, of one sample; a buffer on the device (one the CPU writes is one for each frame in flight, never shared).
+         */
+        static Expected<Transient> TransientOf(const Resource& standIn)
+        {
+            Transient made;
+            if (const auto image = ImageRefOf(&standIn); image.Get()) {
+                if (image->ImageType() != kor::Image::Type::e2D || image->ArrayLayers() != 1 || image->Extent().z > 1)
+                    return Fail("a transient image is a 2D image of one layer: one of more, or of three dimensions, is the node's own");
+                if (image->Samples() != kor::SampleCount::e1) return Fail("a transient image is of one sample: one of more is the node's own");
+                made.image = kor::ImageDesc { .format = image->PixelFormat(), .usage = image->UsageFlags(), .extent = kor::UVec2 { image->Extent().x, image->Extent().y },
+                                              .mipLevels = image->MipLevels() };
+                made.standIn = image.Get();
+            } else if (const auto buffer = BufferRefOf(&standIn); buffer.Get()) {
+                if (buffer->MemoryType() != kor::Buffer::Type::eDeviceLocal)
+                    return Fail("a transient buffer is on the device (eDeviceLocal): one the CPU writes is the node's own");
+                made.buffer = kor::BufferDesc { .size = static_cast<kor::i64>(buffer->size()), .usage = buffer->UsageFlags(), .type = kor::Buffer::Type::eDeviceLocal };
+                made.standIn = buffer.Get();
+            }
+            return made;
         }
 
         /** The shaders wired to a pipeline node, in the order of its inputs. */
@@ -4784,6 +4883,11 @@ namespace kgraph
         std::map<std::string, std::optional<std::vector<Model::Attribute>>, std::less<>> probed;
         std::map<std::string, MeshImport, std::less<>> meshImports;    // how each model file is read, by its name in ids
         std::map<std::string, std::string, std::less<>> unread; // a file that could not be read, and why
+        /// The transients, by node: how the frame graph is to make each — as what its node made in its place is — and which
+        /// object of the frame graph's what is wired from it was last built with (null: what stands in).
+        std::map<std::string, Transient, std::less<>> transients;
+        std::shared_ptr<TransientBoard> board = std::make_shared<TransientBoard>();
+        std::map<std::string, std::vector<std::pair<std::string, const void*>>, std::less<>> holdsOf;   // each pass's transients, by node, as the objects it was built with
         std::deque<Arrived> arrivedMeshes;                      // models read, and not yet the device's: each, the next frame
         std::optional<std::chrono::steady_clock::time_point> modelsWaiting;  // since when a model read waits for the others
         std::vector<Held> arrivedPictures;                      // the stand-ins whose pictures came, for the nodes that hold one
@@ -5245,8 +5349,65 @@ namespace kgraph
         }
 
         /** Each frame: what was read since is made the device's, and what holds a stand-in is led on. */
+        /** The transients node @p id is wired from, by way of anything between: a view, a framebuffer, a pipeline, a Reference. */
+        const std::set<std::string>& TransientsUpstream(const std::string& id, std::map<std::string, std::set<std::string>, std::less<>>& memo) const
+        {
+            if (const auto known = memo.find(id); known != memo.end()) return known->second;
+            std::set<std::string>& found = memo[id];      // empty while it is looked into: a ring ends here
+            const Node* node = current ? CurrentNode(id) : nullptr;
+            if (!node) return found;
+            std::set<std::string> all;
+            const auto from = [&](const std::string& other) {
+                if (transients.contains(other)) all.insert(other);
+                const auto& further = TransientsUpstream(other, memo);
+                all.insert(further.begin(), further.end());
+            };
+            for (const auto& input : node->inputs | std::views::values)
+                if (input.link) from(input.link->node);
+            if (node->type == "Reference")
+                if (const auto target = node->inputs.find("node"); target != node->inputs.end() && target->second.value.String()) from(*target->second.value.String());
+            found = std::move(all);
+            return found;
+        }
+
+        /**
+         * Each frame: what the frame graph has made of each transient since — the first time, or made again — is what its node
+         * gives from now on, and what is wired from it is built again with that. What stood in goes once nothing holds it.
+         */
+        void ArriveTransients()
+        {
+            std::map<std::string, Member, std::less<>> made;
+            {
+                const std::scoped_lock lock(board->mutex);
+                made = board->made;
+            }
+            for (auto it = transients.begin(); it != transients.end();) {
+                const auto node = built.find(it->first);
+                if (node == built.end() || !node->second.status.ok) {
+                    { const std::scoped_lock lock(board->mutex); board->made.erase(it->first); }
+                    it = transients.erase(it);
+                    continue;
+                }
+                const auto fresh = made.find(it->first);
+                if (fresh == made.end() || !fresh->second.id || fresh->second.id == it->second.made) { ++it; continue; }
+                Held held = std::make_shared<Resource>();
+                held->kind = fresh->second.image.Get() ? "Image" : "Buffer";
+                held->handle = fresh->second.image.Get() ? kor::capi::BorrowImage(fresh->second.image) : kor::capi::BorrowBuffer(fresh->second.buffer);
+                held->node = it->first;
+                held->transient = true;
+                Output& out = node->second.outputs["out"];
+                if (out.resource) { out.resource->replacedBy = held; ++replacements; }
+                out.resource = std::move(held);
+                node->second.stamp = ++counter;      // what is wired from it is built again
+                it->second.made = fresh->second.id;
+                stale = true;
+                ++it;
+            }
+        }
+
         void Arrive()
         {
+            ArriveTransients();
             std::erase_if(reading, [](const kor::Task<void>& task) { return task.Done(); });
             // A model's meshes are one mesh on the device, each a run of its indices: a pass that draws a hundred of
             // them binds one thing, where a mesh each would be bound a hundred times. Every model read since arrives
@@ -8939,15 +9100,43 @@ namespace kgraph
                 if (!plan->entities->pictures.empty()) uses.push_back({ pass, true, false, true, plan->entities->pictures, wanted[pass] + "/pictures" });
                 if (!plan->entities->storages.empty()) uses.push_back({ pass, true, true, true, plan->entities->storages, wanted[pass] + "/storages" });
             }
+            // A transient's, by which object it is — what stood in for it, or the frame graph's — wherever it is used; and
+            // which of those each pass was built with, for it to record nothing while that is what stood in.
+            // Two the frame graph shares are one object: which of them a pass uses is which it is wired from.
+            std::unordered_map<const void*, std::vector<std::string>> transientOf;
+            for (const auto& [node, transient] : transients) {
+                if (transient.standIn) transientOf[transient.standIn].push_back(node);
+                if (transient.made && transient.made != transient.standIn) transientOf[transient.made].push_back(node);
+            }
+            holdsOf.clear();
+            std::map<std::string, std::set<std::string>, std::less<>> upstream;
+            for (auto& use : uses) {
+                if (use.dynamic) continue;     // an entity's: imported as the rest of its set is
+                for (auto& member : use.members) {
+                    member.transient.clear();
+                    const auto found = transientOf.find(member.id);
+                    if (found == transientOf.end()) continue;
+                    const std::string* which = found->second.size() == 1 ? &found->second.front() : nullptr;
+                    if (!which) {
+                        const auto& wired = TransientsUpstream(wanted[use.pass], upstream);
+                        for (const auto& node : found->second) if (wired.contains(node)) { which = &node; break; }
+                    }
+                    if (!which) continue;
+                    member.transient = *which;
+                    holdsOf[wanted[use.pass]].emplace_back(*which, member.id);
+                }
+            }
 
             // Uses with a resource in common, together.
+            // A transient by its node: two the frame graph shares are one object, and two things all the same.
+            const auto KeyOf = [&](const Member& member) -> const void* { return member.transient.empty() ? member.id : static_cast<const void*>(&transients.at(member.transient)); };
             std::vector<std::size_t> parent(uses.size());
             for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = i;
             const std::function<std::size_t(std::size_t)> root = [&](const std::size_t i) { return parent[i] == i ? i : parent[i] = root(parent[i]); };
             std::unordered_map<const void*, std::size_t> firstUse;
             for (std::size_t i = 0; i < uses.size(); ++i)
                 for (const auto& member : uses[i].members) {
-                    const auto [known, fresh] = firstUse.try_emplace(member.id, i);
+                    const auto [known, fresh] = firstUse.try_emplace(KeyOf(member), i);
                     if (!fresh) parent[root(i)] = root(known->second);
                 }
 
@@ -8962,12 +9151,14 @@ namespace kgraph
                 Group& group = groups[root(i)];
                 if (uses[i].dynamic && !group.dynamic) { group.dynamic = true; group.name = std::format("kgraph.set.{:x}.{}", reinterpret_cast<std::uintptr_t>(this), uses[i].key); }
                 for (const auto& member : uses[i].members)
-                    if (group.had.insert(member.id).second) group.members.push_back(member);
+                    if (group.had.insert(KeyOf(member)).second) group.members.push_back(member);
             }
             std::set<std::string> live;
             for (auto& group : groups | std::views::values) {
                 if (!group.dynamic) {
                     const Member& member = group.members.front();
+                    // A transient is the frame graph's to make, by its node: in whichever of its passes is given how, below.
+                    if (!member.transient.empty() && transients.contains(member.transient)) { group.name = std::format("kgraph.transient.{:x}.{}", reinterpret_cast<std::uintptr_t>(this), member.transient); continue; }
                     group.name = std::format("kgraph.{:x}", reinterpret_cast<std::uintptr_t>(member.id));
                     if (member.image.Get()) frameGraph.Import(group.name, member.image);
                     else frameGraph.Import(group.name, member.buffer);
@@ -8994,10 +9185,12 @@ namespace kgraph
 
             std::vector<std::vector<Declared>> declared(wanted.size());
             for (std::size_t i = 0; i < uses.size(); ++i) {
-                const std::string& name = groups.at(root(i)).name;
+                const Group& group = groups.at(root(i));
+                const std::string& name = group.name;
                 auto& list = declared[uses[i].pass];
                 const auto known = std::ranges::find(list, name, &Declared::name);
-                if (known == list.end()) list.push_back({ name, uses[i].read, uses[i].write });
+                const std::string transient = name.starts_with("kgraph.transient.") ? group.members.front().transient : std::string();
+                if (known == list.end()) list.push_back({ name, uses[i].read, uses[i].write, transient });
                 else { known->read = known->read || uses[i].read; known->write = known->write || uses[i].write; }
             }
             usesOf.clear();
@@ -9067,12 +9260,29 @@ namespace kgraph
                 ordered.push_back(std::move(declared[index]));
             }
             StepAgain(order, ordered);
+            // Each transient made by one pass: the first of them, in the order they go in, that writes it — or, written by
+            // none, the first that uses it. The frame graph runs that one first of them.
+            {
+                std::set<std::string, std::less<>> made;
+                for (const bool writer : { true, false })
+                    for (auto& uses : ordered)
+                        for (Declared& use : uses) {
+                            if (use.transient.empty() || (writer && !use.write) || made.contains(use.transient)) continue;
+                            const auto how = transients.find(use.transient);
+                            if (how == transients.end()) continue;
+                            use.image = how->second.image;
+                            use.buffer = how->second.buffer;
+                            made.insert(use.transient);
+                        }
+            }
             if (order != passOrder) {
                 // Which passes there are, or their order, changed: the order they are added in breaks ties, so all go in again.
                 for (auto* pass : passes | std::views::values) frameGraph.Remove(*pass);
                 passes.clear();
                 for (std::size_t i = 0; i < order.size(); ++i) {
                     GraphPass& pass = frameGraph.Add<GraphPass>(order[i], built.at(StepOf(order[i]).first).pass, std::move(ordered[i]));
+                    pass.board = board;
+                    if (const auto holds = holdsOf.find(StepOf(order[i]).first); holds != holdsOf.end()) pass.holds = holds->second;
                     if (const std::uint32_t step = StepOf(order[i]).second; step > 0) { pass.step = step; pass.steps = fixedNow; }
                     passes.emplace(order[i], &pass);
                 }
@@ -9083,6 +9293,8 @@ namespace kgraph
             for (std::size_t i = 0; i < order.size(); ++i) {
                 GraphPass* pass = passes.at(order[i]);
                 const auto& plan = built.at(StepOf(order[i]).first).pass;
+                const auto holds = holdsOf.find(StepOf(order[i]).first);
+                pass->holds = holds != holdsOf.end() ? holds->second : std::vector<std::pair<std::string, const void*>> {};
                 if (pass->plan != plan) {
                     declarations = declarations || pass->plan->readsScreen != plan->readsScreen || pass->plan->writesScreen != plan->writesScreen
                                 || pass->plan->async != plan->async;   // which queue it is on is said in its Setup
@@ -9968,6 +10180,7 @@ namespace kgraph
         const auto named = [&](const std::string& name) -> std::string {
             // (Their runtime's in the name: every runtime of a frame graph has a pass of some name, and they share its names.)
             if (name.starts_with("kgraph.set.")) return std::format("the entities' {}", name.substr(name.find('.', 11) + 1));
+            if (name.starts_with("kgraph.transient.")) return name.substr(name.find('.', 17) + 1);     // its node
             if (name.starts_with("kgraph.")) {
                 const auto at = reinterpret_cast<const void*>(static_cast<std::uintptr_t>(std::stoull(name.substr(7), nullptr, 16)));
                 if (const auto found = madeBy.find(at); found != madeBy.end()) return found->second;

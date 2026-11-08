@@ -59,6 +59,9 @@ namespace kgraph
         std::string kind;                   ///< "Image", "Shader", "ComputePipeline"...
         std::string node;                   ///< The node that made it.
         bool screen = false;                ///< The scene's window, which is the frame graph's to give.
+        /// A transient Image's or Buffer's: the frame graph makes it for the frame, sharing its memory with others never
+        /// needed at the same time. What its node first made stands in for it until the frame graph has made it.
+        bool transient = false;
         std::string label;                  ///< What a person calls it, when it has such a name: a model's mesh, as its file names it.
         std::shared_ptr<Resource> source;   ///< For a view: what it is a view of.
         /// What its node made in its place, when the node was built again: whoever holds this one is after that one.

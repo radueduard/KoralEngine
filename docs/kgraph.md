@@ -1375,6 +1375,29 @@ the node it is, its dependency level (passes of one level depend on none of each
 compute queue, its times, and what it reads and writes — by the node that made each resource, or the entities' set it
 is; then the passes left out, skipped or culled, and why; and the memory the frame graph made for itself.
 
+## Transient images and buffers
+
+An Image, a Buffer or a RenderTarget given `transient` is the **frame graph's**: made by it for the frame
+(`PassBuilder::Create`), its memory shared with others of the frame graph's that are never needed at the same time — two of
+one format, size and mips, say, the second written only after the last pass that reads the first. What it holds lasts
+from the pass that writes it to the last that uses it, this frame, and no further: one read before it is written, or a
+frame later (a History, a Keep), reads nothing it can count on. `Runtime::Frame()`'s `bytes` and `unsharedBytes` say what
+the sharing saves.
+
+What its node makes stands in for it until the frame graph has made it: the node is built as any Image or Buffer is, and
+so is what is wired from it. The pass that first writes it — or, written by none, the first that uses it — is where the
+frame graph makes it, as that stand-in is: its format, size, mips and usage, or its size, usage and that it is on the
+device. Once the frame graph has, the node gives that from then on, and what is wired from it — views, framebuffers,
+pipelines' sets — is built again with it, as for a resource made again in its place (`Resource::replacedBy`). The stand-in
+goes once nothing holds it. A pass still built with the stand-in records nothing: the frame or two this takes, and again
+whenever the frame graph is made again (another pass, a pass changed, the window resized for one sized by it), the passes
+that use a transient do not run. Two the frame graph shares are one object; which of them a pass uses is which it is wired
+from.
+
+A transient image is 2D, of one layer and one sample; a transient buffer is on the device (`eDeviceLocal`): one the CPU
+writes is one for each frame in flight, never shared. Anything else given `transient` says so on its node. A transient is
+for passes wired to it: an entity's parameter holds resources a node made of its own.
+
 ## Looking at what a node made
 
 `runtime.Watch(id)` copies what a node makes — its image or its buffer — out each frame from then on, and

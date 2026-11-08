@@ -1,6 +1,7 @@
 // What a pass can be asked to do: every way the framework draws, dispatches and copies has a node that says it.
 
 #include <gtest/gtest.h>
+#include <log.h>
 
 #include <algorithm>
 #include <string>
@@ -482,4 +483,25 @@ TEST_F(DrawTest, TheCatalogOffersEveryWayOfDrawing) {
     for (const char* type : { "TraceRays", "Resolve", "ClearBuffer", "CopyBufferToImage", "CopyImageToBuffer" }) EXPECT_NE(kgraph::FindType(type), nullptr) << type;
     const kgraph::NodeType* pipeline = kgraph::FindType("GraphicsPipeline");
     EXPECT_TRUE(std::ranges::find(pipeline->inputs, "vertex.layout", &kgraph::Port::name)->optional) << "a vertex shader that reads no vertices has no layout to give";
+}
+
+// Drawn into a transient: the canvas the frame graph's, by way of a view and a framebuffer of it, and shown. The draw
+// waits the frame or two the frame graph takes to make it — what stood in records nothing — and then draws as ever.
+TEST_F(DrawTest, ATriangleIsDrawnIntoATransientCanvas) {
+    const std::uint64_t logged = kor::log::LastSequence();
+    kgraph::Graph graph = Canvas();
+    graph.Find("canvas")->Set("transient", true);
+    Triangles(graph);
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto canvas = scene->runtime->ResourceOf("canvas");
+    ASSERT_TRUE(canvas);
+    EXPECT_TRUE(canvas->transient);
+    EXPECT_TRUE(Green(3, 3)) << "above the diagonal, the triangle";
+    EXPECT_TRUE(Black(28, 28)) << "below it, what the framebuffer was cleared to";
+    for (const auto& record : kor::log::HistorySince(logged))
+        if (record.message.find("VUID") != std::string::npos || record.level >= kor::log::Level::eError) ADD_FAILURE() << record.message;
 }

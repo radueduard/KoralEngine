@@ -336,8 +336,8 @@ and they are taken in this order:
    `enabled`. On a device without a second queue, the node's note says it runs on graphics. **Gate:** a Dispatch set
    async is scheduled async (`FrameGraph::Schedule`), and saved and loaded so. **Built** (2026-10-21). The `aliasing`
    switch is not: every resource of a graph is made by its node and imported into the frame graph, and the framework
-   aliases only what it makes itself (`PassBuilder::Create`). Aliasing in the graph waits for **transient** Image and
-   Buffer nodes, made by the frame graph for the frame, which is a later step.
+   aliases only what it makes itself (`PassBuilder::Create`). Aliasing in the graph is **transient** Image, Buffer and
+   RenderTarget nodes, made by the frame graph for the frame: **Built** (2026-11-08), see [kgraph.md](kgraph.md#transient-images-and-buffers).
 5. **Bundles.** ForEach, Filter and Entity give `element`, a Bundle of the component's fields and the transform. A
    **Bundle** node builds one and an **Unbundle** takes one apart, and a Function's output may be one. A Bundle fills the fields it reaches
    by exact name, and a wire to a single field takes precedence. What doesn't match stays an open port, and the node's

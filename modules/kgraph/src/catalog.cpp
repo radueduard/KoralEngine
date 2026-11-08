@@ -549,6 +549,13 @@ namespace kgraph
                     stages.choices = { "eVertex", "eMesh" };
                     add(std::move(stages));
                 }
+                if (description.name == "Image" || description.name == "Buffer") {
+                    Port transient { "transient", PortKind::eValue, "bool", false,
+                                     "Made by the frame graph for the frame, its memory shared with others of the frame graph's that are never needed at the same time: "
+                                     "what it holds lasts from the pass that writes it to the last that uses it, this frame, and no further. "
+                                     "A 2D image of one layer, or a buffer on the device.", nullptr };
+                    add(std::move(transient));
+                }
                 for (const auto& field : description.constructor) add(PortOf(std::string(field.name), field, false, field.doc));
                 for (const auto& setting : description.settings) {
                     // A pipeline's bindings and constants are the engine's to give, from what is wired: its
@@ -1061,7 +1068,11 @@ namespace kgraph
                 mips.optional = true;
                 Port layers = Number("arrayLayers", "How many layers: 1 when not given.");
                 layers.optional = true;
-                types.push_back({ "RenderTarget", "Resources", { std::move(format), std::move(scale), std::move(sizeOf), std::move(extent), std::move(mips), std::move(layers) },
+                Port transient { "transient", PortKind::eValue, "bool", false,
+                                 "Made by the frame graph for the frame, its memory shared with others of the frame graph's that are never needed at the same time, "
+                                 "as an Image's: what it holds lasts this frame, from the pass that writes it to the last that uses it.", nullptr };
+                transient.optional = true;
+                types.push_back({ "RenderTarget", "Resources", { std::move(format), std::move(scale), std::move(sizeOf), std::move(extent), std::move(mips), std::move(layers), std::move(transient) },
                                   { ResourcePort("out", "Image"), { "extent", PortKind::eValue, "vector", false, "How big it is: width, height and 1.", nullptr } },
                                   "An image a pass draws into, sized by the window — or by another image — times a scale: made again when that changes size. "
                                   "Its usage is what it is used as, as an Image's is.", nullptr });
