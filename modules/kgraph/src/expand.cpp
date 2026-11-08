@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <deque>
 #include <format>
 #include <functional>
 #include <optional>
@@ -510,7 +511,9 @@ namespace kgraph
      */
     static void WriteShorthands(Graph& graph, Expansion& out)
     {
-        std::vector<std::pair<std::string, Node>> made;     // each node made, and the one it goes before
+        // Each node made, and the one it goes before: a deque, so that a node `add` gave stays where it is while more are
+        // added — `add(...).Wire("a", made.id)` evaluates `made.id` after the add.
+        std::deque<std::pair<std::string, Node>> made;
         std::map<std::string, std::string, std::less<>> extents;    // a RenderTarget's `extent`, by its id: what gives it now
         const auto add = [&](const Node& at, std::string id, std::string type) -> Node& {
             Node node;
