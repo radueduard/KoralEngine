@@ -48,8 +48,11 @@ TEST(Rewrite, AMovedFileIsFoundByItsId)
     Database assets(root);
     assets.Scan();
     assets.AddBuiltIn(Kind::eMesh, "mesh/cube", "$cube");
-    std::ifstream in(root / "scene.json");
-    const std::string kept((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // Read and closed at once: an open file can't be removed on Windows, and the folder is, at the end.
+    const std::string kept = [&] {
+        std::ifstream in(root / "scene.json");
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }();
     std::size_t missing = 0;
     EXPECT_EQ(FromIds(kept, assets, &missing), R"({ "mesh": "@boat.gltf#2", "picture": "@brick/red.png", "shape": "$cube", "name": "@nothing.png", "label": "wall", "assets": "PbrMaterial @boat.gltf#material:1\nToon $cube" })");
     EXPECT_EQ(missing, 0u);
