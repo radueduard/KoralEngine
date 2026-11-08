@@ -348,8 +348,8 @@ and they are taken in this order:
 6. **The Frame view.** It shows only the Passes, in the order `FrameGraph::Schedule` runs them, grouped by dependency
    level, a lane for each queue, and a bar as wide as GPU time. Culled and skipped Passes are greyed, with the reason,
    and each resource is drawn from its first write to its last read, with `Memory()` used and saved by aliasing. It is
-   read-only: clicking goes to the node on its page. It is not a wall-clock GPU timeline: that waits for `kor` to
-   record when each pass starts. **Gate:** forward-plus's Frame view lists every Pass that ran, and only those, in
+   read-only: clicking goes to the node on its page. Since then it has a timeline of the frame too: `kor` records when
+   each pass starts, and the view draws each pass on its thread and its queue. **Gate:** forward-plus's Frame view lists every Pass that ran, and only those, in
    order. **Built** (2026-10-21).
 7. **The engine's first Functions:** Camera (a Bundle out), SunShadows, Bloom and Tonemap, made from
    forward-plus's graph, their shaders the engine's (`koral_shadow`, `koral_bloom`, `koral_tonemap`). **Gate:**
