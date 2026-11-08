@@ -15,6 +15,11 @@ target_compile_definitions(koral-engine PRIVATE KENGINE_BUILD)
 target_link_libraries(koral-engine PRIVATE keditor kgraph kscript kecs PUBLIC Koral::Koral)
 koral_engine_runtime(koral-engine)   # its modules are its own, linked privately: kengine_tests, beside it, would not have them
 target_compile_options(koral-engine PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra>)
+if(MSVC)
+    # No manifest of its own, as Koral's modules have none: loaded from C#, its import of Koral.dll is then resolved by the
+    # manifest beside Koral (NativeLibraryResolver.LoadBesideKoral), not to the managed assembly of that name.
+    target_link_options(koral-engine PRIVATE /MANIFEST:NO)
+endif()
 
 if(KORAL_ENGINE_BUILD_TESTS)
     # Only what a program in another language has: the framework, and this library through its C interface.
