@@ -8408,6 +8408,14 @@ public extension {0} : IKoralMaterial {{
                 std::vector<kui::Widget> rows;
                 rows.push_back(Heading(id));
                 rows.push_back(kgui::Muted(node.type));
+                rows.push_back(kui::Tooltip("Its name: what wires, files and components know it by. Changed, they follow; a script that reaches it by name does not.",
+                    kgui::Labeled("Name", kui::TextField(kui::TextFieldOptions { .text = id, .placeholder = id,
+                        .onSubmitted = [this, id](const std::string& typed) {
+                            std::string why;
+                            if (typed == id) return;
+                            if (Doc().RenameNode(id, typed, &why)) _session->Select(typed);
+                            else _session->Say(std::format("'{}' is not renamed: {}", id, why), true);
+                        } }).Key("name " + id), LabelWidth)));
                 if (node.type != "Reference")
                     rows.push_back(kui::Tooltip("What it is called on the graph. Its name stays what wires, files and components know it by.",
                         kgui::Labeled("Title", kui::TextField(kui::TextFieldOptions { .text = node.title, .placeholder = id,

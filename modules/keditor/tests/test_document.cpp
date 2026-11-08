@@ -582,6 +582,40 @@ TEST_F(DocumentTest, APortShownAndNotWiredIsKeptWithTheScene) {
     EXPECT_EQ(opened.scene->Doc().Graph().Find("picture")->shown, std::vector<std::string> { "out:size" });
 }
 
+// A node renamed: its wires follow, and so does the component of its parameters each entity holds — what each holds
+// of it kept — so the picture is what it was. A name taken, or one the engine writes out itself, is no name for it.
+TEST_F(DocumentTest, ANodeRenamedTakesItsWiresAndItsComponentWithIt) {
+    scene::MakeProject("renamed");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    scene::BuildGraph(doc);
+    const auto entities = scene::BuildEntities(doc);
+    Frame();
+    Frame();
+    editing.ExpectQuarters("as built");
+    const kgraph::Value gain = doc.Field(entities[2], "stamp", "gain");
+
+    std::string error;
+    ASSERT_TRUE(doc.RenameNode("stamp", "printer", &error)) << error;
+    EXPECT_EQ(doc.Graph().Find("stamp"), nullptr);
+    ASSERT_NE(doc.Graph().Find("printer"), nullptr);
+    const auto& run = doc.Graph().Find("run")->inputs.at("pipeline");
+    ASSERT_TRUE(run.link);
+    EXPECT_EQ(run.link->node, "printer") << "its wires follow";
+    EXPECT_EQ(doc.Field(entities[2], "printer", "gain"), gain) << "each entity keeps what it holds of its component, by its new name";
+    EXPECT_EQ(doc.World().Find("stamp"), kecs::NoComponent) << "no component of the old name is left";
+    for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    editing.ExpectQuarters("renamed");
+
+    EXPECT_FALSE(doc.RenameNode("printer", "show", &error)) << "a name taken";
+    EXPECT_NE(error.find("already"), std::string::npos) << error;
+    EXPECT_FALSE(doc.RenameNode("printer", "a [1]", &error)) << "a loop's turn's";
+    EXPECT_FALSE(doc.RenameNode("printer", "", &error));
+    EXPECT_FALSE(doc.RenameNode("nothing", "else", &error));
+}
+
 // Nodes made a function: a file of the project's, and a call in their place wired as they were. Opened in place, it is
 // changed for every call; written out, a call is its nodes again.
 TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {

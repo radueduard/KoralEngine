@@ -486,8 +486,9 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 ## Not yet
 
 - **The Hub** doesn't know engine projects. They open and run from the editor and from `koral-play`.
-- **A node can't be renamed** after it is made: its name is what wires, files and components know it by. What it
-  is called on the graph — its title — is set in the inspector.
+- **A node renamed** (its Name, in the inspector) takes its wires, what names it by id and its component with it, each
+  entity keeping what it holds of it. A script that reaches its resource by the name it had does not follow: that is the
+  script's to change.
 - **One scene a project** in the interface. `project.json` can list more, and `koral-play` takes a scene
   file, but the editor opens the starting one only.
 - **An entity's own image or buffer** has to come from a node. Nothing in the editor makes a resource per

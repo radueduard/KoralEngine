@@ -1787,6 +1787,48 @@ namespace keditor
         return true;
     }
 
+    bool Document::RenameNode(const std::string_view id, std::string to, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return false; };
+        kgraph::Graph graph = Graph();
+        kgraph::Node* node = graph.Find(id);
+        if (!node) return fail(std::format("there is no node '{}'", id));
+        if (to == id) return true;
+        if (to.empty()) return fail("a node's name is something");
+        if (to.find('/') != std::string::npos || to.find(" [") != std::string::npos || to.starts_with('$') || to.starts_with('@'))
+            return fail(std::format("'{}' is a name the engine gives what it writes out: '/' a function's nodes, ' [' a loop's turns, '$' and '@' its own", to));
+        if (graph.Find(to)) return fail(std::format("there is a node called '{}' already", to));
+        const std::string from(id);
+        // Its component, each entity's of its parameters: renamed with it, what each holds kept (World::Reshape).
+        const kecs::ComponentId component = Runtime().ComponentOf(from);
+        if (_world.Find(to) != kecs::NoComponent) return fail(std::format("there is a component called '{}' already: its node's would be two of one name", to));
+        node->id = to;
+        for (auto& each : graph.nodes)
+            for (auto& [name, input] : each.inputs) {
+                if (input.link && input.link->node == from) input.link->node = to;
+                if (!input.link && (name == "node" || name == "of" || name == "first"))
+                    if (const std::string* named = input.value.String(); named && *named == from) input.value = kgraph::Value(to);
+            }
+        if (component != kecs::NoComponent) {
+            // What names the component — a ForEach's, a Filter's `with` — names it as it is called now.
+            for (auto& each : graph.nodes)
+                for (auto& [name, input] : each.inputs) {
+                    if (input.link) continue;
+                    if ((name == "component" || name == "groupBy") && input.value.String() && *input.value.String() == from) input.value = kgraph::Value(to);
+                    if ((name == "with" || name == "without") && input.value.Items()) {
+                        kgraph::Value::List items = *input.value.Items();
+                        for (auto& item : items) if (item.String() && *item.String() == from) item = kgraph::Value(to);
+                        input.value = kgraph::Value(std::move(items));
+                    }
+                }
+            kecs::ComponentDescription renamed = _world.Describe(component);
+            renamed.name = to;
+            (void)_world.Reshape(component, std::move(renamed));
+        }
+        Apply(std::move(graph));
+        return true;
+    }
+
     bool Document::SetShown(const std::string_view id, const std::string_view name, const bool shown)
     {
         kgraph::Graph graph = Graph();

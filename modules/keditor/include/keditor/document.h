@@ -245,6 +245,14 @@ namespace keditor
         void MoveNodes(const std::vector<std::string>& ids, double dx, double dy);
         bool SetTitle(std::string_view node, std::string title);
         /**
+         * @brief Gives a node another name — its id, what wires, files and components know it by: every wire to it, and
+         *        whatever names it by id (a Reference, a Previous, an Element), follows; so does the component its
+         *        parameters are for each entity (a pipeline's), every entity keeping what it holds of it. A script that
+         *        reaches its resource by the name it had does not. False, with @p error saying why, for a name that is
+         *        taken, empty, or one the engine writes out itself (with `/`, ` [`, or starting `$` or `@`).
+         */
+        bool RenameNode(std::string_view node, std::string to, std::string* error = nullptr);
+        /**
          * @brief How a model file's meshes are read: which attributes are left out (not held at all) and which buffers
          *        the rest are put in. @p file is the file as its meshes' names have it: `sponza.gltf` of
          *        `@sponza.gltf#3`. The default is no entry. An edit of the graph like any: taken back, and saved with
