@@ -20,7 +20,8 @@ namespace kgraph
     struct BlockField {
         std::string name;               ///< From the element: `position`, `material.albedo`, `cascades[1].split`.
         std::uint32_t offset = 0;       ///< Where it is, in bytes from the start of the element.
-        char scalar = 'f';              ///< 'f' a float, 'i' an int, 'u' a uint, 'b' a bool: four bytes each.
+        char scalar = 'f';              ///< 'f' a float, 'i' an int, 'u' a uint, 'b' a bool.
+        std::uint32_t bytes = 4;        ///< Of one number: 2 (a half, an int16_t), 4, or 8 (a double, an int64_t). A bool is 4.
         std::uint32_t components = 1;   ///< How many numbers one after another: a vector's, or one line of a matrix.
         std::uint32_t lines = 1;        ///< A matrix's lines; 1 for a number or a vector.
         std::uint32_t lineStride = 0;   ///< Bytes from one line of a matrix to the next.
@@ -40,10 +41,17 @@ namespace kgraph
         std::uint32_t first = 0;        ///< Where the first element is, in bytes from the start of the buffer.
         std::uint32_t stride = 0;       ///< Bytes from one element to the next: one element's size, for a block of one.
         std::vector<BlockField> fields;
+        /// Of a block with fields before its array (`buffer B { uint count; Light lights[]; }`): those, once for the
+        /// buffer, each where it is from the buffer's start. Empty for any other.
+        std::vector<BlockField> header;
 
         [[nodiscard]] const BlockField* Find(std::string_view field) const;
+        [[nodiscard]] const BlockField* FindHeader(std::string_view field) const;
     };
 
     /** @brief Every uniform and storage buffer the compiled shader @p spirv declares. Empty when it is no SPIR-V. */
     [[nodiscard]] std::vector<BlockLayout> BlocksOf(std::span<const std::uint32_t> spirv);
+
+    /** @brief A float as a half's 16 bits: rounded to the nearest, ties to even; past 65504 an infinity; below 2^-14 a subnormal. */
+    [[nodiscard]] std::uint16_t HalfOf(float value);
 }

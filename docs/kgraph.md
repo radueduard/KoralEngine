@@ -1505,8 +1505,11 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
   `BITANGENT`), for a normal map's frame; one leaving them out (an import's `leaveOut`) has the shader work it out, as
   `samples/forward-plus` does.
 - A ShaderBuffer reads the struct of a buffer an entry point uses: a struct no entry point reaches is not in the
-  compiled shader. Numbers of 16 or 64 bits, and arrays of arrays, are left as zero. Of a block with fields before
-  its array (`buffer B { uint count; Light lights[]; }`) only the array is filled.
+  compiled shader. Numbers of 16 and 64 bits are written at their widths (a half, an int16_t, a double, a uint64_t), and an
+  array of arrays is a field for each of the outer (`grid[1]`), each an array of the inner. A block with fields before
+  its array (`buffer B { uint count; Light lights[]; }`) has them as fields of the buffer, once, not of each element: a
+  `field.count` given or wired is written where the shader has it. Looked at in the editor, a buffer's table leaves out
+  what is not of 32 bits.
 - What is worked out between a ForEach and a buffer is worked out for each element whose entity changed: an element is
   kept, not worked out again, while its entity, what is read of it, where it is and what the nodes between read besides
   are as they were. Ten thousand lights, none changed, cost a frame about 18 ms in Debug, against 740 ms when all did

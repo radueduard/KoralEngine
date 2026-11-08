@@ -6,6 +6,8 @@
 #include "blocks.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <array>
 #include <format>
 #include <map>
@@ -113,7 +115,7 @@ namespace kgraph
             return module;
         }
 
-        /** A number, a vector or a matrix as a field; nothing for anything else, or for numbers that are not of 32 bits. */
+        /** A number, a vector or a matrix as a field — of 16, 32 or 64 bits; nothing for anything else. */
         std::optional<BlockField> Leaf(const Module& module, const std::uint32_t id, const std::uint32_t matrixStride, const bool rowMajor)
         {
             const Type* type = module.Find(id);
@@ -122,52 +124,74 @@ namespace kgraph
             if (type && type->op == OpTypeMatrix) { columns = type->count; type = module.Find(type->of); }
             if (type && type->op == OpTypeVector) { field.components = type->count; type = module.Find(type->of); }
             if (!type) return std::nullopt;
+            const bool sized = type->width == 16 || type->width == 32 || type->width == 64;
             if (type->op == OpTypeBool) field.scalar = 'b';
-            else if (type->op == OpTypeFloat && type->width == 32) field.scalar = 'f';
-            else if (type->op == OpTypeInt && type->width == 32) field.scalar = type->isSigned ? 'i' : 'u';
+            else if (type->op == OpTypeFloat && sized) field.scalar = 'f';
+            else if (type->op == OpTypeInt && sized) field.scalar = type->isSigned ? 'i' : 'u';
             else return std::nullopt;
+            if (type->op != OpTypeBool) field.bytes = type->width / 8;
             if (columns > 1) {
                 // In memory a matrix is its columns one after another, or — decorated so — its rows.
                 field.lines = columns;
                 if (rowMajor) std::swap(field.lines, field.components);
-                field.lineStride = matrixStride != 0 ? matrixStride : field.components * 4;
+                field.lineStride = matrixStride != 0 ? matrixStride : field.components * field.bytes;
             }
             return field;
         }
 
-        /** Every value in struct @p id, and in the structs in it: each by its path, where it is from @p base. */
-        void Flatten(const Module& module, const std::uint32_t id, const std::string& prefix, const std::uint32_t base, std::vector<BlockField>& out, const int depth = 0)
+        void Flatten(const Module& module, std::uint32_t id, const std::string& prefix, std::uint32_t base, std::vector<BlockField>& out, int depth = 0);
+
+        /**
+         * One member's values, of type @p of, as fields: a value is one; a struct its own, each by its path; an array of
+         * values one field of so many; an array of structs or of arrays — the first 64 of it — each element by itself
+         * (`name[1]`), an array of arrays so as many fields each an array.
+         */
+        void Place(const Module& module, const std::uint32_t of, const std::string& name, const std::uint32_t offset, const Member& member,
+                   std::vector<BlockField>& out, const int depth)
         {
-            const Type* type = module.Find(id);
-            if (!type || type->op != OpTypeStruct || depth > 8) return;
-            for (std::uint32_t i = 0; i < type->members.size(); ++i) {
-                const Member member { id, i };
-                const auto named = module.memberNames.find(member);
-                const std::string name = prefix + (named == module.memberNames.end() || named->second.empty() ? std::format("member{}", i) : named->second);
-                const std::uint32_t offset = base + Module::At(module.offsets, member);
-                std::uint32_t of = type->members[i], count = 1, stride = 0;
-                const Type* each = module.Find(of);
-                if (each && each->op == OpTypeArray) {
-                    count = Module::At(module.constants, each->count);
-                    stride = Module::At(module.arrayStrides, of);
-                    of = each->of;
-                    each = module.Find(of);
+            const Type* each = module.Find(of);
+            if (!each || depth > 8) return;
+            if (each->op == OpTypeArray) {
+                const std::uint32_t count = Module::At(module.constants, each->count), stride = Module::At(module.arrayStrides, of);
+                const Type* element = module.Find(each->of);
+                if (!element || count == 0) return;
+                if (element->op == OpTypeStruct || element->op == OpTypeArray) {
+                    for (std::uint32_t at = 0; at < std::min(count, MostElements); ++at)
+                        Place(module, each->of, std::format("{}[{}]", name, at), offset + at * stride, member, out, depth + 1);
+                    return;
                 }
-                if (!each || count == 0) continue;
-                if (each->op == OpTypeStruct) {
-                    if (count == 1 && stride == 0) Flatten(module, of, name + ".", offset, out, depth + 1);
-                    else
-                        for (std::uint32_t element = 0; element < std::min(count, MostElements); ++element)
-                            Flatten(module, of, std::format("{}[{}].", name, element), offset + element * stride, out, depth + 1);
-                    continue;
-                }
-                auto field = Leaf(module, of, Module::At(module.matrixStrides, member), module.rowMajor.contains(member));
-                if (!field) continue;   // an array of arrays, an array with no end inside an element, a double
+                auto field = Leaf(module, each->of, Module::At(module.matrixStrides, member), module.rowMajor.contains(member));
+                if (!field) return;
                 field->name = name;
                 field->offset = offset;
                 field->count = count;
                 field->arrayStride = stride;
                 out.push_back(std::move(*field));
+                return;
+            }
+            if (each->op == OpTypeStruct) { Flatten(module, of, name + ".", offset, out, depth + 1); return; }
+            auto field = Leaf(module, of, Module::At(module.matrixStrides, member), module.rowMajor.contains(member));
+            if (!field) return;     // an array with no end inside an element
+            field->name = name;
+            field->offset = offset;
+            out.push_back(std::move(*field));
+        }
+
+        /** The name of member @p i of a struct, as the shader gives it. */
+        std::string MemberName(const Module& module, const Member& member)
+        {
+            const auto named = module.memberNames.find(member);
+            return named == module.memberNames.end() || named->second.empty() ? std::format("member{}", member.second) : named->second;
+        }
+
+        /** Every value in struct @p id, and in the structs in it: each by its path, where it is from @p base. */
+        void Flatten(const Module& module, const std::uint32_t id, const std::string& prefix, const std::uint32_t base, std::vector<BlockField>& out, const int depth)
+        {
+            const Type* type = module.Find(id);
+            if (!type || type->op != OpTypeStruct || depth > 8) return;
+            for (std::uint32_t i = 0; i < type->members.size(); ++i) {
+                const Member member { id, i };
+                Place(module, type->members[i], prefix + MemberName(module, member), base + Module::At(module.offsets, member), member, out, depth);
             }
         }
 
@@ -184,6 +208,12 @@ namespace kgraph
     {
         const auto it = std::ranges::find(fields, field, &BlockField::name);
         return it == fields.end() ? nullptr : &*it;
+    }
+
+    const BlockField* BlockLayout::FindHeader(const std::string_view field) const
+    {
+        const auto it = std::ranges::find(header, field, &BlockField::name);
+        return it == header.end() ? nullptr : &*it;
     }
 
     std::vector<BlockLayout> BlocksOf(const std::span<const std::uint32_t> spirv)
@@ -211,6 +241,9 @@ namespace kgraph
             if (tail && tail->op == OpTypeRuntimeArray) {
                 // As many of one thing as there is room for: the thing is what is laid out, wherever in the block they start.
                 layout.array = true;
+                // What is before the array, once for the buffer: each where it is from the buffer's start.
+                for (std::uint32_t i = 0; i < last; ++i)
+                    Place(module, block->members[i], MemberName(module, { id, i }), Module::At(module.offsets, Member { id, i }), { id, i }, layout.header, 0);
                 layout.first = Module::At(module.offsets, Member { id, last });
                 layout.stride = Module::At(module.arrayStrides, block->members[last]);
                 const Type* element = module.Find(tail->of);
@@ -230,11 +263,29 @@ namespace kgraph
                 if (field.name.ends_with(".data")) field.name.erase(field.name.size() - 5);
             std::uint32_t end = 0;
             for (const auto& field : layout.fields)
-                end = std::max(end, field.offset + (field.count - 1) * field.arrayStride + (field.lines - 1) * field.lineStride + field.components * 4);
+                end = std::max(end, field.offset + (field.count - 1) * field.arrayStride + (field.lines - 1) * field.lineStride + field.components * field.bytes);
             if (layout.stride == 0) layout.stride = (end + 15) / 16 * 16;
             if (layout.fields.empty() || layout.stride < end) continue;
             blocks.push_back(std::move(layout));
         }
         return blocks;
+    }
+}
+
+namespace kgraph
+{
+    std::uint16_t HalfOf(const float value)
+    {
+        const std::uint32_t bits = std::bit_cast<std::uint32_t>(value);
+        const auto sign = static_cast<std::uint16_t>((bits >> 16) & 0x8000u);
+        const std::uint32_t magnitude = bits & 0x7FFFFFFFu;
+        if (magnitude >= 0x7F800000u) return static_cast<std::uint16_t>(sign | 0x7C00u | (magnitude > 0x7F800000u ? 0x200u : 0u));   // inf, NaN
+        if (magnitude >= 0x477FF000u) return static_cast<std::uint16_t>(sign | 0x7C00u);                                           // past 65504
+        if (magnitude < 0x38800000u) {                                                                                             // a subnormal
+            const float scaled = std::bit_cast<float>(magnitude) * 16777216.0f;   // in units of 2^-24, the least a half holds
+            return static_cast<std::uint16_t>(sign | static_cast<std::uint16_t>(std::lrint(scaled)));
+        }
+        const std::uint32_t rounded = magnitude + 0xFFFu + ((magnitude >> 13) & 1u);     // to nearest, ties to even
+        return static_cast<std::uint16_t>(sign | ((rounded - 0x38000000u) >> 13));
     }
 }

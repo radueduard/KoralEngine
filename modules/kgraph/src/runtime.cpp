@@ -6164,11 +6164,24 @@ namespace kgraph
                 for (std::uint32_t line = 0; line < field.lines; ++line)
                     for (std::uint32_t component = 0; component < field.components; ++component, ++next) {
                         const double number = next < numbers.size() ? numbers[next] : 0.0;
-                        std::byte* at = element + field.offset + item * field.arrayStride + line * field.lineStride + component * 4;
-                        if (field.scalar == 'f') { const auto v = static_cast<float>(number); std::memcpy(at, &v, 4); }
-                        else if (field.scalar == 'i') { const auto v = static_cast<std::int32_t>(std::llround(number)); std::memcpy(at, &v, 4); }
-                        else if (field.scalar == 'b') { const std::uint32_t v = number != 0.0 ? 1 : 0; std::memcpy(at, &v, 4); }
-                        else { const auto v = static_cast<std::uint32_t>(std::llround(std::max(number, 0.0))); std::memcpy(at, &v, 4); }
+                        std::byte* at = element + field.offset + item * field.arrayStride + line * field.lineStride + component * field.bytes;
+                        const auto put = [&](const auto v) { std::memcpy(at, &v, sizeof(v)); };
+                        if (field.scalar == 'b') put(std::uint32_t { number != 0.0 ? 1u : 0u });
+                        else if (field.scalar == 'f') {
+                            if (field.bytes == 2) put(HalfOf(static_cast<float>(number)));
+                            else if (field.bytes == 8) put(number);
+                            else put(static_cast<float>(number));
+                        } else if (field.scalar == 'i') {
+                            const long long whole = std::llround(number);
+                            if (field.bytes == 2) put(static_cast<std::int16_t>(std::clamp<long long>(whole, INT16_MIN, INT16_MAX)));
+                            else if (field.bytes == 8) put(static_cast<std::int64_t>(whole));
+                            else put(static_cast<std::int32_t>(whole));
+                        } else {
+                            const long long whole = std::llround(std::max(number, 0.0));
+                            if (field.bytes == 2) put(static_cast<std::uint16_t>(std::min<long long>(whole, UINT16_MAX)));
+                            else if (field.bytes == 8) put(static_cast<std::uint64_t>(whole));
+                            else put(static_cast<std::uint32_t>(whole));
+                        }
                     }
         }
 
@@ -6284,7 +6297,7 @@ namespace kgraph
             if (first) std::memcpy(bytes.data() + layout.first, first->bytes.data() + layout.first, before * layout.stride);
             // Where each field's value is: on the node, or in what another node gives — which changes where it is, a
             // row after another. And which of the entities' values anything asks for: only those are worked out.
-            std::vector<std::pair<const BlockField*, const Value*>> fields;
+            std::vector<std::pair<const BlockField*, const Value*>> fields, headers;
             std::set<std::string, std::less<>> asked;
             const auto asks = [&](const Node& of) {
                 for (const auto& input : of.inputs | std::views::values)
@@ -6296,13 +6309,16 @@ namespace kgraph
             for (const auto& [name, input] : node.inputs) {
                 if (!name.starts_with("field.")) continue;
                 const BlockField* field = layout.Find(std::string_view(name).substr(6));
+                // One of what is before the array: once for the buffer.
+                auto* into = &fields;
+                if (!field && (field = layout.FindHeader(std::string_view(name).substr(6)))) into = &headers;
                 if (!field) continue;
-                if (!input.link) { if (!input.value.IsNull()) fields.emplace_back(field, &input.value); continue; }
+                if (!input.link) { if (!input.value.IsNull()) into->emplace_back(field, &input.value); continue; }
                 const auto from = built.find(input.link->node);
                 if (from == built.end() || !from->second.status.ok) return;
                 const auto output = from->second.outputs.find(input.link->output);
                 if (output == from->second.outputs.end()) return;
-                fields.emplace_back(field, &output->second.value);
+                into->emplace_back(field, &output->second.value);
             }
             // Rows as they were are not worked out again: each is keyed by what it is worked out of, where that can be said.
             std::vector<Value> context;
@@ -6334,6 +6350,9 @@ namespace kgraph
                 SetRow(*source, 0);
                 for (const auto& id : mapped.chain) Refresh(id);
             }
+            // What is before the array, once, where it is from the buffer's start.
+            for (const auto& [field, value] : headers)
+                if (!value->IsNull()) Put(*field, *value, bytes.data());
             mapped.rowKeys = std::move(keys);
             mapped.keySize = keySize;
             mapped.keyedRows = keySize > 0 ? rows : 0;
@@ -6349,8 +6368,12 @@ namespace kgraph
         /** A field of an element as a shader writes its type: `float3`, `float4x4`, `uint[4]`. */
         static std::string FieldKind(const BlockField& field)
         {
-            static const std::map<char, const char*> scalars { { 'f', "float" }, { 'i', "int" }, { 'u', "uint" }, { 'b', "bool" } };
-            std::string kind = scalars.at(field.scalar);
+            static const std::map<std::pair<char, std::uint32_t>, const char*> scalars {
+                { { 'f', 4 }, "float" }, { { 'i', 4 }, "int" }, { { 'u', 4 }, "uint" }, { { 'b', 4 }, "bool" },
+                { { 'f', 2 }, "half" }, { { 'i', 2 }, "int16_t" }, { { 'u', 2 }, "uint16_t" },
+                { { 'f', 8 }, "double" }, { { 'i', 8 }, "int64_t" }, { { 'u', 8 }, "uint64_t" } };
+            const auto named = scalars.find({ field.scalar, field.bytes });
+            std::string kind = named != scalars.end() ? named->second : "?";
             if (field.lines > 1) kind += std::format("{}x{}", field.lines, field.components);
             else if (field.components > 1) kind += std::to_string(field.components);
             if (field.count > 1) kind += std::format("[{}]", field.count);
@@ -6367,6 +6390,14 @@ namespace kgraph
                             std::format("{}.{}: a {}, at byte {} of an element.", layout.type, field.name, FieldKind(field), field.offset), nullptr };
                 if (field.scalar == 'f' && field.components >= 3 && field.lines == 1 && field.count == 1 && NamesColor(field.name)) port.editor = "color";
                 out.ports.push_back(std::move(port));
+                has += std::format("{}{}", has.empty() ? "" : ", ", field.name);
+            }
+            // What is before the array, once for the buffer: a field of its own, unless an element's has its name.
+            for (const auto& field : layout.header) {
+                if (layout.Find(field.name)) continue;
+                const bool matrix = field.lines > 1 && field.count == 1;
+                out.ports.push_back({ "field." + field.name, PortKind::eValue, field.Numbers() == 1 ? (field.scalar == 'b' ? "bool" : "number") : matrix ? "matrix" : "vector", false,
+                                      std::format("{}: a {}, at byte {} of the buffer, before its elements: once for it, not for each.", field.name, FieldKind(field), field.offset), nullptr });
                 has += std::format("{}{}", has.empty() ? "" : ", ", field.name);
             }
             return has.empty() ? std::string("none") : has;
@@ -9779,7 +9810,9 @@ namespace kgraph
             if (node && node->mapped) {
                 peek.stride = node->mapped->layout.stride;
                 peek.count = static_cast<std::uint32_t>(node->mapped->count);
-                for (const auto& field : node->mapped->layout.fields) peek.fields.push_back({ field.name, field.offset, field.scalar, field.Numbers() });
+                // Of 32 bits a number, as what looks at it reads them: one of 16 or 64 is the node's to say, not a table's.
+                for (const auto& field : node->mapped->layout.fields)
+                    if (field.bytes == 4) peek.fields.push_back({ field.name, field.offset, field.scalar, field.Numbers() });
             } else if (const Node* drawn = _impl->current ? _impl->CurrentNode(id) : nullptr; node && node->packed && drawn && drawn->type == "IndirectDraws") {
                 // An IndirectDraws': a VkDrawIndexedIndirectCommand a mesh — how many of it are drawn, from which instance.
                 peek.stride = 20;
