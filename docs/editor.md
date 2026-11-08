@@ -498,7 +498,6 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
   dropped on. An entity is renamed in the inspector, not in the scene tree.
 - **A component the shader makes starts at zero**: a new `default` is black until its colour is set. The objects set them. Objects have no icons.
 - **The scene view's toolbar is words**, and a menu line that is on is marked with a `*`.
-- `Project, Run` finds `koral-play` beside the editor on Linux only. Elsewhere it has to be on the path.
 
 ## Looking at what a node holds
 
