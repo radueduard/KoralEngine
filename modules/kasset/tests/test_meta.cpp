@@ -31,7 +31,8 @@ TEST(Meta, KeptInTheProjectsMetaFolder)
 {
     // From the project's folder, and whole: in the same folders under .koral/meta.
     EXPECT_EQ(MetaPathOf({}, "assets/wall.png"), std::filesystem::path(".koral/meta/assets/wall.png.meta"));
-    const std::filesystem::path root = std::filesystem::path("C:/game").lexically_normal();
+    // A folder absolute on every system: "C:/game" is a relative path on Linux.
+    const std::filesystem::path root = (std::filesystem::temp_directory_path() / "game").lexically_normal();
     EXPECT_EQ(MetaPathOf(root, root / "scripts/solver/Crew.kt"), root / ".koral/meta/scripts/solver/Crew.kt.meta");
     EXPECT_EQ(FileOfMeta(root, root / ".koral/meta/scripts/solver/Crew.kt.meta"), root / "scripts/solver/Crew.kt");
     // A generator is its own; and where metas were kept before, beside their files.
