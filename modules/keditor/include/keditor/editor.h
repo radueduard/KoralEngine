@@ -163,8 +163,9 @@ namespace keditor
          */
         /** @brief Whether the view is being looked round with the mouse: the mouse is captured while it is. */
         [[nodiscard]] bool Aiming() const { return _aiming; }
-        void Show(const std::string& node, const std::string& input) { _asked[node].insert(input); ++_changes; }
-        void Hide(const std::string& node, const std::string& input) { _asked[node].erase(input); ++_changes; }
+        /** @brief Shows input @p input of @p node — an output by `out:<name>` — though nothing is given it: kept with the node, and saved (Document::SetShown). */
+        void Show(const std::string& node, const std::string& input);
+        void Hide(const std::string& node, const std::string& input);
         /** @brief Whether a part of a node's inspector (Port::group) is open: as it was left, or — never opened nor closed — @p otherwise. */
         [[nodiscard]] bool SectionOpen(const std::string& node, const std::string& group, const bool otherwise) const
         {
@@ -174,11 +175,7 @@ namespace keditor
             return open == it->second.end() ? otherwise : open->second;
         }
         void OpenSection(const std::string& node, const std::string& group, const bool open) { _sections[node][group] = open; ++_changes; }
-        [[nodiscard]] bool Asked(const std::string& node, const std::string& input) const
-        {
-            const auto it = _asked.find(node);
-            return it != _asked.end() && it->second.contains(input);
-        }
+        [[nodiscard]] bool Asked(const std::string& node, const std::string& input) const;
         /** @brief The project's shader modules, by name: the .slang files of its shaders folder. Empty without a project. */
         [[nodiscard]] std::vector<std::string> ShaderModules() const;
         /** @brief The entry points a module of the project declares, in the order it does. */
@@ -1100,7 +1097,6 @@ namespace keditor
         std::string _status = "A scene with nothing in it. Right-click the graph to add a node.";
         bool _failed = false;
         std::uint64_t _changes = 0;
-        std::map<std::string, std::set<std::string>> _asked;
         std::map<std::string, std::map<std::string, bool>> _sections;   // which parts of a node's inspector were opened or closed
         std::set<kecs::Entity> _folded;
         std::string _pass;

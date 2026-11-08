@@ -23,6 +23,7 @@ TEST(Graph, IsSavedAndLoadedAsItWas) {
     pipeline.x = 120.5;
     pipeline.y = -40;
     pipeline.Wire("computeShader", "shader").Wire("param.target", "target").Set("constant.level", 0.25);
+    pipeline.shown = { "compute.element", "out:size" };     // shown, though nothing is given them: kept with it
     graph.Add("state", "GraphicsPipeline").Set("rasterizationState", Value::Members { { "cullMode", Value::List { "eBack" } }, { "lineWidth", 1.0 } });
     graph.Add("flag", "Bool").Set("value", true);
 

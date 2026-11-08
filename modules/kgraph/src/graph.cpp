@@ -244,6 +244,11 @@ namespace kgraph
                 for (const auto& [input, where] : node.placed) placed.emplace_back(input, Value(where));
                 out += std::format(",\n      \"placed\": {}", Value(std::move(placed)).ToJson());
             }
+            if (!node.shown.empty()) {
+                Value::List shown;
+                for (const auto& name : node.shown) shown.emplace_back(name);
+                out += std::format(",\n      \"shown\": {}", Value(std::move(shown)).ToJson());
+            }
             out += std::format(",\n      \"at\": {}", Value(Value::List { node.x, node.y }).ToJson());
             out += ",\n      \"inputs\": {";
             bool first = true;
@@ -292,6 +297,9 @@ namespace kgraph
             if (const json::Value* placed = item.Find("placed"); placed && placed->kind == json::Value::Kind::eObject)
                 for (const auto& [input, where] : placed->members)
                     if (where.kind == json::Value::Kind::eString && (where.string == "node" || where.string == "inspector")) node.placed[input] = where.string;
+            if (const json::Value* shown = item.Find("shown"); shown && shown->kind == json::Value::Kind::eArray)
+                for (const auto& name : shown->items)
+                    if (name.kind == json::Value::Kind::eString && !name.string.empty() && !std::ranges::contains(node.shown, name.string)) node.shown.push_back(name.string);
             if (const json::Value* inputs = item.Find("inputs"))
                 for (const auto& [name, value] : inputs->members) {
                     const json::Value* link = value.kind == json::Value::Kind::eObject ? value.Find("$link") : nullptr;

@@ -2209,11 +2209,27 @@ class $NAME : ResourceScript() {
             if (name.size() <= list.size() + 2 || !name.starts_with(list) || name[list.size()] != '[') return;
             size = std::max(size, std::atoi(name.data() + list.size() + 1) + 1);
         };
-        if (const kgraph::Node* found = _play.Doc().Graph().Find(node))
+        if (const kgraph::Node* found = _play.Doc().Graph().Find(node)) {
             for (const auto& name : found->inputs | std::views::keys) noted(name);
-        if (const auto asked = _asked.find(node); asked != _asked.end())
-            for (const auto& name : asked->second) noted(name);
+            for (const auto& name : found->shown) noted(name);
+        }
         return size;
+    }
+
+    void Session::Show(const std::string& node, const std::string& input)
+    {
+        if (Doc().SetShown(node, input, true)) ++_changes;
+    }
+
+    void Session::Hide(const std::string& node, const std::string& input)
+    {
+        if (Doc().SetShown(node, input, false)) ++_changes;
+    }
+
+    bool Session::Asked(const std::string& node, const std::string& input) const
+    {
+        const kgraph::Node* found = _play.Doc().Graph().Find(node);
+        return found && std::ranges::contains(found->shown, input);
     }
 
     void Session::AddToShaderList(const std::string& node, const std::string_view list)

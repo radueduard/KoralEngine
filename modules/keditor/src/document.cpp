@@ -1787,6 +1787,19 @@ namespace keditor
         return true;
     }
 
+    bool Document::SetShown(const std::string_view id, const std::string_view name, const bool shown)
+    {
+        kgraph::Graph graph = Graph();
+        auto* node = graph.Find(id);
+        if (!node || name.empty()) return false;
+        const auto at = std::ranges::find(node->shown, name);
+        if ((at != node->shown.end()) == shown) return false;
+        if (shown) node->shown.emplace_back(name);
+        else node->shown.erase(at);
+        Apply(std::move(graph));
+        return true;
+    }
+
     std::string Document::MakeCompanion(const std::string_view id, const std::string_view input, std::string* error)
     {
         const kgraph::Node* node = Graph().Find(id);

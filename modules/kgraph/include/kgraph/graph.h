@@ -60,6 +60,9 @@ namespace kgraph
         /// Where an input is set, where this node says otherwise than its type: "node" (a control on the node) or
         /// "inspector", by the input's name. One its type has wired only is wired only, whatever this says. @see Placement
         std::map<std::string, std::string> placed;
+        /// The inputs it shows that it can do without, though nothing is given them: asked for, by their names — an
+        /// output by `out:<name>`. An editor's to keep: what runs takes no notice of it. Saved as `"shown"`.
+        std::vector<std::string> shown;
         bool operator==(const Node&) const = default;
 
         Node& Set(std::string input, Value value) { inputs[std::move(input)] = Input { std::move(value), std::nullopt }; return *this; }

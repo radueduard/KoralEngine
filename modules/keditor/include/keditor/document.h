@@ -220,6 +220,11 @@ namespace keditor
          */
         bool SetPlacement(std::string_view node, std::string_view input, kgraph::Placement where);
         /**
+         * @brief Whether @p node shows its input @p name — an output by `out:<name>` — though nothing is given it: asked for
+         *        (`kgraph::Node::shown`), and so saved with the scene. False when there is no such node, or it is so already.
+         */
+        bool SetShown(std::string_view node, std::string_view name, bool shown);
+        /**
          * @brief Makes the node that sets up @p node 's wired-only input @p input (its port's companion: a VertexLayout
          *        for a pipeline's `vertex.layout`), beside it on its page, and wires it in.
          * @return The new node's id; empty, with @p error saying why, when the input has no companion.

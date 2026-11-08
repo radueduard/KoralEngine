@@ -558,6 +558,30 @@ TEST_F(DocumentTest, ReferencesWiredThroughLeaveWhatRunsAsItWas) {
     EXPECT_EQ(doc.WireStraight(), 0u) << "none left";
 }
 
+// A port shown on a node though nothing is given it — an input it can do without, an output — is the node's, and the
+// scene's: saved, and there when the scene is opened again.
+TEST_F(DocumentTest, APortShownAndNotWiredIsKeptWithTheScene) {
+    const keditor::Project project = scene::MakeProject("shown");
+    {
+        Running editing;
+        keditor::Document& doc = editing.scene->Doc();
+        doc.AddNode("Image", 0, 0, "picture");
+        EXPECT_TRUE(doc.SetShown("picture", "mipLevels", true));
+        EXPECT_TRUE(doc.SetShown("picture", "out:size", true));
+        EXPECT_FALSE(doc.SetShown("picture", "out:size", true)) << "shown already";
+        EXPECT_FALSE(doc.SetShown("nothing", "out:size", true)) << "no such node";
+        EXPECT_TRUE(doc.Dirty()) << "an edit of the scene";
+        std::string error;
+        ASSERT_TRUE(doc.Save(project.ScenePath("main"), error)) << error;
+    }
+    Running opened(project.ScenePath("main"));
+    const kgraph::Node* picture = opened.scene->Doc().Graph().Find("picture");
+    ASSERT_NE(picture, nullptr);
+    EXPECT_EQ(picture->shown, (std::vector<std::string> { "mipLevels", "out:size" }));
+    EXPECT_TRUE(opened.scene->Doc().SetShown("picture", "mipLevels", false));
+    EXPECT_EQ(opened.scene->Doc().Graph().Find("picture")->shown, std::vector<std::string> { "out:size" });
+}
+
 // Nodes made a function: a file of the project's, and a call in their place wired as they were. Opened in place, it is
 // changed for every call; written out, a call is its nodes again.
 TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {

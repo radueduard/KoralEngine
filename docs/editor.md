@@ -486,8 +486,6 @@ the Scene panel, and `koral-play` opens it in a window, so both run the same fil
 ## Not yet
 
 - **The Hub** doesn't know engine projects. They open and run from the editor and from `koral-play`.
-- **A port or an output put on a node and not wired is forgotten** when the editor closes: only inputs that
-  were given, and wires, are in the file.
 - **A node can't be renamed** after it is made: its name is what wires, files and components know it by. What it
   is called on the graph — its title — is set in the inspector.
 - **One scene a project** in the interface. `project.json` can list more, and `koral-play` takes a scene
