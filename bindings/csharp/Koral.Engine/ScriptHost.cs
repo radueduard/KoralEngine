@@ -1,10 +1,15 @@
+using System.Collections.Immutable;
 using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.Metadata.Ecma335;
+using System.Reflection.PortableExecutable;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis.Text;
 
@@ -26,6 +31,12 @@ namespace Koral.Engine;
 /// starts at zero, and a script that was started is not started again. Scripts that do not compile change nothing:
 /// the ones running carry on, and the errors are logged.
 /// </para>
+/// <para>
+/// An edit inside functions' bodies only — no field, signature, constructor or file changed, none added — is applied to
+/// the code that runs, in place (where .NET allows it: <c>DOTNET_MODIFIABLE_ASSEMBLIES=debug</c>, which the editor and
+/// the player set): the objects are the same, what they hold privately is kept, and nothing is registered again. An edit
+/// that would add to the code — a lambda, a query, a function — is loaded as any other.
+/// </para>
 /// </remarks>
 public sealed unsafe class ScriptHost : IDisposable
 {
@@ -36,6 +47,7 @@ public sealed unsafe class ScriptHost : IDisposable
     private string _snapshot = "", _pending = "";
     private DateTime _pendingSince, _lastPoll;
     private int _generation;
+    private Running? _running;
 
     /// <summary>Runs the scripts of <paramref name="directory"/> on the entities of <paramref name="world"/>.</summary>
     public ScriptHost(World world, string directory)
@@ -52,6 +64,8 @@ public sealed unsafe class ScriptHost : IDisposable
     public IReadOnlyCollection<string> ResourceScripts => _resources.Keys;
     /// <summary>How many times the scripts have been loaded.</summary>
     public int Generation => _generation;
+    /// <summary>How many edits were applied to the code that runs, in place, rather than loaded.</summary>
+    public int Edits { get; private set; }
     /// <summary>The errors of the last build that failed; empty once one succeeds.</summary>
     public IReadOnlyList<string> Errors { get; private set; } = [];
     /// <summary>How long the files must have stopped changing before they are loaded again.</summary>
@@ -86,11 +100,14 @@ public sealed unsafe class ScriptHost : IDisposable
     /// <summary>Loads the scripts as they are now. False, changing nothing, when they do not compile.</summary>
     public bool Reload()
     {
+        if (ApplyInPlace()) return true;
+
         ScriptContext context;
         List<Type> types;
+        Running? running;
         try
         {
-            (context, types) = Build();
+            (context, types, running) = Build();
         }
         catch (ScriptBuildException e)
         {
@@ -142,6 +159,7 @@ public sealed unsafe class ScriptHost : IDisposable
         }
         var previous = _context;
         _context = context;
+        _running = running;
         ++_generation;
         Errors = failed;
         if (previous is not null) Unload(previous);
@@ -167,6 +185,7 @@ public sealed unsafe class ScriptHost : IDisposable
         _resources.Clear();
         if (_context is not null) Unload(_context);
         _context = null;
+        _running = null;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -565,9 +584,9 @@ public sealed unsafe class ScriptHost : IDisposable
         return text.ToString();
     }
 
-    private (ScriptContext, List<Type>) Build()
+    /// <summary>The scripts' sources, parsed: the usings every script has first, then each file.</summary>
+    private (List<SyntaxTree> Trees, List<EmbeddedText> Embedded) Parse()
     {
-        var generation = _generation + 1;
         var parse = new CSharpParseOptions(LanguageVersion.Latest);
         var trees = new List<SyntaxTree>
         {
@@ -583,8 +602,15 @@ public sealed unsafe class ScriptHost : IDisposable
             trees.Add(CSharpSyntaxTree.ParseText(text, parse, file));
             embedded.Add(EmbeddedText.FromSource(file, text));
         }
+        return (trees, embedded);
+    }
+
+    private (ScriptContext, List<Type>, Running?) Build()
+    {
+        var generation = _generation + 1;
+        var (trees, embedded) = Parse();
         var context = new ScriptContext($"Koral.Engine.Scripts.{generation}");
-        if (trees.Count == 1) return (context, []);     // no scripts: nothing to run, and nothing wrong
+        if (trees.Count == 1) return (context, [], null);     // no scripts: nothing to run, and nothing wrong
 
         var compilation = CSharpCompilation.Create($"Koral.Engine.Scripts.{generation}", trees, References(),
             new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, nullableContextOptions: NullableContextOptions.Enable,
@@ -604,7 +630,156 @@ public sealed unsafe class ScriptHost : IDisposable
             .Where(t => t.IsClass && !t.IsAbstract && (t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .ToList();
-        return (context, types);
+        return (context, types, MetadataUpdater.IsSupported ? Running.Of(compilation, assembly, pe.ToArray()) : null);
+    }
+
+    // ---- an edit applied in place ------------------------------------------------------------------------------
+
+    /// <summary>The build that runs, as an edit to it is made from: its compilation, and what the runtime has of it.</summary>
+    private sealed class Running
+    {
+        public required CSharpCompilation Compilation;
+        public required Assembly Assembly;
+        public required EmitBaseline Baseline;
+        /// <summary>How many types, functions, fields, properties and events the build has: an edit that adds one is not made in place.</summary>
+        public required Dictionary<TableIndex, int> Rows;
+
+        public static Running Of(CSharpCompilation compilation, Assembly assembly, byte[] image)
+        {
+            var pe = new PEReader(ImmutableArray.Create(image));
+            var metadata = pe.GetMetadataReader();
+            return new Running
+            {
+                Compilation = compilation,
+                Assembly = assembly,
+                Baseline = EmitBaseline.CreateInitialBaseline(compilation, ModuleMetadata.CreateFromImage(image), _ => default,
+                    method => metadata.GetMethodDefinition(method).RelativeVirtualAddress is var at and not 0 ? pe.GetMethodBody(at).LocalSignature : default,
+                    hasPortableDebugInformation: true),
+                Rows = Grown.ToDictionary(t => t, metadata.GetTableRowCount),
+            };
+        }
+
+        public static readonly TableIndex[] Grown = [TableIndex.TypeDef, TableIndex.MethodDef, TableIndex.Field, TableIndex.Property, TableIndex.Event];
+    }
+
+    /// <summary>
+    /// Applies the edit made to the scripts to the code that runs, when it changes bodies only. False, changing nothing,
+    /// when it is not one to make so: the scripts are then loaded again, as for any edit.
+    /// </summary>
+    private bool ApplyInPlace()
+    {
+        if (_running is not { } running) return false;
+        var (trees, _) = Parse();
+        var before = running.Compilation.SyntaxTrees.ToDictionary(t => t.FilePath);
+        if (trees.Count != before.Count || trees.Any(t => !before.ContainsKey(t.FilePath))) return false;     // a file added, or gone
+
+        var changed = trees.Select(t => (Old: before[t.FilePath], New: t)).Where(p => !p.Old.GetText().ContentEquals(p.New.GetText())).ToList();
+        if (changed.Count == 0) return false;     // loaded again as asked
+        var compilation = running.Compilation;
+        foreach (var (old, now) in changed) compilation = compilation.ReplaceSyntaxTree(old, now);
+
+        var edits = new List<SemanticEdit>();
+        var names = new List<string>();
+        foreach (var (old, now) in changed)
+        {
+            var (oldBodies, newBodies) = (Bodies(old.GetRoot()), Bodies(now.GetRoot()));
+            if (Shape(old.GetRoot(), oldBodies) != Shape(now.GetRoot(), newBodies)) return false;     // more than bodies changed
+            var (oldModel, newModel) = (running.Compilation.GetSemanticModel(old), compilation.GetSemanticModel(now));
+            foreach (var (o, n) in oldBodies.Zip(newBodies))
+            {
+                if (Tokens(o.Body) == Tokens(n.Body)) continue;
+                if (Function(oldModel, o.Member) is not { } was || Function(newModel, n.Member) is not { } @is) return false;
+                edits.Add(new SemanticEdit(SemanticEditKind.Update, was, @is));
+                names.Add($"{@is.ContainingType.Name}.{(@is.AssociatedSymbol ?? @is).Name}");
+            }
+        }
+        if (edits.Count == 0) return false;     // what changed was outside the bodies after all (a comment): loaded again
+
+        using var metadata = new MemoryStream();
+        using var il = new MemoryStream();
+        using var pdb = new MemoryStream();
+        var result = compilation.EmitDifference(running.Baseline, edits, _ => false, metadata, il, pdb, CancellationToken.None);
+        if (!result.Success) return false;     // what does not compile is said by the load that follows
+        if (Adds(metadata.ToArray(), running.Rows)) return false;
+        try
+        {
+            MetadataUpdater.ApplyUpdate(running.Assembly, metadata.ToArray(), il.ToArray(), pdb.ToArray());
+        }
+        catch (Exception e) when (e is InvalidOperationException or NotSupportedException)
+        {
+            Log.Info($"[scripts] the edit could not be made in place ({e.Message}): loading them again");
+            return false;
+        }
+        running.Compilation = compilation;
+        running.Baseline = result.Baseline!;
+        ++Edits;
+        Errors = [];
+        Log.Info($"[scripts] changed in place: {string.Join(", ", names.Distinct())}");
+        return true;
+    }
+
+    /// <summary>
+    /// The functions of a file whose bodies an edit may change in place, in order: methods, operators, accessors, and
+    /// properties of one expression. A constructor's is not one: the objects it made are kept, and would not be made by it.
+    /// </summary>
+    private static List<(CSharpSyntaxNode Member, CSharpSyntaxNode Body)> Bodies(SyntaxNode root)
+    {
+        var bodies = new List<(CSharpSyntaxNode, CSharpSyntaxNode)>();
+        foreach (var node in root.DescendantNodes())
+        {
+            CSharpSyntaxNode? body = node switch
+            {
+                MethodDeclarationSyntax m => (CSharpSyntaxNode?)m.Body ?? m.ExpressionBody,
+                OperatorDeclarationSyntax o => (CSharpSyntaxNode?)o.Body ?? o.ExpressionBody,
+                ConversionOperatorDeclarationSyntax c => (CSharpSyntaxNode?)c.Body ?? c.ExpressionBody,
+                AccessorDeclarationSyntax a => (CSharpSyntaxNode?)a.Body ?? a.ExpressionBody,
+                PropertyDeclarationSyntax p => p.ExpressionBody,
+                IndexerDeclarationSyntax i => i.ExpressionBody,
+                _ => null,
+            };
+            if (body is not null) bodies.Add(((CSharpSyntaxNode)node, body));
+        }
+        return bodies;
+    }
+
+    /// <summary>A file with its functions' bodies left out: the same for two, only bodies differ between them.</summary>
+    private static string Shape(SyntaxNode root, List<(CSharpSyntaxNode Member, CSharpSyntaxNode Body)> bodies)
+    {
+        var text = new StringBuilder();
+        var next = 0;
+        foreach (var token in root.DescendantTokens())
+        {
+            while (next < bodies.Count && bodies[next].Body.Span.End <= token.SpanStart) ++next;
+            if (next < bodies.Count && bodies[next].Body.Span.Contains(token.Span)) continue;
+            text.Append(token.Text).Append('\u0001');
+        }
+        return text.ToString();
+    }
+
+    private static string Tokens(SyntaxNode node) => string.Join('\u0001', node.DescendantTokens().Select(t => t.Text));
+
+    private static IMethodSymbol? Function(SemanticModel model, CSharpSyntaxNode member) => member switch
+    {
+        MethodDeclarationSyntax m => model.GetDeclaredSymbol(m),
+        OperatorDeclarationSyntax o => model.GetDeclaredSymbol(o),
+        ConversionOperatorDeclarationSyntax c => model.GetDeclaredSymbol(c),
+        AccessorDeclarationSyntax a => model.GetDeclaredSymbol(a),
+        PropertyDeclarationSyntax p => model.GetDeclaredSymbol(p)?.GetMethod,
+        IndexerDeclarationSyntax i => model.GetDeclaredSymbol(i)?.GetMethod,
+        _ => null,
+    };
+
+    /// <summary>Whether an edit adds a type, a function, a field, a property or an event: what .NET cannot add to code that can be unloaded.</summary>
+    private static bool Adds(byte[] delta, Dictionary<TableIndex, int> rows)
+    {
+        using var provider = MetadataReaderProvider.FromMetadataImage(ImmutableArray.Create(delta));
+        var reader = provider.GetMetadataReader();
+        foreach (var handle in reader.GetEditAndContinueMapEntries())
+        {
+            if (MetadataTokens.TryGetTableIndex(handle.Kind, out var table) && rows.TryGetValue(table, out var count)
+                && MetadataTokens.GetRowNumber(handle) > count) return true;
+        }
+        return false;
     }
 
     private static List<MetadataReference>? s_references;

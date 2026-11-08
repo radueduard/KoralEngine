@@ -139,7 +139,7 @@ if(Koral_FOUND)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:koral-engine>" "${KORAL_ENGINE_DOTNET_OUT}/")
         if(KORAL_ENGINE_BUILD_TESTS)
             add_test(NAME CSharp.Scripts COMMAND ${KORAL_ENGINE_DOTNET} "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll")
-            set_tests_properties(CSharp.Scripts PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}")
+            set_tests_properties(CSharp.Scripts PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK};DOTNET_MODIFIABLE_ASSEMBLIES=debug")
             # E6's gate in C#, on the project the engine's own gate saves.
             add_test(NAME CSharp.ShadowGate COMMAND ${KORAL_ENGINE_DOTNET} "${KORAL_ENGINE_DOTNET_OUT}/Koral.Engine.Tests.dll" shadow "${CMAKE_BINARY_DIR}/shadow-project")
             set_tests_properties(CSharp.ShadowGate PROPERTIES ENVIRONMENT "KORAL_SDK=${KORAL_ENGINE_SDK}" FIXTURES_REQUIRED shadow_project

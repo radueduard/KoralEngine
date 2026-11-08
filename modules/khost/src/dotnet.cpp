@@ -172,6 +172,9 @@ namespace khost
 
             // The managed side loads the same Koral as this program has: not another copy of it, which knows of nothing here.
             detail::SetVariable("KORAL_LIBRARY", detail::KoralLibrary());
+            // A script's edit made to the code that runs, where it can be (a body changed, nothing added): .NET lets
+            // an assembly be changed so only when told before it starts.
+            detail::SetVariable("DOTNET_MODIFIABLE_ASSEMBLIES", "debug");
 
             const auto hostPath = Native(host);
             const auto rootPath = Native(root);

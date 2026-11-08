@@ -117,7 +117,7 @@ entity has set itself. A scene opened has what the file says now.
 | Text | `string` | `String` |
 
 A public field (a public `var` in Kotlin) of one of these is the component's. A private one is the
-object's own: it lasts while the script runs and is gone on a reload. A public field of any other type is
+object's own: it lasts while the script runs and is gone on a reload (an edit made in place keeps it). A public field of any other type is
 an error when the scripts load, which names the field.
 
 A new component starts as its class initialises its fields: the engine reads the scripts' sources for it
@@ -557,6 +557,12 @@ Save a script and it is loaded again without the scene stopping. The data is the
 - A script whose class is gone stops being called. Entities keep its data, for when it is back.
 - Scripts that **do not compile change nothing**. The ones running carry on and the errors are logged.
 
+A C# edit made inside functions' bodies only — a method's, an accessor's, an operator's; no field, signature,
+constructor or file changed — is **made to the code that runs, in place**, rather than loaded: the objects are the
+same, so what they hold privately is kept too, and nothing is registered again (`ScriptHost.Edits` counts them).
+The editor and the player let .NET do so (`DOTNET_MODIFIABLE_ASSEMBLIES=debug`, set before it starts); an edit
+that would add to the code — a lambda, a query — is loaded as any other.
+
 C# is compiled in the process, into a load context of its own that is unloaded once it is replaced. Kotlin is
 compiled in the process as well, each build into a folder of its own, its classes loaded through a class loader of
 their own; what was running carries on until the build is done. A `koral.engine.ScriptHost` made by a program of
@@ -589,6 +595,8 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
   first — a machine with neither runs a project's scripts. Without it, they are found where they are installed.
 - **Scripts are looked at between frames**: an editor that is not in front draws few, so a script saved from
   another program is compiled a little later than it would be.
-- **C# edits are a new build each time**, not applied in place as the framework's scene scripts are.
+- **Only a C# edit to bodies is applied in place**, and only one that adds nothing to the code: a lambda, a query, a
+  local function or an `async` one makes it a load like any other. The functions below an edited one keep the lines
+  they had, in a stack trace, until the next load. Kotlin's edits are always a load.
 - **A script named like an existing plain component** takes that component over — a kind too: a project's own `Light` script is the `Light` from then on, and the package's lights are no longer found by that name. In a host's build, a class named as one of the package's is two of one name, and does not compile.
 - **A light's kind starts each of what derives from it the same**: a field starts as its class says, so `PointLight` and `SpotLight` start white, of intensity 1 and range 5, as `Light` and `LocalLight` say. An object (the Point Light's, the Spot Light's) gives its own.

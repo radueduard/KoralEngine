@@ -490,6 +490,38 @@ var previous = host.PreviousContext;
 for (var i = 0; i < 20 && previous is { IsAlive: true }; ++i) { GC.Collect(); GC.WaitForPendingFinalizers(); Frames(1); }
 Check(previous is { IsAlive: false }, "a build that was replaced is unloaded");
 
+// ---- an edit to bodies only: made to the code that runs, the objects kept ---------------------------------------
+{
+    Check(System.Reflection.Metadata.MetadataUpdater.IsSupported, "the code can be changed as it runs (DOTNET_MODIFIABLE_ASSEMBLIES=debug)");
+    string Spin(string update) => $$"""
+        public sealed class Spin : Script
+        {
+            public float Angle; public double Speed; public int Updates; public int Laps;
+            private int _calls;     // the object's own, which the engine knows nothing of
+            protected override void Update(float delta) { {{update}} }
+        }
+        """;
+    Write("Spin.cs", Spin("++_calls; Laps = _calls;"));
+    Check(host.Reload(), "a field added: loaded");
+    var (loads, edits) = (host.Generation, host.Edits);
+    Frames(2);
+    Equal(world.FieldJson(wheel, "Spin", "Laps"), "2", "called twice");
+
+    Write("Spin.cs", Spin("// counting in thousands now\n        ++_calls;\n        Laps = _calls * 1000;"));
+    Check(host.Reload(), "a body edited: changed");
+    Equal(host.Generation, loads, "not loaded again");
+    Equal(host.Edits, edits + 1, "but changed in place");
+    Frames(1);
+    Equal(world.FieldJson(wheel, "Spin", "Laps"), "3000", "the new body runs, on the same object: what it held privately is kept");
+
+    Write("Spin.cs", Spin("System.Func<int> seven = () => 7; Laps = seven();"));
+    Check(host.Reload(), "an edit that adds to the code (a lambda): loaded");
+    Equal(host.Generation, loads + 1, "loaded again, as any other");
+    Equal(host.Edits, edits + 1, "and not changed in place");
+    Frames(1);
+    Equal(world.FieldJson(wheel, "Spin", "Laps"), "7", "and it runs");
+}
+
 // ---- a text field: the engine's text, both ways ------------------------------------------------------------------
 {
     var sign = world.Create("Sign");
