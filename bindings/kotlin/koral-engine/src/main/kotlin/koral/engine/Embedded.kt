@@ -54,6 +54,13 @@ object Embedded {
         said(e)
     }
 
+    /** Kotlin's compiler warmed up, on its thread, before any project's scripts are asked for: see [InProcessKotlinCompiler.warmUp]. */
+    @JvmStatic
+    fun warmUp() {
+        val compilerJars = System.getProperty("koral.engine.compiler")?.let { InProcessKotlinCompiler.jarsOf(Path.of(it)) }.orEmpty()
+        InProcessKotlinCompiler.warmUp(compilerJars, System.getProperty("java.class.path"))
+    }
+
     /** Between frames: what was compiled, loaded; a saved script, compiled again. */
     @JvmStatic
     fun poll() {

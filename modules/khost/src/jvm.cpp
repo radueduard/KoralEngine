@@ -93,6 +93,7 @@ namespace khost
             JNIEnv* env = nullptr;
             jclass embedded = nullptr;
             jmethodID start = nullptr, attach = nullptr, poll = nullptr, settle = nullptr, detach = nullptr;
+            jmethodID warmUp = nullptr;     // a Kotlin layer of before had none: then nothing is warmed
 
             /** Whether the call before threw: said, and cleared, so that the next can be made. */
             bool Threw()
@@ -116,6 +117,7 @@ namespace khost
             void Poll() override { env->CallStaticVoidMethod(embedded, poll); Threw(); }
             void Settle() override { env->CallStaticVoidMethod(embedded, settle); Threw(); }
             void Detach() override { env->CallStaticVoidMethod(embedded, detach); Threw(); }
+            void WarmUp() override { if (warmUp) { env->CallStaticVoidMethod(embedded, warmUp); Threw(); } }
         };
 
         std::unique_ptr<JvmRuntime> StartJvm(std::string& error)
@@ -184,6 +186,8 @@ namespace khost
             runtime->poll = env->GetStaticMethodID(runtime->embedded, "poll", "()V");
             runtime->settle = env->GetStaticMethodID(runtime->embedded, "settle", "()V");
             runtime->detach = env->GetStaticMethodID(runtime->embedded, "detach", "()V");
+            runtime->warmUp = env->GetStaticMethodID(runtime->embedded, "warmUp", "()V");
+            if (!runtime->warmUp) env->ExceptionClear();     // optional: one without it is warmed by nothing
             if (runtime->Threw() || !runtime->start || !runtime->attach || !runtime->poll || !runtime->settle || !runtime->detach) {
                 error = std::format("koral.engine.Embedded in {} is another version's", kotlin.string());
                 return nullptr;

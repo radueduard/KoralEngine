@@ -77,6 +77,7 @@ int main(const int argc, char** argv)
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
 #endif
     khost::Scripts scripts;
+    scripts.WarmUp(project.directory);      // a Kotlin project's compiler, warmed while the window and the scene are made
     kor::App app(kor::AppSettings { .platform = platform });
     if (!project.directory.empty()) project.Use();
     auto play = std::make_unique<keditor::PlayScene>(scene);

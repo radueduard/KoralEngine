@@ -27,7 +27,8 @@ class InProcessKotlinCompiler(
     compilerJars: List<Path>,
     private val jvmTarget: String = "25",
 ) : ScriptCompiler {
-    private val loader = URLClassLoader("kotlin-compiler", compilerJars.map { it.toUri().toURL() }.toTypedArray(), ClassLoader.getPlatformClassLoader())
+    // One for every compiler of the same jars: what one loaded — and the JVM made fast of it — the next has.
+    private val loader = loaderOf(compilerJars)
 
     override fun compile(into: Path): List<String>? {
         val roots = sources.filter { Files.isDirectory(it) }.map { it.toString() }
@@ -56,6 +57,32 @@ class InProcessKotlinCompiler(
     }
 
     companion object {
+        private val loaders = HashMap<List<Path>, URLClassLoader>()
+
+        @Synchronized private fun loaderOf(jars: List<Path>): URLClassLoader =
+            loaders.getOrPut(jars) { URLClassLoader("kotlin-compiler", jars.map { it.toUri().toURL() }.toTypedArray(), ClassLoader.getPlatformClassLoader()) }
+
+        /**
+         * Kotlin's compiler, run once on what is nothing — a file of one class — on the compiler's thread, and returns at
+         * once: its classes loaded and run, so that the first scripts it compiles are not also the first it has seen. What
+         * a program does while a Kotlin project is opened, before the project's scripts are asked for.
+         */
+        fun warmUp(compilerJars: List<Path>, classpath: String) {
+            if (compilerJars.isEmpty()) return
+            compileThread.submit {
+                val folder = Files.createTempDirectory("koral-kotlin-warm")
+                try {
+                    val sources = Files.createDirectories(folder.resolve("scripts"))
+                    Files.writeString(sources.resolve("Warm.kt"), "class Warm { fun up() = 1 }")
+                    InProcessKotlinCompiler(listOf(sources), classpath, compilerJars).compile(Files.createDirectories(folder.resolve("classes")))
+                } catch (_: Throwable) {
+                    // A warm-up only: what goes wrong here goes wrong again, and is said, when the scripts are compiled.
+                } finally {
+                    folder.toFile().deleteRecursively()
+                }
+            }
+        }
+
         /** The jars of [folder]: what `koral.engine.compiler` names, in the engine's programs. */
         fun jarsOf(folder: Path): List<Path> =
             if (!Files.isDirectory(folder)) emptyList()

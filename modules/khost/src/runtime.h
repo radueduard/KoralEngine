@@ -15,6 +15,8 @@ namespace khost
         virtual void Poll() = 0;
         /** @brief Waits for a build under way, and loads it. */
         virtual void Settle() {}
+        /** @brief Readies what compiles the scripts, on a thread of its own, before any are asked for: what a program does as it opens a project. */
+        virtual void WarmUp() {}
         /** @brief The scripts stop, and let go of the document. */
         virtual void Detach() = 0;
     };

@@ -52,6 +52,7 @@ int main(const int argc, char** argv)
     if (!validate) setenv("VK_LOADER_LAYERS_DISABLE", "*validation*", 0);   // (not over what the environment already says)
 #endif
     khost::Scripts scripts;     // before the editor: what its Problems ask whether the scripts run
+    scripts.WarmUp(project);    // a Kotlin project's compiler, warmed while the window and the scene are made
     kor::App app(kor::AppSettings { .platform = platform });
     auto scene = std::make_unique<keditor::EditorScene>(project);
     keditor::EditorScene* editor = scene.get();

@@ -579,8 +579,10 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
   what they made is gone on Stop.
 - **The inspector follows a script ten times a second**, while the scene plays and the entity is picked: a
   field changed every frame is seen at that rate, not every frame.
-- **A Kotlin project's first compile takes seconds** (the compiler warming up): its scripts run once it is done, and
-  a project opened again with its scripts as they were loads the last build at once.
+- **A Kotlin project's first compile takes a couple of seconds.** Opened by `koral-editor` or `koral-play`, a Kotlin
+  project has the JVM started at once and Kotlin's compiler run once on nothing, on its own thread, while the window and
+  the scene are made (`khost::Scripts::WarmUp`): FluidSimulation's first compile, from no build, went from 3.5 s to 2.1 s.
+  Its scripts run once it is done, and a project opened again with its scripts as they were loads the last build at once.
 - **The runtimes are found, not shipped.** `dotnet/` and `kotlin/` are beside the programs in a build; a .NET
   runtime in `dotnet/` and a JRE in `jre/` beside them are used when they are there, but nothing puts them there yet.
 - **Scripts are looked at between frames**: an editor that is not in front draws few, so a script saved from

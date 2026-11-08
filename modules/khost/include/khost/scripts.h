@@ -33,6 +33,12 @@ namespace khost
         void Follow(keditor::Document* document);
         /** @brief Waits for the scripts being compiled, and loads them: for a run of so many frames, before they start. */
         void Settle();
+        /**
+         * @brief Of a project in Kotlin, as a program starts: the JVM started now, and Kotlin's compiler run once on its
+         *        thread on what is nothing — while the program goes on to open its window and its scene — so that the
+         *        project's scripts, when they are asked for, are compiled by a compiler that is warm. Nothing for any other.
+         */
+        void WarmUp(const std::filesystem::path& project);
         /** @brief The scripts stop, and let go of the document: before the program's scenes go. */
         void Stop();
 

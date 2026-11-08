@@ -69,6 +69,15 @@ namespace khost
         _running = runtime;
     }
 
+    void Scripts::WarmUp(const std::filesystem::path& directory)
+    {
+        if (directory.empty()) return;
+        keditor::Project project;
+        std::string error;
+        if (!keditor::Project::Open(directory, project, error) || project.Language() != 'k') return;
+        if (Runtime* jvm = Jvm(error)) jvm->WarmUp();
+    }
+
     void Scripts::Settle()
     {
         if (_running) _running->Settle();
