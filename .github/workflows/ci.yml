@@ -1,0 +1,41 @@
+# What builds and is tested without a GPU or the Koral framework: kecs, kasset and kscript. Configured without a Koral
+# SDK, the engine builds those alone (see CMakeLists.txt). The rest — kgraph, keditor, kengine, the C# and Kotlin layers —
+# needs a staged Koral SDK and a Vulkan device, and is tested on a machine that has them (ctest -j 8, README.md).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    name: Windows (MSVC, Debug)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: GoogleTest
+        run: vcpkg install gtest:x64-windows
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+      - name: Build
+        run: cmake --build build --config Debug --parallel
+      - name: Test
+        run: ctest --test-dir build -C Debug -j 4 --output-on-failure
+
+  linux:
+    name: Linux (GCC, ASan and UBSan)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build g++-14 libgtest-dev
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER=g++-14 -DKORAL_ENGINE_SANITIZE=ON
+      - name: Build
+        run: cmake --build build
+      - name: Test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build -j 4 --output-on-failure
