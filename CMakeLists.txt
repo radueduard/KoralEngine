@@ -200,6 +200,46 @@ if(Koral_FOUND)
     else()
         message(STATUS "Kotlin scripts: not built (no JDK 25, or a Koral SDK without its Kotlin libraries)")
     endif()
+    # The runtimes a project's scripts run on, beside the programs, for a machine that has neither: .NET's — the newest
+    # 10 there is where `dotnet` is — in dotnet/ (host/fxr and shared/Microsoft.NETCore.App, beside the engine's own
+    # assemblies), and a JRE of the JDK's in jre/ (jlink: what the engine's Kotlin layer and Kotlin's compiler need).
+    # khost looks in both first. About 150 MB, so asked for: -DKORAL_ENGINE_SHIP_RUNTIMES=ON.
+    option(KORAL_ENGINE_SHIP_RUNTIMES "Put a .NET runtime in dotnet/ and a JRE in jre/ beside the programs" OFF)
+    if(KORAL_ENGINE_SHIP_RUNTIMES)
+        if(KORAL_ENGINE_DOTNET)
+            get_filename_component(KORAL_ENGINE_DOTNET_ROOT "${KORAL_ENGINE_DOTNET}" DIRECTORY)
+            file(GLOB fxrs LIST_DIRECTORIES true "${KORAL_ENGINE_DOTNET_ROOT}/host/fxr/10.*")
+            file(GLOB runtimes LIST_DIRECTORIES true "${KORAL_ENGINE_DOTNET_ROOT}/shared/Microsoft.NETCore.App/10.*")
+            list(SORT fxrs COMPARE NATURAL ORDER DESCENDING)
+            list(SORT runtimes COMPARE NATURAL ORDER DESCENDING)
+            if(fxrs AND runtimes)
+                list(GET fxrs 0 fxr)
+                list(GET runtimes 0 runtime)
+                get_filename_component(fxrVersion "${fxr}" NAME)
+                get_filename_component(runtimeVersion "${runtime}" NAME)
+                add_custom_target(koral-engine-dotnet-runtime ALL
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${fxr}" "${CMAKE_BINARY_DIR}/dotnet/host/fxr/${fxrVersion}"
+                    COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${runtime}" "${CMAKE_BINARY_DIR}/dotnet/shared/Microsoft.NETCore.App/${runtimeVersion}"
+                    COMMENT "Shipping .NET ${runtimeVersion} in dotnet/"
+                    VERBATIM)
+                message(STATUS "Runtimes: .NET ${runtimeVersion} shipped in dotnet/")
+            else()
+                message(WARNING "KORAL_ENGINE_SHIP_RUNTIMES: no .NET 10 runtime beside ${KORAL_ENGINE_DOTNET}")
+            endif()
+        endif()
+        if(KORAL_ENGINE_JAVA_HOME AND EXISTS "${KORAL_ENGINE_JAVA_HOME}/bin/jlink${CMAKE_EXECUTABLE_SUFFIX}")
+            set(jreModules java.base,java.desktop,java.instrument,java.logging,java.management,java.rmi,java.scripting,jdk.compiler,jdk.unsupported,jdk.zipfs)
+            add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/jre/release"
+                COMMAND ${CMAKE_COMMAND} -E rm -rf "${CMAKE_BINARY_DIR}/jre"
+                COMMAND "${KORAL_ENGINE_JAVA_HOME}/bin/jlink" --add-modules ${jreModules} --strip-debug --no-header-files --no-man-pages
+                        --output "${CMAKE_BINARY_DIR}/jre"
+                COMMENT "Shipping a JRE in jre/ (jlink, of ${KORAL_ENGINE_JAVA_HOME})"
+                VERBATIM)
+            add_custom_target(koral-engine-jre ALL DEPENDS "${CMAKE_BINARY_DIR}/jre/release")
+            message(STATUS "Runtimes: a JRE of ${KORAL_ENGINE_JAVA_HOME} shipped in jre/")
+        endif()
+    endif()
+
     add_subdirectory(modules/khost)     # after the JDK is known: its JNI headers are what Kotlin is run with
 
     if(KORAL_ENGINE_BUILD_TESTS)
@@ -242,6 +282,14 @@ if(Koral_FOUND)
         if(TARGET koral-engine-kotlin)
             add_dependencies(khost_tests koral-engine-kotlin)
             target_compile_definitions(khost_tests PRIVATE KHOST_TEST_KOTLIN="${CMAKE_BINARY_DIR}/kotlin")
+        endif()
+        if(KORAL_ENGINE_SHIP_RUNTIMES)
+            target_compile_definitions(khost_tests PRIVATE KHOST_TEST_SHIPPED)
+            foreach(shipped koral-engine-dotnet-runtime koral-engine-jre)
+                if(TARGET ${shipped})
+                    add_dependencies(khost_tests ${shipped})
+                endif()
+            endforeach()
         endif()
         koral_engine_runtime(khost_tests)
         gtest_discover_tests(khost_tests DISCOVERY_MODE PRE_TEST)

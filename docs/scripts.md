@@ -583,8 +583,10 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
   project has the JVM started at once and Kotlin's compiler run once on nothing, on its own thread, while the window and
   the scene are made (`khost::Scripts::WarmUp`): FluidSimulation's first compile, from no build, went from 3.5 s to 2.1 s.
   Its scripts run once it is done, and a project opened again with its scripts as they were loads the last build at once.
-- **The runtimes are found, not shipped.** `dotnet/` and `kotlin/` are beside the programs in a build; a .NET
-  runtime in `dotnet/` and a JRE in `jre/` beside them are used when they are there, but nothing puts them there yet.
+- **The runtimes are found, unless shipped.** `dotnet/` and `kotlin/` are beside the programs in a build. Configured
+  with `-DKORAL_ENGINE_SHIP_RUNTIMES=ON`, the build also puts .NET 10 (its `host/fxr` and `shared/Microsoft.NETCore.App`,
+  from where `dotnet` is) in `dotnet/`, and a JRE of its JDK (`jlink`) in `jre/`: about 170 MB, which khost looks in
+  first — a machine with neither runs a project's scripts. Without it, they are found where they are installed.
 - **Scripts are looked at between frames**: an editor that is not in front draws few, so a script saved from
   another program is compiled a little later than it would be.
 - **C# edits are a new build each time**, not applied in place as the framework's scene scripts are.

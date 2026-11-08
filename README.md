@@ -31,3 +31,6 @@ works, and wins over what would be found.
 `koral-editor` and `koral-play` run a project's C# or Kotlin scripts themselves: the build puts the engine's C#
 layer in `dotnet/` and its Kotlin layer, with Kotlin's compiler, in `kotlin/` beside them. C# needs the .NET 10
 runtime on the machine; Kotlin needs Java 25 or later (`JAVA_HOME`, or the JDK the engine was built with).
+
+Configured with `-DKORAL_ENGINE_SHIP_RUNTIMES=ON`, the build puts a .NET 10 runtime in `dotnet/` and a JRE in `jre/` beside
+the programs too (about 170 MB), so that they run a project's scripts on a machine that has neither installed.

@@ -59,6 +59,23 @@ TEST(Platform, TheEnginesInterfaceIsFoundInTheProgram)
     EXPECT_EQ(khost_symbol("khost_no_such_symbol"), nullptr);
 }
 
+// Shipped (KORAL_ENGINE_SHIP_RUNTIMES): a .NET and a JRE beside the program, laid out as khost looks for them first.
+TEST(Runtimes, TheShippedOnesAreWhereTheyAreLookedForFirst)
+{
+#ifndef KHOST_TEST_SHIPPED
+    GTEST_SKIP() << "this build ships no runtimes";
+#else
+    const fs::path here = khost::detail::ProgramDirectory();
+    std::error_code ignored;
+    bool fxr = false, runtime = false;
+    for (const auto& entry : fs::directory_iterator(here / "dotnet" / "host" / "fxr", ignored)) fxr = fxr || fs::exists(entry.path() / "hostfxr.dll") || fs::exists(entry.path() / "libhostfxr.so");
+    for (const auto& entry : fs::directory_iterator(here / "dotnet" / "shared" / "Microsoft.NETCore.App", ignored)) runtime = runtime || fs::exists(entry.path() / "System.Private.CoreLib.dll");
+    EXPECT_TRUE(fxr) << "hostfxr, in dotnet/host/fxr/<version>";
+    EXPECT_TRUE(runtime) << "the runtime, in dotnet/shared/Microsoft.NETCore.App/<version>";
+    EXPECT_TRUE(fs::exists(here / "jre" / "bin" / "server" / "jvm.dll") || fs::exists(here / "jre" / "lib" / "server" / "libjvm.so")) << "a JVM, in jre/";
+#endif
+}
+
 // .NET starts, once, where the build put the engine's C# layer — and asked again, is the same.
 TEST(Runtimes, DotnetStartsWithTheEnginesLayer)
 {
