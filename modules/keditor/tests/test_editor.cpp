@@ -1204,8 +1204,9 @@ TEST_F(EditorTest, TheSceneIsLookedAtPickedPlayedAndMadeFromObjects) {
     ASSERT_FALSE(sphere.IsNull());
     EXPECT_EQ(Session().selectedEntity, sphere);
 
-    // Seen from the editor's own view until it is told to look through the scene's camera.
-    for (int i = 0; i < 4; ++i) Frame();
+    // Seen from the editor's own view until it is told to look through the scene's camera: once the scene's graph has
+    // run a frame — which, its build quick enough (an optimised one), is not yet a few frames in.
+    for (int i = 0; i < 4 || (i < 240 && !(Doc().Runtime().CurrentView().view == Session().camera.View().view)); ++i) Frame();
     EXPECT_FALSE(Session().ThroughSceneCamera());
     EXPECT_EQ(Doc().Runtime().CurrentView().view, Session().camera.View().view);
     Session().SetLookThroughCamera(true);
