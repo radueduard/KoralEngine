@@ -29,7 +29,7 @@ endforeach()
 string(APPEND KEDITOR_ICON_TEXT "    };\n}\n")
 file(GENERATE OUTPUT ${KEDITOR_ICON_HEADER} CONTENT "${KEDITOR_ICON_TEXT}")
 
-add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/assets.cpp src/widgets.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp)
+add_library(keditor STATIC src/document.cpp src/project.cpp src/play.cpp src/editor.cpp src/editor_session.cpp src/editor_session_more.cpp src/assets.cpp src/widgets.cpp src/starter.cpp src/look.cpp src/overlay.cpp src/viewer.cpp)
 target_include_directories(keditor PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_library(KoralEngine::keditor ALIAS keditor)
 target_include_directories(keditor PUBLIC include)
