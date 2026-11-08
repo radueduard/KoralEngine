@@ -15,6 +15,8 @@
 
 #include <array>
 #include <bit>
+#include <cstring>
+#include <optional>
 #include <functional>
 #include <chrono>
 #include <filesystem>
@@ -263,6 +265,43 @@ TEST_F(EntityTest, OneDispatchOfEveryEntityStampsWhatADispatchEachDoes) {
     for (int i = 0; i < 3; ++i) Frame();
     ExpectColor(Quarter(0), 0, 0, 255, "blue now, over the backdrop's blue");
     ExpectColor(Quarter(3), 0, 255, 255, "the others as they were");
+}
+
+// More groups along z than one dispatch counts (65,535): four entities of 20,000 groups each are 80,000, run as several
+// dispatches from a base. Every element is counted as many times — its groups are its own, the whole grid's numbering.
+TEST_F(EntityTest, ADispatchOfMoreGroupsThanOneCountsRunsThemAll) {
+    Load(R"json({
+      "kgraph": 1,
+      "nodes": [
+        { "id": "all", "type": "Entities", "inputs": {} },
+        { "id": "counted", "type": "Filter", "inputs": { "entities": { "$link": ["all", "out"] }, "with": ["counter"] } },
+        { "id": "counts", "type": "Buffer", "inputs": { "instanceCount": 16, "usage": ["eStorage", "eTransferSrc", "eTransferDst"] } },
+        { "id": "zero", "type": "ClearBuffer", "inputs": { "buffer": { "$link": ["counts", "out"] } } },
+        { "id": "counter shader", "type": "Shader", "inputs": { "entryPoint.module": "countBatched", "entryPoint.entry": "computeMain" } },
+        { "id": "counter", "type": "ComputePipeline", "inputs": {
+            "computeShader": { "$link": ["counter shader", "out"] }, "param.counts": { "$link": ["counts", "out"] } } },
+        { "id": "run", "type": "Dispatch", "inputs": { "pipeline": { "$link": ["counter", "out"] }, "entities": { "$link": ["counted", "out"] }, "groups.x": 1, "groups.y": 1, "groups.z": 20000 } }
+      ]
+    })json");
+    auto& runtime = *scene->runtime;
+    const kecs::ComponentId counter = runtime.ComponentOf("counter");
+    ASSERT_NE(counter, kecs::NoComponent);
+    for (int i = 0; i < 4; ++i) {
+        const kecs::Entity entity = scene->world.Create();
+        scene->world.Add(entity, counter);
+        Parameters(scene->world, entity, counter).Set("which", static_cast<float>(i));
+    }
+    for (int i = 0; i < 3; ++i) Frame();        // the entities found, and run
+    runtime.Watch("counts");
+    for (int i = 0; i < 4; ++i) Frame();
+    const std::optional<kgraph::Peek> peek = runtime.Watched("counts");
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    if (const auto* report = runtime.ReportOf("run")) EXPECT_EQ(report->skipped, 0u) << report->why;
+    ASSERT_TRUE(peek && peek->bytes.size() >= 4 * sizeof(std::uint32_t)) << "nothing to look at";
+    std::uint32_t counts[4] {};
+    std::memcpy(counts, peek->bytes.data(), sizeof(counts));
+    EXPECT_EQ(counts[0], 20000u) << "cleared each frame, then all 20,000 of its groups";
+    for (int i = 1; i < 4; ++i) EXPECT_EQ(counts[i], counts[0]) << "element " << i << " as many as the first";
 }
 
 // An entity destroyed after the passes are readied and before they record — what stopping a scene that plays does to

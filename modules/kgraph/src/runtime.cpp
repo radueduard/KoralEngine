@@ -21,6 +21,7 @@
 #include <expected>
 #include <format>
 #include <functional>
+#include <limits>
 #include <optional>
 #include <ranges>
 #include <regex>
@@ -1326,6 +1327,18 @@ namespace kgraph
                 if (const auto whole = std::filesystem::absolute(directory, ec); !ec)
                     if (const auto relative = file.lexically_normal().lexically_relative(whole.lexically_normal()); !relative.empty() && *relative.begin() != "..") name = relative;
             return mesh < 0 ? std::format("@{}", name.generic_string()) : std::format("@{}#{}", name.generic_string(), mesh);
+        }
+
+        /**
+         * A dispatch of @p groups: more along z than every device counts in one (65,535, the least Vulkan allows) is
+         * several, each from the group the last stopped at, so that SV_GroupID is the whole grid's in every one.
+         */
+        void RecordDispatch(kor::CommandBuffer& cb, const kor::u32 (&groups)[3])
+        {
+            constexpr kor::u32 most = 65535;
+            if (groups[2] <= most) { cb.Dispatch(groups[0], groups[1], groups[2]); return; }
+            for (kor::u32 first = 0; first < groups[2]; first += std::min(most, groups[2] - first))
+                cb.DispatchBase(0, 0, first, groups[0], groups[1], std::min(most, groups[2] - first));
         }
     }
 
@@ -3251,7 +3264,7 @@ namespace kgraph
                         if (info->pushSize) cb.PushConstantBytes({ run->pushed.data() + item.push, info->pushSize }, info->pushFirst);
                         if (rays) cb.TraceRays(item.groups[0], item.groups[1], item.groups[2]);
                         else if (indirectBuffer.Get()) cb.DispatchIndirect(indirectBuffer, indirectOffset);
-                        else cb.Dispatch(item.groups[0], item.groups[1], item.groups[2]);
+                        else RecordDispatch(cb, item.groups);
                     }
                 };
             } else {   // Draw
@@ -8318,16 +8331,17 @@ namespace kgraph
             // Those of one mesh one after another: a mesh is then bound once for all of them.
             if (run.draws) std::ranges::stable_sort(run.items, {}, [](const Item& item) { return item.mesh.Get(); });
             // A Dispatch of a Filter's entities: its groups along z as many times over as there are of them, the element
-            // SV_GroupID.z / groups.z. None of them: nothing to run. More than a dispatch's z counts: said, and not run.
+            // SV_GroupID.z / groups.z. None of them: nothing to run. More than one dispatch counts along z is several, each
+            // from where the last stopped (RecordDispatch), the shader none the wiser; more than 32 bits count: said, not run.
             if (!run.batchOf.empty()) {
                 const auto found = built.find(run.batchOf);
                 const std::size_t elements = found != built.end() && found->second.listed ? found->second.listed->Rows() : 0;
-                const kor::u64 most = 65535;
+                const kor::u64 most = std::numeric_limits<kor::u32>::max();
                 for (Item& item : run.items) {
                     if (static_cast<kor::u64>(item.groups[2]) * elements > most) {
                         ++run.report.skipped;
                         if (run.report.why.empty())
-                            run.report.why = std::format("{} of '{}' at {} groups along z each is {} groups along z, past the {} a dispatch can count", elements, run.batchOf, item.groups[2],
+                            run.report.why = std::format("{} of '{}' at {} groups along z each is {} groups along z, past the {} a grid can count", elements, run.batchOf, item.groups[2],
                                                          static_cast<kor::u64>(item.groups[2]) * elements, most);
                         item.groups[2] = 0;
                         continue;
