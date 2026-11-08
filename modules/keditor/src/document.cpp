@@ -1562,6 +1562,41 @@ namespace keditor
         Apply(std::move(graph));
     }
 
+    std::size_t Document::WireStraight()
+    {
+        kgraph::Graph graph = Graph();
+        // What each Reference stands for, at the end of however many: one that stands for nothing there is is kept.
+        std::map<std::string, std::string, std::less<>> standsFor;
+        for (const auto& node : graph.nodes)
+            if (node.type == "Reference")
+                if (const auto target = node.inputs.find("node"); target != node.inputs.end() && target->second.value.String())
+                    standsFor[node.id] = *target->second.value.String();
+        const auto end = [&](std::string id) -> std::string {
+            for (int hops = 0; hops < 16; ++hops) {
+                const auto next = standsFor.find(id);
+                if (next == standsFor.end()) return graph.Find(id) ? id : std::string();
+                id = next->second;
+            }
+            return {};      // a ring of them
+        };
+        std::set<std::string, std::less<>> going;
+        for (const auto& id : standsFor | std::views::keys)
+            if (!end(id).empty()) going.insert(id);
+        if (going.empty()) return 0;
+        for (auto& node : graph.nodes) {
+            if (going.contains(node.id)) continue;
+            for (auto& [name, input] : node.inputs) {
+                if (input.link && going.contains(input.link->node)) input.link->node = end(input.link->node);
+                // What names a node by its id — a Reference kept, a Previous, an Element — names what it stood for.
+                if (!input.link && (name == "node" || name == "of" || name == "first"))
+                    if (const std::string* named = input.value.String(); named && going.contains(*named)) input.value = kgraph::Value(end(*named));
+            }
+        }
+        std::erase_if(graph.nodes, [&](const kgraph::Node& node) { return going.contains(node.id); });
+        Apply(std::move(graph));
+        return going.size();
+    }
+
     void Document::MoveNodes(const std::vector<std::string>& ids, const double dx, const double dy)
     {
         kgraph::Graph graph = Graph();

@@ -524,6 +524,40 @@ TEST_F(DocumentTest, NodesMovedOrPastedToAnotherPassAreBroughtInAsPassesAre) {
     EXPECT_EQ(doc.Runtime().ValueOf(made[1]), Value(13));
 }
 
+// Every Reference wired through: what used one is wired from what it stood for — of a Reference to a Reference, the
+// node at the end — and what named it by id names that. What is worked out is what it was.
+TEST_F(DocumentTest, ReferencesWiredThroughLeaveWhatRunsAsItWas) {
+    using kgraph::Value;
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    for (const char* pass : { "first", "second", "third" }) ASSERT_TRUE(doc.AddPass(pass));
+    doc.AddNode("Double", 0, 0, "n", "first");
+    doc.SetInput("n", "value", 2);
+    doc.AddNode("Multiply", 0, 0, "double", "second");
+    doc.SetInput("double", "b", 2);
+    const std::string brought = doc.Import("n", "second", -260, 0);
+    ASSERT_TRUE(doc.Connect(brought, "out", "double", "a"));
+    // A Reference in the third of the one in the second.
+    const std::string again = doc.Import(brought, "third", -260, 0);
+    doc.AddNode("Add", 0, 0, "show", "third");
+    ASSERT_TRUE(doc.Connect(again, "out", "show", "a"));
+    ASSERT_TRUE(doc.Connect("double", "out", "show", "b"));
+    ASSERT_EQ(doc.Runtime().ValueOf("show"), Value(6)) << "2 + 2 * 2";
+
+    EXPECT_EQ(doc.WireStraight(), 2u);
+    EXPECT_TRUE(std::ranges::none_of(doc.Graph().nodes, [](const kgraph::Node& node) { return node.type == "Reference"; }));
+    const auto link = [&](const char* node, const char* input) {
+        const kgraph::Node* found = doc.Graph().Find(node);
+        const auto it = found ? found->inputs.find(input) : decltype(found->inputs.end()) {};
+        return found && it != found->inputs.end() && it->second.link ? it->second.link->node : std::string();
+    };
+    EXPECT_EQ(link("double", "a"), "n") << "wired from what it stood for";
+    EXPECT_EQ(link("show", "a"), "n") << "of a Reference to a Reference, the node at the end";
+    EXPECT_EQ(doc.Graph().Find("n")->pass, "first") << "each node where it was";
+    EXPECT_EQ(doc.Runtime().ValueOf("show"), Value(6)) << "and what is worked out is what it was";
+    EXPECT_EQ(doc.WireStraight(), 0u) << "none left";
+}
+
 // Nodes made a function: a file of the project's, and a call in their place wired as they were. Opened in place, it is
 // changed for every call; written out, a call is its nodes again.
 TEST_F(DocumentTest, NodesAreMadeAFunctionThatIsOpenedChangedAndWrittenOut) {

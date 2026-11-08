@@ -229,6 +229,14 @@ namespace keditor
         [[nodiscard]] std::vector<std::string> Importable(std::string_view pass) const;
         /** @brief Takes nodes out, with every wire to them. */
         void RemoveNodes(const std::vector<std::string>& ids);
+        /**
+         * @brief Wires what is wired from each Reference straight from what it stands for — however many References
+         *        away — and takes the References out: what runs is the same, since a wire may go from any node to any
+         *        other, and a page shows a wire from another page's node beside what it is wired to. What is lost is a
+         *        Reference's own watch: looked at, one was its node as its page begins. One edit, taken back as one.
+         * @return How many References went.
+         */
+        std::size_t WireStraight();
         void MoveNodes(const std::vector<std::string>& ids, double dx, double dy);
         bool SetTitle(std::string_view node, std::string title);
         /**

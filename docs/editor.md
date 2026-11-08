@@ -641,7 +641,11 @@ The frame has a lane for each rate, left to right in the order they run: **Setup
 Every lane is there, an empty one holding a card that says so — pressed twice, it makes the lane's first page. A page's
 card let go in another lane runs at that lane's rate from then on. Right-clicked, a card is opened, run at another rate,
 put back where the flow has it, or deleted (with its nodes, or keeping them); where no card is, the menu makes a new page
-of the lane it is asked in, shows every node at once, arranges the flow or frames everything.
+of the lane it is asked in, shows every node at once, arranges the flow or frames everything — and, where the scene has
+References, **Wire straight from other pages**: what is wired from each is wired from what it stands for, and the
+References go (`Document::WireStraight`). What runs is the same: a wire may go from any node to any other, and a page
+shows another page's node beside what it is wired to. What is lost is a Reference's own watch, of its node as its page
+begins. One edit, taken back as one.
 
 In each lane, the pages as cards, left to right in the order they run, each wired from the pages whose work
 it uses — the last page before it to write what it reads, not the one that made it (what a page reads of the frame

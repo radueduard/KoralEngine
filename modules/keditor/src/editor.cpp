@@ -9341,6 +9341,15 @@ public extension {0} : IKoralMaterial {{
                         items.push_back(MenuLine());
                         items.push_back({ "Arrange the flow", [this] { ArrangeFlow(); } });
                         items.push_back({ "Frame everything", [this] { _flowView->Frame(); SetState(); } });
+                        // Every Reference wired through: a page shows what it uses of another beside what uses it.
+                        if (std::ranges::any_of(Doc().Graph().nodes, [](const kgraph::Node& node) { return node.type == "Reference"; })) {
+                            items.push_back(MenuLine());
+                            items.push_back({ "Wire straight from other pages", [this] {
+                                const std::size_t gone = Doc().WireStraight();
+                                kor::log::Info("{} Reference{} wired through: what used each is wired from what it stood for", gone, gone == 1 ? "" : "s");
+                                SetState();
+                            } });
+                        }
                         return items;
                     })
                     // Pressed twice, a page is gone into; an empty lane's card makes the lane's first.
