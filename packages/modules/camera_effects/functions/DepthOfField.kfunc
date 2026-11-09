@@ -1,0 +1,381 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture of light blurred as a camera's lens would: each pixel's circle of confusion from its `depth` (a perspective's, `near` to `far`, `reversed` or not) for a lens of `focalLength` metres at `fStop` focused `focus` metres away, and a disc of taps as wide \u2014 no wider than `most` of the picture's height. What is in focus does not bleed into what is behind it. `focused` is it, and `circles` each pixel's circle.",
+ "tags": [
+  "depth of field",
+  "dof",
+  "bokeh",
+  "focus",
+  "lens",
+  "blur",
+  "camera",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "near",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "near",
+     "kind": "eValue",
+     "default": 0.1
+    }
+   },
+   {
+    "id": "far",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "far",
+     "kind": "eValue",
+     "default": 1000
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "focus",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "focus",
+     "kind": "eValue",
+     "default": 5
+    }
+   },
+   {
+    "id": "fStop",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "fStop",
+     "kind": "eValue",
+     "default": 2.8
+    }
+   },
+   {
+    "id": "focalLength",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "focalLength",
+     "kind": "eValue",
+     "default": 0.05
+    }
+   },
+   {
+    "id": "most",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "most",
+     "kind": "eValue",
+     "default": 0.03
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "circles",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "focused",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "circle of confusion",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "circleOfConfusion",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.circlesOut": {
+      "$link": [
+       "circles",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run circle of confusion",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "circle of confusion",
+       "out"
+      ]
+     },
+     "push.near": {
+      "$link": [
+       "near",
+       "out"
+      ]
+     },
+     "push.far": {
+      "$link": [
+       "far",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "push.focus": {
+      "$link": [
+       "focus",
+       "out"
+      ]
+     },
+     "push.fStop": {
+      "$link": [
+       "fStop",
+       "out"
+      ]
+     },
+     "push.focalLength": {
+      "$link": [
+       "focalLength",
+       "out"
+      ]
+     },
+     "cover": "circlesOut"
+    }
+   },
+   {
+    "id": "defocus",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "focus",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.circles": {
+      "$link": [
+       "circles",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "focused",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run defocus",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "defocus",
+       "out"
+      ]
+     },
+     "push.most": {
+      "$link": [
+       "most",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out focused",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "focused",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "focused",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out circles",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     130
+    ],
+    "inputs": {
+     "name": "circles",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "circles",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

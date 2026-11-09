@@ -1,0 +1,220 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture of light blurred along the way each pixel moved across it since the frame before as the camera moved: from its `depth` and `currentToPrevious` (the frame before's viewProjection after this frame's inverse, as TAA's), `taps` along it, `strength` times as long. What moves by itself is not blurred. `blurred` is it.",
+ "tags": [
+  "motion blur",
+  "camera motion",
+  "blur",
+  "camera",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "currentToPrevious",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "currentToPrevious",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "strength",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "strength",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "taps",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "taps",
+     "kind": "eValue",
+     "default": 8
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "blurred",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "motion",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "motion",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run motion",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "motion",
+       "out"
+      ]
+     },
+     "push.currentToPrevious": {
+      "$link": [
+       "currentToPrevious",
+       "out"
+      ]
+     },
+     "push.strength": {
+      "$link": [
+       "strength",
+       "out"
+      ]
+     },
+     "push.taps": {
+      "$link": [
+       "taps",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out blurred",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "blurred",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

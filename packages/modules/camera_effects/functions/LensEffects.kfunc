@@ -1,0 +1,224 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture of light as a cheap lens and film see it: its colours parted towards the edges (`aberration`), its corners darker (`vignette`), and grain (`grain`, another each `frame`). `lensed` is it.",
+ "tags": [
+  "chromatic aberration",
+  "vignette",
+  "grain",
+  "film",
+  "lens",
+  "camera",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "aberration",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "aberration",
+     "kind": "eValue",
+     "default": 0.5
+    }
+   },
+   {
+    "id": "vignette",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "vignette",
+     "kind": "eValue",
+     "default": 0.3
+    }
+   },
+   {
+    "id": "grain",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "grain",
+     "kind": "eValue",
+     "default": 0.05
+    }
+   },
+   {
+    "id": "frame",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "frame",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "lensed",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "lens",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "lens",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "lensed",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run lens",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "lens",
+       "out"
+      ]
+     },
+     "push.aberration": {
+      "$link": [
+       "aberration",
+       "out"
+      ]
+     },
+     "push.vignette": {
+      "$link": [
+       "vignette",
+       "out"
+      ]
+     },
+     "push.grain": {
+      "$link": [
+       "grain",
+       "out"
+      ]
+     },
+     "push.frame": {
+      "$link": [
+       "frame",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out lensed",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "lensed",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "lensed",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

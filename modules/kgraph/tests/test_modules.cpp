@@ -116,3 +116,19 @@ TEST_F(ModuleTest, FiltersFilterAPicture) {
     Run({ "filters", "Denoise", [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals"); }, "call/denoised" });
     Run({ "filters", "Sharpen", picture, "call/sharpened" });
 }
+
+TEST_F(ModuleTest, AntialiasingSmoothsAndUpscales) {
+    Run({ "antialiasing", "FXAA", picture, "call/smoothed" });
+    Run({ "antialiasing", "Upscale", [](kgraph::Node& call) { picture(call); call.Set("extent", Value::List { 96, 80, 1 }); }, "call/upscaled" });
+}
+
+TEST_F(ModuleTest, CameraEffectsDoWhatALensDoes) {
+    const auto withDepth = [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth"); };
+    Run({ "camera_effects", "DepthOfField", [&](kgraph::Node& call) { withDepth(call); call.Set("focus", 2).Set("near", 0.5).Set("far", 10); }, "call/focused" });
+    Run({ "camera_effects", "MotionBlur", [&](kgraph::Node& call) {
+        withDepth(call);
+        call.Set("currentToPrevious", Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.02, 0, 0, 1 });
+    }, "call/blurred" });
+    Run({ "camera_effects", "LensEffects", picture, "call/lensed" });
+    Run({ "camera_effects", "LensFlare", picture, "call/flare" });
+}

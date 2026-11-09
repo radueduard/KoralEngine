@@ -1,0 +1,127 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture drawn smaller made `extent` (width, height, 1) by a Lanczos filter of two lobes, kept within its neighbours so that it does not ring: what a frame drawn at a lower resolution is shown at the screen's with. `upscaled` is it, RGBA16F.",
+ "tags": [
+  "upscale",
+  "lanczos",
+  "resolution",
+  "scaling",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "extent",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "extent",
+     "kind": "eValue",
+     "default": [
+      1920,
+      1080,
+      1
+     ]
+    }
+   },
+   {
+    "id": "upscaled",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "extent",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "upscale",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "antialiasing_passes",
+     "compute.entry": "upscale",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "upscaled",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run upscale",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "upscale",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out upscaled",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "upscaled",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "upscaled",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

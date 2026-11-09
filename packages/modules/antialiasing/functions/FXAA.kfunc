@@ -1,0 +1,185 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture's edges smoothed after it is drawn: FXAA (Lottes's, its quality form), what is less contrasty than `threshold` of the brightest round it left, `subpixel` of what is thinner than a pixel smoothed. `smoothed` is it, RGBA16F. Best on a picture already tone mapped, or of light kept within 0 to 1.",
+ "tags": [
+  "antialiasing",
+  "fxaa",
+  "aa",
+  "jaggies",
+  "edges",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "threshold",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "threshold",
+     "kind": "eValue",
+     "default": 0.125
+    }
+   },
+   {
+    "id": "subpixel",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "subpixel",
+     "kind": "eValue",
+     "default": 0.75
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "smoothed",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "fxaa",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "antialiasing_passes",
+     "compute.entry": "fxaa",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "smoothed",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run fxaa",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "fxaa",
+       "out"
+      ]
+     },
+     "push.threshold": {
+      "$link": [
+       "threshold",
+       "out"
+      ]
+     },
+     "push.subpixel": {
+      "$link": [
+       "subpixel",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out smoothed",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "smoothed",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "smoothed",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

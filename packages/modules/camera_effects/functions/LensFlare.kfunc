@@ -1,0 +1,342 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A lens's flare added to a picture of light: what is brighter than `threshold`, at half its size, mirrored through the middle as four ghosts of their own colours and a ring (`halo`), `strength` of it added. `picture` is it, the picture given \u2014 added to where it is.",
+ "tags": [
+  "lens flare",
+  "flare",
+  "ghosts",
+  "halo",
+  "lens",
+  "camera",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "threshold",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "threshold",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "strength",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "strength",
+     "kind": "eValue",
+     "default": 0.5
+    }
+   },
+   {
+    "id": "halo",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "halo",
+     "kind": "eValue",
+     "default": 0.3
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "half",
+    "type": "Divide",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "b": [
+      2,
+      2,
+      1
+     ]
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "brights",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "flare",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "bright parts",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "brights",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "brights",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run bright parts",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "bright parts",
+       "out"
+      ]
+     },
+     "push.threshold": {
+      "$link": [
+       "threshold",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "ghosts",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "ghosts",
+     "param.source": {
+      "$link": [
+       "brights",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "flare",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run ghosts",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "ghosts",
+       "out"
+      ]
+     },
+     "push.strength": {
+      "$link": [
+       "strength",
+       "out"
+      ]
+     },
+     "push.halo": {
+      "$link": [
+       "halo",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "add flare",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "camera_effects_passes",
+     "compute.entry": "addFlare",
+     "param.flare": {
+      "$link": [
+       "flare",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run add flare",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "add flare",
+       "out"
+      ]
+     },
+     "cover": "picture"
+    }
+   },
+   {
+    "id": "out picture",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}
