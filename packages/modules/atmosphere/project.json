@@ -1,0 +1,13 @@
+{
+  "koral-engine-project": 1,
+  "name": "atmosphere",
+  "kind": "module",
+  "library": 2,
+  "scenes": [
+    "test"
+  ],
+  "start": "test",
+  "modules": [
+    "@modules/noise"
+  ]
+}

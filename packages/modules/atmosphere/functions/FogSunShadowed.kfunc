@@ -1,0 +1,792 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "Light in the air near the eye: the view cut into 160 x 90 x 64 cells out to `distance` metres, each lit by the sun through the clouds and its shadow maps (SunShadows' `atlas`, and the cascades' block it reads), by the sky and by every light of `lights` (the Lights function's, `lightCount` of them); a haze of `density` a metre at `floor`, thinning `height` metres up; blended with last frame's (`previousViewProjection`); gathered along each pixel's ray and laid over `picture` by its `depth`. `view`, `clouds` and `light` are the Atmosphere function's.",
+ "tags": [
+  "fog",
+  "volumetric",
+  "froxels",
+  "god rays",
+  "light shafts",
+  "haze",
+  "atmosphere"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "view",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "view",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "clouds",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "clouds",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "light",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "light",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "lights",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "lights",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "cascades",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "cascades",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "sunAtlas",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "sunAtlas",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "lightCount",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "lightCount",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "inverseView",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     850
+    ],
+    "inputs": {
+     "name": "inverseView",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "previousViewProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     940
+    ],
+    "inputs": {
+     "name": "previousViewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "hasHistory",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1030
+    ],
+    "inputs": {
+     "name": "hasHistory",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1120
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "density",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1210
+    ],
+    "inputs": {
+     "name": "density",
+     "kind": "eValue",
+     "default": 0.012
+    }
+   },
+   {
+    "id": "anisotropy",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1300
+    ],
+    "inputs": {
+     "name": "anisotropy",
+     "kind": "eValue",
+     "default": 0.5
+    }
+   },
+   {
+    "id": "strength",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1390
+    ],
+    "inputs": {
+     "name": "strength",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "distance",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1480
+    ],
+    "inputs": {
+     "name": "distance",
+     "kind": "eValue",
+     "default": 64
+    }
+   },
+   {
+    "id": "ambient",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1570
+    ],
+    "inputs": {
+     "name": "ambient",
+     "kind": "eValue",
+     "default": 0.3
+    }
+   },
+   {
+    "id": "history",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1660
+    ],
+    "inputs": {
+     "name": "history",
+     "kind": "eValue",
+     "default": 0.95
+    }
+   },
+   {
+    "id": "height",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1750
+    ],
+    "inputs": {
+     "name": "height",
+     "kind": "eValue",
+     "default": 6
+    }
+   },
+   {
+    "id": "floor",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1840
+    ],
+    "inputs": {
+     "name": "floor",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "near",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1930
+    ],
+    "inputs": {
+     "name": "near",
+     "kind": "eValue",
+     "default": 0.1
+    }
+   },
+   {
+    "id": "samples",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     2020
+    ],
+    "inputs": {
+     "name": "samples",
+     "kind": "eValue",
+     "default": 4
+    }
+   },
+   {
+    "id": "fog",
+    "type": "ShaderBuffer",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "module": "atmosphere_fog",
+     "entry": "settle",
+     "parameter": "fog",
+     "field.density": {
+      "$link": [
+       "density",
+       "out"
+      ]
+     },
+     "field.anisotropy": {
+      "$link": [
+       "anisotropy",
+       "out"
+      ]
+     },
+     "field.strength": {
+      "$link": [
+       "strength",
+       "out"
+      ]
+     },
+     "field.distance": {
+      "$link": [
+       "distance",
+       "out"
+      ]
+     },
+     "field.ambient": {
+      "$link": [
+       "ambient",
+       "out"
+      ]
+     },
+     "field.history": {
+      "$link": [
+       "history",
+       "out"
+      ]
+     },
+     "field.height": {
+      "$link": [
+       "height",
+       "out"
+      ]
+     },
+     "field.floor": {
+      "$link": [
+       "floor",
+       "out"
+      ]
+     },
+     "field.near": {
+      "$link": [
+       "near",
+       "out"
+      ]
+     },
+     "field.samples": {
+      "$link": [
+       "samples",
+       "out"
+      ]
+     },
+     "field.lightCount": {
+      "$link": [
+       "lightCount",
+       "out"
+      ]
+     },
+     "field.inverseView": {
+      "$link": [
+       "inverseView",
+       "out"
+      ]
+     },
+     "field.previousViewProjection": {
+      "$link": [
+       "previousViewProjection",
+       "out"
+      ]
+     },
+     "field.hasHistory": {
+      "$link": [
+       "hasHistory",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "clamped",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge",
+     "addressModeW": "eClampToEdge"
+    }
+   },
+   {
+    "id": "injected",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      160,
+      90,
+      64
+     ],
+     "type": "e3D"
+    }
+   },
+   {
+    "id": "settled",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      160,
+      90,
+      64
+     ],
+     "type": "e3D"
+    }
+   },
+   {
+    "id": "gathered",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      160,
+      90,
+      64
+     ],
+     "type": "e3D"
+    }
+   },
+   {
+    "id": "before",
+    "type": "Keep",
+    "at": [
+     580,
+     310
+    ],
+    "inputs": {
+     "of": {
+      "$link": [
+       "settled",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "inject",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_fog",
+     "compute.entry": "injectSunShadowed",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.fog": {
+      "$link": [
+       "fog",
+       "out"
+      ]
+     },
+     "param.clouds": {
+      "$link": [
+       "clouds",
+       "out"
+      ]
+     },
+     "param.skyLight": {
+      "$link": [
+       "light",
+       "out"
+      ]
+     },
+     "param.lights": {
+      "$link": [
+       "lights",
+       "out"
+      ]
+     },
+     "param.injected": {
+      "$link": [
+       "injected",
+       "out"
+      ]
+     },
+     "param.cascades": {
+      "$link": [
+       "cascades",
+       "out"
+      ]
+     },
+     "param.sunAtlas": {
+      "$link": [
+       "sunAtlas",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run inject",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "inject",
+       "out"
+      ]
+     },
+     "groups.x": 20,
+     "groups.y": 12,
+     "groups.z": 64
+    }
+   },
+   {
+    "id": "settle",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_fog",
+     "compute.entry": "settle",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.fog": {
+      "$link": [
+       "fog",
+       "out"
+      ]
+     },
+     "param.fresh": {
+      "$link": [
+       "injected",
+       "out"
+      ]
+     },
+     "param.before": {
+      "$link": [
+       "before",
+       "out"
+      ]
+     },
+     "param.clamped": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.settled": {
+      "$link": [
+       "settled",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run settle",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "settle",
+       "out"
+      ]
+     },
+     "groups.x": 20,
+     "groups.y": 12,
+     "groups.z": 64
+    }
+   },
+   {
+    "id": "gather",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_fog",
+     "compute.entry": "gather",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.fog": {
+      "$link": [
+       "fog",
+       "out"
+      ]
+     },
+     "param.cells": {
+      "$link": [
+       "settled",
+       "out"
+      ]
+     },
+     "param.gathered": {
+      "$link": [
+       "gathered",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run gather",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "gather",
+       "out"
+      ]
+     },
+     "groups.x": 20,
+     "groups.y": 12,
+     "groups.z": 1
+    }
+   },
+   {
+    "id": "apply",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_fog",
+     "compute.entry": "apply",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.fog": {
+      "$link": [
+       "fog",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.fogCells": {
+      "$link": [
+       "gathered",
+       "out"
+      ]
+     },
+     "param.clamped": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run apply",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "apply",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "picture"
+    }
+   },
+   {
+    "id": "out picture",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

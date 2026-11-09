@@ -1,0 +1,807 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "The sky as the air makes it (Hillaire's): each frame, how much light gets through the air (`transmittance`), what is scattered more than once (`multiScattering`), the sky seen from the eye (`skyView`), and of them `light` \u2014 a buffer of one KoralSkyLight: the sky's colours over the zenith, round the horizon and off the ground, and the sun's once the air has had it, the clouds over the sky counted. The sun travels along `sunDirection`, of `sunColor` (linear, times its intensity) above the air; the eye is at `eye` (metres), seeing through `inverseViewProjection`. `view`, `air` and `clouds` are the blocks Sky and Fog take.",
+ "tags": [
+  "atmosphere",
+  "sky",
+  "hillaire",
+  "scattering",
+  "rayleigh",
+  "mie",
+  "sun",
+  "clouds",
+  "weather",
+  "lighting"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "inverseViewProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "inverseViewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "eye",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "eye",
+     "kind": "eValue",
+     "default": [
+      0,
+      1.7,
+      0
+     ]
+    }
+   },
+   {
+    "id": "sunDirection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "sunDirection",
+     "kind": "eValue",
+     "default": [
+      0.3,
+      -0.8,
+      0.4
+     ]
+    }
+   },
+   {
+    "id": "sunColor",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "sunColor",
+     "kind": "eValue",
+     "default": [
+      8,
+      8,
+      8
+     ]
+    }
+   },
+   {
+    "id": "sunSize",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "sunSize",
+     "kind": "eValue",
+     "default": 0.53
+    }
+   },
+   {
+    "id": "time",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "time",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "frame",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "frame",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "groundColor",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "groundColor",
+     "kind": "eValue",
+     "default": [
+      0.3,
+      0.27,
+      0.22
+     ]
+    }
+   },
+   {
+    "id": "haze",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "haze",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "altitude",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     850
+    ],
+    "inputs": {
+     "name": "altitude",
+     "kind": "eValue",
+     "default": 0.2
+    }
+   },
+   {
+    "id": "groundAlbedo",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     940
+    ],
+    "inputs": {
+     "name": "groundAlbedo",
+     "kind": "eValue",
+     "default": 0.25
+    }
+   },
+   {
+    "id": "coverage",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1030
+    ],
+    "inputs": {
+     "name": "coverage",
+     "kind": "eValue",
+     "default": 0.45
+    }
+   },
+   {
+    "id": "windSpeed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1120
+    ],
+    "inputs": {
+     "name": "windSpeed",
+     "kind": "eValue",
+     "default": 25
+    }
+   },
+   {
+    "id": "windAngle",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1210
+    ],
+    "inputs": {
+     "name": "windAngle",
+     "kind": "eValue",
+     "default": 0.6
+    }
+   },
+   {
+    "id": "view",
+    "type": "ShaderBuffer",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "module": "atmosphere_passes",
+     "entry": "skyView",
+     "parameter": "view",
+     "field.inverseViewProjection": {
+      "$link": [
+       "inverseViewProjection",
+       "out"
+      ]
+     },
+     "field.eye": {
+      "$link": [
+       "eye",
+       "out"
+      ]
+     },
+     "field.time": {
+      "$link": [
+       "time",
+       "out"
+      ]
+     },
+     "field.sunDirection": {
+      "$link": [
+       "sunDirection",
+       "out"
+      ]
+     },
+     "field.sunSize": {
+      "$link": [
+       "sunSize",
+       "out"
+      ]
+     },
+     "field.sunColor": {
+      "$link": [
+       "sunColor",
+       "out"
+      ]
+     },
+     "field.frame": {
+      "$link": [
+       "frame",
+       "out"
+      ]
+     },
+     "field.groundColor": {
+      "$link": [
+       "groundColor",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "air",
+    "type": "ShaderBuffer",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "module": "atmosphere_passes",
+     "entry": "transmittance",
+     "parameter": "air",
+     "field.groundAlbedo": {
+      "$link": [
+       "groundAlbedo",
+       "out"
+      ]
+     },
+     "field.haze": {
+      "$link": [
+       "haze",
+       "out"
+      ]
+     },
+     "field.altitude": {
+      "$link": [
+       "altitude",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "clouds",
+    "type": "ShaderBuffer",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "module": "atmosphere_passes",
+     "entry": "lighting",
+     "parameter": "clouds",
+     "field.coverage": {
+      "$link": [
+       "coverage",
+       "out"
+      ]
+     },
+     "field.height": 600,
+     "field.scale": 800,
+     "field.windSpeed": {
+      "$link": [
+       "windSpeed",
+       "out"
+      ]
+     },
+     "field.windAngle": {
+      "$link": [
+       "windAngle",
+       "out"
+      ]
+     },
+     "field.shadow": 1,
+     "field.opacity": 3,
+     "field.distance": 12000,
+     "field.sunBlock": 10,
+     "field.thickness": 1600,
+     "field.extinction": 0.045,
+     "field.steps": 192,
+     "field.lightSteps": 5,
+     "field.shaftHaze": 8e-05,
+     "field.shaftSteps": 12,
+     "field.reach": 6000
+    }
+   },
+   {
+    "id": "clamped",
+    "type": "Sampler",
+    "at": [
+     320,
+     310
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge",
+     "addressModeW": "eClampToEdge"
+    }
+   },
+   {
+    "id": "transmittance",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      256,
+      64,
+      1
+     ]
+    }
+   },
+   {
+    "id": "multiScattering",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      32,
+      32,
+      1
+     ]
+    }
+   },
+   {
+    "id": "skyView",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": [
+      192,
+      108,
+      1
+     ]
+    }
+   },
+   {
+    "id": "light",
+    "type": "Buffer",
+    "at": [
+     580,
+     310
+    ],
+    "inputs": {
+     "instanceCount": 64,
+     "usage": [
+      "eStorage",
+      "eTransferSrc",
+      "eTransferDst"
+     ]
+    }
+   },
+   {
+    "id": "transmittance pass",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "transmittance",
+     "param.air": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     },
+     "param.transmittanceOut": {
+      "$link": [
+       "transmittance",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run transmittance pass",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "transmittance pass",
+       "out"
+      ]
+     },
+     "cover": "transmittanceOut"
+    }
+   },
+   {
+    "id": "multiple scattering",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "multiScattering",
+     "param.air": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     },
+     "param.transmittanceTable": {
+      "$link": [
+       "transmittance",
+       "out"
+      ]
+     },
+     "param.clampedLinear": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.multiOut": {
+      "$link": [
+       "multiScattering",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run multiple scattering",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "multiple scattering",
+       "out"
+      ]
+     },
+     "cover": "multiOut"
+    }
+   },
+   {
+    "id": "sky view",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "skyView",
+     "param.air": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     },
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.transmittanceTable": {
+      "$link": [
+       "transmittance",
+       "out"
+      ]
+     },
+     "param.multiTable": {
+      "$link": [
+       "multiScattering",
+       "out"
+      ]
+     },
+     "param.clampedLinear": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.skyViewOut": {
+      "$link": [
+       "skyView",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run sky view",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "sky view",
+       "out"
+      ]
+     },
+     "cover": "skyViewOut"
+    }
+   },
+   {
+    "id": "lighting",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "lighting",
+     "param.air": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     },
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.clouds": {
+      "$link": [
+       "clouds",
+       "out"
+      ]
+     },
+     "param.transmittanceTable": {
+      "$link": [
+       "transmittance",
+       "out"
+      ]
+     },
+     "param.skyViewTable": {
+      "$link": [
+       "skyView",
+       "out"
+      ]
+     },
+     "param.clampedLinear": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.light": {
+      "$link": [
+       "light",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run lighting",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "lighting",
+       "out"
+      ]
+     },
+     "groups.x": 1,
+     "groups.y": 1,
+     "groups.z": 1
+    }
+   },
+   {
+    "id": "out light",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "light",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "light",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out transmittance",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     130
+    ],
+    "inputs": {
+     "name": "transmittance",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "transmittance",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out multiScattering",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     220
+    ],
+    "inputs": {
+     "name": "multiScattering",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "multiScattering",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out skyView",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     310
+    ],
+    "inputs": {
+     "name": "skyView",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "skyView",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out view",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     400
+    ],
+    "inputs": {
+     "name": "view",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out air",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     490
+    ],
+    "inputs": {
+     "name": "air",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out clouds",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     580
+    ],
+    "inputs": {
+     "name": "clouds",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "clouds",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

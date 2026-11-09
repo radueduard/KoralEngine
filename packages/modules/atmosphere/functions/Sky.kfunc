@@ -1,0 +1,398 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "The sky drawn where nothing was (`depth` far: 1, or 0 when `reversed`) into `picture`: the air as the Atmosphere function's `skyView` has it, the ground under it, the sun's disc, and the clouds over them, marched at a quarter of the picture's size (`clouds` rgb their light, a what of the sky gets through). `view`, `air`, `clouds` and `light` are the Atmosphere function's.",
+ "tags": [
+  "sky",
+  "atmosphere",
+  "clouds",
+  "sun",
+  "background",
+  "skybox"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "skyView",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "skyView",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "view",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "view",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "air",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "air",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "clouds",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "clouds",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "light",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "light",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "intensity",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "intensity",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "clamped",
+    "type": "Sampler",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge",
+     "addressModeW": "eClampToEdge"
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "quarter",
+    "type": "Divide",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "b": [
+      4,
+      4,
+      1
+     ]
+    }
+   },
+   {
+    "id": "marched",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "quarter",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "march clouds",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "marchSky",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.clouds": {
+      "$link": [
+       "clouds",
+       "out"
+      ]
+     },
+     "param.skyLight": {
+      "$link": [
+       "light",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.cloudsMarched": {
+      "$link": [
+       "marched",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run march clouds",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "march clouds",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "cloudsMarched"
+    }
+   },
+   {
+    "id": "draw sky",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "atmosphere_passes",
+     "compute.entry": "sky",
+     "param.view": {
+      "$link": [
+       "view",
+       "out"
+      ]
+     },
+     "param.air": {
+      "$link": [
+       "air",
+       "out"
+      ]
+     },
+     "param.clouds": {
+      "$link": [
+       "clouds",
+       "out"
+      ]
+     },
+     "param.skyLight": {
+      "$link": [
+       "light",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.skyViewSeen": {
+      "$link": [
+       "skyView",
+       "out"
+      ]
+     },
+     "param.cloudsSeen": {
+      "$link": [
+       "marched",
+       "out"
+      ]
+     },
+     "param.clampedLinear": {
+      "$link": [
+       "clamped",
+       "out"
+      ]
+     },
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run draw sky",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "draw sky",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "push.intensity": {
+      "$link": [
+       "intensity",
+       "out"
+      ]
+     },
+     "cover": "picture"
+    }
+   },
+   {
+    "id": "out picture",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out clouds",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     130
+    ],
+    "inputs": {
+     "name": "clouds",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "marched",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

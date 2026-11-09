@@ -199,3 +199,25 @@ TEST_F(ModuleTest, OutlinesAreDrawnWhereDepthAndNormalsBreak) {
     Run({ "shading_stylized", "Outline", [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals").Set("normalEdge", 0.01); },
           "call/outlined" });
 }
+
+// The sky as the air makes it, drawn where nothing was; and the light in the air, laid over what was.
+TEST_F(ModuleTest, TheAtmosphereMakesTheSkyAndTheFog) {
+    const Value identity = Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
+    const auto atmosphere = [identity](kgraph::Graph& graph) {
+        graph.functions["Atmosphere"] = support::ModuleFunction("atmosphere", "Atmosphere");
+        graph.Add("air", "Function").Set("function", "Atmosphere").Set("inverseViewProjection", identity).Set("time", 3);
+    };
+    Run({ "atmosphere", "Atmosphere", [identity](kgraph::Node& call) { call.Set("inverseViewProjection", identity); }, "call/skyView" });
+    Run({ "atmosphere", "Sky", [](kgraph::Node& call) {
+        call.Wire("picture", "picture").Wire("depth", "depth").Wire("skyView", "air", "skyView").Wire("view", "air", "view").Wire("air", "air", "air")
+            .Wire("clouds", "air", "clouds").Wire("light", "air", "light");
+    }, "call/marched", atmosphere });
+    Run({ "atmosphere", "Fog", [identity](kgraph::Node& call) {
+        call.Wire("picture", "picture").Wire("depth", "depth").Wire("view", "air", "view").Wire("clouds", "air", "clouds").Wire("light", "air", "light")
+            .Wire("lights", "lights", "lights").Wire("lightCount", "lights", "count").Set("inverseView", identity).Set("previousViewProjection", identity);
+    }, "call/gathered", [atmosphere](kgraph::Graph& graph) {
+        atmosphere(graph);
+        graph.functions["Lights"] = support::EngineFunction("Lights");
+        graph.Add("lights", "Function").Set("function", "Lights");
+    } });
+}
