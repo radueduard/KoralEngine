@@ -944,6 +944,10 @@ namespace kgraph
                     Port repeat { "repeat", PortKind::eValue, "number", false, "How many elements each entity is, one after another: 6 for a point light's six faces. 1 when not given.", nullptr };
                     repeat.optional = true;
                     repeat.initial = Value(1);
+                    Port tests = hinted({ "conditions", PortKind::eValue, "list", false, "Conditions, by name, an entity must meet to be one of them: tests of a few of its "
+                                          "components (HasAttributes: a mesh with every vertex attribute a layout has), each with inputs of its own, `<condition>.<input>`. "
+                                          "A script's Conditions class declares more, [Condition(N)].", nullptr }, "conditions");
+                    tests.optional = true;
                     Port named = hinted({ "entity", PortKind::eValue, "string", false, "Which entity, by its name: the first that has the component, when not given.", nullptr }, "entity");
                     named.optional = true;
                     std::vector<Port> each {
@@ -980,7 +984,7 @@ namespace kgraph
                                                   "of the same name of one of its components for each the shader does not mark. What none of them has, the Draw says.");
                     std::vector<Port> looped = each;
                     looped.insert(looped.begin() + 1, instances);
-                    types.push_back({ "ForEach", "Scene", { component, with, without, where, repeat }, looped,
+                    types.push_back({ "ForEach", "Scene", { component, with, without, where, tests, repeat }, looped,
                                       "Every entity that has a component, an element at a time: each field of it, its index, and where the entity is. "
                                       "Every node wired from it is worked out once an element, and a BufferBuilder or ShaderBuffer wired from those holds an element for each.", nullptr });
                     // One entity, not a loop: the first with a component, or the one named — its fields, and where it is.
@@ -1015,7 +1019,7 @@ namespace kgraph
                     kept.push_back(out("group", "number", "Grouped: which group this element is of, from 0. 0 when it is not grouped."));
                     kept.push_back(out("groups", "list", "Grouped: { first, count } for each group, in order — where its elements start, and how many. What an IndirectDraws takes."));
                     kept.push_back(out("groupCount", "number", "Grouped: how many groups there are."));
-                    types.push_back({ "Filter", "Scene", { std::move(of), std::move(keep), std::move(drop), where, std::move(groupBy), std::move(only) }, kept,
+                    types.push_back({ "Filter", "Scene", { std::move(of), std::move(keep), std::move(drop), where, tests, std::move(groupBy), std::move(only) }, kept,
                                       "The entities it is wired, those with every component of `with` and none of `without`: an element at a time, with the fields of "
                                       "`with`'s components and where each is. A Draw wired from it draws each. With `groupBy`, those of the same mesh are next to each other.", nullptr });
 

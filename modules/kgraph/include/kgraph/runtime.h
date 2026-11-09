@@ -112,6 +112,23 @@ namespace kgraph
         std::string note {};           ///< Something said of it while it is ok: what it waits for — a script nothing runs yet.
     };
 
+    /**
+     * @brief A test a ForEach or a Filter keeps an entity by, named in its `conditions`: of a few of the entity's components,
+     *        given as their bytes — an entity without one of them is not kept — and of parameters, each an input on the node
+     *        named `<condition>.<parameter>`, a value a frame. A script's `Conditions` class declares them, `[Condition(N)]`
+     *        on a function whose first N arguments are components and the rest its parameters; the engine has some of its
+     *        own (HasAttributes). It is to read nothing but what it is given: what it said of an entity is said again only
+     *        when one of those components changes, or a parameter's value does.
+     */
+    struct Condition {
+        std::string name;                       ///< What `conditions` names it by: `HasAttributes`, `MeshTests.Suits`.
+        std::vector<std::string> components;    ///< The components it reads, by name, in the order it is given them.
+        std::vector<Port> parameters;           ///< The rest of what it is given: by name, as the node's inputs (with defaults).
+        std::string doc {};
+        /// Whether to keep the entity: given its components' bytes, and the parameters' values, in order.
+        std::function<bool(std::span<const void* const> components, std::span<const Value> parameters)> test;
+    };
+
     /** @brief What a resource script fills: one of its resources as it was made, and its contents, to be written. */
     struct Contents {
         std::string name;               ///< The resource, as the script declares it: the field it is.
@@ -637,6 +654,16 @@ namespace kgraph
         void RemoveResourceScript(std::string_view name);
         /** @brief The resource scripts a Script node can name, by name: of the runtime it follows, for one that follows another. */
         [[nodiscard]] std::vector<ResourceScript> ResourceScripts() const;
+
+        /**
+         * @brief Makes @p condition one a ForEach's or a Filter's `conditions` can name, or puts it in the place of the one so
+         *        named: each that names it finds its entities again.
+         */
+        void SetCondition(Condition condition);
+        /** @brief Forgets a condition: a node that names it says there is none. */
+        void RemoveCondition(std::string_view name);
+        /** @brief The conditions there are: the engine's (HasAttributes) and those set, by name. */
+        [[nodiscard]] std::vector<Condition> Conditions() const;
 
         // ---- materials ------------------------------------------------------------------------------------------------
 

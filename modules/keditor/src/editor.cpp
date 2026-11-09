@@ -4187,6 +4187,11 @@ namespace keditor
                     return Choice(std::move(names), value, set, depth ? "a depth format" : "a format");
                 }
                 if (port.editor == "components") return ComponentPicker(Doc().ComponentNames(), value, set, key, true);
+                if (port.editor == "conditions") {
+                    std::vector<std::string> names;
+                    for (const auto& condition : Doc().Runtime().Conditions()) names.push_back(condition.name);
+                    return ComponentPicker(std::move(names), value, set, key, true, "a condition");
+                }
                 if (port.editor == "component") return ComponentPicker(Doc().ComponentNames(), value, set, key, false);
                 if (port.editor == "componentFields") {
                     // The fields of the component named beside it that a buffer holds, and where the entity is: ticked,
@@ -5890,7 +5895,8 @@ namespace keditor
              * them, those chosen first, the rest those whose names have what is typed — those that start with it first.
              * Enter ticks the first found. However many components there are, what is looked for is a few letters away.
              */
-            kui::Widget ComponentPicker(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set, const std::string& key, const bool many)
+            kui::Widget ComponentPicker(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set, const std::string& key, const bool many,
+                                        const std::string& what = "a component")
             {
                 std::vector<std::string> on;
                 if (many) {
@@ -5924,7 +5930,7 @@ namespace keditor
                 };
                 const std::string first = found.size() > on.size() ? found[on.size()] : std::string();
                 std::vector<kui::Widget> rows;
-                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = typed, .placeholder = names.empty() ? "There are no components yet" : std::format("Find a component: {} of them", names.size()),
+                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = typed, .placeholder = names.empty() ? "There are none yet" : std::format("Find {}: {} of them", what, names.size()),
                     .onChanged = [this, key](const std::string& text) { SetState([&] { _componentSearch[key] = text; }); },
                     .onSubmitted = [this, key, first, choose](const std::string&) {
                         if (first.empty()) return;

@@ -803,7 +803,15 @@ zero. A value with fewer numbers than the field fills the first of them.
 
 A **ForEach** node is every entity that has a `component` (and those of `with`, and none of `without`), in the
 hierarchy's order, an element at a time — with `where` (`{ "field.kind": 2 }`, a Filter's too), only those whose fields
-hold what it says, found again when those components change. On the node it gives each component as one Bundle, by
+hold what it says, found again when those components change. `conditions` names tests an entity must meet as well
+(`Runtime::SetCondition`, `Runtime::Conditions`): each reads a few of its components — an entity without one is not kept
+— and has inputs of its own on the node, `<condition>.<input>`, a value a frame, wired or set. The engine's
+`HasAttributes` keeps a mesh with every vertex attribute `required` has, by semantic: a vertex layout (a pipeline's, a
+VertexLayout's, a Primitive's `layout`) or a list of semantics. A script's `Conditions` class declares more,
+`[Condition(N)]` on a function whose first N arguments are components and the rest its inputs. A condition reads nothing
+but what it is given, so the entities are found again only when one of its components changes or an input's value does
+(a mesh still being read is looked at again the next frame). An input is one value for all of them: wired from the
+loop's own outputs, it would be its first element's. On the node it gives each component as one Bundle, by
 the component's name — its own and each of `with`'s: `PbrMaterial` — and where the entity is, `transform`. Each field is
 there to wire too — its component's as `field.<name>`, another's as `<Component>.<name>` (`Runtime::OutputsOf(id)`) —
 and so is each of where it is: `matrix`, `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`, `scale`;

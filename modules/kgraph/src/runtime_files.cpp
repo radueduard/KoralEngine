@@ -1061,6 +1061,45 @@ namespace kgraph
                     if (id != kecs::NoComponent || filter)
                         for (const kecs::ComponentId each : with) if (each != id) gives(each, false);
                 }
+                // `conditions`: tests of a few of an entity's components, each with parameters that are inputs on the node,
+                // `<condition>.<parameter>`. Found again, as for `where`, when one of those components changes or a parameter does.
+                struct Tested { const Condition* condition; std::vector<kecs::ComponentId> components; std::vector<Value> parameters; };
+                std::vector<Tested> tests;
+                out.ports.clear();
+                if (const auto it = inputs.find("conditions"); it != inputs.end() && !it->second.value.IsNull()) {
+                    const auto* names = it->second.value.Items();
+                    if (!names || !std::ranges::all_of(*names, [](const Value& v) { return v.String() != nullptr; })) return Fail("'conditions' is a list of conditions, by name");
+                    whereGiven += std::format("|conditions {}:", conditionsVersion + (source ? source->conditionsVersion : 0));
+                    for (const auto& each : *names) {
+                        const std::string& called = *each.String();
+                        const Condition* condition = FindCondition(called);
+                        if (!condition) {
+                            std::string known;
+                            for (const auto& name : EngineConditions() | std::views::keys) known += std::format("{}{}", known.empty() ? "" : ", ", name);
+                            for (const auto& name : conditions | std::views::keys) known += std::format(", {}", name);
+                            return Fail(std::format("there is no condition '{}': there are {} — and a script's Conditions class declares more, [Condition(N)]", called, known));
+                        }
+                        Tested tested { condition, {}, {} };
+                        for (const auto& component : condition->components) {
+                            const kecs::ComponentId of = world ? world->Find(component) : kecs::NoComponent;
+                            if (of == kecs::NoComponent) nobody = true;     // nothing has a component there is none of
+                            else whereChanges.push_back(world->ChangesOf(of));
+                            tested.components.push_back(of);
+                        }
+                        for (const Port& parameter : condition->parameters) {
+                            Port port = parameter;
+                            port.name = called + "." + parameter.name;
+                            port.optional = false;
+                            port.group = "Conditions";
+                            if (port.doc.empty()) port.doc = std::format("What {} is given as its {}.", called, parameter.name);
+                            const auto given = inputs.find(port.name);
+                            tested.parameters.push_back(given != inputs.end() && !given->second.value.IsNull() ? given->second.value : parameter.initial);
+                            whereGiven += std::format("{}={};", port.name, tested.parameters.back().ToJson());
+                            out.ports.push_back(std::move(port));
+                        }
+                        tests.push_back(std::move(tested));
+                    }
+                }
                 EntityList& list = *out.listed;
                 list.repeat = repeat;
                 // Found again only when what they are found from has changed since: see EntityList::Made.
@@ -1072,6 +1111,7 @@ namespace kgraph
                                               with, without, id, groupBy, select, named, whereGiven, whereChanges, repeat, nobody, only,
                                               drawn ? hiddenVersion : 0 };
                 const bool again = !list.made || *list.made != made;
+                bool unsure = false;    // a condition could not say of an entity yet: found again next frame
                 // The component was made since, or is made of other fields now: what this gives is no longer what it has.
                 if (list.component != id || list.shape != shape) {
                     list.entities.clear();
@@ -1091,6 +1131,18 @@ namespace kgraph
                                    const Value now = FieldValue(hold.field, bytes + hold.field.offset);
                                    if (hold.value.Bool()) return now.Bool() ? *now.Bool() == *hold.value.Bool() : now.Number() && (*now.Number() != 0.0) == *hold.value.Bool();
                                    return now.Number() ? std::abs(*now.Number() - *hold.value.Number()) < 1e-6 : now.Bool() && (*now.Bool() ? 1.0 : 0.0) == *hold.value.Number();
+                               })
+                            && std::ranges::all_of(tests, [&](const Tested& tested) {
+                                   std::vector<const void*> of;
+                                   for (const kecs::ComponentId component : tested.components) {
+                                       const void* bytes = world->Get(entity, component);
+                                       if (!bytes) return false;
+                                       // A mesh still being read is nothing to say yes or no of yet: looked at again next frame.
+                                       if (component == meshes)
+                                           if (const Resource* mesh = static_cast<const Mesh*>(bytes)->mesh.get(); mesh && mesh->pending) { unsure = true; return false; }
+                                       of.push_back(bytes);
+                                   }
+                                   return tested.condition->test ? tested.condition->test(of, tested.parameters) : true;
                                }))
                             list.entities.push_back(entity);
                     if (select == "eFirst" && list.entities.size() > 1) list.entities.resize(1);
@@ -1104,6 +1156,7 @@ namespace kgraph
                 const bool regroup = again && list.component == id && list.shape == shape;
                 if (regroup) {
                     list.made = made;
+                    if (unsure) list.made->structure = ~0ull;     // not what it is: found again next frame
                     ++list.version;
                 }
                 list.grouped = groupBy != kecs::NoComponent;
@@ -1150,6 +1203,57 @@ namespace kgraph
                 SetRow(out, 0);
             }
             return {};
+        }
+
+    auto Runtime::Impl::FindCondition(const std::string_view name) const -> const Condition*
+    {
+            if (const auto it = conditions.find(name); it != conditions.end()) return &it->second;
+            if (source)
+                if (const auto it = source->conditions.find(name); it != source->conditions.end()) return &it->second;
+            const auto& engine = EngineConditions();
+            const auto it = engine.find(name);
+            return it == engine.end() ? nullptr : &it->second;
+        }
+
+    auto Runtime::Impl::EngineConditions() -> const std::map<std::string, Condition, std::less<>>&
+    {
+            static const std::map<std::string, Condition, std::less<>> engine = [] {
+                std::map<std::string, Condition, std::less<>> made;
+                // A mesh with every vertex attribute a pipeline reads: its layout's semantics among the mesh's.
+                Condition has;
+                has.name = "HasAttributes";
+                has.components = { "Mesh" };
+                Port required { "required", PortKind::eValue, "struct KoralVertexLayout", false,
+                                "What the mesh's vertices must have: a vertex layout (a pipeline's, a VertexLayout's, a Primitive's `layout`) whose every "
+                                "attribute's semantic the mesh has too — or a list of semantics, [\"POSITION\", \"NORMAL\", \"UV\"].", nullptr };
+                required.initial = Value(Value::List { "POSITION" });
+                has.parameters = { std::move(required) };
+                has.doc = "Keeps an entity whose Mesh has every vertex attribute `required` has, by semantic: those whose layout is one a pipeline that reads them can draw.";
+                has.test = [](const std::span<const void* const> components, const std::span<const Value> parameters) {
+                    const auto* mesh = static_cast<const Mesh*>(components[0]);
+                    const Resource* held = mesh ? mesh->mesh.get() : nullptr;
+                    while (held && held->replacedBy) held = held->replacedBy.get();
+                    if (held && held->part) held = held->source.get();
+                    if (!held || !held->handle || held->kind != "Mesh") return false;
+                    const auto& layout = kor::capi::MeshOf(held->handle)->Layout();
+                    const auto semanticOf = [](const Value& attribute) -> const std::string* {
+                        if (const std::string* text = attribute.String()) return text;
+                        const Value* semantic = attribute.Find("semantic");
+                        return semantic ? semantic->String() : nullptr;
+                    };
+                    const Value& wanted = parameters.empty() ? Value() : parameters[0];
+                    const Value* attributes = wanted.Find("attributes");
+                    const auto* list = attributes ? attributes->Items() : wanted.Items();
+                    if (!list) return true;     // nothing required
+                    return std::ranges::all_of(*list, [&](const Value& attribute) {
+                        const std::string* semantic = semanticOf(attribute);
+                        return !semantic || std::ranges::any_of(layout.attributes, [&](const auto& has) { return has.semantic == *semantic; });
+                    });
+                };
+                made[has.name] = std::move(has);
+                return made;
+            }();
+            return engine;
         }
 
     auto Runtime::Impl::MeshPartsOf(Held mesh, const std::function<void(std::string_view part, Output given)>& set) -> std::string
@@ -2556,8 +2660,16 @@ namespace kgraph
             const bool draws = node.type == "Draw" || node.type == "Dispatch" || node.type == "TraceRays";
             // A lens took a view and an extent before: what became of them is its to say.
             const bool lens = node.type == "Perspective" || node.type == "Orthographic" || node.type == "Frustum" || node.type == "Oblique" || node.type == "Paraboloid";
+            // A ForEach or a Filter has its conditions' inputs besides: `<condition>.<input>`, of each it names.
+            const auto tests = inputs.find("conditions");
+            const auto tested = [&](const std::string& name) {
+                if (tests == inputs.end() || !tests->second.value.Items()) return false;
+                return std::ranges::any_of(*tests->second.value.Items(), [&](const Value& condition) {
+                    return condition.String() && name.size() > condition.String()->size() + 1 && name.starts_with(*condition.String() + ".");
+                });
+            };
             const auto own = [&](const std::string& name) {
-                return (draws && (name.starts_with("param.") || name.starts_with("push.") || name == "with" || name == "without"))
+                return tested(name) || (draws && (name.starts_with("param.") || name.starts_with("push.") || name == "with" || name == "without"))
                     || (lens && (name == "view" || name == "extent")) || (node.type == "ForEach" && (name == "select" || name == "which" || name == "entity"));
             };
             for (const auto& name : inputs | std::views::keys)

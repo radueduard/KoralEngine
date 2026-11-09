@@ -1176,6 +1176,32 @@ namespace kgraph
         at.generation = ++_impl->scriptsVersion;
     }
 
+    void Runtime::SetCondition(Condition condition)
+    {
+        std::string name = condition.name;
+        _impl->conditions[std::move(name)] = std::move(condition);
+        ++_impl->conditionsVersion;
+    }
+
+    void Runtime::RemoveCondition(const std::string_view name)
+    {
+        if (const auto it = _impl->conditions.find(name); it != _impl->conditions.end()) {
+            _impl->conditions.erase(it);
+            ++_impl->conditionsVersion;
+        }
+    }
+
+    std::vector<Condition> Runtime::Conditions() const
+    {
+        std::map<std::string, Condition, std::less<>> all = Impl::EngineConditions();
+        if (_impl->source)
+            for (const auto& [name, condition] : _impl->source->conditions) all[name] = condition;
+        for (const auto& [name, condition] : _impl->conditions) all[name] = condition;
+        std::vector<Condition> out;
+        for (auto& condition : all | std::views::values) out.push_back(std::move(condition));
+        return out;
+    }
+
     void Runtime::RemoveResourceScript(const std::string_view name)
     {
         if (const auto it = _impl->scripts.find(name); it != _impl->scripts.end()) {

@@ -394,6 +394,7 @@ Each input has the control for what it is:
 | An entry point | The functions the module beside it declares with `[shader(...)]`. |
 | Components (a Filter's or a ForEach's `with`, `without`) | A search above a box of the components and tags the scene has, each with a tick: those ticked first, then those whose names have what is typed — those that start with it first. Enter ticks the first found. |
 | A component (a ForEach's `component`, a Filter's `groupBy`) | The same, one ticked at most. |
+| Conditions (a Filter's or a ForEach's `conditions`) | The same, of the conditions there are — the engine's (HasAttributes) and the scripts' — each ticked one's inputs under Conditions. |
 | An image parameter (`cover`) | The image parameters of the pipeline the pass runs. |
 | A node (`Reference`) | The nodes that make a resource. |
 | A vertex layout's attributes | A picture of its buffers, then each buffer's attributes under it: what each is, its type, how many, which buffer, earlier and later; whether the buffer goes per instance. |

@@ -1615,6 +1615,12 @@ namespace kgraph
             std::uint64_t generation = 0;
         };
         std::map<std::string, Scripted, std::less<>> scripts;
+        std::map<std::string, Condition, std::less<>> conditions;     // those set: a script's, in place of the engine's of a name
+        std::uint64_t conditionsVersion = 0;
+        /** The condition so named: one set here, else the runtime's it follows, else the engine's. Null when there is none. */
+        [[nodiscard]] const Condition* FindCondition(std::string_view name) const;
+        /** The engine's own conditions. */
+        static const std::map<std::string, Condition, std::less<>>& EngineConditions();
         std::uint64_t scriptsVersion = 0, scriptsSeen = 0;
         [[nodiscard]] const Scripted* ScriptNamed(const std::string_view name) const;
         [[nodiscard]] std::uint64_t ScriptsVersion() const;

@@ -1809,6 +1809,78 @@ TEST_F(EntityTest, ALoopsInstancesFillADrawsBufferFromWhatItsEntitiesHave) {
     }
 }
 
+// A Filter keeps an entity by its conditions too: tests of a few of its components, each with inputs of its own on the
+// node. The engine's HasAttributes keeps a mesh with every vertex attribute a layout has — given, or wired a pipeline's.
+TEST_F(EntityTest, AFilterKeepsWhatMeetsItsConditions) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    const auto skinned = runtime.ResourceOf("$skinnedCylinder");
+    ASSERT_TRUE(cube);
+    ASSERT_TRUE(skinned);
+    world.Add<kgraph::Mesh>(world.Create(), { cube });
+    world.Add<kgraph::Mesh>(world.Create(), { skinned });
+
+    kgraph::Graph graph;
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" })
+        .Set("conditions", Value::List { "HasAttributes" }).Set("HasAttributes.required", Value::List { "POSITION", "BONE_IDS" });
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(1)) << "only the mesh with bones";
+    EXPECT_TRUE(std::ranges::contains(runtime.PortsOf("meshes"), std::string("HasAttributes.required"), &kgraph::Port::name)) << "its input, on the node";
+
+    // Wired a layout: what a mesh of it has, the cube lacks.
+    graph.Add("bones", "Primitive").Set("shape", "eSkinnedCylinder");
+    graph.Find("meshes")->Wire("HasAttributes.required", "bones", "layout");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(1));
+    graph.Add("box", "Primitive").Set("shape", "eCube");
+    graph.Find("meshes")->Wire("HasAttributes.required", "box", "layout");
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(2)) << "what the cube has, both have";
+
+    // One there is none of: said.
+    graph.Find("meshes")->Set("conditions", Value::List { "NoSuchThing" });
+    runtime.Set(graph);
+    Frame();
+    ASSERT_NE(runtime.Status("meshes"), nullptr);
+    EXPECT_FALSE(runtime.Status("meshes")->ok);
+    EXPECT_NE(runtime.Status("meshes")->error.find("HasAttributes"), std::string::npos) << "what there is: " << runtime.Status("meshes")->error;
+
+    // One set from outside — a script's — of two components, with a parameter.
+    kgraph::Condition both;
+    both.name = "Tests.Bright";
+    both.components = { "Mesh", "PointLight" };
+    both.parameters = { kgraph::Port { "least", kgraph::PortKind::eValue, "number", false, {}, nullptr } };
+    const std::size_t at = world.Describe(world.Find("PointLight")).FindField("intensity")->offset;
+    both.test = [at](const std::span<const void* const> components, const std::span<const Value> parameters) {
+        float intensity = 0.f;
+        std::memcpy(&intensity, static_cast<const std::byte*>(components[1]) + at, sizeof intensity);
+        return parameters[0].Number() && intensity >= *parameters[0].Number();
+    };
+    runtime.SetCondition(both);
+    const kecs::Entity lamp = world.Create();
+    world.Add<kgraph::Mesh>(lamp, { cube });
+    support::Give(world, lamp, "PointLight", { { "intensity", { 3.f } } });
+    graph.Find("meshes")->Set("conditions", Value::List { "Tests.Bright" }).Set("Tests.Bright.least", 2.0);
+    graph.Find("meshes")->inputs.erase("HasAttributes.required");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(1)) << "the lamp: a mesh, and a light bright enough";
+    graph.Find("meshes")->Set("Tests.Bright.least", 5.0);
+    runtime.Set(graph);
+    Frame();
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(0)) << "its parameter changed: found again";
+    EXPECT_TRUE(std::ranges::contains(runtime.Conditions(), std::string("Tests.Bright"), &kgraph::Condition::name));
+}
+
 // A buffer of instances is written again an element at a time, only where something changed: an entity moved — by
 // itself or by what it is under — given, rid of or written its own fields, gone, or another in its place. Each is seen
 // in every copy of the buffer the frames in flight read, and what did not change stays as it was written.
