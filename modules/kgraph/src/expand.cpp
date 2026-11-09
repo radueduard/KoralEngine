@@ -899,7 +899,7 @@ namespace kgraph
             const Node* node = OriginOf(graph, link.node);
             if (!node) return false;
             if (node->type == "Entities" || node->type == "Filter" || node->type == "ForEach")
-                return !std::ranges::contains(std::array<std::string_view, 5> { "out", "entities", "count", "groups", "groupCount" }, link.output);
+                return !std::ranges::contains(std::array<std::string_view, 6> { "out", "entities", "count", "groups", "groupCount", "instances" }, link.output);
             // What gathers every element into one — a list of them, a buffer of them, their meshes packed — is of them all: the
             // lights' buffer a pipeline reads, a PointShadows' idle worked out of a Collect of the lights, a pack's layout.
             static constexpr std::array<std::string_view, 7> gathering { "Collect", "BufferBuilder", "ShaderBuffer", "MeshPack", "IndirectDraws", "Meshlets", "RayScene" };
@@ -935,6 +935,41 @@ namespace kgraph
             for (const char* name : { "where", "select", "entityId", "groupBy" })
                 if (source->inputs.contains(name)) return std::format("'{}' says '{}', which a batch of it does not: make it a Filter", source->id, name);
         return {};
+    }
+
+    /**
+     * A Draw wired a loop's `instances` (a ForEach's, a Filter's, an Entities node's) and no `mesh` draws the loop's meshes:
+     * a ForEach's, each element's own Mesh, a draw an element that reads its own instance; a Filter's or an Entities
+     * node's, every one of them in one indirect draw (`batched`: see WriteBatches), whose instances are then the batch's.
+     * A loop whose entities have no Mesh has none to give: said on the Draw.
+     */
+    static void WriteLoopMeshes(Graph& graph, Expansion& out)
+    {
+        for (Node& draw : graph.nodes) {
+            if (draw.type != "Draw") continue;
+            if (const auto mesh = draw.inputs.find("mesh"); mesh != draw.inputs.end() && (mesh->second.link || !mesh->second.value.IsNull())) continue;
+            const Link* instances = nullptr;
+            const Node* loop = nullptr;
+            for (const auto& input : draw.inputs | std::views::values)
+                if (input.link && input.link->output == "instances")
+                    if (const Node* found = OriginOf(graph, input.link->node); found && IsEach(found->type)) { instances = &*input.link; loop = found; break; }
+            if (!loop) continue;
+            const auto has = [&](const char* list) {
+                const auto names = loop->inputs.find(list);
+                return names != loop->inputs.end() && names->second.value.Items()
+                    && std::ranges::any_of(*names->second.value.Items(), [](const Value& name) { return name.String() && *name.String() == "Mesh"; });
+            };
+            const std::string* component = Text(*loop, "component");
+            const bool own = loop->type == "ForEach" && component && *component == "Mesh";
+            if (!own && !has("with")) {
+                out.errors[draw.id] = std::format("'{}''s instances give it their meshes only when they have a Mesh: add Mesh to its {}, or wire 'mesh'",
+                                                  loop->id, loop->type == "ForEach" ? "component or its with" : "with");
+                continue;
+            }
+            const std::string from = instances->node;
+            draw.Wire("mesh", from, own ? "field.mesh" : "Mesh.mesh");
+            if (loop->type != "ForEach") draw.Set("batched", true);     // every one of them: one indirect draw
+        }
     }
 
     static void WriteBatches(Expansion& out)
@@ -1047,6 +1082,10 @@ namespace kgraph
 
             Node& written = *graph.Find(id);
             written.Wire("mesh", pack, "mesh").Set("command", "eDrawIndexedIndirect").Wire("indirect", commands, "commands").Wire("drawCount", commands, "drawCount");
+            // A loop's instances wired to it are the batch's: the same entities, in the order its commands draw them.
+            for (auto& input : written.inputs | std::views::values)
+                if (input.link && input.link->output == "instances")
+                    if (const Node* loop = origin(input.link->node); loop && IsEach(loop->type)) input.link = Link { batch, "instances" };
             if (sighted) written.Set("compacted", true);
             // Left out of sight a draw at a time, on the CPU: no more of a batch.
             written.inputs.erase("cull");
@@ -1065,6 +1104,7 @@ namespace kgraph
         WriteBundles(written, out, elementOf);
         WriteComponentBuffers(written, out, fieldsOf);
         WriteShorthands(written, out);
+        WriteLoopMeshes(written, out);
         out.graph.passes = written.passes;
         out.graph.setup = written.setup;
         out.graph.fixed = written.fixed;

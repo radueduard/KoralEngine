@@ -1706,8 +1706,9 @@ TEST_F(EntityTest, AShaderSaysWhatEachInstanceIsAndTheDrawFillsIt) {
     EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "outgrown, both have the one made in its place";
 }
 
-// A loop's `instances`, wired to a Draw's buffer of each instance's, say whose entities fill it: a Filter's, for one
-// indirect draw of them all, or a ForEach's, for a draw an element that reads its own. It is filled as best what they
+// A loop's `instances`, wired to a Draw's buffer of each instance's, say whose entities fill it — and, wired nothing else,
+// what the Draw draws: a Filter's meshes in one indirect draw of them all, or a ForEach's each element's, a draw an
+// element that reads its own. It is filled as best what they
 // have fills it — a field the shader does not mark is the same-named field of one of the loop's components — and what
 // none of them has is said on the Draw, which draws all the same.
 TEST_F(EntityTest, ALoopsInstancesFillADrawsBufferFromWhatItsEntitiesHave) {
@@ -1731,13 +1732,12 @@ TEST_F(EntityTest, ALoopsInstancesFillADrawsBufferFromWhatItsEntitiesHave) {
     graph.Add("canvas view", "ImageView").Wire("image", "canvas");
     graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
     graph.Add("all", "Entities");
-    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
-    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
-    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
-    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" });
+    graph.Add("shape", "Primitive").Set("shape", "eCube");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "shape", "layout")
         .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
-    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
-        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.instances", "meshes", "instances");
+    // Its instances and nothing else: the Filter's meshes, packed and drawn in one indirect draw.
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("param.instances", "meshes", "instances");
     graph.Add("screen", "Screen");
     graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
     runtime.Set(graph);
@@ -1771,11 +1771,21 @@ TEST_F(EntityTest, ALoopsInstancesFillADrawsBufferFromWhatItsEntitiesHave) {
         EXPECT_TRUE(is(8, { 0, 0, 0 })) << "no colour of its own: black";
     }
 
+    {   // A loop with no Mesh has no meshes to give: said on the Draw.
+        kgraph::Graph meshless = graph;
+        meshless.Find("meshes")->Set("with", Value::List { "PointLight" });
+        runtime.Set(meshless);
+        Frame();
+        ASSERT_NE(runtime.Status("draw"), nullptr);
+        EXPECT_FALSE(runtime.Status("draw")->ok);
+        EXPECT_NE(runtime.Status("draw")->error.find("Mesh"), std::string::npos) << runtime.Status("draw")->error;
+    }
+
     {   // A ForEach's, a draw an element: each reads its own element of the one buffer.
         kgraph::Graph each = graph;
         std::erase_if(each.nodes, [](const kgraph::Node& node) { return node.id == "draw"; });
         each.Add("lamps", "ForEach").Set("component", "Mesh").Set("with", Value::List { "PointLight" });
-        each.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "lamps", "field.mesh").Wire("param.instances", "lamps", "instances");
+        each.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("param.instances", "lamps", "instances");     // each element's mesh, from them
         runtime.Set(each);
         for (int i = 0; i < 3; ++i) Frame();
         for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;

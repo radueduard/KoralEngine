@@ -1231,6 +1231,11 @@ a field is the pipeline's own component's where an entity has one, and zero wher
 material kind the shader reads is not drawn. A Draw an element of a ForEach at a time, given that ForEach's
 `instances`, reads its own element: each draw's first instance is its element's.
 
+Given a loop's `instances` and no `mesh`, a Draw draws the loop's meshes (Expand's WriteLoopMeshes): a ForEach's, each
+element's own Mesh, a draw an element; a Filter's or an Entities node's, all of them in one indirect draw — `batched`,
+written out as below — whose instances are then the batch's, in the order its commands draw them. A loop whose
+entities have no Mesh (its `component`, or among its `with`) has none to give, and the Draw says so.
+
 ```slang
 import entity;
 struct Instance {

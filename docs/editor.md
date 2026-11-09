@@ -863,8 +863,10 @@ A ForEach, a Filter and an Entities node give `instances`, a wire of a colour of
 each instance's (one its shader marks `[entity("PER_INSTANCE")]`), it says whose entities fill it — and only there does
 it go. So a ForEach of Mesh with PbrMaterial is, on the node, four things: `Mesh`, `PbrMaterial`, `transform` and
 `instances`. The buffer is filled as best what the loop's entities have fills it (see kgraph.md, Each instance's), and
-what none of them has is said on the Draw, which draws all the same. Unwired, the buffer is of the Filter whose meshes
-the Draw's MeshPack packs, as its port says.
+what none of them has is said on the Draw, which draws all the same. With nothing wired to its `mesh`, the Draw draws
+the loop's meshes too: a Filter's all in one indirect draw, a ForEach's a draw an element — so a Draw is its pipeline
+and a loop's `instances`, and nothing else. Unwired, the buffer is of the Filter whose meshes the Draw's MeshPack
+packs, as its port says.
 
 ## Working on the graph
 
