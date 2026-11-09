@@ -218,7 +218,7 @@ what a project can do without. Each has a library its shaders import by the modu
 
 | Module | Its library | Its functions |
 |---|---|---|
-| `noise` | Value, Perlin (`KoralPerlin`, tiled), simplex, Worley (`KoralWorley`), `KoralFbm`, `KoralDomainWarp`, `KoralCurl` | — |
+| `noise` | Value (in three dimensions or over a plane), Perlin (`KoralPerlin`, tiled), simplex, Worley (`KoralWorley`), `KoralFbm`, `KoralDomainWarp`, `KoralCurl` | — |
 | `sdf` | Signed distances of 3D and 2D shapes, hard and smooth booleans, `KoralMarch` of any `IKoralField`, its normal and soft shadow | — |
 | `surface_mapping` | Triplanar and biplanar pictures and normals, `KoralParallax` (occlusion mapping), height-blended layers, detail normals | — |
 | `color_grading` | AgX, Reinhard's, Hable's and Lottes's curves (`KoralCurve`), lift/gamma/gain, contrast, saturation, white balance, a 3D table | Grade, GradeExposed, AutoExposure |
@@ -233,7 +233,7 @@ what a project can do without. Each has a library its shaders import by the modu
 | `screen_space` | A pixel's place and normal of the depth, depth-kept weights, a subsurface profile | GroundTruthOcclusion, ScreenSpaceReflections, SubsurfaceBlur |
 | `atmosphere` | Hillaire's air and its tables, the sky's light (`KoralSkyLight`), the sun's disc; its clouds (`atmosphere_clouds`, of the noise module, which it imports) | Atmosphere, Sky, Fog, FogSunShadowed, FogTraced |
 | `animation` | Linear and dual quaternion skinning, morph targets, wind sway, billboards, baked vertex animation | — |
-| `raytracing_extras` | Inline rays (`KoralTraceAny`), traced shadows and occlusion, ray cones for a picture's level | TracedOcclusion |
+| `raytracing_extras` | Inline rays (`KoralTraceAny`, through what casts no shadow: `KoralShadowMask`), a RayScene's `scene` read (`KoralSceneTraceable`, `KoralSceneStructure`), traced shadows and occlusion, ray cones for a picture's level | TracedOcclusion |
 
 Not among them, for want of what they are made of: SMAA (its area and search tables), and area lights by linearly
 transformed cosines (their fitted tables) — the representative point stands for those.
