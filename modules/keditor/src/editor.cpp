@@ -4478,6 +4478,19 @@ namespace keditor
                 std::erase_if(inputs, [&](const Shown& shown) {
                     return !shown.given && nodeType && !kgraph::PartsOf(*nodeType, shown.port.name).empty();
                 });
+                // A ForEach's or a Filter's components and conditions: one part of their own, not an input each.
+                if (node.type == "ForEach" || node.type == "Filter") {
+                    std::vector<std::string> conditionNames;
+                    if (const auto listed = node.inputs.find("conditions"); listed != node.inputs.end() && listed->second.value.Items())
+                        for (const auto& item : *listed->second.value.Items()) if (item.String()) conditionNames.push_back(*item.String());
+                    std::erase_if(inputs, [&](const Shown& shown) {
+                        const std::string& name = shown.port.name;
+                        return name == "component" || name == "with" || name == "without" || name == "conditions"
+                            || std::ranges::any_of(conditionNames, [&](const std::string& condition) { return name.starts_with(condition + "."); });
+                    });
+                    rows.push_back(EachChoices(node));
+                    rows.push_back(kui::Separator());
+                }
                 // What it gives: an output that is one of its inputs as it is set — `extent`, `format` — is that input's to put on
                 // the node, from its row; the rest are listed under What it gives.
                 const auto outputs = runtime.OutputsOf(id);
@@ -5891,13 +5904,227 @@ namespace keditor
             // The outliner: what is looked for in it, the entity whose name is being typed over, and where what is held
             // over it would go. The inspector: the components shut in it.
             /**
-             * Components to choose from, many (@p many: `with`, `without`) or one (`component`): a search above a box of
-             * them, those chosen first, the rest those whose names have what is typed — those that start with it first.
-             * Enter ticks the first found. However many components there are, what is looked for is a few letters away.
+             * A dropdown with a search: pressed, a field to type in over a list of @p names — those that start with what is
+             * typed first, then those that have it — of which the one pressed, or the first on Enter, is @p pick ed. Only
+             * one is open at a time, by its @p key.
              */
+            kui::Widget SearchDropdown(const std::string& key, std::vector<std::string> names, const std::string& placeholder, std::function<void(const std::string&)> pick,
+                                       const char* icon = "add")
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const bool open = _pickerOpen == key;
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                const std::string typed = _componentSearch.contains(key) ? _componentSearch.at(key) : std::string();
+                const std::string wanted = lower(typed);
+                std::vector<std::string> starting, having;
+                for (const auto& name : names) {
+                    const std::string folded = lower(name);
+                    if (wanted.empty() || folded.starts_with(wanted)) starting.push_back(name);
+                    else if (folded.find(wanted) != std::string::npos) having.push_back(name);
+                }
+                std::ranges::sort(starting);
+                std::ranges::sort(having);
+                starting.insert(starting.end(), having.begin(), having.end());
+                const auto chosen = [this, key, pick](const std::string& name) {
+                    SetState([&] { _pickerOpen.clear(); _componentSearch.erase(key); });
+                    pick(name);
+                };
+                kui::Widget field = kui::Button(kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, t.textMuted)),
+                                                           kui::Expanded(kgui::Line(names.empty() ? std::string("none left to add") : placeholder, kui::TextStyle {}.SetColor(t.textMuted))),
+                                                           kui::SizedBox(16.f, 16.f, kui::Icon(open ? "expand_less" : "expand_more", kui::IconStyle::eFilled, t.textMuted)) },
+                                                         kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                                                [this, key, open, empty = names.empty()] {
+                                                    if (empty) return;
+                                                    SetState([&] { _pickerOpen = open ? std::string() : key; _componentSearch.erase(key); ++_pickerFocus; });
+                                                },
+                                                kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary).SetPadding(kui::EdgeInsets::Symmetric(8.f, 4.f)));
+                std::vector<kui::Widget> lines;
+                lines.push_back(kui::TextField(kui::TextFieldOptions { .text = typed, .placeholder = std::format("Type to find: {} of them", names.size()),
+                    .onChanged = [this, key](const std::string& text) { SetState([&] { _componentSearch[key] = text; }); },
+                    .onSubmitted = [chosen, first = starting.empty() ? std::string() : starting.front()](const std::string&) { if (!first.empty()) chosen(first); },
+                    .focus = _pickerFocus }).Key(key + " search"));
+                std::vector<kui::Widget> found;
+                constexpr std::size_t Most = 200;
+                for (std::size_t i = 0; i < starting.size() && i < Most; ++i)
+                    found.push_back(kui::Button(kui::Align(kui::Alignment::CenterLeft(), kgui::Line(starting[i])), [chosen, name = starting[i]] { chosen(name); },
+                                                kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain).SetPadding(kui::EdgeInsets::Symmetric(6.f, 3.f))));
+                if (starting.size() > Most) found.push_back(kgui::Muted(std::format("{} more: type more of a name", starting.size() - Most)));
+                if (found.empty()) found.push_back(kgui::Muted("none has that in its name"));
+                const float tall = std::min(static_cast<float>(found.size()) * 24.f + 8.f, 220.f);
+                lines.push_back(kui::ScrollView(kui::Column(std::move(found), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(1.f))).Height(tall));
+                kui::Widget popup = kui::Container(kui::ContainerOptions {}.SetWidth(280.f).SetPadding(kui::EdgeInsets::All(6.f))
+                                                       .SetDecoration(kui::Decoration {}.SetColor(t.surface).SetRadius(6.f).SetBorderWidth(1.f).SetBorderColor(t.border)),
+                                                   kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(6.f)));
+                return kui::Column({ std::move(field), kui::PopupAnchor(open, std::move(popup), [this, key] { SetState([&] { if (_pickerOpen == key) _pickerOpen.clear(); }); }, { 0.f, 4.f }) },
+                                   kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetMainAxisSize(kui::MainAxisSize::eMin));
+            }
+
+            /** One of what is chosen, in a list above where more are: an icon, its name, what is said of it, and — when it can be — a press to take it out. */
+            static kui::Widget ChosenRow(const char* icon, std::uint32_t colour, const std::string& name, const std::string& says, std::function<void()> remove, const std::string& tip = {})
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                std::vector<kui::Widget> line { kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, remove ? kui::Color::Hex(colour) : t.textMuted)),
+                                                kui::Expanded(kgui::Line(name, kui::TextStyle {}.SetColor(remove ? t.text : t.textMuted))) };
+                if (!says.empty()) line.push_back(kgui::Muted(says, 11.f));
+                if (remove) line.push_back(kui::Tooltip("Take it out", SmallIcon("close", std::move(remove))));
+                kui::Widget row = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(6.f, 3.f))
+                                                     .SetDecoration(kui::Decoration {}.SetColor(t.surfaceHover).SetRadius(4.f)),
+                                                 kui::Row(std::move(line), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
+                return tip.empty() ? row : kui::Tooltip(tip, std::move(row));
+            }
+
+            /**
+             * What a ForEach or a Filter is of, as one thing to set: the components each one has — `component` and `with`
+             * alike, and those its conditions need — those none has, and its conditions, each a section of its own with its
+             * inputs. Each a list of the chosen above a dropdown with a search of the rest; and how many there are now.
+             */
+            kui::Widget EachChoices(const kgraph::Node& node)
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const std::string id = node.id;
+                const auto listOf = [&](const char* input) {
+                    std::vector<std::string> names;
+                    if (const auto it = node.inputs.find(input); it != node.inputs.end() && it->second.value.Items())
+                        for (const auto& item : *it->second.value.Items()) if (item.String() && !item.String()->empty()) names.push_back(*item.String());
+                    return names;
+                };
+                const auto setList = [this, id](const char* input, const std::vector<std::string>& names) {
+                    if (names.empty()) Doc().ClearInput(id, input);
+                    else Doc().SetInput(id, input, Value(Value::List(names.begin(), names.end())));
+                };
+                const auto heading = [&](const std::string& text, const std::string& says) {
+                    auto style = kui::TextStyle {}.SetColor(t.text);
+                    style.weight = 600.f;
+                    return kui::Row({ kui::Expanded(kgui::Line(text, style)), kgui::Muted(says, 11.f) }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
+                };
+                const auto inputOf = node.inputs.find("component");
+                const std::string own = inputOf != node.inputs.end() && inputOf->second.value.String() ? *inputOf->second.value.String() : std::string();
+                std::vector<std::string> with = listOf("with"), without = listOf("without"), conditions = listOf("conditions");
+                const auto known = Doc().Runtime().Conditions();
+                std::vector<std::string> has = with;
+                if (!own.empty() && !std::ranges::contains(has, own)) has.insert(has.begin(), own);
+                std::vector<kui::Widget> rows;
+
+                // What each one has: all of these.
+                rows.push_back(heading("Has", has.empty() ? "every entity, as it is" : "every one of these"));
+                for (const auto& name : has) {
+                    const bool isOwn = name == own;
+                    rows.push_back(ChosenRow("category", 0x5B9BD5, name, isOwn ? "fields as field.<name>" : std::string(), [this, id, name, isOwn, with, setList] {
+                        if (isOwn) { Doc().ClearInput(id, "component"); return; }
+                        auto left = with;
+                        std::erase(left, name);
+                        setList("with", left);
+                    }, isOwn ? std::string("Its own component: its fields are given as field.<name>; another's as <Component>.<name>") : std::string()));
+                }
+                // ...and what its conditions need, which each one has to have to be tested.
+                std::set<std::string> needed;
+                for (const auto& name : conditions)
+                    if (const auto condition = std::ranges::find(known, name, &kgraph::Condition::name); condition != known.end())
+                        for (const auto& component : condition->components)
+                            if (!std::ranges::contains(has, component) && needed.insert(component).second)
+                                rows.push_back(ChosenRow("category", 0x5B9BD5, component, std::format("for {}", name), nullptr,
+                                                         std::format("What {} reads: an entity without one is not kept. Take the condition out for it to go.", name)));
+                std::vector<std::string> addable = Doc().ComponentNames();
+                std::erase_if(addable, [&](const std::string& name) { return std::ranges::contains(has, name); });
+                rows.push_back(SearchDropdown(id + "/with", addable, "Add a component each one has", [this, id, with, without, setList](const std::string& name) {
+                    auto more = with;
+                    more.push_back(name);
+                    setList("with", more);
+                    if (std::ranges::contains(without, name)) {     // had, it cannot be banned as well
+                        auto left = without;
+                        std::erase(left, name);
+                        setList("without", left);
+                    }
+                }));
+
+                // What none of them has.
+                rows.push_back(kui::SizedBox(1.f, 4.f));
+                rows.push_back(heading("Has not", without.empty() ? "nothing banned" : "none of these"));
+                for (const auto& name : without)
+                    rows.push_back(ChosenRow("block", 0xD86A6A, name, {}, [id, name, without, setList] {
+                        auto left = without;
+                        std::erase(left, name);
+                        setList("without", left);
+                    }));
+                std::vector<std::string> bannable = Doc().ComponentNames();
+                std::erase_if(bannable, [&](const std::string& name) { return std::ranges::contains(without, name) || std::ranges::contains(has, name) || needed.contains(name); });
+                rows.push_back(SearchDropdown(id + "/without", bannable, "Ban a component", [id, without, setList](const std::string& name) {
+                    auto more = without;
+                    more.push_back(name);
+                    setList("without", more);
+                }, "block"));
+
+                // Its conditions: each a section of its own, with its inputs.
+                rows.push_back(kui::SizedBox(1.f, 4.f));
+                rows.push_back(heading("Conditions", conditions.empty() ? "none" : std::format("every one of {}", conditions.size())));
+                for (const auto& name : conditions) {
+                    const auto condition = std::ranges::find(known, name, &kgraph::Condition::name);
+                    // Taken out, its inputs go with it.
+                    const auto takeOut = [this, id, name, conditions, setList] {
+                        auto left = conditions;
+                        std::erase(left, name);
+                        setList("conditions", left);
+                        std::vector<std::string> inputs;
+                        if (const kgraph::Node* now = Doc().Graph().Find(id))
+                            for (const auto& input : now->inputs | std::views::keys) if (input.starts_with(name + ".")) inputs.push_back(input);
+                        for (const auto& input : inputs) Doc().ClearInput(id, input);
+                    };
+                    std::vector<kui::Widget> section;
+                    std::string reads;
+                    if (condition != known.end()) for (const auto& component : condition->components) reads += (reads.empty() ? "of " : ", ") + component;
+                    section.push_back(ChosenRow("filter_alt", 0xE0B040, name, reads, takeOut,
+                                                condition == known.end() ? std::string() : condition->doc.empty() ? std::format("{}: a condition each one meets", name) : condition->doc));
+                    if (condition == known.end()) {
+                        section.push_back(Problem(std::format("There is no condition '{}' now: its script is not running, or no more declares it.", name)));
+                    } else {
+                        for (const kgraph::Port& parameter : condition->parameters) {
+                            const std::string input = name + "." + parameter.name;
+                            const auto given = node.inputs.find(input);
+                            kgraph::Port port = parameter;
+                            port.name = input;
+                            kui::Widget editor;
+                            std::vector<kui::Widget> line;
+                            if (given != node.inputs.end() && given->second.link) {
+                                editor = kgui::Line(std::format("from {}{}", given->second.link->node, given->second.link->output == "out" ? "" : "." + given->second.link->output));
+                            } else if (given != node.inputs.end() && given->second.value.IsNull()) {
+                                editor = kgui::Muted("a port: wire a value in");
+                            } else {
+                                editor = EditorFor(node, port, given != node.inputs.end() ? given->second.value : parameter.initial,
+                                                   [this, id, input](Value changed) { if (changed.IsNull()) Doc().ClearInput(id, input); else Doc().SetInput(id, input, std::move(changed)); },
+                                                   id + "/" + input);
+                            }
+                            line.push_back(kui::Expanded(std::move(editor)));
+                            if (given == node.inputs.end() || !given->second.link)
+                                line.push_back(kui::Tooltip("Make it a port, to wire a value to: a pipeline's layout, a Primitive's", SmallIcon("link", [this, id, input] { Doc().SetInput(id, input, Value {}); })));
+                            if (given != node.inputs.end())
+                                line.push_back(kui::Tooltip("Back to nothing given: as it starts", SmallIcon("close", [this, id, input] { Doc().ClearInput(id, input); })));
+                            section.push_back(kui::Tooltip(parameter.doc.empty() ? parameter.type : parameter.doc + " (" + parameter.type + ")",
+                                kui::Row({ kui::SizedBox(LabelWidth - 12.f, -1.f, kgui::Line(parameter.name, kui::TextStyle {}.SetColor(given != node.inputs.end() ? t.text : t.textMuted))),
+                                           kui::Expanded(kui::Row(std::move(line), kui::FlexOptions {}.SetGap(4.f))) }, kui::FlexOptions {}.SetGap(8.f))));
+                        }
+                    }
+                    rows.push_back(kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(6.f))
+                                                      .SetDecoration(kui::Decoration {}.SetRadius(6.f).SetBorderWidth(1.f).SetBorderColor(t.border)),
+                                                  Rows(std::move(section), 6.f)));
+                }
+                std::vector<std::string> available;
+                for (const auto& condition : known) if (!std::ranges::contains(conditions, condition.name)) available.push_back(condition.name);
+                rows.push_back(SearchDropdown(id + "/conditions", available, "Add a condition each one meets", [id, conditions, setList](const std::string& name) {
+                    auto more = conditions;
+                    more.push_back(name);
+                    setList("conditions", more);
+                }, "filter_alt"));
+
+                // How many there are now.
+                if (const Value count = Doc().Runtime().ValueOf(id, "entities"); count.Number())
+                    rows.push_back(kgui::Muted(std::format("{} {} now", static_cast<long long>(*count.Number()), *count.Number() == 1 ? "entity" : "entities"), 11.f));
+                return Rows(std::move(rows), 4.f);
+            }
+
             kui::Widget ComponentPicker(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set, const std::string& key, const bool many,
                                         const std::string& what = "a component")
             {
+                // The chosen, a list above a dropdown with a search of the rest.
                 std::vector<std::string> on;
                 if (many) {
                     if (const auto* items = value.Items())
@@ -5905,54 +6132,29 @@ namespace keditor
                 } else if (value.String() && !value.String()->empty()) {
                     on.push_back(*value.String());
                 }
-                for (const auto& name : on) if (!std::ranges::contains(names, name)) names.push_back(name);
-                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
-                const std::string typed = _componentSearch.contains(key) ? _componentSearch.at(key) : std::string();
-                const std::string wanted = lower(typed);
-                // Those found: the chosen first, as they were chosen; then those that start with what is typed; then those that have it.
-                std::vector<std::string> found = on, starting, having;
-                for (const auto& name : names) {
-                    if (std::ranges::contains(on, name)) continue;
-                    const std::string folded = lower(name);
-                    if (wanted.empty() || folded.starts_with(wanted)) starting.push_back(name);
-                    else if (folded.find(wanted) != std::string::npos) having.push_back(name);
-                }
-                std::ranges::sort(starting);
-                std::ranges::sort(having);
-                found.insert(found.end(), starting.begin(), starting.end());
-                found.insert(found.end(), having.begin(), having.end());
-                const auto choose = [set, on, many](const std::string& name, const bool chosen) {
-                    if (!many) { set(Value(chosen ? name : std::string())); return; }
-                    auto changed = on;
-                    if (chosen && !std::ranges::contains(changed, name)) changed.push_back(name);
-                    if (!chosen) std::erase(changed, name);
-                    set(Value(Value::List(changed.begin(), changed.end())));
-                };
-                const std::string first = found.size() > on.size() ? found[on.size()] : std::string();
                 std::vector<kui::Widget> rows;
-                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = typed, .placeholder = names.empty() ? "There are none yet" : std::format("Find {}: {} of them", what, names.size()),
-                    .onChanged = [this, key](const std::string& text) { SetState([&] { _componentSearch[key] = text; }); },
-                    .onSubmitted = [this, key, first, choose](const std::string&) {
-                        if (first.empty()) return;
-                        choose(first, true);
-                        SetState([&] { _componentSearch.erase(key); });
-                    } }).Key(key + " search"));
-                std::vector<kui::Widget> box;
-                constexpr std::size_t Most = 200;
-                for (std::size_t i = 0; i < found.size() && i < Most; ++i) {
-                    const std::string& name = found[i];
-                    box.push_back(kui::Checkbox(std::ranges::contains(on, name), [choose, name](const bool checked) { choose(name, checked); }, name));
-                }
-                if (found.size() > Most) box.push_back(kgui::Muted(std::format("{} more: type more of a name", found.size() - Most)));
-                if (box.empty()) box.push_back(kgui::Muted(names.empty() ? "there are none yet" : "none has that in its name"));
-                const float tall = std::min(static_cast<float>(box.size()) * 22.f + 8.f, 180.f);
-                rows.push_back(kui::ScrollView(kui::Padding(kui::EdgeInsets::All(4.f),
-                    kui::Column(std::move(box), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(2.f)))).Height(tall));
-                return kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(4.f));
+                for (const auto& name : on)
+                    rows.push_back(ChosenRow(what == "a condition" ? "filter_alt" : "category", what == "a condition" ? 0xE0B040 : 0x5B9BD5, name, {}, [set, on, name, many] {
+                        if (!many) { set(Value(std::string())); return; }
+                        auto changed = on;
+                        std::erase(changed, name);
+                        set(Value(Value::List(changed.begin(), changed.end())));
+                    }));
+                std::erase_if(names, [&](const std::string& name) { return std::ranges::contains(on, name); });
+                rows.push_back(SearchDropdown(key, std::move(names), many || on.empty() ? std::format("Add {}", what) : std::format("Another in its place"),
+                    [set, on, many](const std::string& name) {
+                        if (!many) { set(Value(name)); return; }
+                        auto changed = on;
+                        changed.push_back(name);
+                        set(Value(Value::List(changed.begin(), changed.end())));
+                    }));
+                return kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(3.f));
             }
 
             std::string _outlinerFilter;
-            std::map<std::string, std::string, std::less<>> _componentSearch;     // what is typed in each component picker, by its input
+            std::map<std::string, std::string, std::less<>> _componentSearch;
+            std::string _pickerOpen;                // the dropdown with a search that is open, by its key: none, at most one
+            std::uint32_t _pickerFocus = 1;         // given its search field the keyboard as it opens     // what is typed in each component picker, by its input
             kecs::Entity _renaming = kecs::NullEntity, _dropOn = kecs::NullEntity;
             Session::Beside _dropWhere = Session::Beside::eUnder;
             std::set<std::string> _componentsShut;

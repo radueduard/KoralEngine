@@ -431,6 +431,36 @@ TEST(Declarations, AResourceScriptMakesWhatItDeclares) {
     EXPECT_TRUE(unclear.types[0].resources[0].settings.empty());
 }
 
+// A class of conditions is no component: its [Condition(N)] functions, by name, for an editor to list it among the scripts.
+TEST(Declarations, AConditionsClassIsItsFunctions) {
+    const auto csharp = kscript::Declare(R"(
+        public sealed class MeshTests : Conditions
+        {
+            [Condition(1)]
+            public static bool HasNormals(EntityMesh mesh) => mesh.Layout.Has("NORMAL");
+            [Condition(2)] public static bool Bright(EntityMesh mesh, Glow glow, float least = 2f) => glow.Power >= least;
+            public static bool Helper(int x) => x > 0;
+        }
+    )", false);
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    EXPECT_TRUE(csharp.types.empty()) << "no component";
+    ASSERT_EQ(csharp.conditions.size(), 1u);
+    EXPECT_EQ(csharp.conditions[0].name, "MeshTests");
+    EXPECT_EQ(csharp.conditions[0].functions, (std::vector<std::string> { "HasNormals", "Bright" })) << "only those marked";
+
+    const auto kotlin = kscript::Declare(R"(
+        class MeshTests : Conditions() {
+            companion object {
+                @Condition(1) @JvmStatic
+                fun hasNormals(mesh: EntityMesh): Boolean = mesh.layout.has("NORMAL")
+            }
+        }
+    )", true);
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(kotlin.conditions.size(), 1u);
+    EXPECT_EQ(kotlin.conditions[0].functions, (std::vector<std::string> { "hasNormals" }));
+}
+
 // What a field is kept within, as its source says — `[Range(1, 179)]`, `[Min(0)]`, or Kotlin's `@Range`, `@Min`, on its
 // line or the one before — is the component's, for an editor; and stays so once the host registers it.
 TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {

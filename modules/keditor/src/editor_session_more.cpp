@@ -812,6 +812,7 @@ namespace keditor
             const std::string& component = asset->label;   // the component itself, not its file: a file may declare several
             if (asset->group == "kind") { Say(std::format("{} is a kind: nothing has one itself. Give {} one of what derives from it.", component, name), true); return false; }
             if (asset->group == "resources") { Say(std::format("{} makes resources for a Script node of it: it is no component an entity has.", component), true); return false; }
+            if (asset->group == "conditions") { Say(std::format("{} holds conditions a ForEach or a Filter keeps entities by: it is no component an entity has.", component), true); return false; }
             if (std::ranges::contains(doc.ComponentsOf(entity), component)) { Say(std::format("{} has {} already.", name, component)); return true; }
             if (!doc.AddComponent(entity, component)) {
                 Say(std::format("There is no component '{}' yet: a script's is there once the editor runs the project's scripts.", component), true);

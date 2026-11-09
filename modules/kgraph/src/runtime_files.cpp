@@ -913,8 +913,12 @@ namespace kgraph
                 const auto component = inputs.find("component");
                 const std::string* name = component == inputs.end() ? nullptr : component->second.value.String();
                 static const std::string none;
-                if (all || filter || (type == "Entity" && (!name || name->empty()))) name = &none;
-                else if (!name || name->empty()) return Fail("'component' is the name of the component every one of them has");
+                // A ForEach of what it is given `with` alone: every entity that has each of them — `component` is one more of them.
+                const auto withGiven = inputs.find("with");
+                const bool byWith = type == "ForEach" && (!name || name->empty()) && withGiven != inputs.end() && withGiven->second.value.Items()
+                                    && !withGiven->second.value.Items()->empty();
+                if (all || filter || byWith || (type == "Entity" && (!name || name->empty()))) name = &none;
+                else if (!name || name->empty()) return Fail("'with' is the components every one of them has: name one at least");
                 const EntityList* from = nullptr;
                 if (filter) {
                     const auto wired = node.inputs.find("entities");
@@ -1001,7 +1005,7 @@ namespace kgraph
                 std::string shape;
                 std::vector<kecs::ComponentId> shaped;
                 if (id != kecs::NoComponent) shaped.push_back(id);
-                if (id != kecs::NoComponent || filter) shaped.insert(shaped.end(), with.begin(), with.end());
+                if (id != kecs::NoComponent || filter || byWith) shaped.insert(shaped.end(), with.begin(), with.end());
                 for (const kecs::ComponentId each : shaped) {
                     shape += world->Describe(each).name + "{";
                     for (const auto& field : world->Describe(each).fields) shape += std::format("{}:{}@{};", field.name, field.type, field.offset);
@@ -1058,7 +1062,7 @@ namespace kgraph
                         }
                     };
                     if (id != kecs::NoComponent) gives(id, true);
-                    if (id != kecs::NoComponent || filter)
+                    if (id != kecs::NoComponent || filter || byWith)
                         for (const kecs::ComponentId each : with) if (each != id) gives(each, false);
                 }
                 // `conditions`: tests of a few of an entity's components, each with parameters that are inputs on the node,
@@ -1120,7 +1124,7 @@ namespace kgraph
                     stale = true;
                 } else if (!again) {
                     // As they were: the entities, their groups, and what was said of the groups.
-                } else if (list.entities.clear(); world && (id != kecs::NoComponent || all || filter || select == "eNamed") && !nobody) {
+                } else if (list.entities.clear(); world && (id != kecs::NoComponent || all || filter || byWith || select == "eNamed") && !nobody) {
                     const auto has = [&](const kecs::Entity entity, const kecs::ComponentId each) { return world->Has(entity, each) && world->IsEnabled(entity, each); };
                     for (const kecs::Entity entity : from ? from->entities : world->All())
                         if ((!drawn || !hidden.contains(entity)) && (id == kecs::NoComponent || has(entity, id)) && std::ranges::all_of(with, [&](const auto each) { return has(entity, each); })
@@ -1256,6 +1260,7 @@ namespace kgraph
                                 "What the mesh's vertices must have: a vertex layout (a pipeline's, a VertexLayout's, a Primitive's `layout`) whose every "
                                 "attribute's semantic the mesh has too — or a list of semantics, [\"POSITION\", \"NORMAL\", \"UV\"].", nullptr };
                 required.initial = Value(Value::List { "POSITION" });
+                required.editor = "names";      // set here, the semantics one after another; wired, a layout
                 has.parameters = { std::move(required) };
                 has.doc = "Keeps an entity whose Mesh has every vertex attribute `required` has, by semantic: those whose layout is one a pipeline that reads them can draw.";
                 has.test = [](const std::span<const void* const> components, const std::span<const Value> parameters) {

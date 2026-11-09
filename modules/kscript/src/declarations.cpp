@@ -402,6 +402,7 @@ namespace kscript
             std::string base;           ///< What it derives from, the first after the colon, bare.
             std::string where;          ///< Its file, as a problem says where.
             std::string path;           ///< Its file, whole: what its type says it is declared in.
+            std::string body;           ///< Its body as it is written: where a Conditions class's functions are found.
             bool kotlin = false, isAbstract = false;
             std::vector<std::string> pieces;
             std::vector<std::string> statements;
@@ -442,7 +443,8 @@ namespace kscript
                 for (auto p = std::sregex_iterator(header.begin(), header.end(), piece); p != std::sregex_iterator(); ++p) one.pieces.push_back((*p)[1].str());
                 const std::size_t open = at + static_cast<std::size_t>(found.length(0)) - 1;
                 const std::size_t close = Closing(text, open);
-                one.statements = Statements(text.substr(open + 1, close - open - 1), kotlin);
+                one.body = text.substr(open + 1, close - open - 1);
+                one.statements = Statements(one.body, kotlin);
                 out.push_back(std::move(one));
             }
             return out;
@@ -464,6 +466,15 @@ namespace kscript
                 return nullptr;
             };
             for (const Class& declared : classes) {
+                // A class of conditions: no component, its [Condition(N)] functions (@Condition(N)) by name.
+                if (declared.base == "Conditions" && !declared.isAbstract) {
+                    static const std::regex function(R"([\[@]\s*Condition\s*\(\s*\d+\s*\)\s*\]?[^(]*?\b(\w+)\s*\()");
+                    DeclaredConditions conditions { declared.name, declared.path, {} };
+                    for (auto it = std::sregex_iterator(declared.body.begin(), declared.body.end(), function); it != std::sregex_iterator(); ++it)
+                        conditions.functions.push_back((*it)[1].str());
+                    out.conditions.push_back(std::move(conditions));
+                    continue;
+                }
                 // Down from its root: the chain of what it derives from, its root's first.
                 std::vector<const Class*> chain { &declared };
                 std::string root;
@@ -640,6 +651,7 @@ namespace kscript
         }
         auto resolved = Resolve(classes);
         for (auto& type : resolved.types) out.types.push_back(std::move(type));
+        for (auto& conditions : resolved.conditions) out.conditions.push_back(std::move(conditions));
         for (auto& problem : resolved.problems) out.problems.push_back(std::move(problem));
         return out;
     }

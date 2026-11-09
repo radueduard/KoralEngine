@@ -231,6 +231,16 @@ namespace keditor
                 asset.group = type.makesResources ? "resources" : type.material ? "material" : type.abstract ? "kind" : type.data ? "data" : "script";
                 if (listed.insert(asset.id).second) assets.push_back(std::move(asset));
             }
+            // And its classes of conditions: no component, but what a ForEach or a Filter keeps an entity by.
+            for (const auto& conditions : ProjectConditions()) {
+                Asset asset;
+                asset.kind = Asset::Kind::eScript;
+                asset.id = "script:" + conditions.name;
+                asset.label = conditions.name;
+                asset.file = conditions.file;
+                asset.group = "conditions";
+                if (listed.insert(asset.id).second) assets.push_back(std::move(asset));
+            }
             for (const auto& root : roots) files(root / "prefabs", Asset::Kind::ePrefab, "prefab:", { ".prefab" });
             for (const auto& root : roots) files(root / "functions", Asset::Kind::eFunction, "function:", { ".kfunc" });
             // The scenes it has: listed, like everything else it is made of.

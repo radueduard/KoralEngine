@@ -26,6 +26,7 @@
 
 #include <kasset/database.h>
 #include <kgraph/catalog.h>
+#include <kscript/declarations.h>
 #include <kscript/scripts.h>
 
 #include "document.h"
@@ -138,6 +139,8 @@ namespace keditor
          *        only when a file is added, removed or written.
          */
         [[nodiscard]] const std::vector<kscript::ScriptType>& ProjectScriptTypes();
+        /** @brief The classes of conditions the project's scripts declare, as their sources say: read with ProjectScriptTypes. */
+        [[nodiscard]] const std::vector<kscript::DeclaredConditions>& ProjectConditions();
         /** @brief One thing wrong now: what is said of it, the node it is of (when it is a node's), and whether it is only a warning. */
         struct Problem { std::string text, node; bool warning = false; };
         /**
@@ -1086,6 +1089,7 @@ namespace keditor
         /// ProjectScriptTypes, and the files (with when each was written) it was read from.
         std::vector<std::pair<std::filesystem::path, std::filesystem::file_time_type>> _scriptFiles;
         std::vector<kscript::ScriptType> _scriptTypes;
+        std::vector<kscript::DeclaredConditions> _scriptConditions;
         PlayScene& _play;
         GameScene* _game = nullptr;
         GameScene* _second = nullptr;

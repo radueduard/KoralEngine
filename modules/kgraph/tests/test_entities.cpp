@@ -1826,10 +1826,14 @@ TEST_F(EntityTest, AFilterKeepsWhatMeetsItsConditions) {
     graph.Add("all", "Entities");
     graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" })
         .Set("conditions", Value::List { "HasAttributes" }).Set("HasAttributes.required", Value::List { "POSITION", "BONE_IDS" });
+    // A ForEach of `with` alone: every entity with each of them, its `component` one more of them.
+    graph.Add("each mesh", "ForEach").Set("with", Value::List { "Mesh" })
+        .Set("conditions", Value::List { "HasAttributes" }).Set("HasAttributes.required", Value::List { "POSITION", "BONE_IDS" });
     runtime.Set(graph);
     Frame();
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
     EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(1)) << "only the mesh with bones";
+    EXPECT_EQ(runtime.ValueOf("each mesh", "count"), Value(1)) << "a ForEach the same, of `with` alone";
     EXPECT_TRUE(std::ranges::contains(runtime.PortsOf("meshes"), std::string("HasAttributes.required"), &kgraph::Port::name)) << "its input, on the node";
 
     // Wired a layout: what a mesh of it has, the cube lacks.

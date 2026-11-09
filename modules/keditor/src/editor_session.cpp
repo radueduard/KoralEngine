@@ -174,7 +174,7 @@ namespace keditor
 
     const std::vector<kscript::ScriptType>& Session::ProjectScriptTypes()
     {
-        if (!_hasProject) { _scriptFiles.clear(); _scriptTypes.clear(); return _scriptTypes; }
+        if (!_hasProject) { _scriptFiles.clear(); _scriptTypes.clear(); _scriptConditions.clear(); return _scriptTypes; }
         // Those of the project's language: one in another runs nowhere, which is a problem of its own.
         const char* ending = ScriptLanguage(_project) == 'k' ? ".kt" : ".cs";
         std::error_code ignored;
@@ -189,9 +189,17 @@ namespace keditor
             _scriptFiles = std::move(files);
             std::vector<std::filesystem::path> paths;
             for (const auto& file : _scriptFiles) paths.push_back(file.first);
-            _scriptTypes = kscript::DeclareFiles(paths).types;
+            auto declared = kscript::DeclareFiles(paths);
+            _scriptTypes = std::move(declared.types);
+            _scriptConditions = std::move(declared.conditions);
         }
         return _scriptTypes;
+    }
+
+    const std::vector<kscript::DeclaredConditions>& Session::ProjectConditions()
+    {
+        (void)ProjectScriptTypes();
+        return _scriptConditions;
     }
 
     std::vector<std::string> Session::ScriptsNotRunning()

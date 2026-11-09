@@ -820,6 +820,31 @@ TEST_F(EditorTest, AShadersBufferIsFilledFromAComponentsFields) {
     Sheet("buffers");
 }
 
+// A ForEach's inspector is what it is of, as one thing: the components each one has — its own and `with`'s alike — those
+// none has, and its conditions, each a list above a dropdown with a search; and each condition a section with its inputs.
+TEST_F(EditorTest, ALoopsInspectorSaysWhatItIsOf) {
+    scene::MakeProject("loops");
+    Open();
+    Doc().AddComponent(Doc().CreateEntity("Lamp"), "PointLight");
+    const std::string lamps = Doc().AddNode("ForEach", 40, 40);
+    Doc().SetInput(lamps, "with", kgraph::Value(kgraph::Value::List { "PointLight" }));
+    Session().Select(lamps);
+    Frame();
+    for (const char* said : { "Has", "Has not", "Conditions", "Add a component each one has", "Ban a component", "Add a condition each one meets", "1 entity now" })
+        EXPECT_TRUE(Shows(said)) << said;
+    EXPECT_TRUE(Shows("PointLight")) << "what it has, listed";
+    EXPECT_TRUE(NothingIsWrong()) << "a ForEach of `with` alone is one";
+
+    // A condition: its own section, with its inputs; and what it reads, which each one has to have.
+    Doc().SetInput(lamps, "conditions", kgraph::Value(kgraph::Value::List { "HasAttributes" }));
+    Frame();
+    EXPECT_TRUE(Shows("HasAttributes"));
+    EXPECT_TRUE(Shows("required")) << "its input, in its section";
+    EXPECT_TRUE(Shows("for HasAttributes")) << "the Mesh it reads, listed as needed for it";
+    EXPECT_TRUE(Shows("0 entities now")) << "a lamp has no mesh";
+    Sheet("loop");
+}
+
 // The outliner is the hierarchy: an entity under another shows under it, folds away with it, and moves with it.
 // Where each is, is in the inspector, and is no component.
 TEST_F(EditorTest, EntitiesAreATreeEachWithATransform) {
@@ -1933,10 +1958,16 @@ TEST_F(EditorTest, ScriptsAreGivenEntitiesAndPrefabsArePlaced) {
     std::ofstream(directory / "scripts" / "Readings.kt") << "import koral.engine.Data\n\nabstract class Reading : Data() {\n    var value = 1f\n}\n"
                                                              "class Heat : Reading() {\n    var where = 0f\n}\nclass Light2 : Reading() {\n}\n";
     std::ofstream(directory / "scripts" / "Helpers.kt") << "class Helpers {\n    var values = FloatArray(0)\n}\n";
+    // A class of conditions is among them too, with an icon of its own: no component.
+    std::ofstream(directory / "scripts" / "Tests.kt") << "import koral.engine.*\n\nclass MeshTests : Conditions() {\n    companion object {\n"
+                                                         "        @Condition(1) @JvmStatic\n        fun hasNormals(mesh: EntityMesh): Boolean = mesh.layout.has(\"NORMAL\")\n    }\n}\n";
     std::map<std::string, keditor::Session::Asset> scripts;
     for (const auto& asset : Session().Assets())
         if (asset.kind == keditor::Session::Asset::Kind::eScript) scripts[asset.label] = asset;
-    EXPECT_EQ(scripts.size(), 4u) << "Follower, Reading, Heat and Light2";
+    EXPECT_EQ(scripts.size(), 5u) << "Follower, Reading, Heat, Light2 and MeshTests";
+    ASSERT_TRUE(scripts.contains("MeshTests"));
+    EXPECT_EQ(scripts["MeshTests"].group, "conditions");
+    EXPECT_FALSE(Session().GiveAsset("script:MeshTests", sphere)) << "no component an entity has";
     ASSERT_TRUE(scripts.contains("Heat") && scripts.contains("Reading") && scripts.contains("Follower"));
     EXPECT_FALSE(scripts.contains("Helpers") || scripts.contains("Readings"));
     EXPECT_EQ(scripts["Heat"].file.filename(), "Readings.kt");

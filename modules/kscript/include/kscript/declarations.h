@@ -18,9 +18,17 @@ namespace kscript
     /** @brief How many bytes a Material's picture (a Texture field) is: a shared reference, whatever it refers to. */
     inline constexpr std::size_t TextureSize = sizeof(std::shared_ptr<void>);
 
+    /** @brief A class of conditions a source declares (one that derives from Conditions): no component, but tests the graph keeps entities by. */
+    struct DeclaredConditions {
+        std::string name;                   ///< The class's: what each of its conditions is named under, `<name>.<function>`.
+        std::string file;                   ///< The file it is declared in, as it was read; empty for one read from a string.
+        std::vector<std::string> functions; ///< Each [Condition(N)] function's name, in the order it declares them.
+    };
+
     /** @brief What a script source declares: a type for each class that is a Script, and what could not be read. */
     struct Declarations {
         std::vector<ScriptType> types;      ///< No callbacks: what the component is, not what is done with it.
+        std::vector<DeclaredConditions> conditions;     ///< Its classes of conditions.
         std::vector<std::string> problems;  ///< A field of a type a script cannot keep, a starting value not understood.
     };
 

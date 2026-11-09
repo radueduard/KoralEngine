@@ -392,9 +392,17 @@ Each input has the control for what it is:
 | A colour (a Clear's `color`, an attachment's `clear`) | A swatch that opens a colour picker. |
 | A shader module | The project's `.slang` files, by name. |
 | An entry point | The functions the module beside it declares with `[shader(...)]`. |
-| Components (a Filter's or a ForEach's `with`, `without`) | A search above a box of the components and tags the scene has, each with a tick: those ticked first, then those whose names have what is typed — those that start with it first. Enter ticks the first found. |
-| A component (a ForEach's `component`, a Filter's `groupBy`) | The same, one ticked at most. |
-| Conditions (a Filter's or a ForEach's `conditions`) | The same, of the conditions there are — the engine's (HasAttributes) and the scripts' — each ticked one's inputs under Conditions. |
+| Components (a ComponentBuffer's `with`, `without`) | Those chosen, a list — each with a press to take it out — above a dropdown with a search of the rest: those whose names start with what is typed first, then those that have it. Enter adds the first found. |
+| A component (a ComponentBuffer's `component`, a Filter's `groupBy`) | The same, one at most. |
+
+A ForEach's and a Filter's inspector says what it is of as one part, above the rest of its inputs. **Has**: the
+components each one has — a ForEach's `component` and `with` alike, its own first (its fields given as
+`field.<name>`), and those its conditions read, listed as for them and gone with them — and a dropdown with a search to
+add another. **Has not**: those none has, banned the same way (one added to Has comes out of it). **Conditions**: each
+chosen one a section of its own — what it reads, its doc, a press to take it out (and its inputs with it) — and under
+it its inputs, each set or made a port to wire (a pipeline's or a Primitive's `layout`, to HasAttributes' `required`);
+then a dropdown with a search of the conditions there are, the engine's and the scripts'. Under them, how many entities
+it is of now. A ForEach of `with` alone is one: `component` is one more of them, whose fields are `field.<name>`.
 | An image parameter (`cover`) | The image parameters of the pipeline the pass runs. |
 | A node (`Reference`) | The nodes that make a resource. |
 | A vertex layout's attributes | A picture of its buffers, then each buffer's attributes under it: what each is, its type, how many, which buffer, earlier and later; whether the buffer goes per instance. |

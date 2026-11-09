@@ -934,7 +934,9 @@ namespace kgraph
                 // Every entity that has a component, one after another, and a buffer a shader declares with an element
                 // for each: the fields of the one wired to the fields of the other.
                 {
-                    Port component = hinted({ "component", PortKind::eValue, "string", false, "The component every one of them has: a light, a script's, a pipeline's.", nullptr }, "component");
+                    Port component = hinted({ "component", PortKind::eValue, "string", false, "A component every one of them has, its fields given as `field.<name>`: "
+                                              "one more of `with`'s, which is enough by itself.", nullptr }, "component");
+                    component.optional = true;
                     Port with = hinted({ "with", PortKind::eValue, "list", false, "Components, by name, an entity must have as well. Their fields are given too, as `<Component>.<field>`.", nullptr }, "components");
                     Port without = hinted({ "without", PortKind::eValue, "list", false, "Components, by name, an entity must not have.", nullptr }, "components");
                     with.optional = without.optional = true;

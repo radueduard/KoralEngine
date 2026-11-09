@@ -126,6 +126,7 @@ namespace keditor
             if (group == "kind") return { "account_tree", 0x8E7CC3, "A kind: abstract Data that nothing has itself, and that finds every one of what derives from it" };
             if (group == "material") return { "palette", 0xD9703F, "A material kind: what a drawn thing is made of" };
             if (group == "resources") return { "memory", 0x4FB3BF, "A ResourceScript: what a Script node runs, to make resources and fill them" };
+            if (group == "conditions") return { "filter_alt", 0xE0B040, "Conditions: tests a ForEach or a Filter keeps an entity by, each [Condition(N)] function one" };
             return { "code", 0x7DBB4B, "A script: run on each entity that has it" };
         }
 
