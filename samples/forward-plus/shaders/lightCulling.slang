@@ -5,7 +5,8 @@
 
 import forwardCommon;
 
-StructuredBuffer<KoralLight> lights;       // the Lights function's
+StructuredBuffer<KoralPointLight> pointLights;     // the Lights function's `points`
+StructuredBuffer<KoralSpotLight> spotLights;       // and `spots`
 RWStructuredBuffer<uint2> lightGrid;        // for each cluster: where its lights start in the list, and how many
 RWStructuredBuffer<uint> lightIndices;      // the list: each cluster's lights, one run after another
 RWStructuredBuffer<uint> lightCounter;      // how much of the list is claimed: cleared before this runs
@@ -50,16 +51,15 @@ void computeMain(uint3 cluster : SV_GroupID, uint thread : SV_GroupIndex)
         upper = max(upper, world);
     }
 
-    // This thread's share of the lights: a sphere touches the box when the box's nearest point is inside it.
-    uint share = (camera.lightCount + Threads - 1) / Threads;
+    // This thread's share of the lights — the point lights, then the spots, one list — each kept when it reaches into
+    // the cluster's box. A spot is listed as the point lights' count and its own place.
+    const uint total = camera.pointCount + camera.spotCount;
+    uint share = (total + Threads - 1) / Threads;
     uint first = thread * share;
-    uint last = min(first + share, camera.lightCount);
+    uint last = min(first + share, total);
     for (uint i = first; i < last; ++i) {
-        const KoralLight light = lights[i];
-        if (light.kind == KoralLightDirectional) continue;      // everywhere: the sun is shaded as the sun
-        float3 nearest = clamp(light.position, lower, upper);
-        float3 away = nearest - light.position;
-        if (dot(away, away) < light.range * light.range) {
+        const bool touches = i < camera.pointCount ? pointLights[i].Touches(lower, upper) : spotLights[i - camera.pointCount].Touches(lower, upper);
+        if (touches) {
             uint slot;
             InterlockedAdd(groupLightCount, 1u, slot);
             if (slot < MaxLightsPerCluster) groupLights[slot] = i;

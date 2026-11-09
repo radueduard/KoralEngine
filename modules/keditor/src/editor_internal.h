@@ -225,7 +225,8 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             std::string out = "// $NAME: " + said + ".\n";
             if (whole) out += "// Its pipeline needs no vertex layout, and its Draw no mesh" + std::string(c.fragment ? ": wire the picture it reads to `param.source`.\n" : ".\n");
             else out += "// A Draw is given each one's own from a Filter of an Entities node: `Mesh.mesh` and `matrix`, and for `color` the field of\n"
-                        "// the pipeline's component, named after its node. Wire the frame pass's `frame data` to `param.frame`.\n";
+                        "// the pipeline's component, named after its node. Wire the frame pass's `frame data` to `param.frame`, and the\n"
+                        "// Lights function's `directional`, `points` and `spots` to `param.directionalLights`, `pointLights` and `spotLights`.\n";
             if (tess) out += "// Tessellated, the pipeline's `patchControlPoints` is 3, and `constant.level` says how fine.\n";
             if (!c.fragment) out += "// Without a fragment shader, its framebuffer needs only a depth attachment: a shadow map's, a depth prepass's.\n";
             out += "// Each entry point is called as a pipeline looks for it: vertexMain, fragmentMain and the rest.\nmodule $NAME;\n\n";
@@ -238,7 +239,7 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             if (tess) out += "// What each corner of a triangle carries to the tessellation shaders.\nstruct Corner {\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
             out += "struct RasterInfo {\n    float4 position : SV_Position;\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
             out += std::string("// Where a place is in the picture.\nfloat4 Placed(float3 place)\n{\n    return ")
-                 + (whole ? "float4(place, 1.0);" : "mul(float4(place, 1.0), frame.viewProjection);") + "\n}\n\n";
+                 + (whole ? "float4(place, 1.0);" : "frame.camera.ToClip(place);") + "\n}\n\n";
             const std::string made = tess ? "Corner" : "RasterInfo";
             out += "[shader(\"vertex\")]\n" + made + (whole ? " vertexMain(uint index : SV_VertexID)\n{\n    const float2 corner = KoralFullscreenCorner(index);\n"
                                                               "    const float3 place = float3(corner, 0.0);\n    const float3 normal = float3(0.0, 0.0, 1.0);\n    const float2 uv = corner * 0.5 + 0.5;\n"
@@ -265,11 +266,10 @@ void computeMain(uint3 id : SV_DispatchThreadID)
                 out += whole ? "[shader(\"fragment\")]\nfloat4 fragmentMain(RasterInfo raster) : SV_Target\n{\n"
                                "    const float4 color = source.Load(int3(int2(raster.position.xy), 0));\n    return float4(1.0 - color.rgb, color.a);    // the picture, inverted: change this\n}\n"
                              : "[shader(\"fragment\")]\nfloat4 fragmentMain(RasterInfo raster) : SV_Target\n{\n"
-                               "    // Matte, of the entity's colour, lit by the sun and the sky as the engine's shadings are (koral_shadings).\n"
+                               "    // Matte, of the entity's colour, lit by the scene's lights and the sky as the engine's shadings are (koral_shadings).\n"
                                "    const float3 normal = KoralSafeNormalize(raster.normal);\n"
-                               "    const KoralLight sun = KoralDirectionalLight(-frame.sunDirection.xyz, frame.sunColor.rgb);\n"
                                "    const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(draw.color)), raster.place, normal, FrameCamera(),\n"
-                               "                                KoralSingleLight(sun), FrameSky());\n"
+                               "                                FrameLights(), FrameAmbient());\n"
                                "    return float4(KoralDisplay(lit), 1.0);\n}\n";
             return out;
         }

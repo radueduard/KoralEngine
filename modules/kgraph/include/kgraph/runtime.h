@@ -557,7 +557,8 @@ namespace kgraph
         /**
          * @brief Which of node @p id 's outputs it is looked at by — watched, shown on it, made a thumbnail of: the one
          *        WatchOutput says, when it has it; otherwise `out`; and for a node that has none, a Script node, its first
-         *        image, or its first resource.
+         *        image, or its first resource. A Function call's the same: WatchOutput's, else the first of its outputs
+         *        that holds an image, else the first that holds anything.
          */
         [[nodiscard]] std::string ShownOutput(std::string_view id) const;
         /** @brief What node @p id 's @p output is, when it is a value; null otherwise. */

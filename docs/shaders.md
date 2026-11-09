@@ -109,18 +109,28 @@ rotation in 32 bits), `KoralPackHalf2`, `KoralPackUnorm4x8`, `KoralPackSnorm2x16
 `KoralDrawCommand`, `KoralMeshRange` (a MeshPack's), `KoralHasBounds`, `KoralCommandOf(commands, count, instance)`,
 `KoralLoadMatrix(buffer, at)`, `KoralDrawInstance(…)`: what CullInSight and InstanceCull work out of.
 
-### `koral_lights`: lights, and their shadows
+### `koral_lights`: lights, the light from all round, and their shadows
 
-`KoralLight` is a light as the engine's Lights function writes it (64 bytes in a buffer): where it is and how far it
-reaches, the way it shines and its kind (`KoralLightDirectional`, `KoralLightPoint`, `KoralLightSpot`), its colour in
-linear terms times its intensity, a spot's cone as cosines, and `kindIndex` — which of its kind it is, what its shadow
-is found by. Every light's colour is converted with the engine's curve, the power 2.2.
+Each kind of light is a struct of its own, as the engine's Lights function writes a buffer of each, its colour in linear
+terms times its intensity (converted with the engine's curve, the power 2.2). A light's place in its buffer is which of
+its kind it is: what its shadow is found by.
 
 | | |
 |---|---|
-| `KoralArrivalAt(light, position)` → `KoralArrival` | What reaches a point: from where, how far, and how much — `KoralDistanceFalloff` (less by the square of the way, none at its range) and `KoralSpotFalloff`. |
-| `IKoralLights` | Where lights are kept: `KoralLightBuffer(lights, count)` (the Lights function's), `KoralSingleLight(light)`, `KoralStudioLights` (the editor's key and fill, for a thing by itself). `KoralDirectionalLight(direction, color)` makes one. |
-| `IKoralShadows` | How much of a light reaches a point past what hides it: `Visibility(light, arrival, position, normal)`. `KoralNoShadows` lets all of it through; `koral_shadows` has the engine's. |
+| `KoralDirectionalLight(direction, color)` | 32 bytes: the way it shines, its colour. `ToLight()`, `ArrivalAt(position)`. |
+| `KoralPointLight(position, range, color)` | 32 bytes. `ArrivalAt(position)`, `Reaches(point)`, `Touches(low, high)` (a cluster's box). |
+| `KoralSpotLight(position, range, direction, color, cosInner, cosOuter)` | 48 bytes. `ArrivalAt`, `Reaches` (in range and in its cone), `Touches`, `Cone(fromLight)`, `MapAngle()` (its shadow map's width). |
+| `KoralArrival` | What reaches a point: from where, how far, how much — `KoralDistanceFalloff` (less by the square of the way, none at its range) and `KoralSpotFalloff`. |
+| `KoralAmbientLight(zenith, horizon, ground, strength)` | The sky's light from all round, 48 bytes as a frame's block holds it: `Along(direction)`, and an `IKoralEnvironment`. |
+| `IKoralEnvironment` | The light from all round: `Diffuse(normal)`, `Specular(direction, roughness)`. `KoralNoEnvironment`, `KoralUniformEnvironment`, `KoralAmbientLight`; koral_shading's `KoralCubeEnvironment`, koral_ibl's `KoralShEnvironment`. |
+| `IKoralLights` | Where lights are kept, a kind at a time (`DirectionalCount()`, `Directional(i)`, and the same of points and spots): `KoralLightBuffers(directional, points, spots, counts)` (the Lights function's), `KoralSingleLight(directional)`, `KoralStudioLights` (the editor's key and fill, for a thing by itself), `KoralNoLights`. |
+| `IKoralShadows` | How much of a light reaches a point past what hides it, a kind at a time: `DirectionalVisibility(index, light, arrival, position, normal)`, `PointVisibility`, `SpotVisibility`. `KoralNoShadows` lets all of it through; `koral_shadows` has the engine's. |
+
+### `koral_camera`: what a frame is seen through
+
+`KoralCamera(viewProjection, inverseViewProjection, position)`, 144 bytes as a frame's block holds it — or
+`KoralCamera(position)`, one known only by where it is. `ToClip(world)`, `ToEye(world)`, `RayThrough(clip)`,
+`WorldAt(uv, depth)`.
 
 ### `koral_brdf`: how a surface answers light, a lobe at a time
 
@@ -147,7 +157,7 @@ The contracts a material kind and its shading are written to (see [scripts.md](s
 |---|---|
 | `KoralSurface`, `KoralSurfaceAt(position, normal, uv, sampler)`, `KoralSurfaceOf(…, tangent, …)` | A point of a surface: its directions along it worked out from the fragment, or given (a ray's hit). |
 | `KoralMappedNormal(surface, texel)`, `KoralNormalTexelOf(rg)`, `KoralBlendNormalTexels(base, detail)` | A normal map's texel; one of two channels; one map's turn over another's. |
-| `IKoralEnvironment` | The light from all round: `KoralNoEnvironment`, `KoralUniformEnvironment`, `KoralGradientEnvironment` (zenith, horizon, ground), `KoralCubeEnvironment`. |
+| `KoralCubeEnvironment(cube, sampler, mips)` | The light from all round of a cube map, its mips blurred more and more (koral_lights has the rest of `IKoralEnvironment`). |
 | `IKoralShading`, `IKoralMaterial` | What a shading answers (`Reflected`, `Ambient`, `Emitted`, `Opacity`); what a material reads into one. |
 | `KoralLit(shading or material, surface — or position and normal —, camera, lights[, environment[, shadows]])` | The light sent to the eye, not tone mapped. |
 
@@ -197,7 +207,7 @@ Each lets through every light but its own kind, and a light past its function's 
 
 | Function | Shader | |
 |---|---|---|
-| Lights | — | Every light in one buffer of `KoralLight`. |
+| Lights | — | A buffer of each kind of light: `KoralDirectionalLight`, `KoralPointLight`, `KoralSpotLight`; and how many of each. |
 | SunShadows, PointLightShadows, SpotLightShadows | `koral_shadow` | The shadow maps koral_shadows reads. |
 | PrefilterEnvironment | `koral_ibl_bake` | A cube prefiltered a mip a roughness, and its harmonics. |
 | GaussianBlur | `koral_blur` | A picture blurred across then down: `radius` taps each side, of spread `sigma`. |

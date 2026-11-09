@@ -29,7 +29,8 @@ public struct Camera {
     public float zNear;
     public float2 screenSize;
     public float zFar;
-    public uint lightCount;         // how many lights there are: the Lights function's, the sun's first
+    public uint pointCount;         // how many point lights there are: the Lights function's
+    public uint spotCount;          // and spots: a cluster's list holds a spot as the point lights' count and its own place
     public uint3 gridSize;          // the clusters lights are sorted into: across, down, and into the picture
 };
 public ConstantBuffer<Camera> camera;
@@ -156,7 +157,7 @@ public float viewDepth(float3 world)
 }
 
 /** The sky: its three colours, as the library's gradient environment has them, giving `ambient` all round. */
-public KoralGradientEnvironment skyOf(Sun sun) { return KoralGradientEnvironment(sun.skyZenith, sun.skyHorizon, sun.skyGround, sun.ambient); }
+public KoralAmbientLight skyOf(Sun sun) { return KoralAmbientLight(sun.skyZenith, sun.skyHorizon, sun.skyGround, sun.ambient); }
 
 /** The sky seen along a direction: the ground below the horizon, the zenith above it, and the sun. */
 public float3 skyColor(Sun sun, float3 direction)

@@ -150,7 +150,7 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         // Every lamp is an element of the lights' buffer, and every drawn thing an instance of one indirect draw, a
         // command a mesh: the pre-pass draws what of them is in sight, and the forward pass what some pixel of the
         // pre-pass showed — fewer, and none it did not see. The sun's cascades draw each entity four times over.
-        EXPECT_EQ(doc.Runtime().ValueOf("lights", "points"), kgraph::Value(96)) << "the Lights function's: every lamp";
+        EXPECT_EQ(doc.Runtime().ValueOf("lights", "pointCount"), kgraph::Value(96)) << "the Lights function's: every lamp";
         EXPECT_EQ(InstancesOf(doc.Runtime(), "drawn"), 1u + 6u + 35u + 96u) << "every mesh but glass, grouped by mesh";
         EXPECT_EQ(doc.Runtime().ValueOf("in sight", "drawCount"), doc.Runtime().ValueOf("drawn meshes", "count")) << "a command a mesh";
         for (const char* draw : { "draw depth", "draw forward", "frustum/cull", "run mark seen", "run gather seen" })
@@ -310,7 +310,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     keditor::Document& doc = editor->CurrentSession().Doc();
     for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
     EXPECT_EQ(doc.Passes().size(), 21u) << "13, and the meshlet and ray branches' 8";
-    EXPECT_EQ(doc.Runtime().ValueOf("lights", "points"), kgraph::Value(96)) << "the Lights function's: every lamp";
+    EXPECT_EQ(doc.Runtime().ValueOf("lights", "pointCount"), kgraph::Value(96)) << "the Lights function's: every lamp";
     // Every page of it is laid out, with whatever its nodes have of their shaders and their components as ports.
     for (const auto& pass : doc.Passes()) {
         editor->CurrentSession().ShowPass(pass);
@@ -360,8 +360,9 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     EXPECT_TRUE(says("eD32_SFLOAT, ")) << editor->CurrentSession().LookSays();
     EXPECT_TRUE(says("Its values run from 0.")) << "a depth is shown stretched: what it runs from and to is said";
     EXPECT_TRUE(editor->CurrentSession().LookPicture().Get() != nullptr);
+    doc.Runtime().WatchOutput("lights", "points");      // a call, by the output it is looked at by: its point lights
     editor->CurrentSession().Look("lights");
-    EXPECT_TRUE(says("97 elements of 64 each")) << editor->CurrentSession().LookSays() << ": the Lights function's, the sun's and every lamp's";
+    EXPECT_TRUE(says("96 elements of 32 each")) << editor->CurrentSession().LookSays() << ": the Lights function's KoralPointLights";
     EXPECT_TRUE(says("[0]  position")) << "an element a line, each field by name";
     editor->CurrentSession().Look({});
 
@@ -378,12 +379,13 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_TRUE(session.ViewedPicture().Get() != nullptr);
         EXPECT_TRUE(shows("Samples"));
 
-        ASSERT_TRUE(session.View("lights"));     // a call: what it gives, the Lights function's KoralLights
-        EXPECT_TRUE(shows("Elements 0 to 63 of 97")) << session.ViewSays();
-        EXPECT_TRUE(shows("position")) << "more numbers than fit across: a field a line, by the names its shader gives them";
+        doc.Runtime().WatchOutput("lights", "points");
+        ASSERT_TRUE(session.View("lights"));     // a call: what it gives, the Lights function's KoralPointLights
+        EXPECT_TRUE(shows("Rows 0 to 63 of 96")) << session.ViewSays();
+        EXPECT_TRUE(shows("position.x")) << "a column a number, by the names its shader gives them";
         session.SetBufferLayout("float4 first; float4 second");
         EXPECT_TRUE(shows("second.w"));
-        EXPECT_TRUE(shows("Rows 0 to 63 of 194")) << "32 bytes an element, as typed";
+        EXPECT_TRUE(shows("Rows 0 to 63 of 96")) << "32 bytes an element, as typed";
         session.SetBufferLayout("float9 nope");
         EXPECT_FALSE(session.BufferLayoutError().empty());
         session.SetBufferLayout("");

@@ -23,6 +23,6 @@ RasterInfo vertex(uint index : SV_VertexID)
 float4 fragment(RasterInfo raster) : SV_Target
 {
     // The way the eye looks through the pixel.
-    const float3 direction = KoralRayThrough(raster.ndc, frame.inverseViewProjection).direction;
+    const float3 direction = frame.camera.RayThrough(raster.ndc).direction;
     return float4(KoralDisplay(SkyColor(direction)), 1.0);
 }

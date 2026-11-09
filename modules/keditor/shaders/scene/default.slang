@@ -53,7 +53,7 @@ float4 fragment(RasterData raster, uniform float4x4 model, uniform float3 color)
     if (koralDebugShowing()) return float4(koralDebugColor(KoralDebugSurface(albedo, normal, 1.0, 0.0)), 1.0);
 
     // The sun, and a little light from all round so that what faces away from it is not black.
-    const KoralLight sun = KoralDirectionalLight(light.direction, KoralLinearFromGamma22(light.color) * light.intensity);
+    const KoralDirectionalLight sun = KoralDirectionalLight(light.direction, KoralLinearFromGamma22(light.color) * light.intensity);
     const float3 lit = KoralLit(KoralMatte(normal, albedo), raster.worldPosition, normal, KoralCamera(camera.eye),
                                 KoralSingleLight(sun), KoralUniformEnvironment(float3(0.03)));
     return float4(KoralDisplay(lit), 1.0);

@@ -2503,9 +2503,9 @@ namespace {
     }
 }
 
-// The engine's Lights: every light in one buffer as koral_lights.slang has it — the directional ones, then the points,
-// then the spots — each colour in linear terms times its intensity.
-TEST_F(EntityTest, TheEnginesLightsAreEveryLightInOneBuffer) {
+// The engine's Lights: a buffer of each kind as koral_lights.slang has them — KoralDirectionalLight, KoralPointLight,
+// KoralSpotLight — each colour in linear terms times its intensity, and how many of each.
+TEST_F(EntityTest, TheEnginesLightsAreABufferOfEachKind) {
     using kgraph::Value;
     kecs::World& world = scene->world;
     const kecs::Entity sun = world.Create(), lamp = world.Create(), other = world.Create(), spot = world.Create();
@@ -2521,22 +2521,25 @@ TEST_F(EntityTest, TheEnginesLightsAreEveryLightInOneBuffer) {
     runtime.Set(graph);
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
     Frame();
-    EXPECT_EQ(runtime.ValueOf("lights", "count"), Value(4));
-    EXPECT_EQ(runtime.ValueOf("lights", "points"), Value(2));
-    EXPECT_EQ(runtime.ValueOf("lights", "spots"), Value(1));
-    const auto held = runtime.ResourceOf("lights", "lights");
-    ASSERT_TRUE(held);
-    const auto floats = kor::capi::BufferOf(held->handle)->Read<float>();
-    ASSERT_GE(floats.size(), 64u) << "four of sixteen numbers: a KoralLight is 64 bytes";
-    const auto kind = [&](const std::size_t light) { std::uint32_t k; std::memcpy(&k, &floats[light * 16 + 7], 4); return k; };
-    EXPECT_EQ(kind(0), 0u) << "the sun first";
-    EXPECT_EQ(floats[8], 3.f) << "white times three";
-    EXPECT_EQ(kind(1), 1u);
-    EXPECT_EQ(floats[16 + 0], 1.f) << "where the first lamp is";
-    EXPECT_EQ(floats[16 + 2], 3.f);
-    EXPECT_EQ(floats[16 + 3], 5.f) << "and how far it reaches";
-    EXPECT_EQ(floats[16 + 8], 2.f) << "red, twice";
-    EXPECT_EQ(kind(3), 2u) << "the spot last";
-    EXPECT_NEAR(floats[48 + 11], 1.f, 1e-5) << "the cosine of none";
-    EXPECT_NEAR(floats[48 + 12], 0.5f, 1e-5) << "of sixty degrees";
+    EXPECT_EQ(runtime.ValueOf("lights", "directionalCount"), Value(1));
+    EXPECT_EQ(runtime.ValueOf("lights", "pointCount"), Value(2));
+    EXPECT_EQ(runtime.ValueOf("lights", "spotCount"), Value(1));
+    EXPECT_EQ(runtime.ValueOf("lights", "counts"), Value(Value::List { 1, 2, 1, 0 })) << "as a frame's block takes them";
+    const auto floatsOf = [&](const char* output) {
+        const auto held = runtime.ResourceOf("lights", output);
+        return held ? kor::capi::BufferOf(held->handle)->Read<float>() : std::vector<float> {};
+    };
+    const auto suns = floatsOf("directional"), lamps = floatsOf("points"), spots = floatsOf("spots");
+    ASSERT_GE(suns.size(), 8u) << "eight numbers: a KoralDirectionalLight is 32 bytes";
+    EXPECT_EQ(suns[4], 3.f) << "white times three";
+    ASSERT_GE(lamps.size(), 16u) << "two of eight numbers: a KoralPointLight is 32 bytes";
+    EXPECT_EQ(lamps[0], 1.f) << "where the first lamp is";
+    EXPECT_EQ(lamps[2], 3.f);
+    EXPECT_EQ(lamps[3], 5.f) << "and how far it reaches";
+    EXPECT_EQ(lamps[4], 2.f) << "red, twice";
+    EXPECT_EQ(lamps[8 + 3], 6.f) << "the second, as far as it reaches";
+    ASSERT_GE(spots.size(), 12u) << "twelve numbers: a KoralSpotLight is 48 bytes";
+    EXPECT_EQ(spots[3], 9.f);
+    EXPECT_NEAR(spots[7], 1.f, 1e-5) << "the cosine of none";
+    EXPECT_NEAR(spots[11], 0.5f, 1e-5) << "of sixty degrees";
 }

@@ -189,40 +189,41 @@ public struct KoralSunShadows : IKoralShadows {
     public float depth;             // how far along the view the point is: which cascade holds it
     public KoralShadowFilter filter;
     public __init(Texture2D<float> atlas, KoralSunCascades sun, float depth, KoralShadowFilter filter) { this.atlas = atlas; this.sun = sun; this.depth = depth; this.filter = filter; }
-    public float Visibility(KoralLight light, KoralArrival arrival, float3 position, float3 normal)
+    public float DirectionalVisibility(uint index, KoralDirectionalLight light, KoralArrival arrival, float3 position, float3 normal)
     {
-        if (light.kind != KoralLightDirectional || light.kindIndex != 0) return 1.0;
-        return KoralSunVisibility(atlas, sun, position, normal, arrival.toLight, depth, filter);
+        return index == 0 ? KoralSunVisibility(atlas, sun, position, normal, arrival.toLight, depth, filter) : 1.0;
     }
+    public float PointVisibility(uint index, KoralPointLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
+    public float SpotVisibility(uint index, KoralSpotLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
 };
 
-/** The point lights' shadows: a cube for each of the first, found by its kindIndex; every other light lets through. */
+/** The point lights' shadows: a cube for each of the first, found by which point light it is; every other light lets through. */
 public struct KoralPointShadows : IKoralShadows {
     public Texture2DArray<float> maps;
     public StructuredBuffer<float4x4> faces;
     public SamplerComparisonState compare;
     public KoralShadowFilter filter;
     public __init(Texture2DArray<float> maps, StructuredBuffer<float4x4> faces, SamplerComparisonState compare, KoralShadowFilter filter) { this.maps = maps; this.faces = faces; this.compare = compare; this.filter = filter; }
-    public float Visibility(KoralLight light, KoralArrival arrival, float3 position, float3 normal)
+    public float DirectionalVisibility(uint index, KoralDirectionalLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
+    public float PointVisibility(uint index, KoralPointLight light, KoralArrival arrival, float3 position, float3 normal)
     {
-        if (light.kind != KoralLightPoint) return 1.0;
-        return KoralPointVisibility(maps, compare, faces, light.kindIndex, light.position, position, normal, arrival.toLight, filter);
+        return KoralPointVisibility(maps, compare, faces, index, light.position, position, normal, arrival.toLight, filter);
     }
+    public float SpotVisibility(uint index, KoralSpotLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
 };
 
-/** The spots' shadows: a map for each of the first, found by its kindIndex; every other light lets through. */
+/** The spots' shadows: a map for each of the first, found by which spot it is; every other light lets through. */
 public struct KoralSpotShadows : IKoralShadows {
     public Texture2DArray<float> maps;
     public StructuredBuffer<float4x4> matrices;
     public SamplerComparisonState compare;
     public KoralShadowFilter filter;
     public __init(Texture2DArray<float> maps, StructuredBuffer<float4x4> matrices, SamplerComparisonState compare, KoralShadowFilter filter) { this.maps = maps; this.matrices = matrices; this.compare = compare; this.filter = filter; }
-    public float Visibility(KoralLight light, KoralArrival arrival, float3 position, float3 normal)
+    public float DirectionalVisibility(uint index, KoralDirectionalLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
+    public float PointVisibility(uint index, KoralPointLight light, KoralArrival arrival, float3 position, float3 normal) { return 1.0; }
+    public float SpotVisibility(uint index, KoralSpotLight light, KoralArrival arrival, float3 position, float3 normal)
     {
-        if (light.kind != KoralLightSpot) return 1.0;
-        // Its map is twice its outer angle wide, and two degrees more, as a SpotShadows node makes it.
-        const float across = 2.0 * acos(clamp(light.cosOuter, -1.0, 1.0)) + 2.0 * 0.0174532925;
-        return KoralSpotVisibility(maps, compare, matrices, light.kindIndex, across, light.position, position, normal, arrival.toLight, filter);
+        return KoralSpotVisibility(maps, compare, matrices, index, light.MapAngle(), light.position, position, normal, arrival.toLight, filter);
     }
 };
 
@@ -231,9 +232,17 @@ public struct KoralBothShadows<A : IKoralShadows, B : IKoralShadows> : IKoralSha
     public A first;
     public B second;
     public __init(A first, B second) { this.first = first; this.second = second; }
-    public float Visibility(KoralLight light, KoralArrival arrival, float3 position, float3 normal)
+    public float DirectionalVisibility(uint index, KoralDirectionalLight light, KoralArrival arrival, float3 position, float3 normal)
     {
-        return first.Visibility(light, arrival, position, normal) * second.Visibility(light, arrival, position, normal);
+        return first.DirectionalVisibility(index, light, arrival, position, normal) * second.DirectionalVisibility(index, light, arrival, position, normal);
+    }
+    public float PointVisibility(uint index, KoralPointLight light, KoralArrival arrival, float3 position, float3 normal)
+    {
+        return first.PointVisibility(index, light, arrival, position, normal) * second.PointVisibility(index, light, arrival, position, normal);
+    }
+    public float SpotVisibility(uint index, KoralSpotLight light, KoralArrival arrival, float3 position, float3 normal)
+    {
+        return first.SpotVisibility(index, light, arrival, position, normal) * second.SpotVisibility(index, light, arrival, position, normal);
     }
 };
 

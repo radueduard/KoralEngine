@@ -4,7 +4,7 @@
 //     import PbrMaterialShading;      // a kind's shading module: `<Kind>Shading`
 //
 //     const KoralSurface surface = KoralSurfaceAt(world, normal, uv, smooth);
-//     const float3 lit = KoralLit(material, surface, camera, KoralLightBuffer(lights, count), environment, shadows);
+//     const float3 lit = KoralLit(material, surface, camera, KoralLightBuffers(directional, points, spots, counts), ambient, shadows);
 //
 // A material kind is generated as a struct of its fields (materials.h). Its shading module extends that struct with
 // IKoralMaterial, which says how the fields are read at a point of a surface, and gives back an IKoralShading: what is
@@ -33,6 +33,7 @@
 module koral_shading;
 
 __exported import koral_lights;
+__exported import koral_camera;
 __exported import koral_math;
 __exported import koral_color;
 
@@ -104,60 +105,8 @@ public float3 KoralBlendNormalTexels(float3 base, float3 detail)
     return KoralSafeNormalize(t * dot(t, u) - u * t.z) * 0.5 + 0.5;
 }
 
-/** Where the camera is. */
-public struct KoralCamera {
-    public float3 position;
-    public __init(float3 position) { this.position = position; }
-};
-
 // ---- what is around --------------------------------------------------------------------------------------------------
-
-/** The light that comes from all round, for a shading to take what it needs of. */
-public interface IKoralEnvironment {
-    /** What a surface facing @p normal is given of it, spread over the half of everything it sees. */
-    float3 Diffuse(float3 normal);
-    /** What is seen along @p direction, as blurred as a surface so rough sees it. */
-    float3 Specular(float3 direction, float roughness);
-};
-
-/** Nothing round it: only the lights light it. */
-public struct KoralNoEnvironment : IKoralEnvironment {
-    public __init() {}
-    public float3 Diffuse(float3 normal) { return 0.0; }
-    public float3 Specular(float3 direction, float roughness) { return 0.0; }
-};
-
-/** The same light every way. */
-public struct KoralUniformEnvironment : IKoralEnvironment {
-    float3 light;
-    public __init(float3 light) { this.light = light; }
-    public float3 Diffuse(float3 normal) { return light; }
-    public float3 Specular(float3 direction, float roughness) { return light; }
-};
-
-/** A sky of three colours: the zenith's above, the horizon's round it, the ground's below — times how much light it gives. */
-public struct KoralGradientEnvironment : IKoralEnvironment {
-    float3 zenith;
-    float3 horizon;
-    float3 ground;
-    float strength;
-    public __init(float3 zenith, float3 horizon, float3 ground, float strength)
-    {
-        this.zenith = zenith; this.horizon = horizon; this.ground = ground; this.strength = strength;
-    }
-    /** What is seen along @p direction, sharp: the ground below the horizon, the zenith above it. */
-    public float3 Along(float3 direction)
-    {
-        const float y = direction.y;
-        return y >= 0.0 ? lerp(horizon, zenith, pow(saturate(y), 0.45)) : lerp(horizon, ground, pow(saturate(-y * 4.0), 0.6));
-    }
-    public float3 Diffuse(float3 normal)
-    {
-        const float3 sky = lerp(horizon, zenith, saturate(normal.y));
-        return lerp(ground, sky, smoothstep(0.0, 1.0, normal.y * 0.5 + 0.5)) * strength;
-    }
-    public float3 Specular(float3 direction, float roughness) { return lerp(Along(direction) * strength, Diffuse(direction), saturate(roughness)); }
-};
+// IKoralEnvironment, nothing round, the same every way and the sky's KoralAmbientLight are koral_lights'.
 
 /** A cube map, its mip levels blurred more and more. */
 public struct KoralCubeEnvironment : IKoralEnvironment {
@@ -196,17 +145,30 @@ public interface IKoralMaterial {
 
 /**
  * The light a shading at @p position, facing @p normal (its surface's, for its shadows), sends to the camera: of each
- * light, as much as its shadows let through, of what is around, and its own. Not tone mapped.
+ * light of each kind, as much as its shadows let through, of what is around, and its own. Not tone mapped.
  */
 public float3 KoralLit<S : IKoralShading, L : IKoralLights, E : IKoralEnvironment, H : IKoralShadows>(S shading, float3 position, float3 normal, KoralCamera camera, L lights, E environment, H shadows)
 {
-    const float3 toEye = KoralSafeNormalize(camera.position - position);
+    const float3 toEye = camera.ToEye(position);
     float3 lit = shading.Emitted() + shading.Ambient(environment, toEye);
-    for (uint i = 0; i < lights.Count(); ++i) {
-        const KoralLight light = lights.At(i);
-        const KoralArrival arrival = KoralArrivalAt(light, position);
-        if (all(arrival.radiance <= 0.0)) continue;
-        const float visible = shadows.Visibility(light, arrival, position, normal);
+    for (uint i = 0; i < lights.DirectionalCount(); ++i) {
+        const KoralDirectionalLight light = lights.Directional(i);
+        const KoralArrival arrival = light.ArrivalAt(position);
+        const float visible = shadows.DirectionalVisibility(i, light, arrival, position, normal);
+        if (visible > 0.0) lit += shading.Reflected(toEye, arrival.toLight, arrival.radiance * visible);
+    }
+    for (uint i = 0; i < lights.PointCount(); ++i) {
+        const KoralPointLight light = lights.Point(i);
+        if (!light.Reaches(position)) continue;
+        const KoralArrival arrival = light.ArrivalAt(position);
+        const float visible = shadows.PointVisibility(i, light, arrival, position, normal);
+        if (visible > 0.0) lit += shading.Reflected(toEye, arrival.toLight, arrival.radiance * visible);
+    }
+    for (uint i = 0; i < lights.SpotCount(); ++i) {
+        const KoralSpotLight light = lights.Spot(i);
+        if (!light.Reaches(position)) continue;
+        const KoralArrival arrival = light.ArrivalAt(position);
+        const float visible = shadows.SpotVisibility(i, light, arrival, position, normal);
         if (visible > 0.0) lit += shading.Reflected(toEye, arrival.toLight, arrival.radiance * visible);
     }
     return lit;

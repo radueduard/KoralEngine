@@ -1767,6 +1767,8 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().Connect("shape", "layout", paint, "vertex.layout");
     Doc().Connect("sky target", "out", paint, "framebuffer");
     Doc().Connect("frame data", "out", paint, "param.frame");
+    for (const auto& [output, param] : { std::pair { "directional", "param.directionalLights" }, { "points", "param.pointLights" }, { "spots", "param.spotLights" } })
+        Doc().Connect("lights", output, paint, param);     // lit as the template says: by the Lights function's buffers
     ASSERT_TRUE(Doc().Runtime().Status(paint)->ok) << Doc().Runtime().Status(paint)->error;
     const kecs::ComponentId component = Doc().Runtime().ComponentOf(paint);
     ASSERT_NE(component, kecs::NoComponent);

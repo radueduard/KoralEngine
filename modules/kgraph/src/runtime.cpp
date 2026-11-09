@@ -238,6 +238,8 @@ namespace kgraph
     {
         // A call's, as a node's: the first of its outputs that holds an image, else the first that holds anything.
         if (const auto call = _impl->calls.find(id); call != _impl->calls.end()) {
+            if (const auto watch = _impl->watched.find(id); watch != _impl->watched.end() && !watch->second.output.empty())
+                if (const auto gives = call->second.gives.find(watch->second.output); gives != call->second.gives.end() && !gives->second.node.empty()) return watch->second.output;
             std::string first;
             for (const auto& name : call->second.outputs) {
                 const auto gives = call->second.gives.find(name);

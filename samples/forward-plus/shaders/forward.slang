@@ -8,7 +8,8 @@ import forwardCommon;
 import koral_debug;     // what the editor's scene view shows of a material: its albedo, its normal after the map...
 
 ConstantBuffer<Sun> sun;
-StructuredBuffer<KoralLight> lights;       // the Lights function's: the sun's first, then the point lights
+StructuredBuffer<KoralPointLight> pointLights;     // the Lights function's `points`
+StructuredBuffer<KoralSpotLight> spotLights;       // and `spots`: a cluster lists one as the point lights' count and its place
 StructuredBuffer<uint2> lightGrid;          // for each cluster: where its lights start in the list, and how many
 StructuredBuffer<uint> lightIndices;
 Texture2D<float> shadowMap;                 // the four cascades, two by two
@@ -265,12 +266,12 @@ float3 throughFrom(Surface surface, float through, float facingBack, float3 radi
     return surface.scattered * KoralInvPi * through * facingBack * radiance;
 }
 
-/** How much of point light @p light reaches a point: through the face of its cube that looks the point's way — the
- *  cube of which point light it is. A light past those that have a cube casts no shadow. */
-float lampShadow(KoralLight light, float3 world, float3 normal, float3 toLight)
+/** How much of point light @p index reaches a point: through the face of its cube that looks the point's way. A light
+ *  past those that have a cube casts no shadow. */
+float lampShadow(uint index, KoralPointLight light, float3 world, float3 normal, float3 toLight)
 {
-    if (light.kindIndex >= LampShadowMost) return 1.0;
-    return KoralPointVisibility(lampShadowMaps, lampCompare, lampFaces, light.kindIndex, light.position, world, normal, toLight, lampFilter());
+    if (index >= LampShadowMost) return 1.0;
+    return KoralPointVisibility(lampShadowMaps, lampCompare, lampFaces, index, light.position, world, normal, toLight, lampFilter());
 }
 
 [shader("fragment")]
@@ -310,13 +311,17 @@ Output fragment(RasterInfo raster)
     const float through = saturate(draw.translucency);
     float3 lit = 0.0;
     for (uint i = run.x; i < run.x + run.y; ++i) {
-        const KoralLight light = lights[lightIndices[i]];
-        const KoralArrival arrival = KoralArrivalAt(light, world);
+        // A point light, with its shadow's cube, or past their count a spot (which has none).
+        const uint index = lightIndices[i];
+        const bool lamp = index < camera.pointCount;
+        const KoralArrival arrival = lamp ? pointLights[index].ArrivalAt(world) : spotLights[index - camera.pointCount].ArrivalAt(world);
         if (all(arrival.radiance <= 0.0)) continue;
         const float3 toLight = arrival.toLight;
         const float facing = dot(surface.normal, toLight);
-        if (facing > 0.0) lit += directLighting(surface, toLight, arrival.radiance) * lampShadow(light, world, surface.normal, toLight);
-        else if (through > 0.0) lit += throughFrom(surface, through, -facing, arrival.radiance) * lampShadow(light, world, -surface.normal, toLight);
+        const float3 side = facing > 0.0 ? surface.normal : -surface.normal;
+        const float shadow = lamp ? lampShadow(index, pointLights[index], world, side, toLight) : 1.0;
+        if (facing > 0.0) lit += directLighting(surface, toLight, arrival.radiance) * shadow;
+        else if (through > 0.0) lit += throughFrom(surface, through, -facing, arrival.radiance) * shadow;
     }
 
     if (sun.present > 0.0) {

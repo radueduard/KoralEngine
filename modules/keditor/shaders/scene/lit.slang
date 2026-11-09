@@ -35,7 +35,7 @@ RasterInfo vertex(Vertex vertex)
     RasterInfo raster;
     const float4 world = mul(float4(vertex.position, 1.0), draw.model);
     raster.worldPosition = world.xyz;
-    raster.position = mul(world, frame.viewProjection);
+    raster.position = frame.camera.ToClip(world.xyz);
     raster.normal = KoralTransformNormal(vertex.normal, draw.model);     // square to the surface however it is scaled
     return raster;
 }
@@ -54,7 +54,7 @@ float4 fragment(RasterInfo raster) : SV_Target
     pbr.opacity = 1.0;
     if (koralDebugShowing()) return float4(koralDebugColor(KoralDebugSurface(pbr.baseColor, pbr.normal, pbr.roughness, pbr.metallic, pbr.emission)), 1.0);
 
-    // Lit by every light of the scene and by the sky all round.
-    const float3 lit = KoralLit(pbr, raster.worldPosition, pbr.normal, FrameCamera(), FrameLights(), FrameSky());
+    // Lit by every light of the scene, each kind by itself, and by the sky all round.
+    const float3 lit = KoralLit(pbr, raster.worldPosition, pbr.normal, FrameCamera(), FrameLights(), FrameAmbient());
     return float4(KoralDisplay(lit), 1.0);
 }

@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "Light in the air near the eye: the view cut into 160 x 90 x 64 cells out to `distance` metres, each lit by the sun through the clouds and its shadow maps (SunShadows' `atlas`, and the cascades' block it reads), by the sky and by every light of `lights` (the Lights function's, `lightCount` of them); a haze of `density` a metre at `floor`, thinning `height` metres up; blended with last frame's (`previousViewProjection`); gathered along each pixel's ray and laid over `picture` by its `depth`. `view`, `clouds` and `light` are the Atmosphere function's. Passes off while `idle` is not 0.",
+ "description": "Light in the air near the eye: the view cut into 160 x 90 x 64 cells out to `distance` metres, each lit by the sun through the clouds and its shadow maps (SunShadows' `atlas`, and the cascades' block it reads), by the sky and by the scene's lamps and spots (the Lights function's `points` and `spots` to `pointLights` and `spotLights`, its `pointCount` and `spotCount`); a haze of `density` a metre at `floor`, thinning `height` metres up; blended with last frame's (`previousViewProjection`); gathered along each pixel's ray and laid over `picture` by its `depth`. `view`, `clouds` and `light` are the Atmosphere function's. Passes off while `idle` is not 0.",
  "tags": [
   "fog",
   "volumetric",
@@ -75,14 +75,26 @@
     }
    },
    {
-    "id": "lights",
+    "id": "pointLights",
     "type": "FunctionInput",
     "at": [
      60,
      490
     ],
     "inputs": {
-     "name": "lights",
+     "name": "pointLights",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "spotLights",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "spotLights",
      "kind": "eResource"
     }
    },
@@ -91,7 +103,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     580
+     670
     ],
     "inputs": {
      "name": "cascades",
@@ -103,7 +115,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     670
+     760
     ],
     "inputs": {
      "name": "sunAtlas",
@@ -111,14 +123,27 @@
     }
    },
    {
-    "id": "lightCount",
+    "id": "pointCount",
     "type": "FunctionInput",
     "at": [
      60,
-     760
+     850
     ],
     "inputs": {
-     "name": "lightCount",
+     "name": "pointCount",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "spotCount",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     940
+    ],
+    "inputs": {
+     "name": "spotCount",
      "kind": "eValue",
      "default": 0
     }
@@ -128,7 +153,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     850
+     1030
     ],
     "inputs": {
      "name": "inverseView",
@@ -140,7 +165,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     940
+     1120
     ],
     "inputs": {
      "name": "previousViewProjection",
@@ -152,7 +177,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1030
+     1210
     ],
     "inputs": {
      "name": "hasHistory",
@@ -165,7 +190,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1120
+     1300
     ],
     "inputs": {
      "name": "reversed",
@@ -178,7 +203,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1210
+     1390
     ],
     "inputs": {
      "name": "idle",
@@ -191,7 +216,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1300
+     1480
     ],
     "inputs": {
      "name": "density",
@@ -204,7 +229,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1390
+     1570
     ],
     "inputs": {
      "name": "anisotropy",
@@ -217,7 +242,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1480
+     1660
     ],
     "inputs": {
      "name": "strength",
@@ -230,7 +255,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1570
+     1750
     ],
     "inputs": {
      "name": "distance",
@@ -243,7 +268,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1660
+     1840
     ],
     "inputs": {
      "name": "ambient",
@@ -256,7 +281,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1750
+     1930
     ],
     "inputs": {
      "name": "history",
@@ -269,7 +294,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1840
+     2020
     ],
     "inputs": {
      "name": "height",
@@ -282,7 +307,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1930
+     2110
     ],
     "inputs": {
      "name": "floor",
@@ -295,7 +320,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     2020
+     2200
     ],
     "inputs": {
      "name": "near",
@@ -308,7 +333,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     2110
+     2290
     ],
     "inputs": {
      "name": "samples",
@@ -387,9 +412,15 @@
        "out"
       ]
      },
-     "field.lightCount": {
+     "field.pointCount": {
       "$link": [
-       "lightCount",
+       "pointCount",
+       "out"
+      ]
+     },
+     "field.spotCount": {
+      "$link": [
+       "spotCount",
        "out"
       ]
      },
@@ -544,9 +575,15 @@
        "out"
       ]
      },
-     "param.lights": {
+     "param.pointLights": {
       "$link": [
-       "lights",
+       "pointLights",
+       "out"
+      ]
+     },
+     "param.spotLights": {
+      "$link": [
+       "spotLights",
        "out"
       ]
      },

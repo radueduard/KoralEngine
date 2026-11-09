@@ -174,7 +174,7 @@ namespace forwardplus
         // ---- frame: what every pass sees of the frame -------------------------------------------------------------
         // The scene's camera, sun and sky as values, and the two buffers of them the shaders declare: each a
         // ShaderBuffer, which has the shader's struct as its inputs. The lights are the engine's Lights function's: a
-        // KoralLight an entity, the sun's first.
+        // buffer of each kind, a light an entity (the sun is the sun block's).
         page("frame");
         node("Screen", "screen", 40, 40);
         node("Primitive", "shape", 40, 160);                 // for how a default mesh's vertices are laid out
@@ -230,7 +230,8 @@ namespace forwardplus
         set("lamps", "component", "PointLight");
         node("Function", "lights", 420, 760);
         set("lights", "function", "Lights");
-        field("camera data", "lightCount", "lights", "count");
+        field("camera data", "pointCount", "lights", "pointCount");
+        field("camera data", "spotCount", "lights", "spotCount");
 
         first("sky values", "Sky", 1000);
         const auto linear = [&](const std::string& id, const std::string& from, const char* output, const double y) {
@@ -307,7 +308,9 @@ namespace forwardplus
         wire("light counter", "reset counter", "buffer");
         compute("cull lights", "lightCulling", "computeMain", nullptr, 600, 40);
         wire(bring("camera data"), "cull lights", "param.camera");
-        wire(bring("lights"), "cull lights", "param.lights", "lights");
+        const std::string lights = bring("lights");
+        wire(lights, "cull lights", "param.pointLights", "points");
+        wire(lights, "cull lights", "param.spotLights", "spots");
         wire("light grid", "cull lights", "param.lightGrid");
         wire("light indices", "cull lights", "param.lightIndices");
         wire("light counter", "cull lights", "param.lightCounter");
@@ -451,7 +454,9 @@ namespace forwardplus
         wire("forward target", "forward", "framebuffer");
         wire(bring("camera data"), "forward", "param.camera");
         wire(bring("sun data"), "forward", "param.sun");
-        wire(bring("lights"), "forward", "param.lights", "lights");
+        const std::string shadedBy = bring("lights");
+        wire(shadedBy, "forward", "param.pointLights", "points");
+        wire(shadedBy, "forward", "param.spotLights", "spots");
         wire(bring("light grid"), "forward", "param.lightGrid");
         wire(bring("light indices"), "forward", "param.lightIndices");
         wire(bring("shadow atlas"), "forward", "param.shadowMap");
@@ -1035,7 +1040,7 @@ namespace forwardplus
             return made;
         };
         // The point lights are the raster passes': the rays have none of them.
-        for (const char* gone : { "param.lights", "param.lightGrid", "param.lightIndices" }) doc.ClearInput("ray tracer", gone);
+        for (const char* gone : { "param.pointLights", "param.spotLights", "param.lightGrid", "param.lightIndices" }) doc.ClearInput("ray tracer", gone);
 
         node("Buffer", "emitters", 320, 1700);
         set("emitters", "instanceCount", MostEmitters * 32);

@@ -215,7 +215,8 @@ TEST_F(ModuleTest, TheAtmosphereMakesTheSkyAndTheFog) {
     }, "call/marched", atmosphere });
     Run({ "atmosphere", "Fog", [identity](kgraph::Node& call) {
         call.Wire("picture", "picture").Wire("depth", "depth").Wire("view", "air", "view").Wire("clouds", "air", "clouds").Wire("light", "air", "light")
-            .Wire("lights", "lights", "lights").Wire("lightCount", "lights", "count").Set("inverseView", identity).Set("previousViewProjection", identity);
+            .Wire("pointLights", "lights", "points").Wire("spotLights", "lights", "spots").Wire("pointCount", "lights", "pointCount").Wire("spotCount", "lights", "spotCount")
+            .Set("inverseView", identity).Set("previousViewProjection", identity);
     }, "call/gathered", [atmosphere](kgraph::Graph& graph) {
         atmosphere(graph);
         graph.functions["Lights"] = support::EngineFunction("Lights");

@@ -159,7 +159,7 @@ three shaders (`engineCommon`, `lit`, `sky`) and builds:
 
 | Pass | What is on its page |
 |---|---|
-| `frame` | The Screen; a ForEach of the first PerspectiveCamera, Sky and DirectionalLight, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (colours in linear terms, the sun disc's cosine); `frame data`, packed in the order `engineCommon.slang` declares it; and the lights — a ForEach of each kind into a ShaderBuffer of the shader's `Light`, each after the last, `light data` the last of them. |
+| `frame` | The Screen; the first PerspectiveCamera and Sky, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (the sky's colours in linear terms, the sun disc's cosine); `frame data`, packed as `engineCommon.slang`'s `FrameData` declares it — the camera (`KoralCamera`), the sky's light from all round (`KoralAmbientLight`), the sun disc and the lights' counts; and `lights`, the engine's Lights function: a buffer of each kind, wired to the pipelines' `directionalLights`, `pointLights` and `spotLights` (the sky's disc is the first directional light's). |
 | `scene` | `color` and `depth` images the size of the window, and `lit`, the pipeline that draws meshes. `all`, every entity, and `drawn`, a Filter of those with a Mesh and the pipeline's component, are wired to the Draw: each entity's mesh, its matrix, and the component's `albedo`, `metallic`, `roughness` and `emission`. An entity with both is drawn. |
 | `sky` | The sky, drawn where nothing nearer was. |
 | `show` | The Blit of `color` to the Screen. |

@@ -30,7 +30,7 @@ cmake-build-debug/koral-editor cmake-build-debug/forward-plus-project
 
 | Page | What it does | The original's |
 |---|---|---|
-| `frame` | The camera, the sun with its cascades and the sky — each a ForEach of the engine's package's component, the first of it, and a View of the camera — as the two buffers the shaders declare, each a ShaderBuffer; and the lights, the engine's Lights function (a KoralLight an entity, the sun's first). The point lights' places, collected, are what the lamps' shadow cubes are made round. | The camera module's set, `LightCulling::SetPointLights`, `DirectionalLight::Update` |
+| `frame` | The camera, the sun with its cascades and the sky — each a ForEach of the engine's package's component, the first of it, and a View of the camera — as the two buffers the shaders declare, each a ShaderBuffer; and the lights, the engine's Lights function (a buffer of each kind: its point lights and spots are the clusters'). The point lights' places, collected, are what the lamps' shadow cubes are made round. | The camera module's set, `LightCulling::SetPointLights`, `DirectionalLight::Update` |
 | `lights` | Sorts the lights into 16 x 9 x 24 clusters: a ClearBuffer of the counter, and a Dispatch of one work group a cluster. | `Light.h`, `lightCulling.comp.glsl` |
 | `shadows` | Four cascades into a quarter each of one depth image: a pipeline and a Draw, in a loop of four turns. | `DirectionalLight.h` |
 | `prepass` | Depth, before anything is shaded. | `DepthPrePass.h` |

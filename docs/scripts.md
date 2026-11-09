@@ -233,11 +233,13 @@ What a kind looks like is a Slang module of the same name with `Shading` after i
 import PbrMaterialShading;
 
 const KoralSurface surface = KoralSurfaceAt(world, normal, uv, smooth);     // normals, and how to read a picture
-const float3 lit = KoralLit(material, surface, KoralCamera(eye), KoralLightBuffer(lights, count), environment);
+const float3 lit = KoralLit(material, surface, camera, KoralLightBuffers(directional, points, spots, counts), ambient);
 ```
 
-`environment` is optional: anything `IKoralEnvironment`, such as `KoralCubeEnvironment`. Lights are `KoralLight`s,
-as the Lights function lays them out, or any `IKoralLights`. Shadows are a last, optional argument: anything
+`camera` is a `KoralCamera` — the lit graph's frame block has one, or `KoralCamera(eye)` knows only where it is.
+The environment is optional: anything `IKoralEnvironment`, such as the sky's `KoralAmbientLight` (the frame block's)
+or a `KoralCubeEnvironment`. Lights are a buffer of each kind, as the Lights function lays them out, or any
+`IKoralLights`. Shadows are a last, optional argument: anything
 `IKoralShadows`, which says how much of each light reaches the point. The result is light, not yet tone mapped
 (`KoralDisplay` shows it). The library's modules are in [shaders.md](shaders.md).
 

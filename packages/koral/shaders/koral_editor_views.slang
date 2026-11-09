@@ -68,7 +68,7 @@ float4 clay(Shaped shaped) : SV_Target
     const float3 toEye = KoralSafeNormalize(shaped.eye - shaped.world);
     float3 normal = KoralSafeNormalize(shaped.normal);
     if (dot(normal, toEye) < 0.0) normal = -normal;
-    const KoralLight headlight = KoralDirectionalLight(-toEye, float3(KoralPi * 0.82));
+    const KoralDirectionalLight headlight = KoralDirectionalLight(-toEye, float3(KoralPi * 0.82));
     const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(float3(0.78, 0.76, 0.72))), shaped.world, normal, KoralCamera(shaped.eye),
                                 KoralSingleLight(headlight), KoralUniformEnvironment(float3(0.18)));
     return float4(KoralGamma22FromLinear(lit), 1.0);

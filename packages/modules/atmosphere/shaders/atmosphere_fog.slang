@@ -29,7 +29,8 @@ public struct KoralFog {
     public float floor;         // where it is thickest, and the same below
     public float near;          // the view's near plane
     public uint samples;        // places in a cell lit each frame
-    public uint lightCount;     // how many of `lights` there are
+    public uint pointCount;     // how many of `pointLights` there are: the Lights function's
+    public uint spotCount;      // and of `spotLights`
     public uint hasHistory;     // 1 when last frame's cells are of this view
     public float4x4 inverseView;
     public float4x4 previousViewProjection;
@@ -39,7 +40,8 @@ ConstantBuffer<KoralSkyView> view;
 ConstantBuffer<KoralFog> fog;
 ConstantBuffer<KoralClouds> clouds;
 StructuredBuffer<KoralSkyLight> skyLight;
-StructuredBuffer<KoralLight> lights;
+StructuredBuffer<KoralPointLight> pointLights;     // the Lights function's `points`
+StructuredBuffer<KoralSpotLight> spotLights;       // and `spots`
 
 public static const uint3 KoralFogCells = uint3(160, 90, 64);
 
@@ -54,16 +56,16 @@ float3 WorldOf(float2 uv, float w)
     return view.eye + ray * (DepthAt(w) / max(dot(ray, Forward()), 1e-3));
 }
 
-/** How a point of the air knows what reaches it from the sun and from a light: an interface, each entry its own way. */
+/** How a point of the air knows what reaches it from the sun and from a light at @p lightAt: an interface, each entry its own way. */
 interface ISight {
     float SunSeen(float3 p, float along);
-    float LightSeen(KoralLight light, float3 p, float distance);
+    float LightSeen(float3 lightAt, float3 p, float distance);
 };
 
 /** Nothing in the way but the clouds. */
 struct OpenSight : ISight {
     float SunSeen(float3 p, float along) { return 1.0; }
-    float LightSeen(KoralLight light, float3 p, float distance) { return 1.0; }
+    float LightSeen(float3 lightAt, float3 p, float distance) { return 1.0; }
 };
 
 // By the sun's shadow maps (SunShadows'), one tap a place: the cells blur it.
@@ -71,7 +73,7 @@ ConstantBuffer<KoralSunCascades> cascades;
 Texture2D<float> sunAtlas;
 struct SunSight : ISight {
     float SunSeen(float3 p, float along) { return KoralSunVisibilityTap(sunAtlas, cascades, p, along); }
-    float LightSeen(KoralLight light, float3 p, float distance) { return 1.0; }
+    float LightSeen(float3 lightAt, float3 p, float distance) { return 1.0; }
 };
 
 // By rays into the scene: a RayScene's `scene`, x its structure's bindless index (~0 while it has nothing). Traced with a
@@ -88,7 +90,7 @@ struct RaySight : ISight {
         return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
     }
     float SunSeen(float3 p, float along) { return Clear(p, -view.sunDirection, 2000.0); }
-    float LightSeen(KoralLight light, float3 p, float distance) { return Clear(p, (light.position - p) / max(distance, 1e-4), distance - 0.05); }
+    float LightSeen(float3 lightAt, float3 p, float distance) { return Clear(p, (lightAt - p) / max(distance, 1e-4), distance - 0.05); }
 };
 
 /** The light a point of the grid scatters toward the eye, a metre of a haze of density 1: the sun's, the sky's, the lights'. */
@@ -105,12 +107,18 @@ float3 ScatteredAt<S : ISight>(S sight, uint3 id, float3 jitter, out float densi
     float3 lit = sky * fog.ambient / (4.0 * KoralPi);
     if (any(s.sun.rgb > 0.0))
         lit += s.sun.rgb * KoralHenyeyGreenstein(dot(view.sunDirection, -ray), fog.anisotropy) * sight.SunSeen(p, DepthAt(w)) * KoralCloudShadowAt(p, view, clouds);
-    for (uint i = 0; i < fog.lightCount; ++i) {
-        const KoralLight light = lights[i];
-        if (light.kind == KoralLightDirectional) continue;      // the sun is the sky's
-        const KoralArrival arrival = KoralArrivalAt(light, p);
-        if (all(arrival.radiance <= 0.0)) continue;
-        lit += arrival.radiance * KoralHenyeyGreenstein(dot(-arrival.toLight, -ray), fog.anisotropy) * sight.LightSeen(light, p, arrival.distance);
+    // The scene's lamps and spots (its suns are the sky's, above).
+    for (uint i = 0; i < fog.pointCount; ++i) {
+        const KoralPointLight light = pointLights[i];
+        if (!light.Reaches(p)) continue;
+        const KoralArrival arrival = light.ArrivalAt(p);
+        lit += arrival.radiance * KoralHenyeyGreenstein(dot(-arrival.toLight, -ray), fog.anisotropy) * sight.LightSeen(light.position, p, arrival.distance);
+    }
+    for (uint i = 0; i < fog.spotCount; ++i) {
+        const KoralSpotLight light = spotLights[i];
+        if (!light.Reaches(p)) continue;
+        const KoralArrival arrival = light.ArrivalAt(p);
+        lit += arrival.radiance * KoralHenyeyGreenstein(dot(-arrival.toLight, -ray), fog.anisotropy) * sight.LightSeen(light.position, p, arrival.distance);
     }
     return lit;
 }

@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "Every light of the scene in one buffer, as koral_lights.slang's KoralLight is: the directional lights, then the point lights, then the spots \u2014 where each is and how far it reaches, the way it shines and its kind, its colour in linear terms times its intensity, a spot's cone as the cosines of its angles, and which of its kind it is (what its shadow is found by). `count` is how many there are, and each kind's how many of it.",
+ "description": "Every light of the scene, a buffer of each kind as koral_lights.slang has it: `directional` of KoralDirectionalLight (the way it shines, its colour), `points` of KoralPointLight (where it is, how far it reaches, its colour), `spots` of KoralSpotLight (where, how far, the way it shines, its colour, its cone as the cosines of its angles) \u2014 each colour in linear terms times its intensity. A light's place in its buffer is which of its kind it is: what its shadow is found by. `counts` is how many of each (x directional, y point, z spot), for a frame's block; `directionalCount`, `pointCount` and `spotCount` the same one by one.",
  "tags": [
   "lights",
   "light list",
@@ -20,8 +20,8 @@
     "id": "directionallights",
     "type": "ForEach",
     "at": [
-     260,
-     60
+     320,
+     40
     ],
     "inputs": {
      "component": "DirectionalLight"
@@ -31,8 +31,8 @@
     "id": "directionallights linear",
     "type": "ColorConvert",
     "at": [
-     520,
-     60
+     320,
+     130
     ],
     "inputs": {
      "color": {
@@ -49,8 +49,8 @@
     "id": "directionallights color",
     "type": "Multiply",
     "at": [
-     780,
-     60
+     320,
+     220
     ],
     "inputs": {
      "a": {
@@ -68,45 +68,29 @@
     }
    },
    {
-    "id": "directionallights data",
+    "id": "directional",
     "type": "BufferBuilder",
     "at": [
-     1040,
-     60
+     580,
+     40
     ],
     "inputs": {
      "layout": [
-      {
-       "name": "position",
-       "type": "eVec3"
-      },
-      {
-       "name": "range",
-       "type": "eFloat"
-      },
       {
        "name": "direction",
        "type": "eVec3"
       },
       {
-       "name": "kind",
-       "type": "eUInt"
+       "name": "unused0",
+       "type": "eFloat"
       },
       {
        "name": "color",
        "type": "eVec3"
       },
       {
-       "name": "cosInner",
+       "name": "unused1",
        "type": "eFloat"
-      },
-      {
-       "name": "cosOuter",
-       "type": "eFloat"
-      },
-      {
-       "name": "kindIndex",
-       "type": "eUInt"
       }
      ],
      "field.direction": {
@@ -115,17 +99,10 @@
        "forward"
       ]
      },
-     "field.kind": 0,
      "field.color": {
       "$link": [
        "directionallights color",
        "out"
-      ]
-     },
-     "field.kindIndex": {
-      "$link": [
-       "directionallights",
-       "index"
       ]
      }
     }
@@ -134,8 +111,8 @@
     "id": "pointlights",
     "type": "ForEach",
     "at": [
-     260,
-     150
+     840,
+     40
     ],
     "inputs": {
      "component": "PointLight"
@@ -145,8 +122,8 @@
     "id": "pointlights linear",
     "type": "ColorConvert",
     "at": [
-     520,
-     150
+     840,
+     130
     ],
     "inputs": {
      "color": {
@@ -163,8 +140,8 @@
     "id": "pointlights color",
     "type": "Multiply",
     "at": [
-     780,
-     150
+     840,
+     220
     ],
     "inputs": {
      "a": {
@@ -182,11 +159,11 @@
     }
    },
    {
-    "id": "pointlights data",
+    "id": "points",
     "type": "BufferBuilder",
     "at": [
-     1040,
-     150
+     1100,
+     40
     ],
     "inputs": {
      "layout": [
@@ -199,43 +176,14 @@
        "type": "eFloat"
       },
       {
-       "name": "direction",
-       "type": "eVec3"
-      },
-      {
-       "name": "kind",
-       "type": "eUInt"
-      },
-      {
        "name": "color",
        "type": "eVec3"
       },
       {
-       "name": "cosInner",
+       "name": "unused",
        "type": "eFloat"
-      },
-      {
-       "name": "cosOuter",
-       "type": "eFloat"
-      },
-      {
-       "name": "kindIndex",
-       "type": "eUInt"
       }
      ],
-     "field.direction": {
-      "$link": [
-       "pointlights",
-       "forward"
-      ]
-     },
-     "field.kind": 1,
-     "field.color": {
-      "$link": [
-       "pointlights color",
-       "out"
-      ]
-     },
      "field.position": {
       "$link": [
        "pointlights",
@@ -248,16 +196,10 @@
        "field.range"
       ]
      },
-     "after": {
+     "field.color": {
       "$link": [
-       "directionallights data",
+       "pointlights color",
        "out"
-      ]
-     },
-     "field.kindIndex": {
-      "$link": [
-       "pointlights",
-       "index"
       ]
      }
     }
@@ -266,8 +208,8 @@
     "id": "spotlights",
     "type": "ForEach",
     "at": [
-     260,
-     240
+     1360,
+     40
     ],
     "inputs": {
      "component": "SpotLight"
@@ -277,8 +219,8 @@
     "id": "spotlights linear",
     "type": "ColorConvert",
     "at": [
-     520,
-     240
+     1360,
+     130
     ],
     "inputs": {
      "color": {
@@ -295,8 +237,8 @@
     "id": "spotlights color",
     "type": "Multiply",
     "at": [
-     780,
-     240
+     1360,
+     220
     ],
     "inputs": {
      "a": {
@@ -317,8 +259,8 @@
     "id": "inner radians",
     "type": "Radians",
     "at": [
-     520,
-     330
+     1360,
+     310
     ],
     "inputs": {
      "a": {
@@ -333,8 +275,8 @@
     "id": "inner cosine",
     "type": "Cos",
     "at": [
-     780,
-     330
+     1360,
+     400
     ],
     "inputs": {
      "a": {
@@ -349,8 +291,8 @@
     "id": "outer radians",
     "type": "Radians",
     "at": [
-     520,
-     420
+     1360,
+     490
     ],
     "inputs": {
      "a": {
@@ -365,8 +307,8 @@
     "id": "outer cosine",
     "type": "Cos",
     "at": [
-     780,
-     420
+     1360,
+     580
     ],
     "inputs": {
      "a": {
@@ -378,11 +320,11 @@
     }
    },
    {
-    "id": "spotlights data",
+    "id": "spots",
     "type": "BufferBuilder",
     "at": [
-     1040,
-     240
+     1620,
+     40
     ],
     "inputs": {
      "layout": [
@@ -399,39 +341,18 @@
        "type": "eVec3"
       },
       {
-       "name": "kind",
-       "type": "eUInt"
+       "name": "cosInner",
+       "type": "eFloat"
       },
       {
        "name": "color",
        "type": "eVec3"
       },
       {
-       "name": "cosInner",
-       "type": "eFloat"
-      },
-      {
        "name": "cosOuter",
        "type": "eFloat"
-      },
-      {
-       "name": "kindIndex",
-       "type": "eUInt"
       }
      ],
-     "field.direction": {
-      "$link": [
-       "spotlights",
-       "forward"
-      ]
-     },
-     "field.kind": 2,
-     "field.color": {
-      "$link": [
-       "spotlights color",
-       "out"
-      ]
-     },
      "field.position": {
       "$link": [
        "spotlights",
@@ -444,9 +365,21 @@
        "field.range"
       ]
      },
+     "field.direction": {
+      "$link": [
+       "spotlights",
+       "forward"
+      ]
+     },
      "field.cosInner": {
       "$link": [
        "inner cosine",
+       "out"
+      ]
+     },
+     "field.color": {
+      "$link": [
+       "spotlights color",
        "out"
       ]
      },
@@ -455,106 +388,191 @@
        "outer cosine",
        "out"
       ]
-     },
-     "after": {
-      "$link": [
-       "pointlights data",
-       "out"
-      ]
-     },
-     "field.kindIndex": {
-      "$link": [
-       "spotlights",
-       "index"
-      ]
      }
     }
    },
    {
-    "id": "lights out",
-    "type": "FunctionOutput",
+    "id": "two counts",
+    "type": "Append",
     "at": [
-     1560,
-     60
+     1880,
+     40
     ],
     "inputs": {
-     "name": "lights",
-     "kind": "eBuffer",
-     "value": {
+     "a": {
       "$link": [
-       "spotlights data",
-       "out"
+       "directional",
+       "count"
       ]
-     }
-    }
-   },
-   {
-    "id": "count out",
-    "type": "FunctionOutput",
-    "at": [
-     1560,
-     150
-    ],
-    "inputs": {
-     "name": "count",
-     "kind": "eValue",
-     "value": {
+     },
+     "b": {
       "$link": [
-       "spotlights data",
+       "points",
        "count"
       ]
      }
     }
    },
    {
-    "id": "directional out",
+    "id": "three counts",
+    "type": "Append",
+    "at": [
+     1880,
+     130
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "two counts",
+       "out"
+      ]
+     },
+     "b": {
+      "$link": [
+       "spots",
+       "count"
+      ]
+     }
+    }
+   },
+   {
+    "id": "counts",
+    "type": "Append",
+    "at": [
+     1880,
+     220
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "three counts",
+       "out"
+      ]
+     },
+     "b": 0
+    }
+   },
+   {
+    "id": "out directional",
     "type": "FunctionOutput",
     "at": [
-     1560,
-     240
+     3180,
+     40
     ],
     "inputs": {
      "name": "directional",
-     "kind": "eValue",
+     "kind": "eBuffer",
      "value": {
       "$link": [
-       "directionallights",
-       "count"
+       "directional",
+       "out"
       ]
      }
     }
    },
    {
-    "id": "points out",
+    "id": "out points",
     "type": "FunctionOutput",
     "at": [
-     1560,
-     330
+     3180,
+     130
     ],
     "inputs": {
      "name": "points",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "points",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out spots",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     220
+    ],
+    "inputs": {
+     "name": "spots",
+     "kind": "eBuffer",
+     "value": {
+      "$link": [
+       "spots",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out counts",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     310
+    ],
+    "inputs": {
+     "name": "counts",
      "kind": "eValue",
      "value": {
       "$link": [
-       "pointlights",
+       "counts",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out directionalCount",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     400
+    ],
+    "inputs": {
+     "name": "directionalCount",
+     "kind": "eValue",
+     "value": {
+      "$link": [
+       "directional",
        "count"
       ]
      }
     }
    },
    {
-    "id": "spots out",
+    "id": "out pointCount",
     "type": "FunctionOutput",
     "at": [
-     1560,
-     420
+     3180,
+     490
     ],
     "inputs": {
-     "name": "spots",
+     "name": "pointCount",
      "kind": "eValue",
      "value": {
       "$link": [
-       "spotlights",
+       "points",
+       "count"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out spotCount",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     580
+    ],
+    "inputs": {
+     "name": "spotCount",
+     "kind": "eValue",
+     "value": {
+      "$link": [
+       "spots",
        "count"
       ]
      }
