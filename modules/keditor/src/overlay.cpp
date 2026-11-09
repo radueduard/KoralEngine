@@ -107,10 +107,14 @@ float4 fragment(float4 position : SV_Position, uniform uint selected, uniform fl
 }
 )slang";
 
-        constexpr const char* ThumbShader = R"slang(// The editor's: one mesh by itself, lit from over the shoulder, for a small picture of it in a list.
+        constexpr const char* ThumbShader = R"slang(// The editor's: one mesh by itself, a matte shape under the studio's lights, for a small picture of it in a list.
+
+import koral_shadings;
+import koral_display;
 
 struct View {
     float4x4 viewProjection;
+    float3 eye;
 };
 ConstantBuffer<View> view;
 
@@ -121,6 +125,7 @@ struct Object {
 
 struct Raster {
     float4 position : SV_Position;
+    float3 world;
     float3 normal;
 };
 
@@ -128,17 +133,20 @@ struct Raster {
 Raster vertex(float3 position : POSITION, float3 normal : NORMAL)
 {
     Raster raster;
-    raster.position = mul(mul(float4(position, 1.0), object.model), view.viewProjection);
-    raster.normal = normal;
+    const float4 world = mul(float4(position, 1.0), object.model);
+    raster.position = mul(world, view.viewProjection);
+    raster.world = world.xyz;
+    raster.normal = KoralTransformNormal(normal, object.model);
     return raster;
 }
 
 [shader("fragment")]
 float4 fragment(Raster raster) : SV_Target
 {
-    float3 normal = normalize(raster.normal);
-    float light = 0.28 + 0.72 * saturate(dot(normal, normalize(float3(0.45, 0.8, 0.4))) * 0.5 + 0.5);
-    return float4(float3(0.80, 0.83, 0.90) * light, 1.0);
+    const float3 normal = KoralSafeNormalize(raster.normal);
+    const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(float3(0.80, 0.83, 0.90))), raster.world, normal, KoralCamera(view.eye),
+                                KoralStudioLights(), KoralUniformEnvironment(float3(0.12)));
+    return float4(KoralDisplay(lit), 1.0);
 }
 )slang";
 
@@ -401,7 +409,7 @@ float4 fragment(Raster raster) : SV_Target
             graph.Add("lens", "Perspective").Set("main", true);     // square: an aspect of 1
             graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");
             graph.Add("view", "ShaderBuffer").Set("module", "koralEditorThumb").Set("entry", "vertex").Set("parameter", "view")
-                .Wire("field.viewProjection", "seen");
+                .Wire("field.viewProjection", "seen").Wire("field.eye", "camera", "position");
             image("thumb", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
             image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
             graph.Add("target", "Framebuffer").Wire("color[0].view", "thumb").Set("color[0].name", "color")
@@ -856,6 +864,9 @@ float4 fragment(Raster raster) : SV_Target
             }
             const std::string text = std::format(R"slang(// The editor's: one mesh by itself, to be looked at — lit, plain, or by one of its attributes — and its edges.
 
+import koral_shadings;
+import koral_display;
+
 struct View {{
     float4x4 viewProjection;
     uint shading;           // 0 lit, 1 plain, 2 the attribute
@@ -863,6 +874,7 @@ struct View {{
     uint count;             // how many numbers the attribute has
     uint edges;             // whether its edges are drawn (the geometry stage is there)
     float edgeWidth;        // in pixels
+    float3 eye;             // where it is seen from
 }};
 ConstantBuffer<View> view;
 
@@ -910,11 +922,11 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
     float3 normal = {3} ? normalize(raster.normal) : flat;
     float3 colour;
     if (view.shading == 0) {{
-        // Lit from over the shoulder, and a little from below; a face seen from behind, darker and redder.
-        float3 light = normalize(float3(0.45, 0.8, 0.4)), under = normalize(float3(-0.5, -0.3, -0.6));
-        float key = {3} ? saturate(dot(normal, light)) : abs(dot(normal, light)), fill = {3} ? saturate(dot(normal, under)) : abs(dot(normal, under));
-        float3 albedo = front ? float3(0.80, 0.83, 0.90) : float3(0.55, 0.32, 0.30);
-        colour = albedo * (0.18 + 0.7 * key + 0.15 * fill);
+        // A matte shape under the studio's lights; a face seen from behind, darker and redder. Of a mesh with no normals,
+        // its faces' own, turned to the eye.
+        const float3 facing = {3} ? normal : (dot(normal, view.eye - raster.world) < 0.0 ? -normal : normal);
+        const float3 albedo = KoralLinearFromGamma22(front ? float3(0.80, 0.83, 0.90) : float3(0.55, 0.32, 0.30));
+        colour = KoralDisplay(KoralLit(KoralMatte(facing, albedo), raster.world, facing, KoralCamera(view.eye), KoralStudioLights(), KoralUniformEnvironment(float3(0.12))));
     }} else if (view.shading == 1) {{
         colour = float3(0.78, 0.80, 0.86);
     }} else {{
@@ -938,7 +950,7 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
     }}
     return float4(colour, 1.0);
 }}
-)slang", inputs, hasNormal ? "mul(float4(normal, 0.0), object.model).xyz" : "float3(0.0)", value, hasNormal ? "true" : "false");
+)slang", inputs, hasNormal ? "KoralTransformNormal(normal, object.model)" : "float3(0.0)", value, hasNormal ? "true" : "false");
             const std::string name = std::format("koralEditorMesh{:016x}", std::hash<std::string> {}(text));
             std::error_code ec;
             const std::filesystem::path file = std::filesystem::temp_directory_path(ec) / "koral-engine" / "editor-shaders" / (name + ".slang");
@@ -1033,7 +1045,8 @@ float4 fragment(Raster raster, bool front : SV_IsFrontFace) : SV_Target
         graph.Add("seen", "MatrixMultiply").Wire("a", "lens").Wire("b", "camera");
         graph.Add("view", "ShaderBuffer").Set("module", module).Set("entry", "vertex").Set("parameter", "view")
             .Wire("field.viewProjection", "seen").Set("field.shading", static_cast<int>(_shading)).Set("field.mapping", static_cast<int>(_mapping))
-            .Set("field.count", static_cast<int>(count)).Set("field.edges", _wireframe ? 1 : 0).Set("field.edgeWidth", _edgeWidth);
+            .Set("field.count", static_cast<int>(count)).Set("field.edges", _wireframe ? 1 : 0).Set("field.edgeWidth", _edgeWidth)
+            .Wire("field.eye", "camera", "position");
         image("shot", "eRGBA8_UNORM", { "eColorAttachment", "eSampled", "eTransferSrc" });
         image("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" });
         graph.Add("target", "Framebuffer").Wire("color[0].view", "shot").Set("color[0].name", "color")

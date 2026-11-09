@@ -227,7 +227,7 @@ as a `uint`, a field of no GPU form (`Entity`) left out and said — and the att
 What a kind looks like is a Slang module of the same name with `Shading` after it, built on the two interfaces of
 `koral_shading`: `IKoralMaterial` says how a kind's fields are read at a point of a surface, and what that gives is an
 `IKoralShading`, which holds what was read and answers light (`Reflected`, `Ambient`, `Emitted`, `Opacity`).
-`PbrMaterialShading` (GGX) and `BlinnPhongMaterialShading` are the engine's. A shader gets the lit colour with one call:
+`PbrMaterialShading` (GGX over Lambert) and `BlinnPhongMaterialShading` are the engine's, reading into `koral_shadings`' `KoralPbr` and `KoralBlinnPhong`. A shader gets the lit colour with one call:
 
 ```slang
 import PbrMaterialShading;
@@ -237,8 +237,9 @@ const float3 lit = KoralLit(material, surface, KoralCamera(eye), KoralLightBuffe
 ```
 
 `environment` is optional: anything `IKoralEnvironment`, such as `KoralCubeEnvironment`. Lights are `KoralLight`s,
-as the Lights function lays them out, or any `IKoralLights`. The result is light, not yet tone mapped. Shadows are the
-shader's: call `Reflected` itself with each `KoralArrivalAt` scaled by what reaches the point.
+as the Lights function lays them out, or any `IKoralLights`. Shadows are a last, optional argument: anything
+`IKoralShadows`, which says how much of each light reaches the point. The result is light, not yet tone mapped
+(`KoralDisplay` shows it). The library's modules are in [shaders.md](shaders.md).
 
 A project's kind `Toon` is shaded by `shaders/ToonShading.slang`. It extends the generated struct:
 

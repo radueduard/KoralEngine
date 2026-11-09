@@ -42,23 +42,6 @@ public KoralPreviewRaster KoralPreviewVertex(float3 position, float3 normal, flo
     return raster;
 }
 
-/** A key light over the shoulder and a dim one from the other side. */
-public struct KoralPreviewLights : IKoralLights {
-    public uint Count() { return 2; }
-    public KoralLight At(uint index)
-    {
-        KoralLight light;
-        light.position = 0.0;
-        light.range = 0.0;
-        light.kind = KoralLightDirectional;
-        light.cosInner = 0.0;
-        light.cosOuter = 0.0;
-        light.direction = index == 0 ? normalize(float3(-0.45, -0.8, -0.4)) : normalize(float3(0.7, 0.1, 0.6));
-        light.color = index == 0 ? float3(3.0, 2.9, 2.75) : float3(0.5, 0.55, 0.65);
-        return light;
-    }
-};
-
 public KoralCubeEnvironment KoralPreviewAround()
 {
     return KoralCubeEnvironment(kor_TextureCube[NonUniformResourceIndex(view.environment)], smooth, view.mips);
@@ -73,7 +56,7 @@ public float4 KoralPreviewColour<M : IKoralMaterial>(M material, KoralPreviewRas
     const M.Shading shading = material.Read(surface);
     const float opacity = shading.Opacity();
     if (opacity <= 0.0) discard;
-    float3 light = KoralLit(shading, surface, KoralCamera(KoralPreviewEye()), KoralPreviewLights(), KoralPreviewAround());
+    float3 light = KoralLit(shading, surface, KoralCamera(KoralPreviewEye()), KoralStudioLights(), KoralPreviewAround());
     // Over what is behind it, as it is where it stands; with nothing behind it, by its own alpha.
     if (view.showAround != 0) {
         light = lerp(KoralPreviewAround().Specular(normalize(raster.world - KoralPreviewEye()), 0.0), light, opacity);

@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "Every light of the scene in one buffer, as koral_lights.slang's KoralLight is: the directional lights, then the point lights, then the spots \u2014 where each is and how far it reaches, the way it shines and its kind, its colour in linear terms times its intensity, and a spot's cone as the cosines of its angles. `count` is how many there are, and each kind's how many of it.",
+ "description": "Every light of the scene in one buffer, as koral_lights.slang's KoralLight is: the directional lights, then the point lights, then the spots \u2014 where each is and how far it reaches, the way it shines and its kind, its colour in linear terms times its intensity, a spot's cone as the cosines of its angles, and which of its kind it is (what its shadow is found by). `count` is how many there are, and each kind's how many of it.",
  "tags": [
   "lights",
   "light list",
@@ -41,7 +41,7 @@
        "field.color"
       ]
      },
-     "from": "eSrgb",
+     "from": "eGamma22",
      "to": "eLinear"
     }
    },
@@ -103,6 +103,10 @@
       {
        "name": "cosOuter",
        "type": "eFloat"
+      },
+      {
+       "name": "kindIndex",
+       "type": "eUInt"
       }
      ],
      "field.direction": {
@@ -116,6 +120,12 @@
       "$link": [
        "directionallights color",
        "out"
+      ]
+     },
+     "field.kindIndex": {
+      "$link": [
+       "directionallights",
+       "index"
       ]
      }
     }
@@ -145,7 +155,7 @@
        "field.color"
       ]
      },
-     "from": "eSrgb",
+     "from": "eGamma22",
      "to": "eLinear"
     }
    },
@@ -207,6 +217,10 @@
       {
        "name": "cosOuter",
        "type": "eFloat"
+      },
+      {
+       "name": "kindIndex",
+       "type": "eUInt"
       }
      ],
      "field.direction": {
@@ -239,6 +253,12 @@
        "directionallights data",
        "out"
       ]
+     },
+     "field.kindIndex": {
+      "$link": [
+       "pointlights",
+       "index"
+      ]
      }
     }
    },
@@ -267,7 +287,7 @@
        "field.color"
       ]
      },
-     "from": "eSrgb",
+     "from": "eGamma22",
      "to": "eLinear"
     }
    },
@@ -393,6 +413,10 @@
       {
        "name": "cosOuter",
        "type": "eFloat"
+      },
+      {
+       "name": "kindIndex",
+       "type": "eUInt"
       }
      ],
      "field.direction": {
@@ -436,6 +460,12 @@
       "$link": [
        "pointlights data",
        "out"
+      ]
+     },
+     "field.kindIndex": {
+      "$link": [
+       "spotlights",
+       "index"
       ]
      }
     }

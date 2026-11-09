@@ -109,6 +109,60 @@ rotation in 32 bits), `KoralPackHalf2`, `KoralPackUnorm4x8`, `KoralPackSnorm2x16
 `KoralDrawCommand`, `KoralMeshRange` (a MeshPack's), `KoralHasBounds`, `KoralCommandOf(commands, count, instance)`,
 `KoralLoadMatrix(buffer, at)`, `KoralDrawInstance(…)`: what CullInSight and InstanceCull work out of.
 
+### `koral_lights`: lights, and their shadows
+
+`KoralLight` is a light as the engine's Lights function writes it (64 bytes in a buffer): where it is and how far it
+reaches, the way it shines and its kind (`KoralLightDirectional`, `KoralLightPoint`, `KoralLightSpot`), its colour in
+linear terms times its intensity, a spot's cone as cosines, and `kindIndex` — which of its kind it is, what its shadow
+is found by. Every light's colour is converted with the engine's curve, the power 2.2.
+
+| | |
+|---|---|
+| `KoralArrivalAt(light, position)` → `KoralArrival` | What reaches a point: from where, how far, and how much — `KoralDistanceFalloff` (less by the square of the way, none at its range) and `KoralSpotFalloff`. |
+| `IKoralLights` | Where lights are kept: `KoralLightBuffer(lights, count)` (the Lights function's), `KoralSingleLight(light)`, `KoralStudioLights` (the editor's key and fill, for a thing by itself). `KoralDirectionalLight(direction, color)` makes one. |
+| `IKoralShadows` | How much of a light reaches a point past what hides it: `Visibility(light, arrival, position, normal)`. `KoralNoShadows` lets all of it through; `koral_shadows` has the engine's. |
+
+### `koral_brdf`: how a surface answers light, a lobe at a time
+
+A shading is made of a specular lobe (light mirrored off its facets) and a diffuse lobe (light taken in and scattered
+out), each a struct of a static `Reflected` — the BRDF, before the cosine:
+
+| | |
+|---|---|
+| `IKoralSpecularLobe` | `KoralGgxLobe` (GGX facets, Smith's height-correlated shadowing, Schlick's Fresnel), `KoralBlinnPhongLobe`. |
+| `IKoralDiffuseLobe` | `KoralLambertLobe`, `KoralBurleyLobe` (Disney's: brighter at a grazing angle when rough). |
+| `KoralAnglesOf(normal, toEye, toLight)` → `KoralAngles` | The cosines a lobe is worked out of. |
+| `KoralFresnelSchlick`, `KoralReflectanceAtNormal(baseColor, metallic)`, `KoralGgxDistribution`, `KoralSmithGgxCorrelated`, `KoralAlphaOf(roughness)` | The parts, for a lobe of a project's own. |
+| `KoralEnvironmentBrdf(roughness, nv)`, `KoralEnvironmentReflectance` | How much of what is around a surface mirrors: the split sum's second half by Karis's fit, no table. |
+| `KoralEnergyCompensation(f0, roughness, nv)` | What a rough metal loses to light bouncing between its facets, given back. |
+| `KoralShininessOf`, `KoralRoughnessOfShininess` | Blinn and Phong's exponent and a roughness of the same width. |
+
+Roughness is as a material gives it, 0 to 1; a lobe squares it where it needs alpha.
+
+### `koral_shading`: materials and shadings
+
+The contracts a material kind and its shading are written to (see [scripts.md](scripts.md), Shading):
+
+| | |
+|---|---|
+| `KoralSurface`, `KoralSurfaceAt(position, normal, uv, sampler)`, `KoralSurfaceOf(…, tangent, …)` | A point of a surface: its directions along it worked out from the fragment, or given (a ray's hit). |
+| `KoralMappedNormal(surface, texel)`, `KoralNormalTexelOf(rg)`, `KoralBlendNormalTexels(base, detail)` | A normal map's texel; one of two channels; one map's turn over another's. |
+| `IKoralEnvironment` | The light from all round: `KoralNoEnvironment`, `KoralUniformEnvironment`, `KoralGradientEnvironment` (zenith, horizon, ground), `KoralCubeEnvironment`. |
+| `IKoralShading`, `IKoralMaterial` | What a shading answers (`Reflected`, `Ambient`, `Emitted`, `Opacity`); what a material reads into one. |
+| `KoralLit(shading or material, surface — or position and normal —, camera, lights[, environment[, shadows]])` | The light sent to the eye, not tone mapped. |
+
+### `koral_shadings`: the engine's shadings
+
+| | |
+|---|---|
+| `KoralPbrOf<S, D>` | Metal-rough, of any specular and diffuse lobe; energy compensated. |
+| `KoralPbr` | `KoralPbrOf<KoralGgxLobe, KoralLambertLobe>`: what PbrMaterial is read into. `KoralMatte(normal, color)` is one, matte. |
+| `KoralBlinnPhong` | A diffuse and a specular colour and a shininess: what BlinnPhongMaterial is read into. |
+| `KoralUnlit(color, opacity)` | Light of its own, nothing reflected. |
+
+Every lit thing the engine draws goes through these: the material previews and small pictures (`KoralStudioLights`
+and a cube map), the editor's mesh thumbnails and mesh viewer, its clay view, and the starter scenes' shaders.
+
 ## Tests
 
 `LibraryTest` (kgraph) runs `modules/kgraph/tests/shaders/library.slang` on the GPU: each check of the library — round

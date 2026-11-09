@@ -608,49 +608,11 @@ dependencies {{
         field("sunPresent", "sun", "present");                  // 1 when there is a sun
         field("sunColor", "sun color", "out");
 
-        // Every light, a kind after another: where it is and how far it reaches, the way it shines and its kind, its
-        // colour, and a spot's cone as the cosines of its angles.
-        const char* kinds[] { "DirectionalLight", "PointLight", "SpotLight" };
-        const char* ids[] { "suns", "lamps", "spots" };
-        std::string before;
-        for (int kind = 0; kind < 3; ++kind) {
-            const double y = 1000.0 + kind * 360.0;
-            const std::string each = ids[kind], data = kind == 2 ? std::string("light data") : each + " data";
-            node("ForEach", each.c_str(), 40, y);
-            set(each, "component", kinds[kind]);
-            shining(each, each, 280, y);
-            node("Append", (each + " position").c_str(), 280, y + 80);
-            wire(each, each + " position", "a", "worldPosition");
-            if (kind == 0) set(each + " position", "b", 0);
-            else wire(each, each + " position", "b", "field.range");
-            node("Append", (each + " direction").c_str(), 280, y + 160);
-            wire(each, each + " direction", "a", "forward");
-            set(each + " direction", "b", kind);
-            node("ShaderBuffer", data.c_str(), 920, y);  // Light[], in engineCommon.slang
-            set(data, "module", "lit");
-            set(data, "entry", "fragment");
-            set(data, "parameter", "lights");
-            wire(each + " position", data, "field.position");
-            wire(each + " direction", data, "field.direction");
-            wire(each + " color", data, "field.color");
-            if (kind == 2)
-                for (const char* angle : { "innerAngle", "outerAngle" }) {
-                    const std::string at = std::format("{} {}", each, angle);
-                    node("Radians", (at + " radians").c_str(), 480, y + 240 + (angle[0] == 'o' ? 60 : 0));
-                    wire(each, at + " radians", "a", std::format("field.{}", angle).c_str());
-                    node("Cos", (at + " cosine").c_str(), 680, y + 240 + (angle[0] == 'o' ? 60 : 0));
-                    wire(at + " radians", at + " cosine", "a");
-                }
-            if (kind == 2) {
-                node("Append", "spots cone", 880, y + 270);
-                wire("spots innerAngle cosine", "spots cone", "a");
-                wire("spots outerAngle cosine", "spots cone", "b");
-                wire("spots cone", data, "field.cone");
-            }
-            if (!before.empty()) wire(before, data, "after");
-            before = data;
-        }
-        field("counts", "light data", "count");
+        // Every light of the scene, one buffer of KoralLight (koral_lights): the engine's Lights function — its suns, then
+        // its lamps, then its spots — and how many there are, for the frame's counts.
+        node("Function", "lights", 40, 1000);
+        set("lights", "function", "Lights");
+        field("counts", "lights", "count");
         node("Primitive", "shape", 280, 40);            // for how a default mesh's vertices are laid out
 
         // ---- scene: every entity with the lit shader's component and a Mesh, a draw each -----------------------------
@@ -678,7 +640,7 @@ dependencies {{
         wire(bring("shape", 760, 420), "lit", "vertex.layout", "layout");
         wire("scene target", "lit", "framebuffer");
         wire(bring("frame data", 760, 540), "lit", "param.frame");
-        wire(bring("light data", 760, 660), "lit", "param.lights");
+        wire(bring("lights", 760, 660), "lit", "param.lights", "lights");
         // Every entity; those with a Mesh and a PbrMaterial; a draw of each, with what its material is.
         node("Entities", "all", 1020, 260);
         node("Filter", "drawn", 1020, 360);

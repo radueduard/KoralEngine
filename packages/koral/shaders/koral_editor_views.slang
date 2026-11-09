@@ -5,8 +5,8 @@
 // `model` and `entityId` are wired to each Draw from a Filter of Mesh, so no entity needs anything to be drawn here. A
 // mesh that has not what a vertex entry reads (a NORMAL, a UV) is not drawn by it.
 
-import koral_math;
-import koral_color;
+import koral_shadings;
+import koral_display;
 
 struct View {
     float4x4 viewProjection;
@@ -22,7 +22,9 @@ struct Object {
 
 struct Shaped {
     float4 position : SV_Position;
+    float3 world;
     float3 normal;
+    nointerpolation float3 eye;
 };
 
 struct Mapped {
@@ -40,7 +42,9 @@ Shaped withNormal(float3 position : POSITION, float3 normal : NORMAL)
 {
     Shaped shaped;
     shaped.position = placed(position);
+    shaped.world = KoralTransformPoint(position, object.model);
     shaped.normal = KoralTransformNormal(normal, object.model);
+    shaped.eye = KoralInverse(view.view)[3].xyz;
     return shaped;
 }
 
@@ -57,13 +61,17 @@ Mapped withUV(float3 position : POSITION, float2 uv : UV)
 [shader("fragment")]
 float4 edges() : SV_Target { return float4(0.82, 0.85, 0.9, 1.0); }
 
-/** Its shape alone: grey clay lit from the eye, so that what faces it is brightest. */
+/** Its shape alone: grey clay lit from the eye, so that what faces it is brightest — a face seen from behind as its front. */
 [shader("fragment")]
 float4 clay(Shaped shaped) : SV_Target
 {
-    float3 seen = mul(float4(normalize(shaped.normal), 0.0), view.view).xyz;
-    float light = 0.18 + 0.82 * pow(abs(normalize(seen).z), 0.8);
-    return float4(float3(0.78, 0.76, 0.72) * light, 1.0);
+    const float3 toEye = KoralSafeNormalize(shaped.eye - shaped.world);
+    float3 normal = KoralSafeNormalize(shaped.normal);
+    if (dot(normal, toEye) < 0.0) normal = -normal;
+    const KoralLight headlight = KoralDirectionalLight(-toEye, float3(KoralPi * 0.82));
+    const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(float3(0.78, 0.76, 0.72))), shaped.world, normal, KoralCamera(shaped.eye),
+                                KoralSingleLight(headlight), KoralUniformEnvironment(float3(0.18)));
+    return float4(KoralGamma22FromLinear(lit), 1.0);
 }
 
 /** Its normals in the world, -1 to 1 as 0 to 1: +X red, +Y green, +Z blue. */

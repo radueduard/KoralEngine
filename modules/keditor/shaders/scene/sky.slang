@@ -1,7 +1,6 @@
 module sky;
 
 import engineCommon;
-import koral_math;
 import koral_depth;
 
 struct RasterInfo {
@@ -25,5 +24,5 @@ float4 fragment(RasterInfo raster) : SV_Target
 {
     // The way the eye looks through the pixel.
     const float3 direction = KoralRayThrough(raster.ndc, frame.inverseViewProjection).direction;
-    return float4(KoralDisplay(skyColor(direction)), 1.0);
+    return float4(KoralDisplay(SkyColor(direction)), 1.0);
 }

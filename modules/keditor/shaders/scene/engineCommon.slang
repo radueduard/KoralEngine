@@ -1,10 +1,14 @@
-// What every pass sees of a frame: the camera, the sky, and the lights. Written once a frame by the graph's
-// SceneView node, whose `frame` and `lights` outputs are wired to a pipeline's `param.frame` and `param.lights`.
-// Neither is given a binding here: the engine numbers what a pipeline's shaders declare.
+// What every pass of the lit graph sees of a frame: the camera, the sky and the sun — written once a frame by the
+// graph's `frame data` — and the scene's lights, the engine's Lights function's. `frame` is wired to a pipeline's
+// `param.frame` and `lights` to its `param.lights`; neither is given a binding here, as the engine numbers what a
+// pipeline's shaders declare.
 //
-// Light is worked in linear terms: the colours here are linear already (the graph converts them), a surface's colour
-// is converted with KoralLinearFromGamma22, and what is worked out goes back to the display through KoralDisplay.
+// Light is worked in linear terms: the colours here are linear already (the graph converts them), a surface's colour is
+// read with KoralLinearFromGamma22, and what is worked out goes to the display through KoralDisplay.
 
+module engineCommon;
+
+__exported import koral_shadings;
 __exported import koral_display;
 
 public struct FrameData {
@@ -19,40 +23,27 @@ public struct FrameData {
     public uint4 counts;               // x: how many lights there are
 };
 
-public static const uint LightDirectional = 0;
-public static const uint LightPoint = 1;
-public static const uint LightSpot = 2;
-
-public struct Light {
-    public float4 position;            // xyz; w: range
-    public float4 direction;           // xyz: the way it shines; w: its type
-    public float4 color;               // rgb, times its intensity
-    public float4 cone;                // x: cosine of the inner angle, y: of the outer
-};
-
 public ConstantBuffer<FrameData> frame;
-public StructuredBuffer<Light> lights;
+public StructuredBuffer<KoralLight> lights;
 
-/** The light the sky gives a surface facing [normal]: the ground's from below, the zenith's from above. */
-public float3 skyLight(float3 normal)
-{
-    float up = normal.y * 0.5 + 0.5;
-    float3 sky = lerp(frame.skyHorizon.rgb, frame.skyZenith.rgb, saturate(normal.y));
-    return lerp(frame.skyGround.rgb, sky, smoothstep(0.0, 1.0, up)) * frame.skyZenith.w;
-}
+/** Where the frame is seen from. */
+public KoralCamera FrameCamera() { return KoralCamera(frame.cameraPosition.xyz); }
 
-/** The sky seen along [direction], in linear light: the ground below the horizon, the zenith above it, and the sun. */
-public float3 skyColor(float3 direction)
+/** The scene's lights: every one the Lights function found. */
+public KoralLightBuffer FrameLights() { return KoralLightBuffer(lights, frame.counts.x); }
+
+/** The sky, as light from all round: the ground's from below, the zenith's from above, times how much light it gives. */
+public KoralGradientEnvironment FrameSky() { return KoralGradientEnvironment(frame.skyZenith.rgb, frame.skyHorizon.rgb, frame.skyGround.rgb, frame.skyZenith.w); }
+
+/** The sky seen along @p direction, in linear light: its colours, and the sun's disc and glow. */
+public float3 SkyColor(float3 direction)
 {
-    float y = direction.y;
-    float3 color = y >= 0.0
-        ? lerp(frame.skyHorizon.rgb, frame.skyZenith.rgb, pow(saturate(y), 0.45))
-        : lerp(frame.skyHorizon.rgb, frame.skyGround.rgb, pow(saturate(-y * 4.0), 0.6));
+    float3 color = FrameSky().Along(direction);
     if (frame.sunDirection.w > 0.0) {
-        float facing = dot(direction, frame.sunDirection.xyz);
-        float edge = frame.skyHorizon.w;
-        float disc = smoothstep(edge - 0.00002, edge + 0.00002, facing);
-        float glow = pow(saturate(facing), 400.0) * 0.6 + pow(saturate(facing), 12.0) * 0.12;
+        const float facing = dot(direction, frame.sunDirection.xyz);
+        const float edge = frame.skyHorizon.w;
+        const float disc = smoothstep(edge - 0.00002, edge + 0.00002, facing);
+        const float glow = pow(saturate(facing), 400.0) * 0.6 + pow(saturate(facing), 12.0) * 0.12;
         color += frame.sunColor.rgb * (disc * 8.0 + glow);
     }
     return color;

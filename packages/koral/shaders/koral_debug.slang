@@ -5,7 +5,7 @@
 //
 //   import koral_debug;
 //   ...
-//   if (koralDebugShowing()) return float4(koralDebugColor(surface), 1.0);
+//   if (koralDebugShowing()) return float4(koralDebugColor(KoralDebugSurface(albedo, normal, roughness, metallic)), 1.0);
 //
 // A pass after the one that draws — a tone mapping, a bloom — imports it too, and leaves the picture as it is while
 // koralDebugShowing(): what is shown is the channel, not the channel exposed, blurred and tone mapped.
@@ -26,7 +26,7 @@ public static const int KoralDebugEmissive = 5;
 public static const int KoralDebugOcclusion = 6;
 
 /** What a surface is made of, at a point: each in the terms light adds up in (albedo and emissive linear). */
-public struct KoralSurface {
+public struct KoralDebugSurface {
     public float3 albedo;
     public float3 normal;       ///< In the world, of unit length: after a normal map.
     public float roughness;
@@ -52,7 +52,7 @@ public bool koralDebugShowing() { return koralDebugView != KoralDebugLit; }
  * The channel asked for, as the display shows it: a colour as it is seen (its linear terms back on the display's
  * curve), a direction as a colour (-1 to 1 as 0 to 1), a number as a grey.
  */
-public float3 koralDebugColor(KoralSurface surface)
+public float3 koralDebugColor(KoralDebugSurface surface)
 {
     switch (koralDebugView) {
     case KoralDebugAlbedo: return KoralGamma22FromLinear(saturate(surface.albedo));
