@@ -210,6 +210,34 @@ Each lets through every light but its own kind, and a light past its function's 
 | Instances, CullInstances, SplatPoints | `koral_instancer`, `koral_instance_cull`, `koral_points` | Millions of one mesh, made, culled and drawn far off as points, on the GPU. |
 | Scan, RadixSort, BitonicSort, OddEvenSort, Compact, IndirectArgs | `koral_scan`, `koral_sort`, `koral_compare_sort`, `koral_compact`, `koral_args` | Prefix sums, sorts, what is kept, how many groups. |
 
+## The engine's modules
+
+In `packages/modules`, each imported by its name (`@modules/filters`; see [editor.md](editor.md), Projects and modules):
+what a project can do without. Each has a library its shaders import by the module's name (`import filters;`), passes
+(`<module>_passes`), and functions the graph calls. `ModuleTest` (kgraph) runs every function and checks every library.
+
+| Module | Its library | Its functions |
+|---|---|---|
+| `noise` | Value, Perlin (`KoralPerlin`, tiled), simplex, Worley (`KoralWorley`), `KoralFbm`, `KoralDomainWarp`, `KoralCurl` | — |
+| `sdf` | Signed distances of 3D and 2D shapes, hard and smooth booleans, `KoralMarch` of any `IKoralField`, its normal and soft shadow | — |
+| `surface_mapping` | Triplanar and biplanar pictures and normals, `KoralParallax` (occlusion mapping), height-blended layers, detail normals | — |
+| `color_grading` | AgX, Reinhard's, Hable's and Lottes's curves (`KoralCurve`), lift/gamma/gain, contrast, saturation, white balance, a 3D table | Grade, GradeExposed, AutoExposure |
+| `filters` | Catmull-Rom and bicubic sampling, bilateral and joint weights, à-trous weights, `KoralSharpen` | KawaseBlur, DualBlur, Bilateral, Denoise, Sharpen |
+| `antialiasing` | `KoralFxaa`, `KoralLanczosUpscale` | FXAA, Upscale |
+| `camera_effects` | Circle of confusion, chromatic aberration, vignetting, grain | DepthOfField, MotionBlur, LensEffects, LensFlare |
+| `shading_extended` | `KoralOrenNayarLobe`; `KoralClearCoatPbr`, `KoralAnisotropicPbr`, `KoralClothPbr` (sheen), `KoralTranslucentPbr`; `KoralThinFilmFresnel` | — |
+| `shading_stylized` | `KoralToon`, `KoralGooch`, `KoralRim`, `KoralBands`, `KoralHatching` | Outline |
+| `lights_area` | Sphere, tube and rectangle lights by their representative point (`KoralSphereLightArrival`...), IES profiles | — |
+| `ibl_precise` | The split sum from a table (`KoralBrdfFromTable`, `KoralEnergyFromTable`), box-projected probes and their weights | BrdfLut |
+| `shadows_soft` | `KoralPcss`, a Poisson disc, EVSM (`KoralEvsmVisibility`), `KoralContactShadow` | ShadowMoments |
+| `screen_space` | A pixel's place and normal of the depth, depth-kept weights, a subsurface profile | GroundTruthOcclusion, ScreenSpaceReflections, SubsurfaceBlur |
+| `atmosphere` | Hillaire's air and its tables, the sky's light (`KoralSkyLight`), the sun's disc; its clouds (`atmosphere_clouds`, of the noise module, which it imports) | Atmosphere, Sky, Fog, FogSunShadowed, FogTraced |
+| `animation` | Linear and dual quaternion skinning, morph targets, wind sway, billboards, baked vertex animation | — |
+| `raytracing_extras` | Inline rays (`KoralTraceAny`), traced shadows and occlusion, ray cones for a picture's level | TracedOcclusion |
+
+Not among them, for want of what they are made of: SMAA (its area and search tables), and area lights by linearly
+transformed cosines (their fitted tables) — the representative point stands for those.
+
 ## Tests
 
 `LibraryTest` (kgraph) runs `modules/kgraph/tests/shaders/library.slang` on the GPU: each check of the library — round
