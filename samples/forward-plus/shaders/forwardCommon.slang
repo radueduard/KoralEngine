@@ -1,5 +1,6 @@
-// Forward+: what every pass of it shares. The camera's block, the lights, and the sun with its cascades — each
-// declared here once and filled by a ShaderBuffer node of the graph, a field at a time by name.
+// Forward+: what every pass of it shares. The camera's block and the sun with its cascades — each declared here once
+// and filled by a ShaderBuffer node of the graph, a field at a time by name — and the engine's library, which has the
+// rest: the lights (KoralLight, the Lights function's), the lobes, the shadows' filters, the sky's gradient.
 //
 // Koral's matrices are a column after another and Slang reads a row after another, so a vector goes first:
 // mul(vector, matrix). A matrix's fourth row is then where it puts the origin.
@@ -7,6 +8,16 @@
 __exported import entity;
 __exported import koral_bindless;
 __exported import PbrMaterial;     // what each thing drawn is made of: the engine writes it of the kind
+__exported import koral_math;       // the library: numbers, colour, lights, lobes, environments, shadows...
+__exported import koral_color;
+__exported import koral_brdf;
+__exported import koral_lights;
+__exported import koral_shading;
+__exported import koral_shadows;
+__exported import koral_random;
+__exported import koral_sampling;
+__exported import koral_bounds;
+__exported import koral_depth;
 
 public struct Camera {
     public float4x4 view;
@@ -18,29 +29,13 @@ public struct Camera {
     public float zNear;
     public float2 screenSize;
     public float zFar;
-    public uint lightCount;         // how many point lights there are
+    public uint lightCount;         // how many lights there are: the Lights function's, the sun's first
     public uint3 gridSize;          // the clusters lights are sorted into: across, down, and into the picture
 };
 public ConstantBuffer<Camera> camera;
 
-public struct PointLight {
-    public float3 position;
-    public float radius;            // where its light ends
-    public float3 color;
-    public float intensity;
-};
-
 public static const uint CascadeCount = 4;
 public static const uint LampShadowMost = 24;       // how many point lights have a shadow map: the first that many
-
-// The point lights' shadow maps: a cube round each, its six faces one after another in an image of as many layers.
-public struct LampShadows {
-    public float4x4 faces[144];     // the world, as each face of each light's cube has it: towards +x, -x, +y, -y, +z, -z
-    public float count;             // how many lights have a cube
-    public float texel;             // one over a face's resolution
-    public float bias;              // what is nearer the light by less than this, as the map counts depth, casts no shadow on itself
-    public float softness;          // how soft a shadow's edge is, in pixels of a face
-}
 
 public struct Sun {
     public float4x4 lightViewProj[4];   // the world, as each cascade's shadow map has it
@@ -118,14 +113,6 @@ public struct Emitter {
     public float unused;
 };
 
-// A normal map's texel as a direction: x and y as stored, z worked out from them — so that a map kept in two channels
-// (BC5, whose blue reads 1) faces as it did. For one of three channels it is what normalizing them gives.
-public float3 unpackedNormal(float3 texel)
-{
-    const float2 xy = texel.xy * 2.0 - 1.0;
-    return float3(xy, sqrt(saturate(1.0 - dot(xy, xy))));
-}
-
 /** One of an instance's pictures at @p uv: @p none where it has no picture there. */
 public float4 pictureOf(uint index, SamplerState sampler, float2 uv, float4 none = float4(1.0, 1.0, 1.0, 1.0))
 {
@@ -168,13 +155,13 @@ public float viewDepth(float3 world)
     return -mul(float4(world, 1.0), camera.view).z;
 }
 
+/** The sky: its three colours, as the library's gradient environment has them, giving `ambient` all round. */
+public KoralGradientEnvironment skyOf(Sun sun) { return KoralGradientEnvironment(sun.skyZenith, sun.skyHorizon, sun.skyGround, sun.ambient); }
+
 /** The sky seen along a direction: the ground below the horizon, the zenith above it, and the sun. */
 public float3 skyColor(Sun sun, float3 direction)
 {
-    float y = direction.y;
-    float3 color = y >= 0.0
-        ? lerp(sun.skyHorizon, sun.skyZenith, pow(saturate(y), 0.45))
-        : lerp(sun.skyHorizon, sun.skyGround, pow(saturate(-y * 4.0), 0.6));
+    float3 color = skyOf(sun).Along(direction);
     if (sun.present > 0.0) {
         float facing = dot(direction, -sun.direction);
         float disc = smoothstep(sun.sunCosine - 0.00002, sun.sunCosine + 0.00002, facing);
@@ -185,9 +172,25 @@ public float3 skyColor(Sun sun, float3 direction)
 }
 
 /** The light the sky gives a surface facing [normal]: the ground's from below, the zenith's from above. */
-public float3 skyLight(Sun sun, float3 normal)
+public float3 skyLight(Sun sun, float3 normal) { return skyOf(sun).Diffuse(normal); }
+
+/** The sun's cascades as koral_shadows reads them, and how they are filtered: as the block says. */
+public KoralSunCascades cascadesOf(Sun sun)
 {
-    float up = normal.y * 0.5 + 0.5;
-    float3 sky = lerp(sun.skyHorizon, sun.skyZenith, saturate(normal.y));
-    return lerp(sun.skyGround, sky, smoothstep(0.0, 1.0, up)) * sun.ambient;
+    KoralSunCascades c;
+    c.cascades = sun.lightViewProj;
+    c.splits = sun.splits;
+    c.worldTexel = sun.worldTexel;
+    return c;
 }
+public KoralShadowFilter sunFilterOf(Sun sun)
+{
+    KoralShadowFilter f = KoralShadowFilter();
+    f.bias = sun.bias / 0.0015;         // the library's bias is in steps of 0.0015 of the map's depth
+    f.softness = sun.pcfRadius;
+    f.cascadeBlend = sun.blend;
+    return f;
+}
+
+/** How the lamps' shadows are filtered: soft by a little more than a texel of a face. */
+public KoralShadowFilter lampFilter() { KoralShadowFilter f = KoralShadowFilter(); f.softness = 1.25; return f; }

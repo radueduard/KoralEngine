@@ -59,7 +59,6 @@ StructuredBuffer<FrameState> frameState;
     uint emitterSamples;        // how many shadow rays to what gives off light, a point
 };
 
-static const float Pi = 3.14159265359;
 
 static const uint Solid = 0, Glass = 1;     // which scene, and pack, a hit is of
 
@@ -164,32 +163,16 @@ struct Surface {
     float through;      // how much of the light on its back shows through: its translucency
 };
 
-float3 fresnel(float facing, float3 straightOn) { return straightOn + (1.0 - straightOn) * pow(saturate(1.0 - facing), 5.0); }
-
-float facets(float facingHalfway, float alpha)
-{
-    float a2 = alpha * alpha;
-    float f = (facingHalfway * a2 - facingHalfway) * facingHalfway + 1.0;
-    return a2 / (Pi * f * f);
-}
-
-float visible(float facingEye, float facingLight, float alpha)
-{
-    float a2 = alpha * alpha;
-    float v = facingLight * sqrt(facingEye * facingEye * (1.0 - a2) + a2);
-    float l = facingEye * sqrt(facingLight * facingLight * (1.0 - a2) + a2);
-    return v + l > 0.0 ? 0.5 / (v + l) : 0.0;
-}
-
+/** What a surface sends to the eye of light arriving along [toLight]: the library's lobes (koral_brdf) — GGX,
+ *  height-correlated Smith and Schlick's Fresnel over Lambert. */
 float3 directLighting(Surface surface, float3 toLight, float3 radiance)
 {
-    float facingLight = max(dot(surface.normal, toLight), 0.0);
-    if (facingLight == 0.0) return 0.0;
-    float3 halfway = normalize(toLight + surface.toEye);
-    float3 mirrored = fresnel(max(dot(surface.toEye, halfway), 0.0), surface.straightOn);
-    float3 highlight = facets(max(dot(surface.normal, halfway), 0.0), surface.alpha) * visible(surface.facingEye, facingLight, surface.alpha) * mirrored;
-    float3 matte = (1.0 - mirrored) * (1.0 - surface.metallic) * surface.scattered / Pi;
-    return (matte + highlight) * facingLight * radiance;
+    const KoralAngles a = KoralAnglesOf(surface.normal, surface.toEye, toLight);
+    if (dot(surface.normal, toLight) <= 0.0) return 0.0;
+    const float3 mirrored = KoralFresnelSchlick(surface.straightOn, a.vh);
+    const float3 highlight = KoralGgxDistribution(a.nh, surface.alpha) * KoralSmithGgxCorrelated(a.nv, a.nl, surface.alpha) * mirrored;
+    const float3 matte = (1.0 - mirrored) * (1.0 - surface.metallic) * surface.scattered * KoralInvPi;
+    return (matte + highlight) * a.nl * radiance;
 }
 
 RaytracingAccelerationStructure world() { return kor::accelerationStructure(scene[0].x); }
@@ -242,32 +225,13 @@ bool clear(float3 from, float3 along, float far)
 }
 
 /** A number from 0 to 1, another for each pixel, frame and use: what a ray is sent by. */
-float random(uint2 pixel, uint frame, uint use)
-{
-    uint h = pixel.x * 1973u + pixel.y * 9277u + frame * 26699u + use * 7919u;
-    h = (h ^ 61u) ^ (h >> 16);
-    h *= 9u;
-    h ^= h >> 4;
-    h *= 0x27d4eb2du;
-    h ^= h >> 15;
-    return float(h) / 4294967296.0;
-}
+float random(uint2 pixel, uint frame, uint use) { return KoralUnitFloat(KoralPcg3d(uint3(pixel, frame * 1024u + use)).x); }
 
 /** A way round @p normal, as often as light from it falls on a surface (cosine weighted). */
-float3 around(float3 normal, float u, float v)
-{
-    const float r = sqrt(u), phi = 2.0 * Pi * v;
-    const float3 side = abs(normal.y) < 0.99 ? normalize(cross(normal, float3(0.0, 1.0, 0.0))) : float3(1.0, 0.0, 0.0);
-    const float3 up = cross(normal, side);
-    return normalize(side * (r * cos(phi)) + up * (r * sin(phi)) + normal * sqrt(max(0.0, 1.0 - u)));
-}
+float3 around(float3 normal, float u, float v) { return KoralBasisOf(normal).ToWorld(KoralCosineHemisphere(float2(u, v))); }
 
 /** A normal of a mesh into the world, through the cofactors of the model's 3x3: square to the surface however it is scaled. */
-float3 turned(float4x4 model, float3 n)
-{
-    const float3 a0 = model[0].xyz, a1 = model[1].xyz, a2 = model[2].xyz;
-    return normalize((n.x * cross(a1, a2) + n.y * cross(a2, a0) + n.z * cross(a0, a1)) * sign(dot(a0, cross(a1, a2))));
-}
+float3 turned(float4x4 model, float3 n) { return KoralSafeNormalize(KoralTransformNormal(n, model)); }
 
 /** Where a ray from @p eye along @p way meets the plane of the triangle @p p0 @p p1 @p p2, as its UVs there; @p otherwise when it runs along the plane. */
 float2 uvWhere(float3 eye, float3 way, float3 p0, float3 p1, float3 p2, float2 t0, float2 t1, float2 t2, float2 otherwise)
@@ -334,7 +298,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
 
     const float4 base = pictureAt(draw.albedoMap, uv, dx, dy);
     const float4 material = pictureAt(draw.roughnessMap, uv, dx, dy);
-    const float3 albedo = pow(max(draw.baseColor.rgb, 0.0), 2.2) * pow(base.rgb, 2.2);
+    const float3 albedo = KoralLinearFromGamma22(draw.baseColor.rgb) * pow(base.rgb, 2.2);
 
     // A normal map, which way its u and v run over the triangle worked out from the triangle's corners: where they are in
     // the world, and in the picture.
@@ -346,10 +310,8 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
             const float det = d1.x * d2.y - d1.y * d2.x;
             if (abs(det) > 1e-12) {
                 const float3 u = (e1 * d2.y - e2 * d1.y) / det, v = (e2 * d1.x - e1 * d2.x) / det;
-                const float3 tangent = normalize(u - normal * dot(normal, u));
-                const float3 bitangent = cross(normal, tangent) * (dot(cross(normal, tangent), v) < 0.0 ? -1.0 : 1.0);
-                const float3 n = unpackedNormal(texel);
-                normal = normalize(tangent * n.x + bitangent * n.y + normal * n.z);
+                const float4 tangent = float4(u, dot(cross(normal, u), v) < 0.0 ? -1.0 : 1.0);
+                normal = KoralMappedNormal(KoralSurfaceOf(p0, normal, tangent, uv, textureSampler), KoralNormalTexelOf(texel.xy));
             }
         }
     }
@@ -371,7 +333,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
     // mirrored the more along it a pane is seen.
     const float seeThrough = transparencyOf(draw);
     surface.opaque = base.a * (1.0 - seeThrough);
-    if (seeThrough > 0.0) surface.opaque = saturate(surface.opaque + (1.0 - surface.opaque) * dot(fresnel(surface.facingEye, surface.straightOn), float3(0.2126, 0.7152, 0.0722)) * (1.0 - surface.roughness));
+    if (seeThrough > 0.0) surface.opaque = saturate(surface.opaque + (1.0 - surface.opaque) * KoralLuminance(KoralFresnelSchlick(surface.straightOn, surface.facingEye)) * (1.0 - surface.roughness));
     return surface;
 }
 
@@ -381,7 +343,7 @@ Surface surfaceOf(Hit found, float3 eye, float3 along, float spread, out float3 
  */
 float3 throughFrom(Surface surface, float facingBack, float3 radiance)
 {
-    return surface.scattered / Pi * surface.through * facingBack * radiance;
+    return surface.scattered * KoralInvPi * surface.through * facingBack * radiance;
 }
 
 /** The sun on a point, through a shadow ray — from its back, for one that lets light through. */
@@ -440,7 +402,7 @@ float3 emittersOn(Surface surface, float3 point, float3 flat, uint2 pixel, uint 
         const float near = dot(to, to);
         const float cosWidest = near > emitter.radius * emitter.radius ? sqrt(max(1.0 - emitter.radius * emitter.radius / near, 0.0)) : -1.0;
         const float3 axis = near > 1e-8 ? to * rsqrt(near) : surface.normal;
-        const float cosTilt = 1.0 - random(pixel, frame, salt + 61) * (1.0 - cosWidest), turn = 2.0 * Pi * random(pixel, frame, salt + 62);
+        const float cosTilt = 1.0 - random(pixel, frame, salt + 61) * (1.0 - cosWidest), turn = KoralTau * random(pixel, frame, salt + 62);
         const float sinTilt = sqrt(max(1.0 - cosTilt * cosTilt, 0.0));
         const float3 side = abs(axis.y) < 0.99 ? normalize(cross(axis, float3(0.0, 1.0, 0.0))) : float3(1.0, 0.0, 0.0);
         const float3 way = normalize(axis * cosTilt + (side * cos(turn) + cross(axis, side) * sin(turn)) * sinTilt);
@@ -454,7 +416,7 @@ float3 emittersOn(Surface surface, float3 point, float3 flat, uint2 pixel, uint 
             given *= pow(kor::texture2D(material.emissiveMap).SampleLevel(textureSampler, uvAt(Solid, cornersOf(Solid, found.instance, found.triangle), found.barycentrics), 0.0).rgb, 2.2);
         // Weighed: the emitter as likely as it was picked among the few, the way as likely as one of all its cone's.
         const float picked = total / (float(emitterCandidates) * weight) * float(count);
-        const float3 radiance = given * (2.0 * Pi * (1.0 - cosWidest)) * picked;
+        const float3 radiance = given * (KoralTau * (1.0 - cosWidest)) * picked;
         lit += facing > 0.0 ? directLighting(surface, way, radiance) : throughFrom(surface, -facing, radiance);
     }
     return lit / float(samples);
@@ -478,7 +440,7 @@ float3 throughGlass(float3 eye, float3 along, float far, float spread, uint2 pix
         const float3 lifted = point + flat * shadowsFrom;
         float3 lit = surface.emitted + sunOn(surface, point, flat) + emittersOn(surface, point, flat, pixel, 300 + layer * 1000, ~0u);
         lit += skyLight(sun, surface.normal) * surface.scattered;
-        lit += skyLight(sun, reflect(along, surface.normal)) * fresnel(surface.facingEye, surface.straightOn) * (1.0 - surface.roughness);
+        lit += skyLight(sun, reflect(along, surface.normal)) * KoralFresnelSchlick(surface.straightOn, surface.facingEye) * (1.0 - surface.roughness);
         seen += showing * surface.opaque * lit;
         showing *= 1.0 - surface.opaque;
         near = found.distance + 1e-4;
@@ -547,6 +509,6 @@ void raygen()
     } else {
         mirrored = skyLight(sun, reflect(along, surface.normal)) * open;
     }
-    lit += mirrored * fresnel(surface.facingEye, surface.straightOn) * (1.0 - surface.roughness);
+    lit += mirrored * KoralFresnelSchlick(surface.straightOn, surface.facingEye) * (1.0 - surface.roughness);
     picture[pixel] = float4(throughGlass(eye, along, found.distance, spread, pixel, size, alongX, alongY, lit), 1.0);
 }

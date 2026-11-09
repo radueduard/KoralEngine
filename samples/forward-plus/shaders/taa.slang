@@ -8,18 +8,6 @@ import forwardCommon;
 
 RWStructuredBuffer<FrameState> state;
 
-/** The radical inverse of @p index in @p base: the Halton sequence, a well spread fraction for each index. */
-float halton(uint index, uint base)
-{
-    float fraction = 1.0, result = 0.0;
-    while (index > 0) {
-        fraction /= float(base);
-        result += fraction * float(index % base);
-        index /= base;
-    }
-    return result;
-}
-
 [numthreads(1, 1, 1)]
 void advance()
 {
@@ -34,7 +22,7 @@ void advance()
     s.size = size;
     // Eight places within the pixel, round and round: the 2 and 3 Halton sequences, about the pixel's middle.
     const uint index = s.frame % 8 + 1;
-    const float2 offset = float2(halton(index, 2), halton(index, 3)) - 0.5;
+    const float2 offset = float2(KoralHalton(index, 2), KoralHalton(index, 3)) - 0.5;
     s.jitter = offset * 2.0 / max(size, float2(1.0, 1.0));
     s.begun = Begun;
     state[0] = s;
@@ -50,8 +38,6 @@ StructuredBuffer<FrameState> frameState;
 RWTexture2D<float4> resolved;
 [[vk::push_constant]] cbuffer Settings { float blend; };   // how much of this frame goes in: 0.1 keeps about ten frames
 
-float3 toYCoCg(float3 c) { return float3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
-float3 fromYCoCg(float3 c) { return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z); }
 // A highlight would otherwise outweigh everything round it and flicker: each weighed by one over one and its brightest.
 float weight(float3 c) { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
 
@@ -89,13 +75,13 @@ void resolve(uint3 id : SV_DispatchThreadID)
     float3 low = 1e30, high = -1e30;
     for (int y = -1; y <= 1; ++y)
         for (int x = -1; x <= 1; ++x) {
-            const float3 c = toYCoCg(current[clamp(px + int2(x, y), int2(0, 0), int2(size) - 1)].rgb);
+            const float3 c = KoralToYCoCg(current[clamp(px + int2(x, y), int2(0, 0), int2(size) - 1)].rgb);
             low = min(low, c);
             high = max(high, c);
         }
     float3 previous = history.SampleLevel(linearSampler, previousUv, 0.0).rgb;
     if (any(isnan(previous)) || any(isinf(previous))) previous = colour;
-    previous = fromYCoCg(clamp(toYCoCg(previous), low, high));
+    previous = KoralFromYCoCg(clamp(KoralToYCoCg(previous), low, high));
     const float a = weight(colour) * blend, b = weight(previous) * (1.0 - blend);
     resolved[px] = float4((colour * a + previous * b) / max(a + b, 1e-6), 1.0);
 }

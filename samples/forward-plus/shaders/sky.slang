@@ -16,9 +16,8 @@ void computeMain(uint3 id : SV_DispatchThreadID)
     if (id.x >= width || id.y >= height) return;
     if (depthTex.Load(int3(id.xy, 0)) < 0.999999) return;
 
-    float2 ndc = (float2(id.xy) + 0.5) / float2(width, height) * 2.0 - 1.0;
-    float4 seen = mul(float4(ndc, 1.0, 1.0), camera.inverseProjection);
-    float3 direction = normalize(mul(float4(seen.xyz / seen.w, 0.0), camera.inverseView).xyz);
+    const float2 clip = KoralClipFromUv(KoralPixelUv(id.xy, uint2(width, height)));
+    float3 direction = KoralSafeNormalize(KoralTransformDirection(KoralRayThrough(clip, camera.inverseProjection).direction, camera.inverseView));
     hdrImage[id.xy] = float4(skyColor(sun, direction), 1.0);
 }
 
@@ -36,12 +35,11 @@ void environmentMain(uint3 id : SV_DispatchThreadID, uniform float intensity, un
     if (id.x >= width || id.y >= height) return;
     if (depthTex.Load(int3(id.xy, 0)) < 0.999999) return;
 
-    float2 ndc = (float2(id.xy) + 0.5) / float2(width, height) * 2.0 - 1.0;
-    float4 seen = mul(float4(ndc, 1.0, 1.0), camera.inverseProjection);
-    float3 direction = normalize(mul(float4(seen.xyz / seen.w, 0.0), camera.inverseView).xyz);
+    const float2 clip = KoralClipFromUv(KoralPixelUv(id.xy, uint2(width, height)));
+    float3 direction = KoralSafeNormalize(KoralTransformDirection(KoralRayThrough(clip, camera.inverseProjection).direction, camera.inverseView));
     float c = cos(rotation), s = sin(rotation);
     direction = float3(c * direction.x - s * direction.z, direction.y, s * direction.x + c * direction.z);
     // -Z is the picture's middle, and +Y its top row.
-    float2 uv = float2(atan2(direction.x, -direction.z) / (2.0 * 3.14159265359) + 0.5, acos(clamp(direction.y, -1.0, 1.0)) / 3.14159265359);
+    float2 uv = float2(atan2(direction.x, -direction.z) / KoralTau + 0.5, acos(clamp(direction.y, -1.0, 1.0)) * KoralInvPi);
     hdrImage[id.xy] = float4(environment.SampleLevel(uv, 0.0).rgb * intensity, 1.0);
 }

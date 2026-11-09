@@ -236,7 +236,20 @@ namespace kgraph
 
     std::string Runtime::ShownOutput(const std::string_view id) const
     {
-        if (_impl->calls.contains(id) || _impl->aliases.contains(id)) return "out";
+        // A call's, as a node's: the first of its outputs that holds an image, else the first that holds anything.
+        if (const auto call = _impl->calls.find(id); call != _impl->calls.end()) {
+            std::string first;
+            for (const auto& name : call->second.outputs) {
+                const auto gives = call->second.gives.find(name);
+                if (gives == call->second.gives.end() || gives->second.node.empty()) continue;
+                const auto held = ResourceOf(gives->second.node, gives->second.output);
+                if (!held) continue;
+                if (ImageRefOf(held.get()).Get()) return name;
+                if (first.empty()) first = name;
+            }
+            return first.empty() ? std::string("out") : first;
+        }
+        if (_impl->aliases.contains(id)) return "out";
         const auto* node = _impl->Find(id);
         if (!node) return "out";
         if (const auto watch = _impl->watched.find(id); watch != _impl->watched.end() && !watch->second.output.empty())
@@ -310,8 +323,10 @@ namespace kgraph
     {
         const auto watch = _impl->watched.find(id);
         if (watch == _impl->watched.end()) return std::nullopt;
-        // A node, or a picture of a file's that no node is (`@wall.png`).
+        // A node, a call (by the node inside it that what it shows is), or a picture of a file's that no node is (`@wall.png`).
         const auto* node = _impl->Find(id);
+        if (const auto call = _impl->calls.find(id); !node && call != _impl->calls.end())
+            if (const auto gives = call->second.gives.find(ShownOutput(id)); gives != call->second.gives.end()) node = _impl->Find(gives->second.node);
         const auto held = ResourceOf(id);
         if ((!node && !id.starts_with('@')) || !held || held->pending) return std::nullopt;
         Peek peek;
@@ -418,8 +433,16 @@ namespace kgraph
             std::size_t bytes = 0;
             Node copy;
             copy.id = PeekId(id);
-            // The node itself, or — for one of a loop — what it is on its first turn; a file's picture, by a node of its own.
+            // The node itself, or — for one of a loop — what it is on its first turn; a file's picture, by a node of its own;
+            // a call's output, by the node inside it that it is.
             std::string source = expansion.graph.Find(id) ? std::string(id) : TurnId(id, 0);
+            std::string output = ShownOutput(id);
+            if (const auto call = expansion.calls.find(id); call != expansion.calls.end()) {
+                const auto gives = call->second.gives.find(output);
+                if (gives == call->second.gives.end() || gives->second.node.empty()) continue;
+                source = gives->second.node;
+                output = gives->second.output;
+            }
             if (!expansion.graph.Find(source) && id.starts_with('@') && !id.contains('#')) {
                 source = PeekSourceId(id);
                 expansion.graph.Add(source, "ImageFile").Set("file", id.substr(1));
@@ -432,14 +455,14 @@ namespace kgraph
                 const Subresource at = SubresourceOf(*held, *image, watching.mip, watching.layer);
                 bytes = static_cast<std::size_t>(at.size.x) * at.size.y * at.size.z * texel.Bytes();
                 copy.type = "CopyImageToBuffer";
-                copy.Wire("image", source, ShownOutput(id)).Wire("buffer", PeekBufferId(id));
+                copy.Wire("image", source, output).Wire("buffer", PeekBufferId(id));
                 if (at.level > 0) copy.Set("mip", at.level);
                 if (at.layer > 0) copy.Set("layer", at.layer);
                 setUp = std::format("image {} {}x{}x{} {} {} of {}", format, at.size.x, at.size.y, at.size.z, at.level, at.layer, ShownOutput(id));
             } else if (const auto buffer = BufferRefOf(held.get()); buffer.Get()) {
                 bytes = static_cast<std::size_t>(buffer->size());
                 copy.type = "CopyBuffer";
-                copy.Wire("source", source, ShownOutput(id)).Wire("destination", PeekBufferId(id));
+                copy.Wire("source", source, output).Wire("destination", PeekBufferId(id));
                 setUp = std::format("buffer {} of {}", bytes, ShownOutput(id));
             } else {
                 continue;

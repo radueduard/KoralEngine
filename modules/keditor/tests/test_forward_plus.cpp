@@ -88,12 +88,16 @@ namespace {
 
     constexpr kor::UVec2 Extent { 960, 540 };
 
+    /** The project MakeProject made last: what a scene run without a file of its own is of — its modules' functions its. */
+    std::filesystem::path madeProject;
+
     struct Running {
         PlayScene* scene = nullptr;
         kor::Resource<kor::Buffer> readback;
 
         explicit Running(const std::filesystem::path& file = {}) {
             scene = support::App()->OpenOffscreen<PlayScene>({ .title = "forward+", .extent = Extent }, file);
+            if (file.empty() && !madeProject.empty()) scene->Doc().SetAssetDirectory(madeProject / "assets");
             readback = kor::Buffer::RawBuilder{}.SetRawSize(Extent.x * Extent.y * 4).SetUsage(kor::Buffer::Usage::eTransferDst)
                 .SetType(kor::Buffer::Type::eReadback).Build();
             scene->Graph().Add<support::ReadScreen>(kor::ResourceRef<const kor::Buffer>(readback));
@@ -110,14 +114,16 @@ namespace {
         }
     };
 
-    /** The project, in a folder of the build's: made afresh, with the sample's shaders in it. */
+    /** The project, in a folder of the build's: made afresh, with the sample's shaders in it, importing the engine's
+     *  screen-space module (its occlusion is GroundTruthOcclusion). */
     keditor::Project MakeProject(const std::string& suffix = {})
     {
         const std::filesystem::path directory = std::string(KEDITOR_FORWARD_PLUS_PROJECT) + suffix;
         std::filesystem::remove_all(directory);
         keditor::Project project;
         std::string error;
-        EXPECT_TRUE(keditor::Project::Create(directory, "ForwardPlus", project, error)) << error;
+        EXPECT_TRUE(keditor::Project::Create(directory, "ForwardPlus", project, error, 0, false, { keditor::Project::OfficialModules() / "screen_space" })) << error;
+        madeProject = directory;
         for (const char* shader : forwardplus::Shaders)
             std::filesystem::copy_file(std::filesystem::path(KEDITOR_FORWARD_PLUS_SHADERS) / shader, project.ShaderDirectory() / shader);
         project.Use();
@@ -144,7 +150,7 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         // Every lamp is an element of the lights' buffer, and every drawn thing an instance of one indirect draw, a
         // command a mesh: the pre-pass draws what of them is in sight, and the forward pass what some pixel of the
         // pre-pass showed — fewer, and none it did not see. The sun's cascades draw each entity four times over.
-        EXPECT_EQ(doc.Runtime().ValueOf("light data", "count"), kgraph::Value(96));
+        EXPECT_EQ(doc.Runtime().ValueOf("lights", "points"), kgraph::Value(96)) << "the Lights function's: every lamp";
         EXPECT_EQ(InstancesOf(doc.Runtime(), "drawn"), 1u + 6u + 35u + 96u) << "every mesh but glass, grouped by mesh";
         EXPECT_EQ(doc.Runtime().ValueOf("in sight", "drawCount"), doc.Runtime().ValueOf("drawn meshes", "count")) << "a command a mesh";
         for (const char* draw : { "draw depth", "draw forward", "frustum/cull", "run mark seen", "run gather seen" })
@@ -196,7 +202,7 @@ TEST(ForwardPlus, TheGraphIsBuiltRunsAndIsSavedAsAProject) {
         for (const auto& pass : editing.scene->Graph().Schedule()) order.push_back(pass.name);
         const auto at = [&](const char* name) { return std::ranges::find(order, name) - order.begin(); };
         const char* const sequence[] { "run advance frame", "reset counter", "run cull lights", "cast [0]", "cast [3]", "frustum/cull", "draw depth", "run mark seen",
-                                       "run gather seen", "draw forward", "run occlusion pass", "run blur occlusion", "run apply occlusion", "run sky", "run trace reflections",
+                                       "run gather seen", "draw forward", "ambient occlusion/run horizons", "ambient occlusion/run blur down", "run apply occlusion", "run sky", "run trace reflections",
                                        "run add reflections", "run resolve", "run keep", "run down [0]", "run down [5]", "run up [0]",
                                        "run up [4]", "run add bloom", "run tone map", "show" };
         for (std::size_t i = 0; i + 1 < std::size(sequence); ++i) {
@@ -304,7 +310,7 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     keditor::Document& doc = editor->CurrentSession().Doc();
     for (const auto& problem : doc.Runtime().Problems()) ADD_FAILURE() << problem;
     EXPECT_EQ(doc.Passes().size(), 21u) << "13, and the meshlet and ray branches' 8";
-    EXPECT_EQ(doc.Runtime().ValueOf("light data", "count"), kgraph::Value(96));
+    EXPECT_EQ(doc.Runtime().ValueOf("lights", "points"), kgraph::Value(96)) << "the Lights function's: every lamp";
     // Every page of it is laid out, with whatever its nodes have of their shaders and their components as ports.
     for (const auto& pass : doc.Passes()) {
         editor->CurrentSession().ShowPass(pass);
@@ -354,8 +360,8 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
     EXPECT_TRUE(says("eD32_SFLOAT, ")) << editor->CurrentSession().LookSays();
     EXPECT_TRUE(says("Its values run from 0.")) << "a depth is shown stretched: what it runs from and to is said";
     EXPECT_TRUE(editor->CurrentSession().LookPicture().Get() != nullptr);
-    editor->CurrentSession().Look("light data");
-    EXPECT_TRUE(says("96 elements of 32 each")) << editor->CurrentSession().LookSays();
+    editor->CurrentSession().Look("lights");
+    EXPECT_TRUE(says("97 elements of 64 each")) << editor->CurrentSession().LookSays() << ": the Lights function's, the sun's and every lamp's";
     EXPECT_TRUE(says("[0]  position")) << "an element a line, each field by name";
     editor->CurrentSession().Look({});
 
@@ -372,12 +378,12 @@ TEST(ForwardPlus, TheProjectOpensInTheEditor) {
         EXPECT_TRUE(session.ViewedPicture().Get() != nullptr);
         EXPECT_TRUE(shows("Samples"));
 
-        ASSERT_TRUE(session.View("light data"));
-        EXPECT_TRUE(shows("Rows 0 to 63 of 96")) << session.ViewSays();
-        EXPECT_TRUE(shows("position.x")) << "a column a number, by the names its shader gives them";
+        ASSERT_TRUE(session.View("lights"));     // a call: what it gives, the Lights function's KoralLights
+        EXPECT_TRUE(shows("Elements 0 to 63 of 97")) << session.ViewSays();
+        EXPECT_TRUE(shows("position")) << "more numbers than fit across: a field a line, by the names its shader gives them";
         session.SetBufferLayout("float4 first; float4 second");
         EXPECT_TRUE(shows("second.w"));
-        EXPECT_TRUE(shows("Rows 0 to 63 of 96")) << "32 bytes an element, as typed";
+        EXPECT_TRUE(shows("Rows 0 to 63 of 194")) << "32 bytes an element, as typed";
         session.SetBufferLayout("float9 nope");
         EXPECT_FALSE(session.BufferLayoutError().empty());
         session.SetBufferLayout("");

@@ -172,8 +172,9 @@ namespace forwardplus
         const Value clearToNothing = Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 0 } } } } };
 
         // ---- frame: what every pass sees of the frame -------------------------------------------------------------
-        // The scene's camera, sun, sky and lights as values, and the three buffers of them the shaders declare: each
-        // a ShaderBuffer, which has the shader's struct as its inputs. The point lights are an element an entity.
+        // The scene's camera, sun and sky as values, and the two buffers of them the shaders declare: each a
+        // ShaderBuffer, which has the shader's struct as its inputs. The lights are the engine's Lights function's: a
+        // KoralLight an entity, the sun's first.
         page("frame");
         node("Screen", "screen", 40, 40);
         node("Primitive", "shape", 40, 160);                 // for how a default mesh's vertices are laid out
@@ -225,14 +226,11 @@ namespace forwardplus
         field("camera data", "screenSize", "screen", "size");
         set("camera data", "field.gridSize", Value::List { Grid[0], Grid[1], Grid[2] });
 
-        node("ForEach", "lamps", 40, 760);
+        node("ForEach", "lamps", 40, 760);                   // every point light: what their shadows' cubes are round
         set("lamps", "component", "PointLight");
-        shaderBuffer("light data", "forward", "fragment", "lights", 420, 760);
-        field("light data", "position", "lamps", "worldPosition");
-        field("light data", "radius", "lamps", "field.range");
-        field("light data", "color", "lamps", "field.color");
-        field("light data", "intensity", "lamps", "field.intensity");
-        field("camera data", "lightCount", "light data", "count");
+        node("Function", "lights", 420, 760);
+        set("lights", "function", "Lights");
+        field("camera data", "lightCount", "lights", "count");
 
         first("sky values", "Sky", 1000);
         const auto linear = [&](const std::string& id, const std::string& from, const char* output, const double y) {
@@ -309,7 +307,7 @@ namespace forwardplus
         wire("light counter", "reset counter", "buffer");
         compute("cull lights", "lightCulling", "computeMain", nullptr, 600, 40);
         wire(bring("camera data"), "cull lights", "param.camera");
-        wire(bring("light data"), "cull lights", "param.lights");
+        wire(bring("lights"), "cull lights", "param.lights", "lights");
         wire("light grid", "cull lights", "param.lightGrid");
         wire("light indices", "cull lights", "param.lightIndices");
         wire("light counter", "cull lights", "param.lightCounter");
@@ -453,11 +451,10 @@ namespace forwardplus
         wire("forward target", "forward", "framebuffer");
         wire(bring("camera data"), "forward", "param.camera");
         wire(bring("sun data"), "forward", "param.sun");
-        wire(bring("light data"), "forward", "param.lights");
+        wire(bring("lights"), "forward", "param.lights", "lights");
         wire(bring("light grid"), "forward", "param.lightGrid");
         wire(bring("light indices"), "forward", "param.lightIndices");
         wire(bring("shadow atlas"), "forward", "param.shadowMap");
-        wire(bring("nearest"), "forward", "param.shadowMap.sampler");
         wire(bring("texture sampler"), "forward", "param.textureSampler");
         wire(seen, "forward", "param.drawnInstances", "visible");
         wire(state, "forward", "param.frameState");
@@ -513,35 +510,23 @@ namespace forwardplus
         set("draw blended", "push.culled", 0);
 
         // ---- occlusion: what is in a corner is darker ---------------------------------------------------------------------
-        // How occluded each pixel is, worked out of where its surface and its neighbours' are; that blurred, keeping
-        // to each surface; and the picture multiplied by it.
+        // How occluded each pixel is, from the depth alone: the screen-space module's GroundTruthOcclusion, within a
+        // metre (the project imports `@modules/screen_space`); and the picture multiplied by it.
         page("occlusion");
         {
-            const std::string screen = bring("screen"), camera = bring("camera data"), position = bring("position"), normal = bring("normal");
-            const std::string nearest = bring("nearest"), linear = bring("linear");
-            image("occlusion raw", "eR8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 40, screen);
-            image("occlusion", "eR8_UNORM", { "eStorage", "eSampled", "eTransferSrc" }, 320, 180, screen);
-            compute("occlusion pass", "ambientOcclusion", "occlusion", "occlusionOut", 760, 40);
-            wire(camera, "occlusion pass", "param.camera");
-            wire(position, "occlusion pass", "param.positionTex");
-            wire(nearest, "occlusion pass", "param.positionTex.sampler");
-            wire(normal, "occlusion pass", "param.normalTex");
-            wire(nearest, "occlusion pass", "param.normalTex.sampler");
-            wire("occlusion raw", "occlusion pass", "param.occlusionOut");
-            set("run occlusion pass", "push.radius", 1.0);
-            set("run occlusion pass", "push.intensity", 1.5);
-            set("run occlusion pass", "push.bias", 0.1);
-            compute("blur occlusion", "ambientOcclusion", "blur", "occlusionOut", 760, 240);
-            wire(camera, "blur occlusion", "param.camera");
-            wire(position, "blur occlusion", "param.positionTex");
-            wire(nearest, "blur occlusion", "param.positionTex.sampler");
-            wire(normal, "blur occlusion", "param.normalTex");
-            wire(nearest, "blur occlusion", "param.normalTex.sampler");
-            wire("occlusion raw", "blur occlusion", "param.occlusionIn");
-            wire(linear, "blur occlusion", "param.occlusionIn.sampler");
-            wire("occlusion", "blur occlusion", "param.occlusionOut");
+            const std::string lens = bring("lens"), linear = bring("linear");
+            node("Slice", "lens scale", 320, 160);          // the projection's [1][1]: how tall the view is, a metre away
+            wire(lens, "lens scale", "of", "projection");
+            set("lens scale", "first", 5);
+            set("lens scale", "count", 1);
+            node("Function", "ambient occlusion", 760, 40);
+            set("ambient occlusion", "function", "GroundTruthOcclusion");
+            wire(bring("depth"), "ambient occlusion", "depth");
+            wire(lens, "ambient occlusion", "inverseProjection", "inverseProjection");
+            wire("lens scale", "ambient occlusion", "projectionScale");
+            set("ambient occlusion", "radius", 1.0);
             compute("apply occlusion", "ambientOcclusion", "compose", "hdrImage", 760, 440);
-            wire("occlusion", "apply occlusion", "param.occlusionIn");
+            wire("ambient occlusion", "apply occlusion", "param.occlusionIn", "occlusion");
             wire(linear, "apply occlusion", "param.occlusionIn.sampler");
             wire(bring("hdr"), "apply occlusion", "param.hdrImage");
         }
@@ -756,15 +741,16 @@ namespace forwardplus
         // The lamps stand still, and so does most of what they light: two lights' cubes are drawn again each frame,
         // one after another, and the rest stay as they were drawn last.
         set("lamp shadows", "each", 2);
-        node("ShaderBuffer", "lamp shadow data", 520, 1700, frame);
-        set("lamp shadow data", "module", "forward");
-        set("lamp shadow data", "entry", "fragment");
-        set("lamp shadow data", "parameter", "lampShadows");
-        wire("lamp shadows", "lamp shadow data", "field.faces", "matrices");
-        wire("lamp shadows", "lamp shadow data", "field.count", "count");
-        set("lamp shadow data", "field.texel", 1.0 / LampShadowFace);
-        set("lamp shadow data", "field.bias", 0.0004);
-        set("lamp shadow data", "field.softness", 1.25);
+        // Every face's matrix, six a lamp: what koral_shadows' KoralPointVisibility finds a point's face by.
+        node("BufferBuilder", "lamp faces", 520, 1700, frame);
+        set("lamp faces", "layout", Value(Value::List { Value::Members { { "name", "faces" }, { "type", "eMat4" }, { "count", LampShadowMost * 6 } } }));
+        wire("lamp shadows", "lamp faces", "field.faces", "matrices");
+        // And what a face's depths are compared through: what is no farther from the light than the map has is lit.
+        node("Sampler", "lamp compare", 520, 1820, frame);
+        for (const char* which : { "minFilter", "magFilter" }) set("lamp compare", which, "eLinear");
+        for (const char* which : { "addressModeU", "addressModeV" }) set("lamp compare", which, "eClampToEdge");
+        set("lamp compare", "compareEnable", true);
+        set("lamp compare", "compareOp", "eLessOrEqual");
 
         // A pass of its own, after the sun's shadows: one image of every face, and a loop that draws a face a turn.
         const std::string pass = "lamp shadows";
@@ -795,7 +781,7 @@ namespace forwardplus
         set("lamp shadow", "fragment.entry", "lampFragment");
         wire(bring("shape", pass, 150), "lamp shadow", "vertex.layout", "layout");
         wire("lamp face target", "lamp shadow", "framebuffer");
-        wire(bring("lamp shadow data", pass, 260), "lamp shadow", "param.lampShadows");
+        wire(bring("lamp faces", pass, 260), "lamp shadow", "param.lampFaces");
         set("lamp shadow", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", true }, { "depthCompareOp", "eLessOrEqual" } });
         node("Draw", "cast lamp", 1320, 260, pass);
         wire("lamp shadow", "cast lamp", "pipeline");
@@ -817,15 +803,11 @@ namespace forwardplus
         // And the pipelines that shade by them.
         // (Copies: bringing a node in makes the graph anew, and what pointed into the old one points nowhere.)
         const std::string shading = doc.Graph().Find("forward")->pass;
-        std::string nearest;
-        if (const auto& inputs = doc.Graph().Find("forward")->inputs; inputs.contains("param.shadowMap.sampler") && inputs.at("param.shadowMap.sampler").link)
-            nearest = inputs.at("param.shadowMap.sampler").link->node;
-        const std::string maps = bring("lamp shadow maps", shading, 1500), data = bring("lamp shadow data", shading, 1610);
-        if (nearest.empty()) nearest = bring("nearest", shading, 1720);
+        const std::string maps = bring("lamp shadow maps", shading, 1500), faces = bring("lamp faces", shading, 1610), compare = bring("lamp compare", shading, 1720);
         for (const char* pipeline : { "forward", "forward blended" }) {
             wire(maps, pipeline, "param.lampShadowMaps");
-            wire(nearest, pipeline, "param.lampShadowMaps.sampler");
-            wire(data, pipeline, "param.lampShadows");
+            wire(faces, pipeline, "param.lampFaces");
+            wire(compare, pipeline, "param.lampCompare");
         }
         return error.empty();
     }

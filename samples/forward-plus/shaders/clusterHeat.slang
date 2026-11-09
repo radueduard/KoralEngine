@@ -28,7 +28,7 @@ void computeMain(uint3 id : SV_DispatchThreadID, uniform float most)
     heat.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
     int3 pixel = int3(id.xy, 0);
-    float3 under = dot(picture.Load(pixel).rgb, float3(0.2126, 0.7152, 0.0722));
+    float3 under = KoralLuminance(picture.Load(pixel).rgb);
     float depth = depthTex.Load(pixel);
     if (depth >= 0.999999) { heat[id.xy] = float4(under * 0.35, 1.0); return; }
 

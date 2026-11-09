@@ -22,7 +22,6 @@ ByteAddressBuffer meshPositions;            // the pack's positions, 12 bytes ea
 RWStructuredBuffer<Emitter> emitters;
 RWStructuredBuffer<uint> emitterCount;      // how many there are: counted into, from none
 
-static const float Pi = 3.14159265359;
 static const uint MostCornersLooked = 6144;     // a mesh of more corners than this is reached as far as its box says
 
 [shader("compute")]
@@ -38,7 +37,7 @@ void gather(uint3 id : SV_DispatchThreadID)
     if (instance >= min(instancesLength, meshesLength)) return;
     const RayMaterial material = instances[instance];
     // How bright what it gives off is: a row of no entity gives off nothing.
-    const float bright = dot(max(material.emission, 0.0), float3(0.2126, 0.7152, 0.0722));
+    const float bright = KoralLuminance(max(material.emission, 0.0));
     if (!(bright > 0.0)) return;
     const uint mesh = meshOf[instance];
     if (mesh >= rangesLength) return;
@@ -68,7 +67,7 @@ void gather(uint3 id : SV_DispatchThreadID)
     Emitter emitter;
     emitter.instance = instance;
     emitter.triangles = range.indexCount / 3;
-    emitter.power = bright * Pi * reach * reach;    // as bright as it is, by how big it looks from afar
+    emitter.power = bright * KoralPi * reach * reach;    // as bright as it is, by how big it looks from afar
     emitter.radius = reach;
     emitter.center = mul(float4(middle, 1.0), model).xyz;
     emitter.unused = 0.0;

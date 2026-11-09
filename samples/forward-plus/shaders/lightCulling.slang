@@ -1,11 +1,11 @@
-// Clustered light culling: sorts the point lights into a grid of clusters — across the picture, down it, and into
+// Clustered light culling: sorts the point lights and spots into a grid of clusters — across the picture, down it, and into
 // it, deeper clusters longer — which the forward pass walks for each pixel. A work group is one cluster: its threads
 // share the lights out among themselves, each tests its share against the cluster's box, and the group claims a run
 // of the index list for those that touch it.
 
 import forwardCommon;
 
-StructuredBuffer<PointLight> lights;
+StructuredBuffer<KoralLight> lights;       // the Lights function's
 RWStructuredBuffer<uint2> lightGrid;        // for each cluster: where its lights start in the list, and how many
 RWStructuredBuffer<uint> lightIndices;      // the list: each cluster's lights, one run after another
 RWStructuredBuffer<uint> lightCounter;      // how much of the list is claimed: cleared before this runs
@@ -55,10 +55,11 @@ void computeMain(uint3 cluster : SV_GroupID, uint thread : SV_GroupIndex)
     uint first = thread * share;
     uint last = min(first + share, camera.lightCount);
     for (uint i = first; i < last; ++i) {
-        PointLight light = lights[i];
+        const KoralLight light = lights[i];
+        if (light.kind == KoralLightDirectional) continue;      // everywhere: the sun is shaded as the sun
         float3 nearest = clamp(light.position, lower, upper);
         float3 away = nearest - light.position;
-        if (dot(away, away) < light.radius * light.radius) {
+        if (dot(away, away) < light.range * light.range) {
             uint slot;
             InterlockedAdd(groupLightCount, 1u, slot);
             if (slot < MaxLightsPerCluster) groupLights[slot] = i;

@@ -8,12 +8,13 @@ import forwardCommon;
 import koral_debug;     // what the editor's scene view shows of a material: its albedo, its normal after the map...
 
 ConstantBuffer<Sun> sun;
-StructuredBuffer<PointLight> lights;
+StructuredBuffer<KoralLight> lights;       // the Lights function's: the sun's first, then the point lights
 StructuredBuffer<uint2> lightGrid;          // for each cluster: where its lights start in the list, and how many
 StructuredBuffer<uint> lightIndices;
-Sampler2D<float> shadowMap;                 // the four cascades, two by two
-ConstantBuffer<LampShadows> lampShadows;
-Sampler2DArray<float> lampShadowMaps;       // each point light's cube: six layers a light, a face each
+Texture2D<float> shadowMap;                 // the four cascades, two by two
+Texture2DArray<float> lampShadowMaps;       // each point light's cube: six layers a light, a face each
+SamplerComparisonState lampCompare;
+StructuredBuffer<float4x4> lampFaces;       // each face's matrix, six a light
 
 // Every entity, in one indirect draw: each instance's matrix, and the fields of its component — the pictures by their
 // bindless indices (Instance). Each picture names a file (`@textures/wall.png`), or is `$white` for one it has not,
@@ -99,15 +100,8 @@ groupshared uint meshletsSeen;
 /** Whether a sphere, moved by @p model, is wholly outside one of the camera's planes. */
 bool sphereOutOfSight(float3 middle, float reach, float4x4 model, float4x4 viewProjection)
 {
-    const float3 at = mul(float4(middle, 1.0), model).xyz;
     const float scale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
-    const float r = reach * scale;
-    // The planes of the frustum, from the matrix's columns (Gribb and Hartmann): each as a normal and a distance.
-    const float4x4 m = transpose(viewProjection);
-    const float4 planes[5] = { m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1], m[2] };
-    for (uint i = 0; i < 5; ++i)
-        if (dot(planes[i].xyz, at) + planes[i].w < -r * length(planes[i].xyz)) return true;
-    return false;
+    return KoralSphereOutOfSight(KoralTransformPoint(middle, model), reach * scale, viewProjection);
 }
 
 // ---- occlusion: what is behind what was drawn is not drawn ---------------------------------------------------------
@@ -240,8 +234,6 @@ void meshletMesh(uint thread : SV_GroupThreadID, uint3 group : SV_GroupID, in pa
     }
 }
 
-static const float Pi = 3.14159265359;
-
 struct Surface {
     float3 normal;
     float3 toEye;
@@ -252,132 +244,33 @@ struct Surface {
     float metallic;
 };
 
-float3 fresnel(float facing, float3 straightOn)
-{
-    return straightOn + (1.0 - straightOn) * pow(saturate(1.0 - facing), 5.0);
-}
-
-/** How much of a surface's tiny facets face the halfway direction: Trowbridge-Reitz (GGX). */
-float facets(float facingHalfway, float alpha)
-{
-    float a2 = alpha * alpha;
-    float f = (facingHalfway * a2 - facingHalfway) * facingHalfway + 1.0;
-    return a2 / (Pi * f * f);
-}
-
-/** How much of them is hidden neither from the light nor from the eye: Smith's, height-correlated (Heitz 2014). */
-float visible(float facingEye, float facingLight, float alpha)
-{
-    float a2 = alpha * alpha;
-    float v = facingLight * sqrt(facingEye * facingEye * (1.0 - a2) + a2);
-    float l = facingEye * sqrt(facingLight * facingLight * (1.0 - a2) + a2);
-    return v + l > 0.0 ? 0.5 / (v + l) : 0.0;
-}
-
-/** What a surface sends to the eye of light arriving along [toLight]. */
+/** What a surface sends to the eye of light arriving along [toLight]: the library's lobes (koral_brdf) — GGX,
+ *  height-correlated Smith and Schlick's Fresnel over Lambert. */
 float3 directLighting(Surface surface, float3 toLight, float3 radiance)
 {
-    float facingLight = max(dot(surface.normal, toLight), 0.0);
-    if (facingLight == 0.0) return 0.0;
-    float3 halfway = normalize(toLight + surface.toEye);
-    float3 mirrored = fresnel(max(dot(surface.toEye, halfway), 0.0), surface.straightOn);
-    float3 highlight = facets(max(dot(surface.normal, halfway), 0.0), surface.alpha) * visible(surface.facingEye, facingLight, surface.alpha) * mirrored;
-    float3 matte = (1.0 - mirrored) * (1.0 - surface.metallic) * surface.scattered / Pi;
-    return (matte + highlight) * facingLight * radiance;
+    const KoralAngles a = KoralAnglesOf(surface.normal, surface.toEye, toLight);
+    if (dot(surface.normal, toLight) <= 0.0) return 0.0;
+    const float3 mirrored = KoralFresnelSchlick(surface.straightOn, a.vh);
+    const float3 highlight = KoralGgxDistribution(a.nh, surface.alpha) * KoralSmithGgxCorrelated(a.nv, a.nl, surface.alpha) * mirrored;
+    const float3 matte = (1.0 - mirrored) * (1.0 - surface.metallic) * surface.scattered * KoralInvPi;
+    return (matte + highlight) * a.nl * radiance;
 }
 
-/** How much of the sun reaches a point through one cascade: 1 lit, 0 in shadow, and 1 outside the cascade. A 5x5 filter. */
 /**
  * Light falling on a thin surface's back, let through to its front by @p through and scattered there evenly, tinted by
  * its colour: what a curtain with the sun behind it glows with. @p facingBack is how squarely its back faces the light.
  */
 float3 throughFrom(Surface surface, float through, float facingBack, float3 radiance)
 {
-    return surface.scattered / Pi * through * facingBack * radiance;
+    return surface.scattered * KoralInvPi * through * facingBack * radiance;
 }
 
-float sampleCascade(int cascade, float3 world, float3 normal, float facingLight)
+/** How much of point light @p light reaches a point: through the face of its cube that looks the point's way — the
+ *  cube of which point light it is. A light past those that have a cube casts no shadow. */
+float lampShadow(KoralLight light, float3 world, float3 normal, float3 toLight)
 {
-    // Moved off the surface by a pixel or so of this cascade's map, more at a glancing angle: nothing shadows itself.
-    float worldTexel = sun.worldTexel[cascade];
-    float3 point = world + normal * worldTexel * (2.0 + 4.0 * saturate(1.0 - facingLight));
-    float4 lit = mul(float4(point, 1.0), sun.lightViewProj[cascade]);
-    float3 seen = lit.xyz / lit.w;
-    float2 uv = seen.xy * 0.5 + 0.5;
-    if (seen.z > 1.0 || any(uv < 0.0) || any(uv > 1.0)) return 1.0;
-
-    // The filter is as big in the world in every cascade, so that a shadow's edge is not wider past each split.
-    float radius = max(sun.pcfRadius * sun.worldTexel[0] / worldTexel, 1.0);
-    float2 tile = float2(float(cascade & 1), float(cascade >> 1)) * 0.5;
-    float reached = 0.0;
-    for (int x = -2; x <= 2; ++x)
-        for (int y = -2; y <= 2; ++y) {
-            float2 at = saturate(uv + float2(x, y) * sun.tileTexel * radius);
-            reached += seen.z - sun.bias > shadowMap.SampleLevel(tile + at * 0.5, 0.0) ? 0.0 : 1.0;
-        }
-    return reached / 25.0;
-}
-
-/**
- * How much of point light @p index reaches a point: looked up in the face of the light's cube that looks the point's
- * way. A light past those that have a cube casts no shadow.
- */
-float lampShadow(uint index, float3 lightPosition, float3 world, float3 normal, float facingLight)
-{
-    if (float(index) >= lampShadows.count) return 1.0;
-    // Moved off the surface by a pixel or so of the map there, more at a glancing angle: nothing shadows itself.
-    float away = length(world - lightPosition);
-    float3 point = world + normal * away * 2.0 * lampShadows.texel * (1.5 + 3.0 * saturate(1.0 - facingLight));
-    float3 from = point - lightPosition;
-    float3 size = abs(from);
-    uint face = size.x >= size.y && size.x >= size.z ? (from.x > 0.0 ? 0 : 1) : size.y >= size.z ? (from.y > 0.0 ? 2 : 3) : (from.z > 0.0 ? 4 : 5);
-    uint layer = index * 6 + face;
-    float4 lit = mul(float4(point, 1.0), lampShadows.faces[layer]);
-    if (lit.w <= 0.0) return 1.0;
-    float3 seen = lit.xyz / lit.w;
-    float2 uv = seen.xy * 0.5 + 0.5;
-    float reached = 0.0;
-    for (int x = -1; x <= 1; ++x)
-        for (int y = -1; y <= 1; ++y) {
-            float2 at = saturate(uv + float2(x, y) * lampShadows.texel * lampShadows.softness);
-            reached += seen.z - lampShadows.bias > lampShadowMaps.SampleLevel(float3(at, float(layer)), 0.0) ? 0.0 : 1.0;
-        }
-    return reached / 9.0;
-}
-
-/** How much of the sun reaches a point: from the sharpest cascade that covers it, faded into the next before its end. */
-float sunShadow(float3 world, float3 normal, float facingLight, float depth)
-{
-    int cascade = int(CascadeCount) - 1;
-    for (int i = 0; i < int(CascadeCount); ++i)
-        if (depth < sun.splits[i]) { cascade = i; break; }
-    float shadow = sampleCascade(cascade, world, normal, facingLight);
-    if (cascade < int(CascadeCount) - 1) {
-        float start = cascade == 0 ? 0.0 : sun.splits[cascade - 1];
-        float end = sun.splits[cascade];
-        float band = (end - start) * sun.blend;
-        float t = band > 0.0 ? (end - depth) / band : 1.0;
-        if (t < 1.0) shadow = lerp(sampleCascade(cascade + 1, world, normal, facingLight), shadow, smoothstep(0.0, 1.0, t));
-    }
-    return shadow;
-}
-
-/**
- * The mesh's normal turned as a normal map's texel says. The mesh has no tangents: which way the picture's u and v
- * run over the surface is worked out from how the position and the texture coordinate change across the pixel.
- */
-float3 mapped(float3 normal, float3 world, float2 uv, float3 texel)
-{
-    float3 dp1 = ddx(world), dp2 = ddy(world);
-    float2 duv1 = ddx(uv), duv2 = ddy(uv);
-    float3 dp2perp = cross(dp2, normal), dp1perp = cross(normal, dp1);
-    float3 tangent = dp2perp * duv1.x + dp1perp * duv2.x;
-    float3 bitangent = dp2perp * duv1.y + dp1perp * duv2.y;
-    float longest = max(dot(tangent, tangent), dot(bitangent, bitangent));
-    if (longest < 1e-20) return normal;
-    // Signed so the tangent runs the way u grows: across a pixel y runs down in Vulkan, which turns the frame over.
-    float scale = rsqrt(longest) * (dot(normal, cross(dp1, dp2)) < 0.0 ? -1.0 : 1.0);
-    return normalize(tangent * scale * texel.x + bitangent * scale * texel.y + normal * texel.z);
+    if (light.kindIndex >= LampShadowMost) return 1.0;
+    return KoralPointVisibility(lampShadowMaps, lampCompare, lampFaces, light.kindIndex, light.position, world, normal, toLight, lampFilter());
 }
 
 [shader("fragment")]
@@ -387,7 +280,7 @@ Output fragment(RasterInfo raster)
     float4 base = pictureOf(draw.albedoMap, textureSampler, raster.uv);
     if (isCutOut(draw) && base.a < draw.alphaCutoff) discard;
     float4 material = pictureOf(draw.roughnessMap, textureSampler, raster.uv);
-    float3 albedo = pow(max(draw.baseColor.rgb, 0.0), 2.2) * pow(base.rgb, 2.2);
+    float3 albedo = KoralLinearFromGamma22(draw.baseColor.rgb) * KoralLinearFromGamma22(base.rgb);
     float roughness = saturate(draw.roughness * material.g);
     float3 world = raster.worldPosition;
 
@@ -396,7 +289,8 @@ Output fragment(RasterInfo raster)
     surface.toEye = normalize(camera.position - world);
     if (dot(surface.normal, surface.toEye) < 0.0) surface.normal = -surface.normal;    // seen from behind, it faces the eye
     float3 texel = pictureOf(draw.normalMap, textureSampler, raster.uv).xyz;
-    if (any(texel < 0.99)) surface.normal = mapped(surface.normal, world, raster.uv, unpackedNormal(texel));   // (white: it has none)
+    if (any(texel < 0.99))     // (white: it has none) — its directions along the surface from how its uv changes
+        surface.normal = KoralMappedNormal(KoralSurfaceAt(world, surface.normal, raster.uv, textureSampler), KoralNormalTexelOf(texel.xy));
     surface.metallic = saturate(draw.metallic * material.b);
     surface.alpha = max(roughness * roughness, 0.0001);
     // Wider where the normal turns fast across a pixel, or a small highlight sparkles (Tokuyoshi and Kaplanyan).
@@ -416,41 +310,36 @@ Output fragment(RasterInfo raster)
     const float through = saturate(draw.translucency);
     float3 lit = 0.0;
     for (uint i = run.x; i < run.x + run.y; ++i) {
-        uint index = lightIndices[i];
-        PointLight light = lights[index];
-        float3 offset = light.position - world;
-        float distance = length(offset);
-        if (distance >= light.radius) continue;
-        float x = distance / light.radius;
-        float falloff = (1.0 - x * x) * (1.0 - x * x);
-        float3 toLight = offset / max(distance, 1e-4);
-        float facing = dot(surface.normal, toLight);
-        float3 radiance = pow(max(light.color, 0.0), 2.2) * light.intensity * falloff;
-        if (facing > 0.0) lit += directLighting(surface, toLight, radiance) * lampShadow(index, light.position, world, surface.normal, facing);
-        else if (through > 0.0) lit += throughFrom(surface, through, -facing, radiance) * lampShadow(index, light.position, world, -surface.normal, -facing);
+        const KoralLight light = lights[lightIndices[i]];
+        const KoralArrival arrival = KoralArrivalAt(light, world);
+        if (all(arrival.radiance <= 0.0)) continue;
+        const float3 toLight = arrival.toLight;
+        const float facing = dot(surface.normal, toLight);
+        if (facing > 0.0) lit += directLighting(surface, toLight, arrival.radiance) * lampShadow(light, world, surface.normal, toLight);
+        else if (through > 0.0) lit += throughFrom(surface, through, -facing, arrival.radiance) * lampShadow(light, world, -surface.normal, toLight);
     }
 
     if (sun.present > 0.0) {
         float3 toSun = -sun.direction;
         float facing = dot(surface.normal, toSun);
-        if (facing > 0.0) lit += directLighting(surface, toSun, sun.color * sunShadow(world, surface.normal, facing, depth));
-        else if (through > 0.0) lit += throughFrom(surface, through, -facing, sun.color * sunShadow(world, -surface.normal, -facing, depth));
+        if (facing > 0.0) lit += directLighting(surface, toSun, sun.color * KoralSunVisibility(shadowMap, cascadesOf(sun), world, surface.normal, toSun, depth, sunFilterOf(sun)));
+        else if (through > 0.0) lit += throughFrom(surface, through, -facing, sun.color * KoralSunVisibility(shadowMap, cascadesOf(sun), world, -surface.normal, toSun, depth, sunFilterOf(sun)));
     }
 
     // The sky's light from all round, scattered; and what of the sky it mirrors, the less the rougher it is.
     lit += skyLight(sun, surface.normal) * surface.scattered;
     lit += skyLight(sun, -surface.normal) * surface.scattered * through;
-    lit += skyLight(sun, reflect(-surface.toEye, surface.normal)) * fresnel(surface.facingEye, surface.straightOn) * (1.0 - roughness);
-    const float3 emitted = draw.emission * pow(pictureOf(draw.emissiveMap, textureSampler, raster.uv).rgb, 2.2);
+    lit += skyLight(sun, reflect(-surface.toEye, surface.normal)) * KoralFresnelSchlick(surface.straightOn, surface.facingEye) * (1.0 - roughness);
+    const float3 emitted = draw.emission * KoralLinearFromGamma22(pictureOf(draw.emissiveMap, textureSampler, raster.uv).rgb);
     lit += emitted;
-    if (koralDebugShowing()) lit = koralDebugColor(KoralSurface(albedo, surface.normal, roughness, surface.metallic, emitted));
+    if (koralDebugShowing()) lit = koralDebugColor(KoralDebugSurface(albedo, surface.normal, roughness, surface.metallic, emitted));
 
     Output output;
     // How opaque it is: what the blended pipeline draws it over the picture by. What it mirrors is on it however
     // clear it is: a pane seen along itself shows more of the sky than of what is behind it.
     float clear = transparencyOf(draw);
     float opaque = base.a * (1.0 - clear);
-    if (clear > 0.0) opaque = saturate(opaque + (1.0 - opaque) * dot(fresnel(surface.facingEye, surface.straightOn), float3(0.2126, 0.7152, 0.0722)) * (1.0 - roughness));
+    if (clear > 0.0) opaque = saturate(opaque + (1.0 - opaque) * KoralLuminance(KoralFresnelSchlick(surface.straightOn, surface.facingEye)) * (1.0 - roughness));
     output.color = float4(lit, opaque);
     output.position = float4(world, 1.0);
     output.normal = float4(surface.normal, 1.0);

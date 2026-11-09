@@ -46,7 +46,7 @@ uint prepassFragment(Seen seen) : SV_Target0
     return seen.instance + 1;
 }
 
-ConstantBuffer<LampShadows> lampShadows;
+StructuredBuffer<float4x4> lampFaces;      // each face's matrix, six a light
 
 // A point light's shadows: the same meshes as one face of the cube round the light sees them. `face` is which face of
 // which light — six a light, one after another: the turn's number of the loop the pipeline is in (push.face).
@@ -54,7 +54,7 @@ ConstantBuffer<LampShadows> lampShadows;
 float4 lampVertex(float3 position : POSITION, uniform float4x4 model, uniform uint face) : SV_Position
 {
     float4 world = mul(float4(position, 1.0), model);
-    return mul(float4(world.xyz, 1.0), lampShadows.faces[face]);
+    return mul(float4(world.xyz, 1.0), lampFaces[face]);
 }
 
 [shader("fragment")]

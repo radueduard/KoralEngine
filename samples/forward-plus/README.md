@@ -30,12 +30,12 @@ cmake-build-debug/koral-editor cmake-build-debug/forward-plus-project
 
 | Page | What it does | The original's |
 |---|---|---|
-| `frame` | The camera, the sun with its cascades and the sky — each a ForEach of the engine's package's component, the first of it, and a View of the camera — and the point lights, a ForEach of `PointLight`: as the three buffers the shaders declare, each a ShaderBuffer, the lights an element an entity. Their places, collected, are what the lamps' shadow cubes are made round. | The camera module's set, `LightCulling::SetPointLights`, `DirectionalLight::Update` |
+| `frame` | The camera, the sun with its cascades and the sky — each a ForEach of the engine's package's component, the first of it, and a View of the camera — as the two buffers the shaders declare, each a ShaderBuffer; and the lights, the engine's Lights function (a KoralLight an entity, the sun's first). The point lights' places, collected, are what the lamps' shadow cubes are made round. | The camera module's set, `LightCulling::SetPointLights`, `DirectionalLight::Update` |
 | `lights` | Sorts the lights into 16 x 9 x 24 clusters: a ClearBuffer of the counter, and a Dispatch of one work group a cluster. | `Light.h`, `lightCulling.comp.glsl` |
 | `shadows` | Four cascades into a quarter each of one depth image: a pipeline and a Draw, in a loop of four turns. | `DirectionalLight.h` |
 | `prepass` | Depth, before anything is shaded. | `DepthPrePass.h` |
-| `forward` | Every entity with a Mesh and the `forward` component (albedo, metallic, roughness, emission, and its four pictures), lit by its cluster's lights and the sun; beside the picture, where each surface is, which way it faces and how it mirrors. | `ForwardPass.h`, `albedo.frag.glsl` |
-| `occlusion` | Horizon-based ambient occlusion, blurred, over the picture. | `HBAO.h` |
+| `forward` | Every entity with a Mesh and the `forward` component (albedo, metallic, roughness, emission, and its four pictures), lit by its cluster's lights and the sun through the library's lobes and shadow filters (koral_brdf, koral_shadows); beside the picture, where each surface is, which way it faces and how it mirrors. | `ForwardPass.h`, `albedo.frag.glsl` |
+| `occlusion` | Ground-truth ambient occlusion from the depth — the screen-space module's GroundTruthOcclusion — over the picture. | `HBAO.h` |
 | `sky` | The sky where nothing was drawn. | `Skybox.h` |
 | `reflections` | Screen-space reflections: traced, then added. | `SSR.h` |
 | `bloom` | Six levels down and five back up, each way a loop, then over the picture. | `Bloom.h` |

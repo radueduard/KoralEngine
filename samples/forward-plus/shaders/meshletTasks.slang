@@ -27,24 +27,6 @@ StructuredBuffer<FrameState> frameState;
 
 static const uint MeshletsATask = 32;
 
-/** Whether a box, moved by @p model, is wholly outside one of the camera's planes. */
-bool outOfSight(float3 low, float3 high, float4x4 model, float4x4 viewProjection)
-{
-    uint outside[6] = { 0, 0, 0, 0, 0, 0 };
-    for (uint corner = 0; corner < 8; ++corner) {
-        const float3 at = float3(corner & 1 ? high.x : low.x, corner & 2 ? high.y : low.y, corner & 4 ? high.z : low.z);
-        const float4 clip = mul(float4(mul(float4(at, 1.0), model).xyz, 1.0), viewProjection);
-        outside[0] += clip.x < -clip.w ? 1 : 0;
-        outside[1] += clip.x > clip.w ? 1 : 0;
-        outside[2] += clip.y < -clip.w ? 1 : 0;
-        outside[3] += clip.y > clip.w ? 1 : 0;
-        outside[4] += clip.z < 0.0 ? 1 : 0;
-        outside[5] += clip.z > clip.w ? 1 : 0;
-    }
-    for (uint plane = 0; plane < 6; ++plane) if (outside[plane] == 8) return true;
-    return false;
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void expand(uint3 id : SV_DispatchThreadID)
@@ -63,7 +45,7 @@ void expand(uint3 id : SV_DispatchThreadID)
     if (instance < counted.firstInstance || instance >= counted.firstInstance + counted.instanceCount) return;     // a row past the entities
     const MeshRange range = ranges[command];
     const bool known = any(range.boundsMin.xyz != range.boundsMax.xyz);
-    if (known && frameState[0].begun == Begun && outOfSight(range.boundsMin.xyz, range.boundsMax.xyz, instances[instance].model, frameState[0].viewProjection)) return;
+    if (known && frameState[0].begun == Begun && KoralBoxOutOfSight(range.boundsMin.xyz, range.boundsMax.xyz, instances[instance].model, frameState[0].viewProjection)) return;
     const uint4 meshlets = meshRanges[command];
     const uint count = (meshlets.y + MeshletsATask - 1) / MeshletsATask;
     uint first;

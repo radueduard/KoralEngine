@@ -119,6 +119,7 @@ TEST_F(ModuleTest, FiltersFilterAPicture) {
     Run({ "filters", "Bilateral", picture, "call/filtered" });
     Run({ "filters", "Denoise", [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals"); }, "call/denoised" });
     Run({ "filters", "Sharpen", picture, "call/sharpened" });
+    Run({ "filters", "Sharpen", picture, "call" });     // the call itself: looked at by the first of its outputs that holds an image
 }
 
 TEST_F(ModuleTest, AntialiasingSmoothsAndUpscales) {
