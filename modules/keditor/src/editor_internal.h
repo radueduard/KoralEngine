@@ -225,8 +225,9 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             std::string out = "// $NAME: " + said + ".\n";
             if (whole) out += "// Its pipeline needs no vertex layout, and its Draw no mesh" + std::string(c.fragment ? ": wire the picture it reads to `param.source`.\n" : ".\n");
             else out += "// A Draw is given each one's own from a Filter of an Entities node: `Mesh.mesh` and `matrix`, and for `color` the field of\n"
-                        "// the pipeline's component, named after its node. Wire the frame pass's `frame data` to `param.frame`, and the\n"
-                        "// Lights function's `directional`, `points` and `spots` to `param.directionalLights`, `pointLights` and `spotLights`.\n";
+                        "// the pipeline's component, named after its node. Wire the frame pass's `camera data` to `param.camera`, its\n"
+                        "// `ambient light` to `param.ambient`, the Lights function's `directional`, `points` and `spots` to\n"
+                        "// `param.directionalLights`, `pointLights` and `spotLights`, and its `counts` to the Draw's `push.lightCounts`.\n";
             if (tess) out += "// Tessellated, the pipeline's `patchControlPoints` is 3, and `constant.level` says how fine.\n";
             if (!c.fragment) out += "// Without a fragment shader, its framebuffer needs only a depth attachment: a shadow map's, a depth prepass's.\n";
             out += "// Each entry point is called as a pipeline looks for it: vertexMain, fragmentMain and the rest.\nmodule $NAME;\n\n";
@@ -234,12 +235,13 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             if (whole && c.fragment) out += "Texture2D<float4> source;\n\n";
             if (!whole) out += "struct Vertex {\n    float3 position : POSITION;\n    float3 normal : NORMAL;\n};\n\n"
                                "struct DrawData {\n    float4x4 model;         // where the entity is in the world: a Filter's `matrix`, to `push.model`\n"
-                               "    float3 color;           // the entity's own: a field of the pipeline's component\n};\n"
+                               "    float3 color;           // the entity's own: a field of the pipeline's component\n"
+                               "    uint4 lightCounts;      // the Lights function's `counts`, to `push.lightCounts`: the same for every draw\n};\n"
                                "[[vk::push_constant]] ConstantBuffer<DrawData> draw;\n\n";
             if (tess) out += "// What each corner of a triangle carries to the tessellation shaders.\nstruct Corner {\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
             out += "struct RasterInfo {\n    float4 position : SV_Position;\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
             out += std::string("// Where a place is in the picture.\nfloat4 Placed(float3 place)\n{\n    return ")
-                 + (whole ? "float4(place, 1.0);" : "frame.camera.ToClip(place);") + "\n}\n\n";
+                 + (whole ? "float4(place, 1.0);" : "camera.ToClip(place);") + "\n}\n\n";
             const std::string made = tess ? "Corner" : "RasterInfo";
             out += "[shader(\"vertex\")]\n" + made + (whole ? " vertexMain(uint index : SV_VertexID)\n{\n    const float2 corner = KoralFullscreenCorner(index);\n"
                                                               "    const float3 place = float3(corner, 0.0);\n    const float3 normal = float3(0.0, 0.0, 1.0);\n    const float2 uv = corner * 0.5 + 0.5;\n"
@@ -269,7 +271,7 @@ void computeMain(uint3 id : SV_DispatchThreadID)
                                "    // Matte, of the entity's colour, lit by the scene's lights and the sky as the engine's shadings are (koral_shadings).\n"
                                "    const float3 normal = KoralSafeNormalize(raster.normal);\n"
                                "    const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(draw.color)), raster.place, normal, FrameCamera(),\n"
-                               "                                FrameLights(), FrameAmbient());\n"
+                               "                                FrameLights(draw.lightCounts.xyz), FrameAmbient());\n"
                                "    return float4(KoralDisplay(lit), 1.0);\n}\n";
             return out;
         }

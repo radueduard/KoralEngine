@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "Every light of the scene, a buffer of each kind as koral_lights.slang has it: `directional` of KoralDirectionalLight (the way it shines, its colour), `points` of KoralPointLight (where it is, how far it reaches, its colour), `spots` of KoralSpotLight (where, how far, the way it shines, its colour, its cone as the cosines of its angles) \u2014 each colour in linear terms times its intensity. A light's place in its buffer is which of its kind it is: what its shadow is found by. `counts` is how many of each (x directional, y point, z spot), for a frame's block; `directionalCount`, `pointCount` and `spotCount` the same one by one.",
+ "description": "Every light of the scene, a buffer of each kind as koral_lights.slang has it: `directional` of KoralDirectionalLight (the way it shines, its colour), `points` of KoralPointLight (where it is, how far it reaches, its colour), `spots` of KoralSpotLight (where, how far, the way it shines, its colour, its cone as the cosines of its angles) \u2014 each colour in linear terms times its intensity. A light's place in its buffer is which of its kind it is: what its shadow is found by. `counts` is how many of each (x directional, y point, z spot), for a draw's push constants (a uint4); `directionalCount`, `pointCount` and `spotCount` the same one by one.",
  "tags": [
   "lights",
   "light list",

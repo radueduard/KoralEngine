@@ -121,14 +121,14 @@ its kind it is: what its shadow is found by.
 | `KoralPointLight(position, range, color)` | 32 bytes. `ArrivalAt(position)`, `Reaches(point)`, `Touches(low, high)` (a cluster's box). |
 | `KoralSpotLight(position, range, direction, color, cosInner, cosOuter)` | 48 bytes. `ArrivalAt`, `Reaches` (in range and in its cone), `Touches`, `Cone(fromLight)`, `MapAngle()` (its shadow map's width). |
 | `KoralArrival` | What reaches a point: from where, how far, how much — `KoralDistanceFalloff` (less by the square of the way, none at its range) and `KoralSpotFalloff`. |
-| `KoralAmbientLight(zenith, horizon, ground, strength)` | The sky's light from all round, 48 bytes as a frame's block holds it: `Along(direction)`, and an `IKoralEnvironment`. |
+| `KoralAmbientLight(zenith, horizon, ground, strength)` | The sky's light from all round, 48 bytes as a ConstantBuffer holds it (the lit graph's `ambient light`): `Along(direction)`, and an `IKoralEnvironment`. |
 | `IKoralEnvironment` | The light from all round: `Diffuse(normal)`, `Specular(direction, roughness)`. `KoralNoEnvironment`, `KoralUniformEnvironment`, `KoralAmbientLight`; koral_shading's `KoralCubeEnvironment`, koral_ibl's `KoralShEnvironment`. |
 | `IKoralLights` | Where lights are kept, a kind at a time (`DirectionalCount()`, `Directional(i)`, and the same of points and spots): `KoralLightBuffers(directional, points, spots, counts)` (the Lights function's), `KoralSingleLight(directional)`, `KoralStudioLights` (the editor's key and fill, for a thing by itself), `KoralNoLights`. |
 | `IKoralShadows` | How much of a light reaches a point past what hides it, a kind at a time: `DirectionalVisibility(index, light, arrival, position, normal)`, `PointVisibility`, `SpotVisibility`. `KoralNoShadows` lets all of it through; `koral_shadows` has the engine's. |
 
 ### `koral_camera`: what a frame is seen through
 
-`KoralCamera(viewProjection, inverseViewProjection, position)`, 144 bytes as a frame's block holds it — or
+`KoralCamera(viewProjection, inverseViewProjection, position)`, 144 bytes as a ConstantBuffer holds it (the lit graph's `camera data`) — or
 `KoralCamera(position)`, one known only by where it is. `ToClip(world)`, `ToEye(world)`, `RayThrough(clip)`,
 `WorldAt(uv, depth)`.
 

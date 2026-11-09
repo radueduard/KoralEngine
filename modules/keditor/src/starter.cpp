@@ -575,36 +575,32 @@ dependencies {{
         wire("sun radius", "sun radians", "a");
         node("Cos", "sun cosine", 680, 660);
         wire("sun radians", "sun cosine", "a");
-        // The sky's one value more: the sun disc's cosine, as a float4's first.
-        node("Append", "sky disc", 680, 740);
-        wire("sun cosine", "sky disc", "a");
-        set("sky disc", "b", Value::List { 0, 0, 0 });
-        // FrameData, in engineCommon.slang: its camera (koral_camera's KoralCamera), its ambient light (koral_lights'
-        // KoralAmbientLight), the sky disc and the lights' counts. A float after a float3 is the float4's fourth, as a
+        // The two blocks the shaders read, in engineCommon.slang: the camera (koral_camera's KoralCamera) and the sky's
+        // light from all round (koral_lights' KoralAmbientLight). A float after a float3 is the float4's fourth, as a
         // ConstantBuffer lays them out.
-        node("BufferBuilder", "frame data", 920, 340);
-        set("frame data", "usage", "eUniform");
-        Value::List layout;
-        for (const auto& [name, type] : { std::pair { "viewProjection", "eMat4" }, { "inverseViewProjection", "eMat4" }, { "cameraPosition", "eVec3" }, { "cameraUnused", "eFloat" },
-                                          { "ambientZenith", "eVec3" }, { "ambientStrength", "eFloat" }, { "ambientHorizon", "eVec3" }, { "ambientUnused0", "eFloat" },
-                                          { "ambientGround", "eVec3" }, { "ambientUnused1", "eFloat" }, { "sky", "eVec4" }, { "counts", "eUVec4" } })
-            layout.emplace_back(Value::Members { { "name", name }, { "type", type } });
-        set("frame data", "layout", Value(std::move(layout)));
-        const auto field = [&](const char* name, const char* from, const char* output) { wire(from, "frame data", std::format("field.{}", name).c_str(), output); };
-        field("viewProjection", "seen", "out");
-        field("inverseViewProjection", "unseen", "out");
-        field("cameraPosition", "camera", "position");
-        field("ambientZenith", "zenith", "out");
-        field("ambientStrength", "sky values", "field.ambient");     // how much light the sky gives all round
-        field("ambientHorizon", "horizon", "out");
-        field("ambientGround", "ground", "out");
-        field("sky", "sky disc", "out");
+        const auto block = [&](const char* id, const double y, std::initializer_list<std::pair<const char*, const char*>> fields) {
+            node("BufferBuilder", id, 920, y);
+            set(id, "usage", "eUniform");
+            Value::List layout;
+            for (const auto& [name, type] : fields) layout.emplace_back(Value::Members { { "name", name }, { "type", type } });
+            set(id, "layout", Value(std::move(layout)));
+        };
+        const auto field = [&](const char* id, const char* name, const char* from, const char* output) { wire(from, id, std::format("field.{}", name).c_str(), output); };
+        block("camera data", 340, { { "viewProjection", "eMat4" }, { "inverseViewProjection", "eMat4" }, { "position", "eVec3" }, { "unused", "eFloat" } });
+        field("camera data", "viewProjection", "seen", "out");
+        field("camera data", "inverseViewProjection", "unseen", "out");
+        field("camera data", "position", "camera", "position");
+        block("ambient light", 520, { { "zenith", "eVec3" }, { "strength", "eFloat" }, { "horizon", "eVec3" }, { "unused0", "eFloat" },
+                                      { "ground", "eVec3" }, { "unused1", "eFloat" } });
+        field("ambient light", "zenith", "zenith", "out");
+        field("ambient light", "strength", "sky values", "field.ambient");     // how much light the sky gives all round
+        field("ambient light", "horizon", "horizon", "out");
+        field("ambient light", "ground", "ground", "out");
 
         // Every light of the scene, a buffer of each kind (koral_lights): the engine's Lights function — its suns, its
-        // lamps, its spots — and how many of each, for the frame's counts.
+        // lamps, its spots — and how many of each, `counts`, which each Draw is given as a push constant.
         node("Function", "lights", 40, 1000);
         set("lights", "function", "Lights");
-        field("counts", "lights", "counts");
         node("Primitive", "shape", 280, 40);            // for how a default mesh's vertices are laid out
 
         // ---- scene: every entity with the lit shader's component and a Mesh, a draw each -----------------------------
@@ -624,14 +620,15 @@ dependencies {{
         picture("depth", "eD32_SFLOAT", { "eDepthStencilAttachment" }, 360);
         target("scene target", "color", "depth", 760, 40);
         set("scene target", "color[0].clear", Value::Members { { "scalarType", "Float" }, { "components", 4 }, { "value", Value::Members { { "f", Value::List { 0, 0, 0, 1 } } } } });
-        // The pipeline is what every draw shares: the frame's values and the lights. What each draw has of its own —
+        // The pipeline is what every draw shares: the camera, the ambient light and the lights. What each draw has of its own —
         // its mesh, where it is, its colour, how metallic and how rough it is, what light it gives off — is wired to the
         // Draw from a Filter of what has a mesh and a PbrMaterial: the material's fields, each to a push constant.
         node("GraphicsPipeline", "lit", 1020, 40);
         shaders("lit", "lit");
         wire(bring("shape", 760, 420), "lit", "vertex.layout", "layout");
         wire("scene target", "lit", "framebuffer");
-        wire(bring("frame data", 760, 540), "lit", "param.frame");
+        wire(bring("camera data", 760, 540), "lit", "param.camera");
+        wire(bring("ambient light", 760, 600), "lit", "param.ambient");
         const std::string lights = bring("lights", 760, 660);
         for (const auto& [param, output] : { std::pair { "param.directionalLights", "directional" }, { "param.pointLights", "points" }, { "param.spotLights", "spots" } })
             wire(lights, "lit", param, output);
@@ -646,6 +643,7 @@ dependencies {{
         wire("drawn", "draw scene", "push.model", "matrix");
         for (const auto& [push, field] : { std::pair { "albedo", "baseColor" }, { "metallic", "metallic" }, { "roughness", "roughness" }, { "emission", "emission" } })
             wire("drawn", "draw scene", (std::string("push.") + push).c_str(), (std::string("PbrMaterial.") + field).c_str());
+        wire(lights, "draw scene", "push.lightCounts", "counts");      // the same for every draw: how many lights of each kind
 
         // ---- sky: a triangle over the whole picture at the far plane, where nothing nearer was drawn -----------
         pass = "sky";
@@ -654,11 +652,15 @@ dependencies {{
         node("GraphicsPipeline", "sky", 600, 40);
         shaders("sky", "sky");
         wire("sky target", "sky", "framebuffer");
-        wire(bring("frame data", 320, 300), "sky", "param.frame");
-        wire(bring("lights", 320, 420), "sky", "param.directionalLights", "directional");     // the sun's disc: the first one's
+        wire(bring("camera data", 320, 300), "sky", "param.camera");
+        wire(bring("ambient light", 320, 360), "sky", "param.ambient");
+        const std::string skyLights = bring("lights", 320, 420);
+        wire(skyLights, "sky", "param.directionalLights", "directional");     // the sun's disc: the first one's
         set("sky", "depthStencilState", Value::Members { { "depthTestEnable", true }, { "depthWriteEnable", false }, { "depthCompareOp", "eLessOrEqual" } });
         node("Draw", "draw sky", 880, 40);
         wire("sky", "draw sky", "pipeline");
+        wire(skyLights, "draw sky", "push.lightCounts", "counts");
+        wire(bring("sun cosine", 320, 480), "draw sky", "push.sunDisc");     // the cosine of the sun disc's radius
         set("draw sky", "load", true);
 
         // ---- show: the picture, in the window ----------------------------------------------------------------------

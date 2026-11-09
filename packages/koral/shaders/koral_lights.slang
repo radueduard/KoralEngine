@@ -1,6 +1,6 @@
 // The engine's base library: lights. Each kind its own struct, as the engine's Lights function lays them out — a buffer
 // of each: its DirectionalLights, its PointLights, its SpotLights — and each knows what of it reaches a point. The light
-// from all round, the sky's, is a KoralAmbientLight: what a frame's block holds of the scene's Sky.
+// from all round, the sky's, is a KoralAmbientLight: the scene's Sky, as a ConstantBuffer holds it.
 //
 //     import koral_lights;
 //     StructuredBuffer<KoralPointLight> pointLights;      // the Lights function's `points`; `counts`.y how many
@@ -166,7 +166,7 @@ public struct KoralUniformEnvironment : IKoralEnvironment {
 
 /**
  * The sky's light from all round: three colours — the zenith's above, the horizon's round it, the ground's below — times
- * how much light it gives. 48 bytes, as a frame's block holds it of the scene's Sky.
+ * how much light it gives. 48 bytes, as a ConstantBuffer holds it of the scene's Sky.
  */
 public struct KoralAmbientLight : IKoralEnvironment {
     public float3 zenith;

@@ -1377,7 +1377,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     // The first pass's page, to begin with: its nodes, and none of another's.
     for (const char* pass : { "frame", "scene", "show", "Every node at once" }) EXPECT_TRUE(Shows(pass)) << pass;
     EXPECT_TRUE(Shows("camera"));
-    EXPECT_TRUE(Shows("frame data"));
+    EXPECT_TRUE(Shows("camera data"));
     EXPECT_FALSE(Shows("draw sky"));
     EXPECT_FALSE(Shows("scene target"));
     Session().ShowPass("sky");
@@ -1426,7 +1426,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     EXPECT_EQ(Doc().Passes()[2], "bloom");
     const auto importable = Doc().Importable("bloom");
     EXPECT_NE(std::ranges::find(importable, "color"), importable.end()) << "what the scene pass made";
-    EXPECT_NE(std::ranges::find(importable, "frame data"), importable.end());
+    EXPECT_NE(std::ranges::find(importable, "camera data"), importable.end());
     EXPECT_EQ(std::ranges::find(importable, "sky target"), importable.end()) << "not what a later pass makes";
     EXPECT_EQ(std::ranges::find(importable, "draw scene"), importable.end()) << "a pass node gives nothing to take";
     const std::string taken = Doc().Import("color", "bloom", 40, 40);
@@ -1443,7 +1443,7 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     Session().ShowPass("bloom");
     EXPECT_TRUE(Shows("Image, from scene"));
     EXPECT_TRUE(Shows("blurred"));
-    EXPECT_FALSE(Shows("camera"));
+    EXPECT_FALSE(Shows("looking at")) << "a node of the frame page: not on this one";
 
     // A wire straight from another page's node, with nothing brought in: the node is shown beside what it feeds.
     EXPECT_TRUE(Doc().Connect("screen", "extent", blurred, "extent"));
@@ -1517,7 +1517,7 @@ TEST_F(EditorTest, SetupIsALaneOfItsOwnAndWhatAPageCanUseIsBesideIt) {
     }
     EXPECT_TRUE(Session().NodePicture(texture).Get()) << "an image's picture";
     EXPECT_TRUE(Session().NodePicture("shape").Get()) << "a mesh's picture";
-    EXPECT_FALSE(Session().NodePicture("frame data").Get()) << "a buffer has none: what kind of thing it is, instead";
+    EXPECT_FALSE(Session().NodePicture("camera data").Get()) << "a buffer has none: what kind of thing it is, instead";
     Sheet("drawer");
     Session().SetDrawerList(true);
     EXPECT_TRUE(Shows("noise texture")) << "or a line each";
@@ -1673,7 +1673,7 @@ TEST_F(EditorTest, EveryKindOfShaderIsMadeAndBuilt) {
     std::filesystem::remove_all(directory);
     Open();
     ASSERT_TRUE(Session().NewProject(directory));
-    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the frame data, is the lit graph's
+    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the camera and the lights, is the lit graph's
     Session().ShowPass("sky");
     int made = 0;
     const auto build = [&](const std::string& name, const std::string& kind, const keditor::Session::ShaderChoice& choice, const char* type,
@@ -1697,7 +1697,7 @@ TEST_F(EditorTest, EveryKindOfShaderIsMadeAndBuilt) {
             for (const bool geometry : { false, true })
                 for (const bool fragment : { false, true }) {
                     std::vector<std::pair<std::string, std::string>> settings { { "vertex.module", "~" }, { "@framebuffer", "sky target" } };
-                    if (!whole) { settings.push_back({ "layout", "" }); settings.push_back({ "@param.frame", "frame data" }); }
+                    if (!whole) { settings.push_back({ "layout", "" }); settings.push_back({ "@param.camera", "camera data" }); }
                     if (tess) { settings.push_back({ "tessellationControl.module", "~" }); settings.push_back({ "tessellationEvaluation.module", "~" }); }
                     if (geometry) settings.push_back({ "geometry.module", "~" });
                     if (fragment) settings.push_back({ "fragment.module", "~" });
@@ -1741,7 +1741,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_FALSE(Session().NewShader("glow", "Compute")) << "there is no project for it to go in";
     EXPECT_TRUE(Session().Failed());
     ASSERT_TRUE(Session().NewProject(directory));
-    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the frame data, is the lit graph's
+    ASSERT_TRUE(Session().NewLitScene());      // what a mesh's shader reads, the camera and the lights, is the lit graph's
 
     for (const auto& [kind, what] : keditor::Session::ShaderKinds()) EXPECT_FALSE(what.empty()) << kind;
     ASSERT_TRUE(Session().NewShader("glow", "Compute")) << Session().Status();
@@ -1766,13 +1766,14 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().SetInput(paint, "fragment.module", "paint");
     Doc().Connect("shape", "layout", paint, "vertex.layout");
     Doc().Connect("sky target", "out", paint, "framebuffer");
-    Doc().Connect("frame data", "out", paint, "param.frame");
+    Doc().Connect("camera data", "out", paint, "param.camera");
+    Doc().Connect("ambient light", "out", paint, "param.ambient");
     for (const auto& [output, param] : { std::pair { "directional", "param.directionalLights" }, { "points", "param.pointLights" }, { "spots", "param.spotLights" } })
         Doc().Connect("lights", output, paint, param);     // lit as the template says: by the Lights function's buffers
     ASSERT_TRUE(Doc().Runtime().Status(paint)->ok) << Doc().Runtime().Status(paint)->error;
     const kecs::ComponentId component = Doc().Runtime().ComponentOf(paint);
     ASSERT_NE(component, kecs::NoComponent);
-    EXPECT_EQ(Doc().World().Describe(component).fields.size(), 2u) << "with no draw of it yet, every push constant is the component's";
+    EXPECT_EQ(Doc().World().Describe(component).fields.size(), 3u) << "with no draw of it yet, every push constant is the component's";
     // A draw of every entity with a Mesh and the component: where it is, from the ForEach; its colour, from the component.
     const std::string each = Doc().AddNode("ForEach", 0, 0, "painted", "scene");
     Doc().SetInput(each, "component", "paint");
@@ -1782,6 +1783,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     Doc().Connect(each, "Mesh.mesh", draw, "mesh");
     Doc().Connect(each, "matrix", draw, "push.model");
     Doc().Connect(each, "field.color", draw, "push.color");
+    Doc().Connect("lights", "counts", draw, "push.lightCounts");      // the same for every draw
     EXPECT_TRUE(Doc().Runtime().Status(draw)->ok) << Doc().Runtime().Status(draw)->error;
     ASSERT_EQ(Doc().World().Describe(component).fields.size(), 1u) << "where it is is wired from elsewhere: the colour is all that is left";
     EXPECT_EQ(Doc().World().Describe(component).fields.front().name, "color");
@@ -3344,7 +3346,7 @@ TEST_F(EditorTest, WhatAPageCanUseStaysInSightAsItsPicturesAreMadeAgain) {
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(6);
     while (std::chrono::steady_clock::now() < until) Frame();
     EXPECT_TRUE(Session().NodePicture("color").Get());
-    Session().Select(Doc().Import("frame data", "show", 0, 0));
+    Session().Select(Doc().Import("camera data", "show", 0, 0));
     for (int i = 0; i < 30; ++i) Frame();
     ASSERT_NE(Doc().Graph().Find(Session().selectedNode), nullptr);
     EXPECT_EQ(Doc().Graph().Find(Session().selectedNode)->type, "Reference");

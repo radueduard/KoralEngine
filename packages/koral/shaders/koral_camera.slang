@@ -1,10 +1,11 @@
 // The engine's base library: the camera a frame is seen through — where it is, and the view and lens that put the world
-// in the picture and take a pixel back out of it. 144 bytes, as a frame's block holds it.
+// in the picture and take a pixel back out of it. 144 bytes, as a ConstantBuffer holds it.
 //
 //     import koral_camera;
 //
-//     raster.position = frame.camera.ToClip(world);
-//     const float3 direction = frame.camera.RayThrough(clip).direction;
+//     ConstantBuffer<KoralCamera> camera;     // the lit graph's `camera data`
+//     raster.position = camera.ToClip(world);
+//     const float3 direction = camera.RayThrough(clip).direction;
 //
 // The matrices are the engine's: a vector goes first, mul(vector, matrix).
 

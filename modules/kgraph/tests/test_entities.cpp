@@ -2524,7 +2524,7 @@ TEST_F(EntityTest, TheEnginesLightsAreABufferOfEachKind) {
     EXPECT_EQ(runtime.ValueOf("lights", "directionalCount"), Value(1));
     EXPECT_EQ(runtime.ValueOf("lights", "pointCount"), Value(2));
     EXPECT_EQ(runtime.ValueOf("lights", "spotCount"), Value(1));
-    EXPECT_EQ(runtime.ValueOf("lights", "counts"), Value(Value::List { 1, 2, 1, 0 })) << "as a frame's block takes them";
+    EXPECT_EQ(runtime.ValueOf("lights", "counts"), Value(Value::List { 1, 2, 1, 0 })) << "as a draw's push constants take them";
     const auto floatsOf = [&](const char* output) {
         const auto held = runtime.ResourceOf("lights", output);
         return held ? kor::capi::BufferOf(held->handle)->Read<float>() : std::vector<float> {};

@@ -159,7 +159,7 @@ three shaders (`engineCommon`, `lit`, `sky`) and builds:
 
 | Pass | What is on its page |
 |---|---|
-| `frame` | The Screen; the first PerspectiveCamera and Sky, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (the sky's colours in linear terms, the sun disc's cosine); `frame data`, packed as `engineCommon.slang`'s `FrameData` declares it — the camera (`KoralCamera`), the sky's light from all round (`KoralAmbientLight`), the sun disc and the lights' counts; and `lights`, the engine's Lights function: a buffer of each kind, wired to the pipelines' `directionalLights`, `pointLights` and `spotLights` (the sky's disc is the first directional light's). |
+| `frame` | The Screen; the first PerspectiveCamera and Sky, the main View of the camera, the main Perspective of its lens (its aspect the Screen's) and `seen`, the two multiplied, and what is worked out of them (the sky's colours in linear terms, the sun disc's cosine); `camera data`, the camera as `engineCommon.slang` reads it (`KoralCamera`), and `ambient light`, the sky's light from all round (`KoralAmbientLight`), each to the pipelines' `param.camera` and `param.ambient`; and `lights`, the engine's Lights function: a buffer of each kind, wired to the pipelines' `directionalLights`, `pointLights` and `spotLights`, and its `counts` to each Draw's `push.lightCounts` (the sky's Draw is given the sun disc's cosine too, `push.sunDisc`: the disc is the first directional light's). |
 | `scene` | `color` and `depth` images the size of the window, and `lit`, the pipeline that draws meshes. `all`, every entity, and `drawn`, a Filter of those with a Mesh and the pipeline's component, are wired to the Draw: each entity's mesh, its matrix, and the component's `albedo`, `metallic`, `roughness` and `emission`. An entity with both is drawn. |
 | `sky` | The sky, drawn where nothing nearer was. |
 | `show` | The Blit of `color` to the Screen. |
@@ -174,7 +174,7 @@ over the Scene panel. So any scene is picked from and outlined, and a project th
 
 Each pass imports what it uses of the ones before it. To send something else to the shaders — a script's
 value, another entity's place — declare it in the shader's block and wire it into its buffer (`camera data`,
-`light data`; the lit graph's `frame data`) as another field.
+`light data`; the lit graph's `camera data` and `ambient light`) as another field, or give it a Draw as a push constant.
 
 The standard scene also makes a camera, a sun, a sphere and a cylinder under it; the lit one a sky, a camera, a
 sun and a sphere. `keditor::AddStandardGraph` and `AddStandardScene`, and `AddLitGraph` and `AddLitScene`
@@ -837,8 +837,8 @@ rest forward. A menu's line that is on has a tick before it.
 ## A buffer, from the pipeline that expects it
 
 A pipeline's parameter that is a buffer nothing is wired to has **Make its buffer** beside it in the inspector.
-It makes a ShaderBuffer node laid out as the pipeline's shader declares that buffer — `frame`, for a shader with
-`ConstantBuffer<FrameData> frame`, is a node with an input for each field of `FrameData` — beside the pipeline, in
+It makes a ShaderBuffer node laid out as the pipeline's shader declares that buffer — `camera`, for a shader with
+`ConstantBuffer<KoralCamera> camera`, is a node with an input for each field of `KoralCamera` — beside the pipeline, in
 its pass, wired to the parameter and picked, for the data to be wired to its fields. Each of the pipeline's
 shaders is tried, and the first that declares the buffer lays it out. `Document::MakeBufferFor(pipeline,
 parameter)` is the same, for code.

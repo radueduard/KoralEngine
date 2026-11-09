@@ -207,8 +207,8 @@ namespace keditor
         /**
          * @brief Makes the buffer a pipeline's shaders expect of one of its parameters: a ShaderBuffer node laid out
          *        as the shader declares that buffer — an input for each field of its struct, to wire the data to —
-         *        beside the pipeline, in its pass, and wired to the parameter. `frame`, of a pipeline whose shader
-         *        has `ConstantBuffer<FrameData> frame`, is a node with FrameData's fields.
+         *        beside the pipeline, in its pass, and wired to the parameter. `camera`, of a pipeline whose shader
+         *        has `ConstantBuffer<KoralCamera> camera`, is a node with KoralCamera's fields.
          * @param parameter The parameter, by the name the shader gives it, with or without `param.` before it.
          * @return The node's id; empty, with @p error saying why, when the pipeline names no shader that declares
          *         such a buffer.

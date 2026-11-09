@@ -236,8 +236,8 @@ const KoralSurface surface = KoralSurfaceAt(world, normal, uv, smooth);     // n
 const float3 lit = KoralLit(material, surface, camera, KoralLightBuffers(directional, points, spots, counts), ambient);
 ```
 
-`camera` is a `KoralCamera` — the lit graph's frame block has one, or `KoralCamera(eye)` knows only where it is.
-The environment is optional: anything `IKoralEnvironment`, such as the sky's `KoralAmbientLight` (the frame block's)
+`camera` is a `KoralCamera` — the lit graph's `camera data` is one, or `KoralCamera(eye)` knows only where it is.
+The environment is optional: anything `IKoralEnvironment`, such as the sky's `KoralAmbientLight` (the lit graph's `ambient light`)
 or a `KoralCubeEnvironment`. Lights are a buffer of each kind, as the Lights function lays them out, or any
 `IKoralLights`. Shadows are a last, optional argument: anything
 `IKoralShadows`, which says how much of each light reaches the point. The result is light, not yet tone mapped

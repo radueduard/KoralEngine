@@ -3,6 +3,14 @@ module sky;
 import engineCommon;
 import koral_depth;
 
+// What the sky's Draw is given: the Lights function's `counts` (the sun is the first directional light), and the
+// cosine of the sun disc's radius, of the Sky's sunSize.
+struct SkyData {
+    uint4 lightCounts;
+    float sunDisc;
+};
+[[vk::push_constant]] ConstantBuffer<SkyData> drawn;
+
 struct RasterInfo {
     float4 position : SV_Position;
     float2 ndc;
@@ -23,6 +31,6 @@ RasterInfo vertex(uint index : SV_VertexID)
 float4 fragment(RasterInfo raster) : SV_Target
 {
     // The way the eye looks through the pixel.
-    const float3 direction = frame.camera.RayThrough(raster.ndc).direction;
-    return float4(KoralDisplay(SkyColor(direction)), 1.0);
+    const float3 direction = camera.RayThrough(raster.ndc).direction;
+    return float4(KoralDisplay(SkyColor(direction, drawn.lightCounts.x, drawn.sunDisc)), 1.0);
 }

@@ -14,8 +14,9 @@ struct RasterInfo {
     float3 normal;
 };
 
-// One block of push constants both stages read. `model` is the engine's to give: where the entity is in the world. The
-// rest is what the entity's PbrMaterial is, wired to the Draw from a Filter of what has one (baseColor to albedo):
+// One block of push constants both stages read. `model` is the engine's to give: where the entity is in the world;
+// `lightCounts` the Lights function's `counts`, the same for every draw. The rest is what the entity's PbrMaterial is,
+// wired to the Draw from a Filter of what has one (baseColor to albedo):
 //   albedo     its colour, as picked: what it is under white light
 //   metallic   0 for a thing that is not metal, 1 for one that is: its colour is then its reflection's
 //   roughness  0 polished, 1 matte
@@ -26,6 +27,7 @@ struct DrawData {
     float metallic;
     float3 emission;
     float roughness;
+    uint4 lightCounts;      // how many lights of each kind: x directional, y point, z spot
 };
 [[vk::push_constant]] ConstantBuffer<DrawData> draw;
 
@@ -35,7 +37,7 @@ RasterInfo vertex(Vertex vertex)
     RasterInfo raster;
     const float4 world = mul(float4(vertex.position, 1.0), draw.model);
     raster.worldPosition = world.xyz;
-    raster.position = frame.camera.ToClip(world.xyz);
+    raster.position = camera.ToClip(world.xyz);
     raster.normal = KoralTransformNormal(vertex.normal, draw.model);     // square to the surface however it is scaled
     return raster;
 }
@@ -55,6 +57,6 @@ float4 fragment(RasterInfo raster) : SV_Target
     if (koralDebugShowing()) return float4(koralDebugColor(KoralDebugSurface(pbr.baseColor, pbr.normal, pbr.roughness, pbr.metallic, pbr.emission)), 1.0);
 
     // Lit by every light of the scene, each kind by itself, and by the sky all round.
-    const float3 lit = KoralLit(pbr, raster.worldPosition, pbr.normal, FrameCamera(), FrameLights(), FrameAmbient());
+    const float3 lit = KoralLit(pbr, raster.worldPosition, pbr.normal, FrameCamera(), FrameLights(draw.lightCounts.xyz), FrameAmbient());
     return float4(KoralDisplay(lit), 1.0);
 }
