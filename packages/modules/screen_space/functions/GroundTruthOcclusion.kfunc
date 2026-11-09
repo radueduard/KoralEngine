@@ -1,0 +1,492 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "How much of the sky each pixel's point sees, from the picture's `depth` alone: ground-truth ambient occlusion (Jimenez et al.), eight ways within `radius` metres, `intensity` a power on it; found at half the picture's size and blurred up to its own, kept to what is at one depth. `inverseProjection` undoes the lens, `projectionScale` is its [1][1]. `occlusion` is it (R16F, 1 open). Passes off while `idle` is not 0.",
+ "tags": [
+  "ambient occlusion",
+  "gtao",
+  "ssao",
+  "occlusion",
+  "screen space",
+  "lighting"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "inverseProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "inverseProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "projectionScale",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "projectionScale",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "radius",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "radius",
+     "kind": "eValue",
+     "default": 1.5
+    }
+   },
+   {
+    "id": "intensity",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "intensity",
+     "kind": "eValue",
+     "default": 1.5
+    }
+   },
+   {
+    "id": "fadeOut",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "fadeOut",
+     "kind": "eValue",
+     "default": 0.6
+    }
+   },
+   {
+    "id": "idle",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "idle",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "size plus",
+    "type": "Add",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "b": [
+      1,
+      1,
+      0
+     ]
+    }
+   },
+   {
+    "id": "half",
+    "type": "Divide",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size plus",
+       "out"
+      ]
+     },
+     "b": [
+      2,
+      2,
+      1
+     ]
+    }
+   },
+   {
+    "id": "raw",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eR16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "across",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eR16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "occlusion",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eR16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "horizons",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "horizons",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.raw": {
+      "$link": [
+       "raw",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run horizons",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "horizons",
+       "out"
+      ]
+     },
+     "push.inverseProjection": {
+      "$link": [
+       "inverseProjection",
+       "out"
+      ]
+     },
+     "push.projectionScale": {
+      "$link": [
+       "projectionScale",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.intensity": {
+      "$link": [
+       "intensity",
+       "out"
+      ]
+     },
+     "push.fadeOut": {
+      "$link": [
+       "fadeOut",
+       "out"
+      ]
+     },
+     "cover": "raw",
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blur across",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "across",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.rough": {
+      "$link": [
+       "raw",
+       "out"
+      ]
+     },
+     "param.blurred": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur across",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur across",
+       "out"
+      ]
+     },
+     "push.inverseProjection": {
+      "$link": [
+       "inverseProjection",
+       "out"
+      ]
+     },
+     "push.projectionScale": {
+      "$link": [
+       "projectionScale",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.intensity": {
+      "$link": [
+       "intensity",
+       "out"
+      ]
+     },
+     "push.fadeOut": {
+      "$link": [
+       "fadeOut",
+       "out"
+      ]
+     },
+     "cover": "blurred",
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blur down",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "down",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.rough": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     },
+     "param.blurred": {
+      "$link": [
+       "occlusion",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur down",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur down",
+       "out"
+      ]
+     },
+     "push.inverseProjection": {
+      "$link": [
+       "inverseProjection",
+       "out"
+      ]
+     },
+     "push.projectionScale": {
+      "$link": [
+       "projectionScale",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.intensity": {
+      "$link": [
+       "intensity",
+       "out"
+      ]
+     },
+     "push.fadeOut": {
+      "$link": [
+       "fadeOut",
+       "out"
+      ]
+     },
+     "cover": "blurred",
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out occlusion",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "occlusion",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "occlusion",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

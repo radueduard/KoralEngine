@@ -1,0 +1,349 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "The light under a skin blurred by how far it scatters (Jimenez's separable subsurface scattering): across, then down, as wide as `width` metres in the world, red scattering furthest (`falloff`, rgb), where `mask`'s red says there is skin, kept to its depth. `inverseProjection` undoes the lens, `projectionScale` is its [1][1]. `blurred` is the picture, RGBA16F.",
+ "tags": [
+  "subsurface scattering",
+  "sss",
+  "skin",
+  "translucency",
+  "screen space"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "mask",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "mask",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "inverseProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "inverseProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "projectionScale",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "projectionScale",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "width",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "width",
+     "kind": "eValue",
+     "default": 0.012
+    }
+   },
+   {
+    "id": "falloff",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "falloff",
+     "kind": "eValue",
+     "default": [
+      1,
+      0.37,
+      0.3,
+      0
+     ]
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "across",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blurred",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blur across",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "subsurface",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.mask": {
+      "$link": [
+       "mask",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur across",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur across",
+       "out"
+      ]
+     },
+     "push.direction": [
+      1,
+      0
+     ],
+     "push.width": {
+      "$link": [
+       "width",
+       "out"
+      ]
+     },
+     "push.falloff": {
+      "$link": [
+       "falloff",
+       "out"
+      ]
+     },
+     "push.inverseProjection": {
+      "$link": [
+       "inverseProjection",
+       "out"
+      ]
+     },
+     "push.projectionScale": {
+      "$link": [
+       "projectionScale",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "blur down",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "subsurface",
+     "param.source": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.mask": {
+      "$link": [
+       "mask",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur down",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur down",
+       "out"
+      ]
+     },
+     "push.direction": [
+      0,
+      1
+     ],
+     "push.width": {
+      "$link": [
+       "width",
+       "out"
+      ]
+     },
+     "push.falloff": {
+      "$link": [
+       "falloff",
+       "out"
+      ]
+     },
+     "push.inverseProjection": {
+      "$link": [
+       "inverseProjection",
+       "out"
+      ]
+     },
+     "push.projectionScale": {
+      "$link": [
+       "projectionScale",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out blurred",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "blurred",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

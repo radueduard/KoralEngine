@@ -221,3 +221,17 @@ TEST_F(ModuleTest, TheAtmosphereMakesTheSkyAndTheFog) {
         graph.Add("lights", "Function").Set("function", "Lights");
     } });
 }
+
+// What is worked out of the picture's own depth: occlusion, reflections, and light under a skin.
+TEST_F(ModuleTest, ScreenSpaceWorksFromTheDepth) {
+    // A lens of 90 degrees, near 0.1, far 100, and what undoes it.
+    const Value lens = Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, -100.0 / 99.9, -1, 0, 0, -10.0 / 99.9, 0 };
+    const Value unlens = Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, -9.99, 0, 0, -1, 10 };
+    Run({ "screen_space", "GroundTruthOcclusion", [&](kgraph::Node& call) { call.Wire("depth", "depth").Set("inverseProjection", unlens); }, "call/occlusion" });
+    Run({ "screen_space", "ScreenSpaceReflections", [&](kgraph::Node& call) {
+        call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals").Set("viewProjection", lens).Set("inverseViewProjection", unlens);
+    }, "" });
+    Run({ "screen_space", "SubsurfaceBlur", [&](kgraph::Node& call) {
+        call.Wire("picture", "picture").Wire("depth", "depth").Wire("mask", "picture").Set("inverseProjection", unlens);
+    }, "call/blurred" });
+}

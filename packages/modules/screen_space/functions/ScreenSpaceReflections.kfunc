@@ -1,0 +1,295 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "What each pixel mirrors of the picture: a ray from its place (`depth`, back through `inverseViewProjection`) about its normal (`normals`, in the world), marched `steps` steps as far as `maxDistance` metres, refined where it passes behind what is drawn and hit if within `thickness` of it. `reflected` is its colour, of `picture`, and in its alpha how sure it is \u2014 less toward the picture's edges and the further it went: what is to be blended over a probe's.",
+ "tags": [
+  "reflections",
+  "ssr",
+  "screen space reflections",
+  "mirror",
+  "glossy",
+  "screen space"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "normals",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "normals",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "viewProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "viewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "inverseViewProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "inverseViewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "maxDistance",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "maxDistance",
+     "kind": "eValue",
+     "default": 20
+    }
+   },
+   {
+    "id": "thickness",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "thickness",
+     "kind": "eValue",
+     "default": 0.3
+    }
+   },
+   {
+    "id": "steps",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "steps",
+     "kind": "eValue",
+     "default": 48
+    }
+   },
+   {
+    "id": "frame",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "frame",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "reflected",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "reflect",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "screen_space_passes",
+     "compute.entry": "reflections",
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.reflected": {
+      "$link": [
+       "reflected",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run reflect",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "reflect",
+       "out"
+      ]
+     },
+     "push.viewProjection": {
+      "$link": [
+       "viewProjection",
+       "out"
+      ]
+     },
+     "push.inverseViewProjection": {
+      "$link": [
+       "inverseViewProjection",
+       "out"
+      ]
+     },
+     "push.maxDistance": {
+      "$link": [
+       "maxDistance",
+       "out"
+      ]
+     },
+     "push.thickness": {
+      "$link": [
+       "thickness",
+       "out"
+      ]
+     },
+     "push.steps": {
+      "$link": [
+       "steps",
+       "out"
+      ]
+     },
+     "push.frame": {
+      "$link": [
+       "frame",
+       "out"
+      ]
+     },
+     "cover": "reflected"
+    }
+   },
+   {
+    "id": "out reflected",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "reflected",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "reflected",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}
