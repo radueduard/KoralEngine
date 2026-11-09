@@ -437,7 +437,7 @@ TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {
     const auto csharp = kscript::Declare(R"(
         public sealed class Lens : Script
         {
-            [Range(1, 179)] public float FieldOfView = 60f;
+            [Shown, Range(1, 179)] public float FieldOfView = 60f;
             [Min(0.001f), Logarithmic] public float Near = 0.1f;
             [Min(-1.5e1)]
             public float Far = 100f;
@@ -453,13 +453,15 @@ TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {
     EXPECT_FALSE(std::isfinite(Field(lens, "Near")->max));
     EXPECT_TRUE(Field(lens, "Near")->logarithmic) << "dragged by so much of it";
     EXPECT_FALSE(Field(lens, "FieldOfView")->logarithmic);
+    EXPECT_TRUE(Field(lens, "FieldOfView")->shown) << "among the few shown of it, taken apart";
+    EXPECT_FALSE(Field(lens, "Near")->shown);
     EXPECT_EQ(Field(lens, "Far")->min, -15.f) << "an attribute on the line before";
     EXPECT_FALSE(std::isfinite(Field(lens, "Free")->min));
 
     const auto kotlin = kscript::Declare(R"(
         class Lens : Script() {
             @Range(1f, 179f) var fieldOfView = 60f
-            @Min(0f)
+            @Shown @Min(0f)
             @Logarithmic
             var near = 0.1f
             var far = 100f
@@ -470,6 +472,8 @@ TEST(Declarations, AFieldsRangeIsWhatItsAttributeSays) {
     EXPECT_EQ(Field(kotlin.types[0], "fieldOfView")->max, 179.f);
     EXPECT_EQ(Field(kotlin.types[0], "near")->min, 0.f) << "an annotation on a line of its own";
     EXPECT_TRUE(Field(kotlin.types[0], "near")->logarithmic) << "and two";
+    EXPECT_TRUE(Field(kotlin.types[0], "near")->shown);
+    EXPECT_FALSE(Field(kotlin.types[0], "fieldOfView")->shown);
     EXPECT_FALSE(std::isfinite(Field(kotlin.types[0], "far")->min));
 
     // Its host says nothing of limits: the declared ones stay.

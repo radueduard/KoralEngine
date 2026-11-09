@@ -405,6 +405,13 @@ namespace kgraph
                     } else {
                         members.emplace_back(field.name, output);
                     }
+                    // A mesh's buffers and layout, as a MeshBuffers gives them: what taking a Mesh apart gives besides it.
+                    if (field.type == "Mesh")
+                        for (const auto& part : MeshParts()) {
+                            const std::string name = MeshPartName(field.name, part.name);
+                            if (!std::ranges::contains(members, name, &std::pair<std::string, std::string>::first))
+                                members.emplace_back(name, own ? "field." + name : description.name + "." + name);
+                        }
                 }
             };
             if (const auto component = node.inputs.find("component"); component != node.inputs.end() && component->second.value.String()) add(*component->second.value.String(), true);
@@ -1081,7 +1088,23 @@ namespace kgraph
         if (node->type == "FunctionInput" || node->type == "FunctionOutput") return { FunctionPort("out", KindOf(*node), "What it stands for: what it is given.") };
         // An Unbundle gives each member of what it takes apart.
         if (node->type == "Unbundle") {
-            for (const auto& name : BundleOf(id, "of")) ports.push_back({ name, PortKind::eValue, "value", false, std::format("The member '{}'.", name), nullptr });
+            // Each as what it is taken from gives it — a vector, a buffer, a mesh — and of a ForEach's component or `transform`,
+            // only those shown by default on the node (Port::shown): the rest there to be asked for.
+            const auto found = _impl->bundles.find(std::format("{}.of", id));
+            if (found != _impl->bundles.end())
+                for (const auto& [name, input] : found->second) {
+                    Port port { name, PortKind::eValue, "value", false, std::format("The member '{}'.", name), nullptr };
+                    if (input.link && input.link->node != id)
+                        for (const Port& given : OutputsOf(input.link->node))
+                            if (given.name == input.link->output) {
+                                port = given;
+                                port.name = name;
+                                port.optional = !given.group.empty() && !given.shown;
+                                port.group.clear();
+                                break;
+                            }
+                    ports.push_back(std::move(port));
+                }
             // Of a struct only as the graph runs: its members as it last was.
             if (ports.empty())
                 if (const auto* made = _impl->Find(id))

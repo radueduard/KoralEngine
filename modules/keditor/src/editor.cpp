@@ -661,6 +661,8 @@ namespace keditor
         /** Whether a wire may go from an output of kind @p from to an input of kind @p to: a resource to what takes one of its kind (a view of an image where an image goes), a value to a value. */
         bool WireFits(const std::string_view from, const std::string_view to)
         {
+            // A loop's instances fill a buffer of each instance's: a Draw's (a TraceRays', a Dispatch's) buffer, and nothing else.
+            if (from == "r:Instances" || to == "r:Instances") return from == "r:Instances" && (to == "r:Buffer" || to == "r:Resource");
             if (from.substr(0, 2) != to.substr(0, 2)) return false;
             // A Bundle goes where a Bundle is taken — or a function's edge, which takes any value — and nothing else takes one.
             if ((from == "v:bundle") != (to == "v:bundle")) return from == "v:value" || to == "v:value";
@@ -702,6 +704,8 @@ namespace keditor
             if (kind.starts_with("r:")) {
                 if (type == "Image" || type == "ImageView") return kui::Color::Hex(0x3FB8AF);
                 if (type == "Buffer" || type == "BufferView") return kui::Color::Hex(0xD9A441);
+                // A loop's instances: a buffer filled as best it can be from what its entities have, told from any other at a glance.
+                if (type == "Instances") return kui::Color::Hex(0xFF4F7B);
                 if (type == "Sampler") return kui::Color::Hex(0xA77BD8);
                 if (type == "Mesh") return kui::Color::Hex(0x7DBB4B);
                 if (type == "Shader") return kui::Color::Hex(0xC76B98);
@@ -4182,8 +4186,8 @@ namespace keditor
                     }
                     return Choice(std::move(names), value, set, depth ? "a depth format" : "a format");
                 }
-                if (port.editor == "components") return Ticks(Doc().ComponentNames(), value, set);
-                if (port.editor == "component") return Choice(Doc().ComponentNames(), value, set, "a component");
+                if (port.editor == "components") return ComponentPicker(Doc().ComponentNames(), value, set, key, true);
+                if (port.editor == "component") return ComponentPicker(Doc().ComponentNames(), value, set, key, false);
                 if (port.editor == "componentFields") {
                     // The fields of the component named beside it that a buffer holds, and where the entity is: ticked,
                     // when nothing is said, as many as it holds then.
@@ -5881,7 +5885,68 @@ namespace keditor
             // and when (twice in a row opens), and what is asked about before it goes to the trash.
             // The outliner: what is looked for in it, the entity whose name is being typed over, and where what is held
             // over it would go. The inspector: the components shut in it.
+            /**
+             * Components to choose from, many (@p many: `with`, `without`) or one (`component`): a search above a box of
+             * them, those chosen first, the rest those whose names have what is typed — those that start with it first.
+             * Enter ticks the first found. However many components there are, what is looked for is a few letters away.
+             */
+            kui::Widget ComponentPicker(std::vector<std::string> names, const Value& value, const std::function<void(Value)>& set, const std::string& key, const bool many)
+            {
+                std::vector<std::string> on;
+                if (many) {
+                    if (const auto* items = value.Items())
+                        for (const auto& item : *items) if (item.String() && !item.String()->empty()) on.push_back(*item.String());
+                } else if (value.String() && !value.String()->empty()) {
+                    on.push_back(*value.String());
+                }
+                for (const auto& name : on) if (!std::ranges::contains(names, name)) names.push_back(name);
+                const auto lower = [](std::string text) { std::ranges::transform(text, text.begin(), [](const unsigned char c) { return static_cast<char>(std::tolower(c)); }); return text; };
+                const std::string typed = _componentSearch.contains(key) ? _componentSearch.at(key) : std::string();
+                const std::string wanted = lower(typed);
+                // Those found: the chosen first, as they were chosen; then those that start with what is typed; then those that have it.
+                std::vector<std::string> found = on, starting, having;
+                for (const auto& name : names) {
+                    if (std::ranges::contains(on, name)) continue;
+                    const std::string folded = lower(name);
+                    if (wanted.empty() || folded.starts_with(wanted)) starting.push_back(name);
+                    else if (folded.find(wanted) != std::string::npos) having.push_back(name);
+                }
+                std::ranges::sort(starting);
+                std::ranges::sort(having);
+                found.insert(found.end(), starting.begin(), starting.end());
+                found.insert(found.end(), having.begin(), having.end());
+                const auto choose = [set, on, many](const std::string& name, const bool chosen) {
+                    if (!many) { set(Value(chosen ? name : std::string())); return; }
+                    auto changed = on;
+                    if (chosen && !std::ranges::contains(changed, name)) changed.push_back(name);
+                    if (!chosen) std::erase(changed, name);
+                    set(Value(Value::List(changed.begin(), changed.end())));
+                };
+                const std::string first = found.size() > on.size() ? found[on.size()] : std::string();
+                std::vector<kui::Widget> rows;
+                rows.push_back(kui::TextField(kui::TextFieldOptions { .text = typed, .placeholder = names.empty() ? "There are no components yet" : std::format("Find a component: {} of them", names.size()),
+                    .onChanged = [this, key](const std::string& text) { SetState([&] { _componentSearch[key] = text; }); },
+                    .onSubmitted = [this, key, first, choose](const std::string&) {
+                        if (first.empty()) return;
+                        choose(first, true);
+                        SetState([&] { _componentSearch.erase(key); });
+                    } }).Key(key + " search"));
+                std::vector<kui::Widget> box;
+                constexpr std::size_t Most = 200;
+                for (std::size_t i = 0; i < found.size() && i < Most; ++i) {
+                    const std::string& name = found[i];
+                    box.push_back(kui::Checkbox(std::ranges::contains(on, name), [choose, name](const bool checked) { choose(name, checked); }, name));
+                }
+                if (found.size() > Most) box.push_back(kgui::Muted(std::format("{} more: type more of a name", found.size() - Most)));
+                if (box.empty()) box.push_back(kgui::Muted(names.empty() ? "there are none yet" : "none has that in its name"));
+                const float tall = std::min(static_cast<float>(box.size()) * 22.f + 8.f, 180.f);
+                rows.push_back(kui::ScrollView(kui::Padding(kui::EdgeInsets::All(4.f),
+                    kui::Column(std::move(box), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(2.f)))).Height(tall));
+                return kui::Column(std::move(rows), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetGap(4.f));
+            }
+
             std::string _outlinerFilter;
+            std::map<std::string, std::string, std::less<>> _componentSearch;     // what is typed in each component picker, by its input
             kecs::Entity _renaming = kecs::NullEntity, _dropOn = kecs::NullEntity;
             Session::Beside _dropWhere = Session::Beside::eUnder;
             std::set<std::string> _componentsShut;

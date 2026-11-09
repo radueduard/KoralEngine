@@ -113,6 +113,10 @@ namespace kgraph
         /// The part of an editor's inspector it is in: "Indirect", "Depth", "rasterizationState", a Script node's
         /// resource. Empty: among the few that are always there, at the top.
         std::string group {};
+        /// A member of a Bundle (its @ref group) that is on the node once the Bundle is taken apart (an Unbundle of it):
+        /// a component's field its script marks `[Shown]`, where an entity is in the world (`matrix`, `position`,
+        /// `rotation`, `scale`), a mesh's buffers and layout. The rest are there to be asked for.
+        bool shown = false;
         /// When it does anything: while the node's input `input` is one of `values` — a Draw's `indirectOffset` for the
         /// indirect commands, a Sampler's `maxAnisotropy` while `anisotropyEnable` is true. What an editor need not
         /// show until it does. `what` says when, for an editor to say what it is not showing: "for indirect draws".

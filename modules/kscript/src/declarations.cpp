@@ -228,17 +228,20 @@ namespace kscript
 
         /**
          * What a field is kept within, as its attributes say: C#'s `[Range(0, 10)]` and `[Min(0)]`, Kotlin's `@Range(0f, 10f)`
-         * and `@Min(0f)` — as Unity has them. What an editor lets it be set to; and `[Logarithmic]`, how it is dragged.
+         * and `@Min(0f)` — as Unity has them. What an editor lets it be set to; `[Logarithmic]`, how it is dragged; and
+         * `[Shown]`, whether it is among the few shown of its component at first.
          */
         void Limits(const std::string& statement, kecs::FieldDescription& field)
         {
             static const std::regex range(R"([\[@,]\s*(?:[\w.]+\.)?Range\s*\(\s*(?:min\s*=\s*)?([^,()]+),\s*(?:max\s*=\s*)?([^,()]+)\))");
             static const std::regex least(R"([\[@,]\s*(?:[\w.]+\.)?Min\s*\(\s*(?:min\s*=\s*)?([^,()]+)\))");
             static const std::regex logarithmic(R"([\[@,]\s*(?:[\w.]+\.)?Logarithmic\b)");
+            static const std::regex shown(R"([\[@,]\s*(?:[\w.]+\.)?Shown\b)");
             static const std::regex choices(R"([\[@,]\s*(?:[\w.]+\.)?Choices\s*\(([^)]*)\))");
             static const std::regex choice(R"rx("((?:[^"\\]|\\.)*)")rx");
             std::smatch found;
             field.logarithmic = std::regex_search(statement, logarithmic);
+            field.shown = std::regex_search(statement, shown);
             if (std::regex_search(statement, found, choices)) {
                 const std::string listed = found[1].str();
                 for (auto it = std::sregex_iterator(listed.begin(), listed.end(), choice); it != std::sregex_iterator(); ++it) field.choices.push_back((*it)[1].str());

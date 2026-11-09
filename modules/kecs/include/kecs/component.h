@@ -69,6 +69,10 @@ namespace kecs
         /// A whole number's names, when it is one of so many things: 0 is the first, 1 the second... It is kept, saved
         /// and set as the number; a tool shows, and is given, the name.
         std::vector<std::string> choices;
+        /// Among the few of its component a tool shows of it at first: a script's `[Shown]`. Taken apart — a ForEach's
+        /// Bundle of the component, unbundled — these are on the node, the rest there to be asked for. A component none
+        /// of whose fields says it shows them all.
+        bool shown = false;
 
         /** @brief Whether @p other is this field for the purposes of keeping a value: the same name, type and size. */
         [[nodiscard]] bool SameAs(const FieldDescription& other) const { return name == other.name && type == other.type && size == other.size; }

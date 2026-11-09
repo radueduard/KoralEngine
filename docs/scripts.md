@@ -132,7 +132,9 @@ from the scene tree. A prefab keeps what one of its entities holds of another: e
 
 A number field can say what it is kept within: `[Range(1, 179)]` or `[Min(0)]` in C#, `@Range(1f, 179f)` or
 `@Min(0f)` in Kotlin (`koral.engine.Range`, `koral.engine.Min`), on the field's line or the line before; and
-`[Logarithmic]` (`@Logarithmic`), that it is dragged by so much of what it is — a distance, an intensity, a size. It is read
+`[Logarithmic]` (`@Logarithmic`), that it is dragged by so much of what it is — a distance, an intensity, a size; and
+`[Shown]` (`@Shown`), that it is among the few of its component on the node when the graph takes the component apart (an
+Unbundle of a ForEach's Bundle of it) — a component none of whose fields says so shows them all. It is read
 from the source with the rest, and the inspector's drag boxes — and a Script node's `field.<name>` inputs — keep to it,
 dragged or typed; for a vector, each of its numbers. An unsigned field is never less than 0. Nothing is checked as
 the script runs: a script can set a field to anything.

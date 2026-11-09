@@ -1706,6 +1706,99 @@ TEST_F(EntityTest, AShaderSaysWhatEachInstanceIsAndTheDrawFillsIt) {
     EXPECT_EQ(runtime.ResourceOf("again", "instances"), runtime.ResourceOf("draw", "instances")) << "outgrown, both have the one made in its place";
 }
 
+// A loop's `instances`, wired to a Draw's buffer of each instance's, say whose entities fill it: a Filter's, for one
+// indirect draw of them all, or a ForEach's, for a draw an element that reads its own. It is filled as best what they
+// have fills it — a field the shader does not mark is the same-named field of one of the loop's components — and what
+// none of them has is said on the Draw, which draws all the same.
+TEST_F(EntityTest, ALoopsInstancesFillADrawsBufferFromWhatItsEntitiesHave) {
+    using kgraph::Value;
+    kecs::World& world = scene->world;
+    kgraph::Runtime& runtime = *scene->runtime;
+    const auto cube = runtime.ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    const std::array<std::array<float, 3>, 2> colors { { { 1, 0, 0 }, { 0, 1, 0 } } };
+    for (int i = 0; i < 2; ++i) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { i == 0 ? -0.5f : 0.5f, 0, 0.5f });
+        world.SetScale(entity, { 0.4f, 0.4f, 0.4f });
+        world.Add<kgraph::Mesh>(entity, { cube });
+        support::Give(world, entity, "PointLight", { { "color", { colors[i][0], colors[i][1], colors[i][2] } } });
+    }
+
+    kgraph::Graph graph;
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
+        .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
+    graph.Add("canvas view", "ImageView").Wire("image", "canvas");
+    graph.Add("target", "Framebuffer").Set("color[0].name", "color").Wire("color[0].view", "canvas view");
+    graph.Add("all", "Entities");
+    graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh", "PointLight" }).Set("groupBy", "Mesh");
+    graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh");
+    graph.Add("commands", "IndirectDraws").Wire("ranges", "pack", "ranges").Wire("groups", "meshes", "groups");
+    graph.Add("tinted", "GraphicsPipeline").Set("vertex.module", "instanced").Set("vertex.entry", "vertexMain").Wire("vertex.layout", "pack", "layout")
+        .Set("fragment.module", "instanced").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "pack", "mesh").Set("command", "eDrawIndexedIndirect")
+        .Wire("indirect", "commands", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.instances", "meshes", "instances");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    runtime.Set(graph);
+    for (int i = 0; i < 3; ++i) Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    ASSERT_NE(runtime.ResourceOf("draw", "instances"), nullptr) << "the Draw made its buffer, of the Filter's entities";
+    ASSERT_NE(runtime.Status("draw"), nullptr);
+    EXPECT_EQ(runtime.Status("draw")->note, "") << "every field found: the colour is each one's PointLight's";
+    const auto is = [&](const kor::u32 x, const std::array<int, 3> rgb) {
+        const auto p = scene->Pixel(x, 16);
+        return std::abs(p.x - rgb[0]) < 4 && std::abs(p.y - rgb[1]) < 4 && std::abs(p.z - rgb[2]) < 4;
+    };
+    EXPECT_TRUE(is(8, { 255, 0, 0 })) << "each in its own PointLight's colour, with nothing of the pipeline's component";
+    EXPECT_TRUE(is(24, { 0, 255, 0 }));
+    const auto outputs = runtime.OutputsOf("meshes");
+    const auto instances = std::ranges::find(outputs, std::string("instances"), &kgraph::Port::name);
+    ASSERT_NE(instances, outputs.end());
+    EXPECT_EQ(instances->type, "Instances") << "a wire of its own";
+    EXPECT_FALSE(instances->optional) << "on the node";
+
+    {   // Of a loop whose entities have nothing of that name: said on the Draw, which draws all the same.
+        kgraph::Graph bare = graph;
+        bare.Find("meshes")->Set("with", Value::List { "Mesh" });
+        runtime.Set(bare);
+        for (int i = 0; i < 3; ++i) Frame();
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        ASSERT_NE(runtime.Status("draw"), nullptr);
+        EXPECT_TRUE(runtime.Status("draw")->ok);
+        EXPECT_NE(runtime.Status("draw")->note.find("color"), std::string::npos) << runtime.Status("draw")->note;
+        EXPECT_TRUE(is(8, { 0, 0, 0 })) << "no colour of its own: black";
+    }
+
+    {   // A ForEach's, a draw an element: each reads its own element of the one buffer.
+        kgraph::Graph each = graph;
+        std::erase_if(each.nodes, [](const kgraph::Node& node) { return node.id == "draw"; });
+        each.Add("lamps", "ForEach").Set("component", "Mesh").Set("with", Value::List { "PointLight" });
+        each.Add("draw", "Draw").Wire("pipeline", "tinted").Wire("mesh", "lamps", "field.mesh").Wire("param.instances", "lamps", "instances");
+        runtime.Set(each);
+        for (int i = 0; i < 3; ++i) Frame();
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        ASSERT_TRUE(runtime.Ok());
+        EXPECT_TRUE(is(8, { 255, 0, 0 })) << "the first element's draw reads the first instance";
+        EXPECT_TRUE(is(24, { 0, 255, 0 })) << "and the second, the second";
+
+        // Its Mesh, taken apart, gives its buffers and layout too.
+        each.Add("mesh parts", "Unbundle").Wire("of", "lamps", "Mesh");
+        runtime.Set(each);
+        Frame();
+        const auto parts = runtime.OutputsOf("mesh parts");
+        const auto part = [&](const char* name) { return std::ranges::find(parts, std::string(name), &kgraph::Port::name); };
+        for (const char* shown : { "mesh", "vertices", "indices", "layout" }) {
+            ASSERT_NE(part(shown), parts.end()) << shown;
+            EXPECT_FALSE(part(shown)->optional) << shown << " is on the node";
+        }
+        ASSERT_NE(part("vertexCount"), parts.end());
+        EXPECT_TRUE(part("vertexCount")->optional) << "there to be asked for";
+        EXPECT_EQ(part("vertices")->type, "Buffer");
+    }
+}
+
 // A buffer of instances is written again an element at a time, only where something changed: an entity moved — by
 // itself or by what it is under — given, rid of or written its own fields, gone, or another in its place. Each is seen
 // in every copy of the buffer the frames in flight read, and what did not change stays as it was written.

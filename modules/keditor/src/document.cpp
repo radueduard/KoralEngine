@@ -962,10 +962,11 @@ namespace keditor
             if (script.resources.empty()) script.resources = declared.resources;
             for (auto& field : script.fields)
                 if (const auto was = std::ranges::find(declared.fields, field.name, &kecs::FieldDescription::name);
-                    was != declared.fields.end() && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic) {
+                    was != declared.fields.end() && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic && !field.shown) {
                     field.min = was->min;
                     field.max = was->max;
                     field.logarithmic = was->logarithmic;
+                    field.shown = was->shown;
                 }
         }
         _runtime->SetResourceScript(std::move(script));

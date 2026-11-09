@@ -220,6 +220,15 @@ annotation class Min(val min: Float)
 annotation class Logarithmic
 
 /**
+ * A property among the few of its component the editor shows at first: taken apart in the graph — a ForEach's Bundle of
+ * the component, unbundled — these are on the node, and the rest there to be asked for. A component none of whose
+ * properties says it shows them all. `@Shown var roughness = 0.5f`.
+ */
+@Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.SOURCE)
+annotation class Shown
+
+/**
  * A property its script starts over for: while the scene plays, when something other than the script changes it — the
  * inspector, another script — the script is switched off, destroyed and made anew, a new object with the entity's
  * properties as they are, as if it had just been added: what `initialize` set up from it is set up again, and what

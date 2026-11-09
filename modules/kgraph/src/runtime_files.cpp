@@ -1014,6 +1014,8 @@ namespace kgraph
                     out.listed->shape = shape;
                     const auto gives = [&](const kecs::ComponentId each, const bool own) {
                         const kecs::ComponentDescription& description = world->Describe(each);
+                        // Shown, taken apart: what its script marks [Shown] — every field, where none is marked.
+                        const bool marked = std::ranges::any_of(description.fields, &kecs::FieldDescription::shown);
                         // On the node: the component as one Bundle, of its fields by their names. Each field is there to wire —
                         // and on the node only once it is, or asked for; listed as the component's, what taking it apart gives.
                         out.gives.push_back({ description.name, PortKind::eValue, "bundle", false,
@@ -1027,16 +1029,31 @@ namespace kgraph
                             if (field.offset + field.size > description.size) continue;
                             const std::string output = own ? "field." + field.name : description.name + "." + field.name;
                             const std::string doc = std::format("Each one's {}.{}.", description.name, field.name);
-                            const auto member = [&](Port port) { port.optional = true; port.group = description.name; out.gives.push_back(std::move(port)); };
+                            const auto member = [&](Port port, const bool shown) {
+                                port.optional = true;
+                                port.group = description.name;
+                                port.shown = shown;
+                                out.gives.push_back(std::move(port));
+                            };
+                            const bool shown = !marked || field.shown;
                             if (IsResourceField(field)) {
-                                member({ output, PortKind::eResource, field.type == "resource" ? std::string("Resource") : field.type, false, doc, nullptr });
+                                member({ output, PortKind::eResource, field.type == "resource" ? std::string("Resource") : field.type, false, doc, nullptr }, shown);
                                 out.listed->fields.push_back({ output, each, field, true });
+                                // A mesh: its buffers and its layout as well, as a MeshBuffers gives them, each element's.
+                                if (field.type == "Mesh")
+                                    for (const auto& part : MeshParts()) {
+                                        const std::string name = MeshPartName(field.name, part.name);
+                                        const std::string partOut = own ? "field." + name : description.name + "." + name;
+                                        member({ partOut, part.resource ? PortKind::eResource : PortKind::eValue, std::string(part.type), false,
+                                                 std::format("Each one's {}.{}: {}", description.name, field.name, part.doc), nullptr }, shown && part.shown);
+                                        out.listed->parts.push_back({ partOut, each, field, std::string(part.name) });
+                                    }
                                 continue;
                             }
                             const Value value = FieldValue(field, none.data() + field.offset);
                             if (value.IsNull()) continue;   // a string: nothing a buffer holds
                             const auto* items = value.Items();
-                            member({ output, PortKind::eValue, items ? (items->size() == 16 ? "matrix" : "vector") : value.Bool() ? "bool" : "number", false, doc, nullptr });
+                            member({ output, PortKind::eValue, items ? (items->size() == 16 ? "matrix" : "vector") : value.Bool() ? "bool" : "number", false, doc, nullptr }, shown);
                             out.listed->fields.push_back({ output, each, field, false });
                         }
                     };
@@ -1127,8 +1144,37 @@ namespace kgraph
                     if (!list.grouped) out.outputs["group"].value = 0;     // not grouped: every element is of the one
                 }
                 out.outputs["out"].value = static_cast<double>(list.Rows());     // them, for a Filter to keep some of
+                // What fills a Draw's buffer of each instance's: no resource of its own — the Draw it is wired to makes the
+                // buffer, of these entities.
+                out.outputs.try_emplace("instances");
                 SetRow(out, 0);
             }
+            return {};
+        }
+
+    auto Runtime::Impl::MeshPartsOf(Held mesh, const std::function<void(std::string_view part, Output given)>& set) -> std::string
+    {
+            while (mesh && mesh->replacedBy) mesh = mesh->replacedBy;
+            if (!mesh || mesh->kind != "Mesh") return "it holds no mesh";
+            if (mesh->pending) return "its mesh is still being read";
+            const Resource* whole = mesh->part ? mesh->source.get() : mesh.get();
+            if (!whole || !whole->handle || whole->buffers.empty()) return "its mesh has no buffers of its own to read: one made another way";
+            const auto device = kor::capi::MeshOf(whole->handle);
+            const auto& layout = device->Layout();
+            const auto position = std::ranges::find(layout.attributes, std::string_view("POSITION"), [](const auto& a) { return std::string_view(a.semantic); });
+            if (position == layout.attributes.end() || position->binding >= whole->buffers.size()) return "its mesh has no POSITION";
+            const bool indexed = device->IndexBuffer().has_value();
+            const auto number = [](const double n) { Output given; given.value = n; return given; };
+            const auto held = [](Held resource) { Output given; given.resource = std::move(resource); return given; };
+            set("vertices", held(whole->buffers[position->binding]));
+            if (indexed) set("indices", held(whole->buffers.back()));
+            Output laidOut;
+            laidOut.value = LayoutValueOf(layout);
+            set("layout", std::move(laidOut));
+            set("vertexCount", number(static_cast<double>(mesh->part ? mesh->vertexCount : device->VertexCount())));
+            set("indexCount", number(static_cast<double>(mesh->part ? mesh->indexCount : indexed ? device->IndexCount().value_or(0) : 0)));
+            set("firstIndex", number(static_cast<double>(mesh->part ? mesh->firstIndex : 0)));
+            set("vertexOffset", number(static_cast<double>(mesh->part ? mesh->vertexOffset : 0)));
             return {};
         }
 
@@ -1155,6 +1201,33 @@ namespace kgraph
                 Held held = *reinterpret_cast<const Held*>(bytes + read.field.offset);
                 while (held && held->replacedBy) held = held->replacedBy;
                 out.outputs[read.output].resource = std::move(held);
+            }
+            // A mesh's parts, of the element's mesh: worked out only when one of them is asked for.
+            for (std::size_t first = 0; first < list.parts.size();) {
+                std::size_t last = first;
+                bool any = false;
+                while (last < list.parts.size() && list.parts[last].component == list.parts[first].component && list.parts[last].field.name == list.parts[first].field.name) {
+                    any = any || wanted(list.parts[last].output);
+                    ++last;
+                }
+                const auto& of = list.parts[first];
+                const auto* bytes = !any ? nullptr : present ? static_cast<const std::byte*>(world->Get(entity, of.component)) : nullptr;
+                if (any && !bytes) bytes = list.nones.at(of.component).data();
+                const Resource* mesh = bytes ? reinterpret_cast<const Held*>(bytes + of.field.offset)->get() : nullptr;
+                while (mesh && mesh->replacedBy) mesh = mesh->replacedBy.get();
+                // The same mesh as last time — every element of a field of one mesh, every frame of one entity — is what it was.
+                const bool same = any && mesh && !mesh->pending && of.of == mesh
+                    && std::ranges::all_of(list.parts.begin() + static_cast<std::ptrdiff_t>(first), list.parts.begin() + static_cast<std::ptrdiff_t>(last),
+                                           [&](const auto& part) { return out.outputs.contains(part.output); });
+                if (any && !same) {
+                    of.of = mesh && !mesh->pending ? mesh : nullptr;
+                    for (std::size_t i = first; i < last; ++i) out.outputs[list.parts[i].output] = {};
+                    (void)MeshPartsOf(*reinterpret_cast<const Held*>(bytes + of.field.offset), [&](const std::string_view part, Output given) {
+                        for (std::size_t i = first; i < last; ++i)
+                            if (list.parts[i].part == part) out.outputs[list.parts[i].output] = std::move(given);
+                    });
+                }
+                first = last;
             }
             set("count", static_cast<double>(list.Rows()));
             set("index", static_cast<double>(index));
@@ -2572,22 +2645,16 @@ namespace kgraph
                 while (mesh && mesh->replacedBy) mesh = mesh->replacedBy;
                 if (!mesh || mesh->kind != "Mesh") return Fail("'mesh' needs a mesh wired in: a Primitive, an entity's, a model's");
                 if (mesh->pending) return Fail("its mesh is still being read");
+                if (const std::string why = MeshPartsOf(mesh, [&](const std::string_view part, Output made) { out.outputs[std::string(part)] = std::move(made); }); !why.empty())
+                    return Fail(why);
+                out.outputs.erase("layout");
                 const Resource* whole = mesh->part ? mesh->source.get() : mesh.get();
-                if (!whole || !whole->handle || whole->buffers.empty()) return Fail("its mesh has no buffers of its own to read: one made another way");
                 const auto device = kor::capi::MeshOf(whole->handle);
                 const auto& layout = device->Layout();
                 const auto position = std::ranges::find(layout.attributes, std::string_view("POSITION"), [](const auto& a) { return std::string_view(a.semantic); });
-                if (position == layout.attributes.end() || position->binding >= whole->buffers.size()) return Fail("its mesh has no POSITION");
                 const auto binding = std::ranges::find(layout.bindings, position->binding, &kor::VertexInputBindingDescription::binding);
-                const bool indexed = device->IndexBuffer().has_value();
-                out.outputs["vertices"].resource = whole->buffers[position->binding];
-                if (indexed) out.outputs["indices"].resource = whole->buffers.back();
                 out.outputs["stride"].value = static_cast<double>(binding == layout.bindings.end() ? 0 : binding->stride);
                 out.outputs["position"].value = static_cast<double>(position->offset);
-                out.outputs["vertexCount"].value = static_cast<double>(mesh->part ? mesh->vertexCount : device->VertexCount());
-                out.outputs["indexCount"].value = static_cast<double>(mesh->part ? mesh->indexCount : indexed ? device->IndexCount().value_or(0) : 0);
-                out.outputs["firstIndex"].value = static_cast<double>(mesh->part ? mesh->firstIndex : 0);
-                out.outputs["vertexOffset"].value = static_cast<double>(mesh->part ? mesh->vertexOffset : 0);
                 // And where its normals and its first UVs are, when it has them: what a mesh shader or a hit shader reads
                 // of a vertex besides where it is.
                 for (const auto& [semantic, name] : { std::pair { "NORMAL", "normals" }, std::pair { "UV", "uvs" } }) {

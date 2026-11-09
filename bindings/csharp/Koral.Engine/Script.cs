@@ -289,6 +289,14 @@ public sealed class MinAttribute(float min) : Attribute
 public sealed class LogarithmicAttribute : Attribute;
 
 /// <summary>
+/// A field among the few of its component the editor shows at first: taken apart in the graph — a ForEach's Bundle of the
+/// component, unbundled — these are on the node, and the rest there to be asked for. A component none of whose fields
+/// says it shows them all. <c>[Shown] public float roughness;</c> Read from the script's source.
+/// </summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class ShownAttribute : Attribute;
+
+/// <summary>
 /// A field its script starts over for: while the scene plays, when something other than the script changes it — the
 /// inspector, another script — the script is switched off, destroyed and made anew, a new object with the entity's fields
 /// as they are, as if it had just been added: what Initialize set up from it is set up again, and what OnDestroyed lets

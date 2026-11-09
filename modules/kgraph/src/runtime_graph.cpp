@@ -266,29 +266,83 @@ namespace kgraph
             return std::format("'{}' has nothing in it", source.kind == Source::Kind::eField ? source.field.name : source.input);
         }
 
-    auto Runtime::Impl::InstancesFor(const Node& draw, const PipelineInfo& info, const Slot& slot, EntityRun& run) -> Expected<Source>
+    auto Runtime::Impl::InstancesFor(const Node& draw, const PipelineInfo& info, const Slot& slot, EntityRun& run, const Node* loop, std::string* missing) -> Expected<Source>
     {
             const std::string port = "param." + slot.field;
             if (!world) return Fail(std::format("'{}' is each instance's, and there is no world for there to be instances of", port));
-            if (!run.each.empty()) return Fail(draw.type == "Dispatch" ? std::format("'{}' is each instance's, and this runs once an element of '{}': wire 'entities' a Filter's instead, for one dispatch of them all, or wire it", port, run.each)
-                                                                 : std::format("'{}' is each instance's, and this draws one element of '{}' at a time: set 'batched', draw a MeshPack's mesh, or wire it", port, run.each));
+            // Drawn an element of a ForEach at a time, of the same ForEach's instances: each draw reads its own element.
+            if (loop && !run.each.empty() && run.each == loop->id) run.instancedRows = true;
+            else if (!run.each.empty())
+                return Fail(loop ? std::format("'{}' is '{}''s instances, and this draws one element of '{}' at a time: wire the instances of the loop it draws", port, loop->id, run.each)
+                            : draw.type == "Dispatch" ? std::format("'{}' is each instance's, and this runs once an element of '{}': wire 'entities' a Filter's instead, for one dispatch of them all, or wire it", port, run.each)
+                                                      : std::format("'{}' is each instance's, and this draws one element of '{}' at a time: wire '{}''s instances to it, set 'batched', or draw a MeshPack's mesh", port, run.each, run.each));
             const bool rays = draw.type == "TraceRays" || draw.type == "Dispatch";     // of the Filter wired to `entities`
-            const Node* filter = nullptr;
-            if (rays) {
+            const Node* filter = loop;
+            if (!loop && rays) {
                 if (const auto entities = draw.inputs.find("entities"); entities != draw.inputs.end() && entities->second.link) filter = Origin(entities->second.link->node);
-            } else {
+            } else if (!loop) {
                 const auto mesh = draw.inputs.find("mesh");
                 const Node* pack = mesh != draw.inputs.end() && mesh->second.link ? Origin(mesh->second.link->node) : nullptr;
                 if (pack && pack->type == "MeshPack")
                     if (const auto meshes = pack->inputs.find("meshes"); meshes != pack->inputs.end() && meshes->second.link) filter = Origin(meshes->second.link->node);
             }
             const auto found = filter ? built.find(filter->id) : built.end();
+            if (loop && (found == built.end() || !found->second.status.ok || !found->second.listed)) return Fail(std::format("'{}', whose instances fill '{}', is not built", loop->id, port));
             if (found == built.end() || !found->second.status.ok || !found->second.listed)
-                return Fail(rays ? std::format("'{}' is each instance's: they are the entities wired to 'entities', a Filter's — or wire it", port)
-                                 : std::format("'{}' is each instance's: they are the entities of the Filter whose Mesh.mesh the 'mesh' MeshPack packs — or wire it", port));
+                return Fail(rays ? std::format("'{}' is each instance's: they are the entities wired to 'entities', a Filter's — or wire a ForEach's or a Filter's instances to it", port)
+                                 : std::format("'{}' is each instance's: wire a ForEach's or a Filter's instances to it — or draw the mesh of a MeshPack of a Filter's Mesh.mesh, whose entities it then is", port));
+
+            // Of a loop wired: filled from what its entities are sure to have — its components, and `with`'s, of every
+            // Filter it keeps some of — as best it can be. A field the shader does not mark is the same-named field of one
+            // of them; a material's, of a kind none of them is, is said with the rest none of them has.
+            std::shared_ptr<Instancing> instancing = slot.instancing;
+            if (loop) {
+                std::vector<kecs::ComponentId> has;
+                for (const Node* at = loop; at; ) {
+                    const auto add = [&](const Value& name) { if (const std::string* text = name.String(); text && !text->empty()) if (const kecs::ComponentId id = world->Find(*text); id != kecs::NoComponent && !std::ranges::contains(has, id)) has.push_back(id); };
+                    if (const auto component = at->inputs.find("component"); component != at->inputs.end()) add(component->second.value);
+                    if (const auto with = at->inputs.find("with"); with != at->inputs.end() && with->second.value.Items())
+                        for (const auto& name : *with->second.value.Items()) add(name);
+                    const auto upstream = at->inputs.find("entities");
+                    at = upstream != at->inputs.end() && upstream->second.link ? Origin(upstream->second.link->node) : nullptr;
+                }
+                // A component is of the kinds it derives from too: a PointLight is a Light.
+                const auto kindOf = [&](const kecs::ComponentId id) {
+                    for (const kecs::ComponentId one : has) {
+                        if (one == id) return true;
+                        if (std::ranges::contains(world->Describe(one).kinds, world->Describe(id).name)) return true;
+                    }
+                    return false;
+                };
+                auto filled = std::make_shared<Instancing>(*slot.instancing);
+                std::string lacks;
+                const auto lack = [&](const std::string& what) { lacks += std::format("{}{}", lacks.empty() ? "" : ", ", what); };
+                for (auto& field : filled->fields) {
+                    using From = Instancing::Field::From;
+                    if (field.from == From::eComponent || field.from == From::eTexture) {
+                        const kecs::FieldDescription* match = nullptr;
+                        kecs::ComponentId of = kecs::NoComponent;
+                        for (const kecs::ComponentId one : has)
+                            if (const kecs::FieldDescription* named = world->Describe(one).FindField(field.name)) {
+                                const bool picture = named->type == "Image";
+                                if (field.from == From::eTexture ? picture : !picture && MaterialFieldMisfit(*named, field.type).empty()) { match = named; of = one; break; }
+                            }
+                        if (!match) { lack(std::format("{} ({})", field.name, field.from == From::eTexture ? "a picture" : field.type)); continue; }
+                        field.from = field.from == From::eTexture ? From::eMaterialTexture : From::eMaterial;
+                        field.kind = world->Describe(of).name;
+                        field.source = *match;
+                        field.at = match->offset;
+                        field.component = of;
+                    } else if (field.Material() && (field.component == kecs::NoComponent || !kindOf(field.component))) {
+                        lack(std::format("{}.{} (only an entity with a {} is drawn)", field.kind, field.source.name, field.kind));
+                    }
+                }
+                if (missing) *missing = std::move(lacks);
+                instancing = std::move(filled);
+            }
 
             // Another Draw's, when it would write the same: one buffer, written once a frame, for all of them.
-            const std::string key = InstancesKey(filter->id, *slot.instancing, info.component);
+            const std::string key = InstancesKey(filter->id, *instancing, info.component);
             std::erase_if(sharedInstances, [](const auto& entry) { return entry.second.expired(); });
             // A runtime that follows another — an editor's Game panel, the same graph over the same world — has the one
             // that runtime made: the same entities, written once a frame for both.
@@ -324,16 +378,16 @@ namespace kgraph
             }
 
             auto instances = std::make_shared<Instances>();
-            instances->instancing = slot.instancing;
+            instances->instancing = instancing;
             instances->source = filter->id;
             instances->draws = { draw.id };
             instances->component = info.component;
-            for (const auto& field : slot.instancing->fields)
+            for (const auto& field : instancing->fields)
                 if (field.Material() && field.component != kecs::NoComponent && !std::ranges::contains(instances->materials, field.component))
                     instances->materials.push_back(field.component);
             instances->clock = frames;
             instances->capacity = std::bit_ceil(std::max<std::size_t>(found->second.listed->Rows(), 64));
-            auto buffer = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(instances->capacity * slot.instancing->stride))
+            auto buffer = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(instances->capacity * instancing->stride))
                 .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eStorage) | kor::Buffer::Usage::eTransferSrc)
                 .SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
             if (!buffer.Valid()) return Fail(buffer.Failure() ? buffer.Failure()->message : std::format("'{}' could not be made a buffer", port));
@@ -799,6 +853,7 @@ namespace kgraph
                 };
                 Item item;
                 item.entity = entity;
+                if (run.instancedRows) item.firstInstance = static_cast<kor::u32>(row);
                 item.pipeline = graphics;
 
                 if (run.draws && run.mesh.kind != Source::Kind::eNone) {

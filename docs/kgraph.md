@@ -864,7 +864,11 @@ and where it is — `matrix`, `normalMatrix`, `worldPosition`, `forward`, `up`, 
 where it is as one, `transform` (`matrix` to `scale`). A **Bundle** node is one of what it is given: an input for each of its `names`,
 `field.<name>`, a value or a wire, made on `base` (another Bundle, whose members of the same names its own replace).
 An **Unbundle** takes one apart: an output for each member, by its name — of a ForEach's component, each field, worked
-out once an element. A function's input or output may carry one.
+out once an element. A function's input or output may carry one. Each is what it is taken from gives it (a vector, a
+buffer), and of a ForEach's, only some are on the node (`Port::shown`), the rest optional: of `transform`, `matrix`,
+`position`, `rotation`, `scale`; of a component, the fields its script marks `[Shown]`, or all of them where none is. A
+mesh field gives its parts besides, each element's, as a MeshBuffers does: `vertices`, `indices`, `layout` (shown) and
+`vertexCount`, `indexCount`, `firstIndex`, `vertexOffset` — of a field `hull`, `hullVertices` and so on.
 
 A ShaderBuffer's or a BufferBuilder's `fields`, and a Draw's, a Dispatch's or a TraceRays' `push`, take a Bundle and fill
 each `field.<name>` (or `push.<name>`) of the same name — names match exactly, nothing more:
@@ -1214,9 +1218,18 @@ handled yet: an indirect draw suits meshes that share their pictures, or use non
 
 #### Each instance's, said by the shader
 
-The buffer of instances need not be wired at all: a shader that marks it `[entity("PER_INSTANCE")]` (the engine's
+The buffer of instances is not a buffer node's: a shader that marks it `[entity("PER_INSTANCE")]` (the engine's
 `entity` module, in `packages/koral/shaders`, on every scene's search path) has the Draw make it and fill it, an element
-for each entity of the Filter whose `Mesh.mesh` its `mesh`'s MeshPack packs, in the order the commands draw them.
+for each entity of the loop whose `instances` is wired to it — a Filter's, a ForEach's, an Entities node's. Unwired, it
+is of the Filter whose `Mesh.mesh` its `mesh`'s MeshPack packs, in the order the commands draw them.
+
+Of a loop wired, it is filled as best what the loop's entities are sure to have fills it: its `component`, its `with`,
+and those of each Filter it keeps some of. A field the shader does not mark — and a `TEXTURE` — is the same-named
+field of one of them, when one has a field of that name the member can be (as a material's is, below); a material
+kind's is of an entity's material of that kind. What none of them has is said on the Draw (its status's `note`): such
+a field is the pipeline's own component's where an entity has one, and zero where not, and an entity without a
+material kind the shader reads is not drawn. A Draw an element of a ForEach at a time, given that ForEach's
+`instances`, reads its own element: each draw's first instance is its element's.
 
 ```slang
 import entity;

@@ -399,6 +399,15 @@ namespace kgraph
                 bool resource = false;      // a shared reference to a resource: a mesh, a picture
             };
             std::vector<Read> fields;
+            /** A part of a mesh field it gives (MeshParts): of the field's mesh, worked out an element at a time. */
+            struct Part {
+                std::string output;
+                kecs::ComponentId component = kecs::NoComponent;
+                kecs::FieldDescription field;
+                std::string part;       // "vertices", "indices", "layout", "vertexCount"...
+                mutable const Resource* of = nullptr;   // the mesh its output was last worked out of: not again while it is the same
+            };
+            std::vector<Part> parts;
             std::map<kecs::ComponentId, std::vector<std::byte>> nones;     // a component of nothing, each: what its outputs are with no entity
             std::vector<kecs::Entity> entities;                 // as of this frame, parents before their children — or grouped
             std::size_t repeat = 1;                             // how many elements each entity is, one after another
@@ -502,6 +511,7 @@ namespace kgraph
             bool part = false;
             kor::u32 firstIndex = 0, indexCount = 0;
             kor::i32 vertexOffset = 0;
+            kor::u32 firstInstance = 0;     // its element, where it reads a buffer of each instance's of its ForEach
         };
 
         enum class DrawWith { eAuto, eDraw, eDrawIndexed };
@@ -628,6 +638,9 @@ namespace kgraph
             std::vector<Source> slots;              // one each of the pipeline's
             std::vector<Source> pushes;             // the same
             std::vector<std::shared_ptr<Instances>> instances;  // the buffers of each instance's it makes
+            // Drawn an element of a ForEach at a time, with a buffer of each instance's of the same ForEach (its
+            // `instances` wired): each draw's first instance is its element, so that a shader reads its own.
+            bool instancedRows = false;
             DrawWith command = DrawWith::eAuto;
             int cover = -1;                         // the slot whose image decides how many groups
             // A Draw's `cull`: the output whose matrix — the `cullIndex`th of them — what is out of sight is told by.
@@ -2303,8 +2316,15 @@ namespace kgraph
          * are, and filled each frame from the entities of the Filter whose meshes the Draw's MeshPack packs — in the order
          * the pack's indirect commands draw them. A TraceRays' is of the Filter wired to its `entities`, in its order: the
          * InstanceID() a RayScene of the same Filter gives each.
+         *
+         * Wired a loop's `instances` (@p loop: a ForEach's, a Filter's), it is of that loop's entities, and filled as best
+         * it can be from what they have: a field the shader does not mark is the same-named field of one of the loop's
+         * components, when there is one; what none of them has is said in @p missing — and is the pipeline's own
+         * component's, where an entity has one, and zero where not.
          */
-        Expected<Source> InstancesFor(const Node& draw, const PipelineInfo& info, const Slot& slot, EntityRun& run);
+        Expected<Source> InstancesFor(const Node& draw, const PipelineInfo& info, const Slot& slot, EntityRun& run, const Node* loop = nullptr, std::string* missing = nullptr);
+        /** The parts of a mesh (MeshParts) as a MeshBuffers gives them, each to @p set: an empty string, or why there are none. */
+        static std::string MeshPartsOf(Held mesh, const std::function<void(std::string_view part, Output given)>& set);
 
         /**
          * Each instance's element as its entity is now: where it is, which it is, and its own fields. Once a frame, and

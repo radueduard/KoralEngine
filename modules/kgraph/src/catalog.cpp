@@ -967,10 +967,20 @@ namespace kgraph
                     // by the component's name. The rest are there to wire, and put on the node by asking; what a Bundle holds is
                     // shown by taking it apart (Unbundle), and grouped as it where the editor lists what a node gives.
                     for (auto& port : each)
-                        if (IsPlacementOutput(port.name)) port.group = "transform";
+                        if (IsPlacementOutput(port.name)) {
+                            port.group = "transform";
+                            port.shown = IsShownPlacement(port.name);     // taken apart: on the node, the rest asked for
+                        }
                     each.insert(each.begin(), out("transform", "bundle", "Where it is, as one Bundle: matrix, normalMatrix, previousMatrix, worldPosition, forward, "
                                                                          "up, right, position, rotation, orientation, scale. Take it apart (Unbundle) for one of them.", true));
-                    types.push_back({ "ForEach", "Scene", { component, with, without, where, repeat }, each,
+                    // Each one's element of a buffer a shader marks [entity("PER_INSTANCE")], filled from what they have: wired to
+                    // a Draw's (a TraceRays', a Dispatch's) buffer of it, it says whose entities are drawn — the loop's.
+                    Port instances = ResourcePort("instances", "Instances", "What fills a Draw's buffer of each instance's ([entity(\"PER_INSTANCE\")]): wired to it, "
+                                                  "an element of it each one, as best as what they have fills it — where each is, which it is, its materials, and a field "
+                                                  "of the same name of one of its components for each the shader does not mark. What none of them has, the Draw says.");
+                    std::vector<Port> looped = each;
+                    looped.insert(looped.begin() + 1, instances);
+                    types.push_back({ "ForEach", "Scene", { component, with, without, where, repeat }, looped,
                                       "Every entity that has a component, an element at a time: each field of it, its index, and where the entity is. "
                                       "Every node wired from it is worked out once an element, and a BufferBuilder or ShaderBuffer wired from those holds an element for each.", nullptr });
                     // One entity, not a loop: the first with a component, or the one named — its fields, and where it is.
@@ -985,7 +995,7 @@ namespace kgraph
                                       "One entity: the first that has a component, or the one named — the camera, the sky, the sun. Each field of its component "
                                       "and of `with`'s, where it is and which it is. What is wired from it is that one's: it is no loop.", nullptr });
                     // Every entity, and those of them a filter keeps: a ForEach in steps, each wired to the next.
-                    std::vector<Port> every = each;
+                    std::vector<Port> every = looped;
                     every.insert(every.begin(), out("out", "entities", "Them: what a Filter takes, to keep some of.", true));
                     every.erase(std::ranges::find(every, "turn", &Port::name));
                     types.push_back({ "Entities", "Scene", {}, every,

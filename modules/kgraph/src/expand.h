@@ -72,6 +72,22 @@ namespace kgraph
      */
     [[nodiscard]] bool IsPlacementOutput(std::string_view name);
 
+    /** @brief Whether a placement output is on the node once a `transform` Bundle is taken apart: matrix, position, rotation, scale. */
+    [[nodiscard]] bool IsShownPlacement(std::string_view name);
+
+    /** @brief One of what a ForEach gives of a mesh field besides the mesh: its buffers, its layout, its counts. */
+    struct MeshPart {
+        std::string_view name;      ///< "vertices", "indices", "layout", "vertexCount"...
+        std::string_view type;      ///< A resource's ("Buffer"), or a value's ("struct KoralVertexLayout", "number").
+        bool resource = false;
+        bool shown = false;         ///< On the node once its Bundle is taken apart: the buffers and the layout.
+        std::string_view doc;
+    };
+    /** @brief What a ForEach gives of a mesh field besides the mesh itself, a MeshBuffers' and a Primitive's `layout`. */
+    [[nodiscard]] const std::vector<MeshPart>& MeshParts();
+    /** @brief What part @p part of mesh field @p field is called among its component's: of `mesh`, the part's own name (`vertices`); of `hull`, `hullVertices`. */
+    [[nodiscard]] std::string MeshPartName(std::string_view field, std::string_view part);
+
     /**
      * @brief The Bundles a ForEach (an Entity, an Entities node, a Filter) gives besides its `element`: `transform`, where
      *        the entity is; and one of each component's fields, by the component's name — its own (`component`), and each

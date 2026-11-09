@@ -128,10 +128,11 @@ namespace kscript
         if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent)
             for (auto& field : type.fields)
                 if (const kecs::FieldDescription* was = _world.Describe(existing).FindField(field.name);
-                    was && was->SameAs(field) && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic) {
+                    was && was->SameAs(field) && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic && !field.shown) {
                     field.min = was->min;
                     field.max = was->max;
                     field.logarithmic = was->logarithmic;
+                    field.shown = was->shown;
                 }
         description.fields = type.fields;
         if (const kecs::ComponentId existing = _world.Find(type.name); existing != kecs::NoComponent && type.initial.empty() && type.texts.empty()) {

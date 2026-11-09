@@ -334,6 +334,21 @@ TEST_F(BufferTest, AComponentIsOneBundleAndTakenApartAFieldEach) {
     EXPECT_TRUE(std::ranges::contains(runtime.BundleOf("place", "of"), std::string("matrix")));
     EXPECT_FALSE(std::ranges::contains(runtime.BundleOf("place", "of"), std::string("range"))) << "where it is: no field of its component";
     EXPECT_TRUE(Has(runtime.OutputsOf("light parts"), "range"));
+
+    // Taken apart, each member is what it was on the ForEach: of where it is, the matrix, position, rotation and scale
+    // are on the node, the rest to be asked for; of a component none of whose fields says [Shown], every field.
+    const auto place = runtime.OutputsOf("place");
+    const auto member = [](const std::vector<kgraph::Port>& ports, const char* name) { return std::ranges::find(ports, std::string(name), &kgraph::Port::name); };
+    for (const char* shown : { "matrix", "position", "rotation", "scale" }) {
+        ASSERT_NE(member(place, shown), place.end()) << shown;
+        EXPECT_FALSE(member(place, shown)->optional) << shown << " is on the node";
+    }
+    ASSERT_NE(member(place, "worldPosition"), place.end());
+    EXPECT_TRUE(member(place, "worldPosition")->optional) << "there to be asked for";
+    EXPECT_EQ(member(place, "matrix")->type, "matrix") << "as the ForEach gives it";
+    const auto parts = runtime.OutputsOf("light parts");
+    ASSERT_NE(member(parts, "range"), parts.end());
+    EXPECT_FALSE(member(parts, "range")->optional) << "nothing of PointLight says [Shown]: all of it is";
 }
 
 // A shader's inputs as it declares them: a Dispatch's `push.` inputs are of the shader's kind and size, start as its

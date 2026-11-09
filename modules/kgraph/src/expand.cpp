@@ -286,6 +286,33 @@ namespace kgraph
         return std::ranges::contains(placement, name);
     }
 
+    bool IsShownPlacement(const std::string_view name)
+    {
+        return name == "matrix" || name == "position" || name == "rotation" || name == "scale";
+    }
+
+    const std::vector<MeshPart>& MeshParts()
+    {
+        static const std::vector<MeshPart> parts {
+            { "vertices", "Buffer", true, true, "The vertex buffer its positions are in, as a buffer (eStorage)." },
+            { "indices", "Buffer", true, true, "Its indices, 32 bits each, as a buffer (eStorage): none for a mesh that has none." },
+            { "layout", "struct KoralVertexLayout", false, true, "How its vertices are laid out: what a pipeline that draws it takes as vertex.layout." },
+            { "vertexCount", "number", false, false, "How many vertices it has." },
+            { "indexCount", "number", false, false, "How many indices it has." },
+            { "firstIndex", "number", false, false, "Of a model's mesh, a part of the one buffer its model is on the device: the first of its indices." },
+            { "vertexOffset", "number", false, false, "...and what they count from." },
+        };
+        return parts;
+    }
+
+    std::string MeshPartName(const std::string_view field, const std::string_view part)
+    {
+        if (field == "mesh") return std::string(part);
+        std::string name = std::string(field) + std::string(part);
+        name[field.size()] = static_cast<char>(std::toupper(static_cast<unsigned char>(name[field.size()])));
+        return name;
+    }
+
     std::vector<std::string> EachBundles(const Node& node)
     {
         std::vector<std::string> names { "transform" };

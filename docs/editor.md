@@ -392,7 +392,8 @@ Each input has the control for what it is:
 | A colour (a Clear's `color`, an attachment's `clear`) | A swatch that opens a colour picker. |
 | A shader module | The project's `.slang` files, by name. |
 | An entry point | The functions the module beside it declares with `[shader(...)]`. |
-| Components (a Filter's or a ForEach's `with`, `without`) | A tick for each component and tag the scene has. |
+| Components (a Filter's or a ForEach's `with`, `without`) | A search above a box of the components and tags the scene has, each with a tick: those ticked first, then those whose names have what is typed — those that start with it first. Enter ticks the first found. |
+| A component (a ForEach's `component`, a Filter's `groupBy`) | The same, one ticked at most. |
 | An image parameter (`cover`) | The image parameters of the pipeline the pass runs. |
 | A node (`Reference`) | The nodes that make a resource. |
 | A vertex layout's attributes | A picture of its buffers, then each buffer's attributes under it: what each is, its type, how many, which buffer, earlier and later; whether the buffer goes per instance. |
@@ -851,6 +852,19 @@ pin beside it in the inspector, once listed). A Bundle output has **Take it apar
 What it gives: an Unbundle beside the node, in its pass, wired to it and picked — an output for each member, to wire
 from. A Bundle wires whole to a buffer's `fields` or a draw's `push`, which it fills by name.
 `Document::TakeApart(node, output)` is the same, for code.
+
+Taken apart, a few members are on the Unbundle and the rest are there to be asked for: of `transform`, `matrix`,
+`position`, `rotation` and `scale`; of a component, the fields its script marks `[Shown]` (`@Shown`) — all of them, where
+none is marked; of `Mesh`, its `mesh`, `vertices`, `indices` and `layout` (its counts asked for).
+
+## A loop's instances
+
+A ForEach, a Filter and an Entities node give `instances`, a wire of a colour of its own: wired to a Draw's buffer of
+each instance's (one its shader marks `[entity("PER_INSTANCE")]`), it says whose entities fill it — and only there does
+it go. So a ForEach of Mesh with PbrMaterial is, on the node, four things: `Mesh`, `PbrMaterial`, `transform` and
+`instances`. The buffer is filled as best what the loop's entities have fills it (see kgraph.md, Each instance's), and
+what none of them has is said on the Draw, which draws all the same. Unwired, the buffer is of the Filter whose meshes
+the Draw's MeshPack packs, as its port says.
 
 ## Working on the graph
 

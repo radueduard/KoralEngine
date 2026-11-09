@@ -4,14 +4,14 @@
 
 public sealed class PbrMaterial : Material
 {
-    public Texture baseColorMap = Texture.White;
+    [Shown] public Texture baseColorMap = Texture.White;
     public Texture normalMap = Texture.Normal;
     public Texture metallicRoughnessMap = Texture.White;    // As glTF has it: roughness in green, metallic in blue.
     public Texture emissiveMap = Texture.White;
     public Texture occlusionMap = Texture.White;
-    public Vec4 baseColor = new(1f, 1f, 1f, 1f);           // a: how opaque.
-    [Range(0f, 1f)] public float metallic = 0f;
-    [Range(0f, 1f)] public float roughness = 0.5f;
+    [Shown] public Vec4 baseColor = new(1f, 1f, 1f, 1f);   // a: how opaque.
+    [Shown, Range(0f, 1f)] public float metallic = 0f;
+    [Shown, Range(0f, 1f)] public float roughness = 0.5f;
     [Min(0f)] public Vec3 emission = new(0f, 0f, 0f);
     [Choices("Opaque", "Masked", "Blended")] public int alphaMode = 0;
     [Range(0f, 1f)] public float alphaCutoff = 0.5f;        // Masked: a texel less opaque than this is not drawn.

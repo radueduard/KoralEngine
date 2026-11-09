@@ -830,7 +830,11 @@ namespace kgraph
             }
             for (const Slot& slot : info->slots)
                 info->drawPorts.push_back({ "param." + slot.field, PortKind::eResource, KindOf(slot.type), false,
-                                            slot.sampler ? "The sampler its picture is read with." : "What the pipeline's node leaves unwired: each draw's own.", nullptr });
+                                            slot.sampler ? "The sampler its picture is read with."
+                                            : slot.instancing ? "Each instance's ([entity(\"PER_INSTANCE\")]): an element an entity, which the Draw makes and fills. Wire a ForEach's or a "
+                                                                "Filter's `instances` to it, to say whose: what their entities have fills it, as best it can, and what none of them has is said "
+                                                                "on the Draw. Unwired, it is of the Filter whose meshes the Draw's MeshPack packs."
+                                                              : "What the pipeline's node leaves unwired: each draw's own.", nullptr });
             for (PushMember& push : info->pushes) {
                 Port port { "push." + push.name, PortKind::eValue, push.rows * push.columns == 16 ? "matrix" : push.rows * push.columns == 1 ? (push.scalar == 3 ? "bool" : "number") : "vector",
                             false, "A push constant: each draw's own. Its default in the shader when not given, or zero.", nullptr };
@@ -1128,11 +1132,18 @@ namespace kgraph
                 std::vector<std::string> names { "mesh" };
                 for (const Slot& slot : info->slots) names.push_back("param." + slot.field);
                 for (const PushMember& push : info->pushes) names.push_back("push." + push.name);
+                // A loop's `instances`: what fills a buffer of each instance's, of every one of its entities — not one of them.
+                const auto instancesOf = [&](const std::string& name) -> const Node* {
+                    const auto wired = node.inputs.find(name);
+                    if (wired == node.inputs.end() || !wired->second.link || wired->second.link->output != "instances") return nullptr;
+                    const Node* loop = Origin(wired->second.link->node);
+                    return loop && IsEach(loop->type) ? loop : nullptr;
+                };
                 // The ForEach they follow, when any does: one, as a buffer's fields do.
                 std::set<std::string> sources;
                 std::map<std::string, bool> seen;
                 for (const auto& name : names)
-                    if (const auto wired = node.inputs.find(name); wired != node.inputs.end() && wired->second.link)
+                    if (const auto wired = node.inputs.find(name); wired != node.inputs.end() && wired->second.link && !instancesOf(name))
                         Follows(wired->second.link->node, sources, run->chain, seen);
                 if (sources.size() > 1)
                     return Fail(std::format("what it draws with follows more than one ForEach, '{}' and '{}': a draw is one element of one", *sources.begin(), *std::next(sources.begin())));
@@ -1178,12 +1189,18 @@ namespace kgraph
                     return source;
                 };
                 run->mesh = classify("mesh");
+                std::string unfilled;
                 for (const Slot& slot : info->slots) {
-                    run->slots.push_back(classify("param." + slot.field));
+                    const Node* loop = instancesOf("param." + slot.field);
+                    if (loop && !slot.instancing)
+                        return Fail(std::format("'param.{}' is wired '{}''s instances, and is no buffer of each instance's: only one its shader marks [entity(\"PER_INSTANCE\")] is filled so", slot.field, loop->id));
+                    run->slots.push_back(loop ? Source { .input = "param." + slot.field } : classify("param." + slot.field));
                     if (run->slots.back().kind == Source::Kind::eNone && slot.instancing) {
-                        auto made = InstancesFor(node, *info, slot, *run);
+                        std::string missing;
+                        auto made = InstancesFor(node, *info, slot, *run, loop, &missing);
                         if (!made) return Fail(made.error());
                         run->slots.back() = std::move(*made);
+                        if (!missing.empty()) unfilled += std::format("{}'param.{}' has nothing of {}", unfilled.empty() ? "" : "; ", slot.field, missing);
                     }
                     if (run->slots.back().kind == Source::Kind::eNone)
                         return Fail(slot.sampler ? std::format("'param.{}' needs a sampler: here, or wired on the pipeline for every draw", slot.field)
@@ -1207,6 +1224,9 @@ namespace kgraph
                     if (source.kind == Source::Kind::eField && source.held) return Fail(std::format("'push.{}' is a value, and was wired to a resource", push.name));
                     run->pushes.push_back(std::move(source));
                 }
+                // What a loop's entities have none of, filled as best it could be: said on the node, which draws all the same.
+                if (!unfilled.empty())
+                    out.status.note = unfilled + ": zero, or the pipeline's own component's where an entity has one";
                 // What is worked out between asks the ForEach for what it is worked out of.
                 for (const auto& id : run->chain)
                     if (const Node* between = current ? CurrentNode(id) : nullptr)
@@ -1879,10 +1899,10 @@ namespace kgraph
                         case eIndexedIndirectCount: cb.DrawIndexedIndirectCount(indirectBuffer, indirectOffset, countBuffer, countOffset, drawCount, stride); break;
                         case eTasksIndirect: cb.DrawMeshTasksIndirect(indirectBuffer, indirectOffset, drawCount, stride); break;
                         default:
-                            if (bound.Get() && item.part) cb.DrawIndexed(item.indexCount, instances, item.firstIndex, item.vertexOffset, firstInstance);
-                            else if (item.indexed) cb.DrawIndexed(vertexCount.value_or(kor::WholeSize), instances, firstVertex, vertexOffset, firstInstance);
+                            if (bound.Get() && item.part) cb.DrawIndexed(item.indexCount, instances, item.firstIndex, item.vertexOffset, firstInstance + item.firstInstance);
+                            else if (item.indexed) cb.DrawIndexed(vertexCount.value_or(kor::WholeSize), instances, firstVertex, vertexOffset, firstInstance + item.firstInstance);
                             // With no mesh there is nothing to say how many: a triangle, unless the node says.
-                            else cb.Draw(vertexCount.value_or(bound.Get() ? kor::WholeSize : 3), instances, firstVertex, firstInstance);
+                            else cb.Draw(vertexCount.value_or(bound.Get() ? kor::WholeSize : 3), instances, firstVertex, firstInstance + item.firstInstance);
                         }
                     };
                     for (const Item& item : run->items) draw(item);

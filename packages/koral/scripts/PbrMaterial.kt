@@ -8,17 +8,18 @@ import koral.engine.Choices
 import koral.engine.Material
 import koral.engine.Min
 import koral.engine.Range
+import koral.engine.Shown
 import koral.engine.Texture
 
 class PbrMaterial : Material() {
-    var baseColorMap = Texture.White
+    @Shown var baseColorMap = Texture.White
     var normalMap = Texture.Normal
     var metallicRoughnessMap = Texture.White    // As glTF has it: roughness in green, metallic in blue.
     var emissiveMap = Texture.White
     var occlusionMap = Texture.White
-    var baseColor = Vec4(1f, 1f, 1f, 1f)        // a: how opaque.
-    @Range(0f, 1f) var metallic = 0f
-    @Range(0f, 1f) var roughness = 0.5f
+    @Shown var baseColor = Vec4(1f, 1f, 1f, 1f)      // a: how opaque.
+    @Shown @Range(0f, 1f) var metallic = 0f
+    @Shown @Range(0f, 1f) var roughness = 0.5f
     @Min(0f) var emission = Vec3(0f, 0f, 0f)
     @Choices("Opaque", "Masked", "Blended") var alphaMode = 0
     @Range(0f, 1f) var alphaCutoff = 0.5f       // Masked: a texel less opaque than this is not drawn.
