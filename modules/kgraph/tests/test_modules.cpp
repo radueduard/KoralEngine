@@ -197,5 +197,5 @@ TEST_F(ModuleTest, OcclusionIsTracedIntoTheScene) {
 
 TEST_F(ModuleTest, OutlinesAreDrawnWhereDepthAndNormalsBreak) {
     Run({ "shading_stylized", "Outline", [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals").Set("normalEdge", 0.01); },
-          "picture" });
+          "call/outlined" });
 }

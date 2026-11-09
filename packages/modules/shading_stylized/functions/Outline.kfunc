@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Post",
- "description": "Lines drawn over a picture where what is seen breaks: a step in `depth` of more than `depthEdge` of how far it is, or a turn of its `normals` (xyz) of more than `normalEdge` (1 - the cosine), `width` pixels wide, of `color` (its alpha how much). `picture` is it, drawn on where it is.",
+ "description": "Lines drawn over a picture where what is seen breaks: a step in `depth` of more than `depthEdge` of how far it is, or a turn of its `normals` (xyz) of more than `normalEdge` (1 - the cosine), `width` pixels wide, of `color` (its alpha how much). `outlined` is it, RGBA16F.",
  "tags": [
   "outline",
   "edges",
@@ -108,6 +108,44 @@
     }
    },
    {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "outlined",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
     "id": "outline",
     "type": "ComputePipeline",
     "at": [
@@ -120,6 +158,12 @@
      "param.picture": {
       "$link": [
        "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "outlined",
        "out"
       ]
      },
@@ -175,22 +219,22 @@
        "out"
       ]
      },
-     "cover": "picture"
+     "cover": "target"
     }
    },
    {
-    "id": "out picture",
+    "id": "out outlined",
     "type": "FunctionOutput",
     "at": [
      3180,
      40
     ],
     "inputs": {
-     "name": "picture",
+     "name": "outlined",
      "kind": "eImage",
      "value": {
       "$link": [
-       "picture",
+       "outlined",
        "out"
       ]
      }
