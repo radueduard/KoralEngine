@@ -199,3 +199,46 @@ TEST_F(LibraryTest, TheBlurAndTheMipChainKeepWhatTheyAreGiven) {
     ASSERT_EQ(last.size(), 1u) << "32 halved five times: one pixel";
     EXPECT_NEAR(last[0], 1.f / 1024.f, 1e-4f) << "the average of the whole picture";
 }
+
+namespace {
+    /** What a shader's checks wrote to `results`, each named by its line: as LibraryTest's other checks. */
+    void ExpectChecks(kgraph::Runtime& runtime, const std::vector<std::string>& checks)
+    {
+        runtime.Watch("results");
+        std::optional<kgraph::Peek> peek;
+        for (int i = 0; i < 8 && !(peek && peek->bytes.size() >= checks.size() * 16); ++i) { Frame(); peek = runtime.Watched("results"); }
+        for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+        ASSERT_TRUE(peek && peek->bytes.size() >= checks.size() * 16) << "nothing to look at";
+        std::vector<float> got(checks.size() * 4);
+        std::memcpy(got.data(), peek->bytes.data(), got.size() * sizeof(float));
+        for (std::size_t i = 0; i < checks.size(); ++i) {
+            ASSERT_EQ(got[i * 4 + 3], 1.f) << "the shader stopped before " << checks[i];
+            EXPECT_LE(std::abs(got[i * 4] - got[i * 4 + 1]), got[i * 4 + 2]) << checks[i] << ": got " << got[i * 4];
+        }
+    }
+}
+
+// The engine's PrefilterEnvironment bakes an environment of one colour into harmonics and a prefiltered cube that give
+// that colour back, every way and at every roughness.
+TEST_F(LibraryTest, AnEnvironmentOfOneColourIsBakedAsItIs) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    const std::vector<std::string> checks = ChecksOf("iblCheck");
+    kgraph::Graph graph;
+    graph.functions["PrefilterEnvironment"] = support::EngineFunction("PrefilterEnvironment");
+    graph.Add("environment", "Image").Set("format", "eRGBA16_SFLOAT").Set("extent", Value::List { 16, 16, 1 }).Set("arrayLayers", 6)
+        .Set("usage", Value::List { "eStorage", "eSampled", "eTransferSrc" });
+    graph.Add("faces", "ImageView").Wire("image", "environment").Set("viewType", "e2DArray").Set("arrayLayerCount", 6);
+    graph.Add("fill", "ComputePipeline").Set("compute.module", "iblCheck").Set("compute.entry", "fill").Wire("param.environmentFaces", "faces");
+    graph.Add("run fill", "Dispatch").Wire("pipeline", "fill").Set("cover", "environmentFaces");
+    graph.Add("baked", "Function").Set("function", "PrefilterEnvironment").Wire("environment", "environment").Set("size", 16).Set("levels", 4).Set("samples", 32);
+    graph.Add("results", "Buffer").Set("instanceCount", static_cast<double>(checks.size() * 16)).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("check", "ComputePipeline").Set("compute.module", "iblCheck").Set("compute.entry", "computeMain")
+        .Wire("param.sh", "baked", "sh").Wire("param.prefiltered", "baked", "prefiltered").Wire("param.prefilteredSampler", "baked", "sampler")
+        .Wire("param.results", "results");
+    graph.Add("run", "Dispatch").Wire("pipeline", "check").Set("groups.x", 1).Set("groups.y", 1).Set("groups.z", 1);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 3; ++i) Frame();
+    ExpectChecks(runtime, checks);
+}

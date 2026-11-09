@@ -1,0 +1,387 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "What koral_ibl lights with, baked of `environment` (a cube: an image of six layers): `prefiltered`, a cube of `size` whose mip n is it as a surface of roughness n / (levels - 1) mirrors it (GGX, `samples` a texel), and `sh`, a buffer of its nine spherical harmonics \u2014 the light a matte surface is given of it. Baked each frame: give it an environment that changes, or turn its passes off once baked.",
+ "tags": [
+  "ibl",
+  "image based lighting",
+  "environment",
+  "prefilter",
+  "spherical harmonics",
+  "irradiance",
+  "cube map",
+  "reflection"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "environment",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "environment",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "size",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     120
+    ],
+    "inputs": {
+     "name": "size",
+     "kind": "eValue",
+     "default": 128
+    }
+   },
+   {
+    "id": "levels",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     200
+    ],
+    "inputs": {
+     "name": "levels",
+     "kind": "eValue",
+     "default": 6
+    }
+   },
+   {
+    "id": "samples",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     280
+    ],
+    "inputs": {
+     "name": "samples",
+     "kind": "eValue",
+     "default": 64
+    }
+   },
+   {
+    "id": "smooth",
+    "type": "Sampler",
+    "at": [
+     320,
+     360
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "mipmapMode": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge",
+     "addressModeW": "eClampToEdge"
+    }
+   },
+   {
+    "id": "prefiltered",
+    "type": "Image",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent.x": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "extent.y": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "arrayLayers": 6,
+     "mipLevels": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "level",
+    "type": "Repeat",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "count": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "level view",
+    "type": "ImageView",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "prefiltered",
+       "out"
+      ]
+     },
+     "viewType": "e2DArray",
+     "baseMipLevel": {
+      "$link": [
+       "level",
+       "index"
+      ]
+     },
+     "mipLevelCount": 1,
+     "baseArrayLayer": 0,
+     "arrayLayerCount": 6
+    }
+   },
+   {
+    "id": "last level",
+    "type": "Subtract",
+    "at": [
+     580,
+     200
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     },
+     "b": 1
+    }
+   },
+   {
+    "id": "roughness",
+    "type": "Divide",
+    "at": [
+     840,
+     200
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "level",
+       "index"
+      ]
+     },
+     "b": {
+      "$link": [
+       "last level",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "prefilter",
+    "type": "ComputePipeline",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "compute.module": "koral_ibl_bake",
+     "compute.entry": "prefilter",
+     "param.source": {
+      "$link": [
+       "environment",
+       "out"
+      ]
+     },
+     "param.sourceSampler": {
+      "$link": [
+       "smooth",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "level view",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run prefilter",
+    "type": "Dispatch",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "prefilter",
+       "out"
+      ]
+     },
+     "cover": "target",
+     "push.roughness": {
+      "$link": [
+       "roughness",
+       "out"
+      ]
+     },
+     "push.samples": {
+      "$link": [
+       "samples",
+       "out"
+      ]
+     },
+     "push.size": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "sh",
+    "type": "Buffer",
+    "at": [
+     840,
+     320
+    ],
+    "inputs": {
+     "instanceCount": 144,
+     "usage": [
+      "eStorage",
+      "eTransferSrc",
+      "eTransferDst"
+     ]
+    }
+   },
+   {
+    "id": "project",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     320
+    ],
+    "inputs": {
+     "compute.module": "koral_ibl_bake",
+     "compute.entry": "projectSh",
+     "param.source": {
+      "$link": [
+       "environment",
+       "out"
+      ]
+     },
+     "param.sourceSampler": {
+      "$link": [
+       "smooth",
+       "out"
+      ]
+     },
+     "param.sh": {
+      "$link": [
+       "sh",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run project",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     320
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "project",
+       "out"
+      ]
+     },
+     "groups.x": 1,
+     "groups.y": 1,
+     "groups.z": 1
+    }
+   },
+   {
+    "id": "out prefiltered",
+    "type": "FunctionOutput",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "name": "prefiltered",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "prefiltered",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out sh",
+    "type": "FunctionOutput",
+    "at": [
+     1620,
+     320
+    ],
+    "inputs": {
+     "name": "sh",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "sh",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out sampler",
+    "type": "FunctionOutput",
+    "at": [
+     1620,
+     400
+    ],
+    "inputs": {
+     "name": "sampler",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "smooth",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

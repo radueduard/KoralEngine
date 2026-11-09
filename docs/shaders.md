@@ -163,6 +163,17 @@ The contracts a material kind and its shading are written to (see [scripts.md](s
 Every lit thing the engine draws goes through these: the material previews and small pictures (`KoralStudioLights`
 and a cube map), the editor's mesh thumbnails and mesh viewer, its clay view, and the starter scenes' shaders.
 
+### `koral_ibl`: light from all round, baked
+
+| | |
+|---|---|
+| `KoralSh9`, `KoralShOf(buffer)`, `KoralShBasis`, `KoralShDiffuse(sh, normal)` | Nine spherical harmonics of the light all round: what a white matte surface facing a way sends back. |
+| `KoralShEnvironment(sh, prefiltered, sampler, mips)` | An `IKoralEnvironment` of them and a cube prefiltered a mip a roughness. |
+| `KoralCubeDirection(face, uv)`, `KoralCubeTexelSolidAngle` | A cube's texels as directions, and how much of the sphere each covers. |
+
+The engine's **PrefilterEnvironment** function bakes both of a cube (`koral_ibl_bake`): GGX importance sampled, each
+sample from the mip as wide as it covers, and the harmonics a weighed sum over the cube.
+
 ### `koral_shadows`: how much of a light reaches past what hides it
 
 Read from the maps the engine's functions draw (see [kgraph.md](kgraph.md), Lights' shadows): a point is moved off its
@@ -188,6 +199,7 @@ Each lets through every light but its own kind, and a light past its function's 
 |---|---|---|
 | Lights | — | Every light in one buffer of `KoralLight`. |
 | SunShadows, PointLightShadows, SpotLightShadows | `koral_shadow` | The shadow maps koral_shadows reads. |
+| PrefilterEnvironment | `koral_ibl_bake` | A cube prefiltered a mip a roughness, and its harmonics. |
 | GaussianBlur | `koral_blur` | A picture blurred across then down: `radius` taps each side, of spread `sigma`. |
 | MipChain | `koral_mips` | A picture's levels, each the average of the one before. |
 | Bloom | `koral_bloom` | What is brighter than a threshold bleeds round it: a 13-tap chain down and a tent back up. |
