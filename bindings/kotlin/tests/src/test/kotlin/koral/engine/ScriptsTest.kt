@@ -44,7 +44,7 @@ class ScriptsTest {
             install("a")
             val host = ScriptHost(world, classes)
             assertTrue(host.load(), "the scripts load: ${host.errors}")
-            assertEquals(setOf("Checker", "Feeder", "Pyramid", "Restarter", "Sign", "Spin", "Watcher"), host.scripts)
+            assertEquals(setOf("Checker", "Feeder", "Glow", "Pyramid", "Restarter", "Sign", "Spin", "Watcher"), host.scripts)
             assertTrue(world.hasComponentType("Spin"), "a script is a component type, by its class name")
 
             // What initialize reads, changed from outside: the script starts over, a new object, once. Nothing else does that.
@@ -220,6 +220,32 @@ class ScriptsTest {
             world.setInput("ramp", "field.step", "2")
             frames(2)
             assertEquals(6f, world.buffer("ramp", "table")!!.readFloats(8)[3], "a setting changed: made and filled again")
+
+            // ---- a script's conditions: what a Filter keeps an entity by ----------------------------------------
+            assertEquals(setOf("GlowTests.bright", "GlowTests.shaped"), host.conditionNames, "each @Condition function is one")
+            val dim = world.create("Dim")
+            world.add(dim, "Glow")
+            world.set(dim, "Glow", "power", 1)
+            val shining = world.create("Shining")
+            world.add(shining, "Glow")
+            world.set(shining, "Glow", "power", 5)
+            world.addNode("Entities", "everyone")
+            world.addNode("Filter", "glowing")
+            world.connect("everyone", "glowing", "entities")
+            world.setInput("glowing", "with", "[\"Glow\"]")
+            world.setInput("glowing", "conditions", "[\"GlowTests.bright\"]")
+            world.setInput("glowing", "GlowTests.bright.least", "2")
+            frames(1)
+            assertEquals(null, world.nodeProblem("glowing"), "a Filter of a script's condition builds")
+            assertEquals("1", world.valueJson("glowing", "count"), "only the bright one, its input by its name")
+            world.setInput("glowing", "GlowTests.bright.least", "0.5")
+            frames(1)
+            assertEquals("2", world.valueJson("glowing", "count"), "its input changed: both")
+            world.set(dim, "Glow", "power", 0)
+            frames(1)
+            assertEquals("1", world.valueJson("glowing", "count"), "its component changed: asked again")
+            world.removeNode("glowing")
+            world.removeNode("everyone")
 
             // ---- a property a script cannot keep changes nothing, and is said plainly --------------------------
             install("bad")

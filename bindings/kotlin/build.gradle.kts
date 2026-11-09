@@ -5,7 +5,8 @@ plugins {
 subprojects {
     plugins.withId("org.jetbrains.kotlin.jvm") {
         extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinJvmProjectExtension> {
-            compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }
+            // Arguments by their names: what a script's condition's inputs are called on the node.
+            compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25); javaParameters.set(true) }
         }
         extensions.configure<JavaPluginExtension> {
             sourceCompatibility = JavaVersion.VERSION_25

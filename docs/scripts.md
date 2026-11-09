@@ -517,6 +517,44 @@ the script was edited and loaded. A script that throws leaves the node failed, s
 `kengine_resource_script_register`, with what it makes as `KengineScriptResource`s, and
 `kengine_resource_script_unregister`.
 
+## Conditions
+
+A class that derives from `Conditions` holds tests a graph's ForEach or Filter keeps an entity by: each named in the
+node's `conditions` as `<Class>.<function>`, and picked there from a list. A condition is a static function marked
+`[Condition(N)]` (`@Condition(N)`, in a `companion object` with `@JvmStatic`, or in an `object`) that returns a bool.
+Its first N arguments are the entity's components — `EntityMesh` for its Mesh (its `Layout`, a `MeshLayout`), a
+script's Data class, or a script — and choosing it requires them; the rest are its inputs, each an input on the node,
+`<Class>.<function>.<argument>`: a number, a bool, a string, a vector, a `MeshLayout` (wired from a pipeline's or a
+Primitive's `layout`), a list of strings, or a component of a script's to compare with (a Bundle of one, wired).
+
+```csharp
+public sealed class MeshTests : Conditions
+{
+    [Condition(1)]
+    public static bool HasAttributes(EntityMesh mesh, MeshLayout required) => required.IsSubsetOf(mesh.Layout);
+
+    [Condition(2)]
+    public static bool Bright(EntityMesh mesh, Glow glow, float least = 2f) => glow.Power >= least;
+}
+```
+
+```kotlin
+class MeshTests : Conditions() {
+    companion object {
+        @Condition(1) @JvmStatic
+        fun hasAttributes(mesh: EntityMesh, required: MeshLayout): Boolean = required.isSubsetOf(mesh.layout)
+    }
+}
+```
+
+A condition reads nothing but its arguments: the graph asks again only when one of its components changes or an input's
+value does, and remembers the answer otherwise — so it costs nothing while the scene stands still. An input is one value
+a frame, not each entity's. A C# input's default (`= 2f`) is what the node starts with; Kotlin's is not seen by the
+engine, so a Kotlin input starts at zero, empty or false until the node says. A condition that throws is said once, and
+keeps nothing. The engine has one of its own, `HasAttributes` (a Mesh with every attribute its `required` has). Its
+arguments come to it through the C API, `kengine_condition_register`: its components as JSON of their fields, a mesh as
+its layout.
+
 ## Running a project with scripts
 
 `koral-editor` and `koral-play` run a project's scripts themselves, inside their own process: open a project, and

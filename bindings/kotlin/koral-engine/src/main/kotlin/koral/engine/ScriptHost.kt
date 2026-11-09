@@ -50,6 +50,10 @@ class ScriptHost(
     private class Built(val into: Path, val sources: String, val errors: List<String>?)
     private val registered = LinkedHashMap<String, Registered>()
     private val resources = LinkedHashMap<String, RegisteredResource>()
+    private val conditions = LinkedHashMap<String, RegisteredCondition>()
+
+    /** The conditions the scripts declare, by the name a node's `conditions` gives them: `<Class>.<function>`. */
+    val conditionNames: Set<String> get() = conditions.keys
     private var snapshot = ""
     private var pending = ""
     private var pendingSince = 0L
@@ -181,8 +185,8 @@ class ScriptHost(
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
-                if ((Setup::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
-                    && type.constructors.any { it.parameterCount == 0 }) type else null
+                if (((Setup::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
+                    && type.constructors.any { it.parameterCount == 0 }) || (Conditions::class.java.isAssignableFrom(type) && type != Conditions::class.java)) type else null
             }.sortedBy { it.name }
         } catch (e: LinkageError) {
             return refuse(next, "the classes could not be loaded: $e")
@@ -190,8 +194,9 @@ class ScriptHost(
             return refuse(next, "the classes could not be loaded: $e")
         }
         // The layouts first: a property a script cannot keep changes nothing.
+        val conditionTypes = types.filter { Conditions::class.java.isAssignableFrom(it) }
         val layouts = try {
-            types.map { it to ScriptLayout.of(it) }
+            (types - conditionTypes.toSet()).map { it to ScriptLayout.of(it) }
         } catch (e: EngineException) {
             return refuse(next, e.message ?: "a script has a property it cannot keep")
         }
@@ -202,8 +207,24 @@ class ScriptHost(
         registered.clear()
         resources.values.forEach { it.unregister() }
         resources.clear()
+        conditions.values.forEach { it.unregister() }
+        conditions.clear()
 
         val failed = mutableListOf<String>()
+        // Each @Condition function of a Conditions class — its companion's, @JvmStatic, or an object's: one the graph's
+        // ForEach and Filter nodes can name.
+        for (type in conditionTypes)
+            for (method in type.declaredMethods.sortedBy { it.name }) {
+                val marked = method.getAnnotation(Condition::class.java) ?: continue
+                val condition = RegisteredCondition(world, "${type.simpleName}.${method.name}", method, marked.components)
+                val problem = condition.problem
+                when {
+                    problem != null -> failed += "${condition.name}: $problem"
+                    condition.name in conditions -> failed += "${condition.name}: there is another of that name — a condition's function has no overloads"
+                    condition.register() -> conditions[condition.name] = condition
+                    else -> failed += "${condition.name}: ${Native.lastError}"
+                }
+            }
         for ((type, layout) in layouts) {
             // One that makes resources is a Script node's to run, and no component.
             if (ResourceScript::class.java.isAssignableFrom(type)) {
@@ -244,6 +265,8 @@ class ScriptHost(
         registered.clear()
         resources.values.forEach { it.unregister() }
         resources.clear()
+        conditions.values.forEach { it.unregister() }
+        conditions.clear()
         loader?.let { ScriptLayout.forget(it); it.close() }
         loader = null
     }
@@ -556,6 +579,87 @@ class ScriptHost(
     }
 
     /** What the engine calls to fill what a script makes: one function for every such script, told apart by the number each registered with. */
+    /** A Conditions class's @Condition function, as the graph runs it: its components and inputs from JSON. */
+    internal class RegisteredCondition(private val world: World, val name: String, private val method: java.lang.reflect.Method, private val components: Int) {
+        private val key = nextKey++
+        private val parameters = method.parameters
+        private var complained = false
+
+        /** Why it cannot be one: what is wrong with how it is written. Null when nothing is. */
+        val problem: String? = run {
+            if (!java.lang.reflect.Modifier.isStatic(method.modifiers)) return@run "a condition is static: in the class's companion object, @JvmStatic, or in an object"
+            if (method.returnType != java.lang.Boolean.TYPE) return@run "a condition returns a Boolean: whether to keep the entity"
+            if (components < 0 || components > parameters.size) return@run "@Condition($components) says $components components, and it takes ${parameters.size} arguments"
+            parameters.forEachIndexed { i, parameter ->
+                val type = parameter.type
+                if (i < components && !ConditionValues.isComponent(type))
+                    return@run "'${parameter.name}' is one of its $components components, and a ${type.simpleName} is none: an EntityMesh, or a Data class or a script of a script's"
+                if (i < components && parameters.take(i).any { it.type == type }) return@run "'${parameter.name}' is a ${type.simpleName} again: an entity has one of each"
+                if (i >= components && ConditionValues.portType(type) == null)
+                    return@run "its input '${parameter.name}' is a ${type.simpleName}: an input is a number, a Boolean, a String, a vector, a MeshLayout, a list of strings, or a component of a script's"
+            }
+            null
+        }
+
+        fun register(): Boolean = Arena.ofConfined().use { a ->
+            val callbacks = a.allocate(Native.CONDITION_CALLBACKS)
+            callbacks.setAtIndex(ADDRESS, 0, MemorySegment.ofAddress(key))
+            callbacks.setAtIndex(ADDRESS, 1, testStub)
+            val names = a.allocate(ADDRESS, maxOf(components, 1).toLong())
+            for (i in 0 until components) names.setAtIndex(ADDRESS, i.toLong(), a.allocateFrom(ConditionValues.componentName(parameters[i].type)))
+            val count = parameters.size - components
+            val inputs = a.allocate(Native.CONDITION_INPUT, maxOf(count, 1).toLong())
+            for (i in 0 until count) {
+                val parameter = parameters[components + i]
+                val at = i * Native.CONDITION_INPUT.byteSize()
+                inputs.set(ADDRESS, at, a.allocateFrom(parameter.name))
+                inputs.set(ADDRESS, at + 8, a.allocateFrom(ConditionValues.portType(parameter.type)!!))
+                inputs.set(ADDRESS, at + 16, MemorySegment.NULL)
+            }
+            method.isAccessible = true
+            conditionsLive[key] = this
+            val ok = Native.kengine_condition_register.invokeExact(world.document, a.allocateFrom(name), names, components.toLong(), inputs, count.toLong(), callbacks) as Boolean
+            if (!ok) conditionsLive.remove(key)
+            ok
+        }
+
+        fun unregister() {
+            Arena.ofConfined().use { a ->
+                Native.kengine_condition_unregister.invokeExact(world.document, a.allocateFrom(name))
+                Unit
+            }
+            conditionsLive.remove(key)
+        }
+
+        fun test(given: String, values: String): Boolean {
+            val c = ConditionValues.parse(given) as? List<*> ?: emptyList<Any?>()
+            val v = ConditionValues.parse(values) as? List<*> ?: emptyList<Any?>()
+            val arguments = Array(parameters.size) { i ->
+                val json = if (i < components) c.getOrNull(i) else v.getOrNull(i - components)
+                ConditionValues.from(json, parameters[i].type)
+            }
+            return try {
+                method.invoke(null, *arguments) == true
+            } catch (e: java.lang.reflect.InvocationTargetException) {
+                // Said once, not once an entity: and the entity is not kept.
+                if (!complained) Log.error("[scripts] $name threw ${e.targetException.javaClass.simpleName}: ${e.targetException.message}")
+                complained = true
+                false
+            }
+        }
+    }
+
+    internal object ConditionUpcalls {
+        @JvmStatic fun test(user: MemorySegment, components: MemorySegment, inputs: MemorySegment): Int =
+            // Must not throw: the caller is C.
+            try {
+                if (conditionsLive[user.address()]?.test(Native.text(components), Native.text(inputs)) == true) 1 else 0
+            } catch (e: Throwable) {
+                runCatching { Log.error("[scripts] a condition failed: ${e.stackTraceToString()}") }
+                0
+            }
+    }
+
     internal object ResourceUpcalls {
         @JvmStatic fun fill(user: MemorySegment, contents: MemorySegment, count: Long, settings: MemorySegment, size: Long): MemorySegment =
             // Must not throw: the caller is C.
@@ -619,6 +723,10 @@ class ScriptHost(
         }
         val live = HashMap<Long, Registered>()
         val resourcesLive = HashMap<Long, RegisteredResource>()
+        val conditionsLive = HashMap<Long, RegisteredCondition>()
+        val testStub: MemorySegment by lazy {
+            Koral.linker.upcallStub(MethodHandles.lookup().findStatic(ConditionUpcalls::class.java, "test", Native.TEST.toMethodType()), Native.TEST, Arena.global())
+        }
         val fillStub: MemorySegment by lazy {
             Koral.linker.upcallStub(MethodHandles.lookup().findStatic(ResourceUpcalls::class.java, "fill", Native.FILL.toMethodType()), Native.FILL, Arena.global())
         }

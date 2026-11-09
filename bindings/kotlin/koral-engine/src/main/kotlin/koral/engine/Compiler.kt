@@ -33,8 +33,9 @@ class InProcessKotlinCompiler(
     override fun compile(into: Path): List<String>? {
         val roots = sources.filter { Files.isDirectory(it) }.map { it.toString() }
         if (roots.isEmpty()) return null
+        // Its functions' arguments by their names: what a condition's inputs are called on the node.
         val arguments = listOf("-d", into.toString(), "-classpath", classpath, "-no-stdlib", "-no-reflect", "-jvm-target", jvmTarget,
-                               "-module-name", "scripts", "-nowarn") + roots
+                               "-java-parameters", "-module-name", "scripts", "-nowarn") + roots
         val said = ByteArrayOutputStream()
         val thread = Thread.currentThread()
         val before = thread.contextClassLoader

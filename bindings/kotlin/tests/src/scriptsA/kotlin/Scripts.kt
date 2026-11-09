@@ -6,6 +6,23 @@ import koral.engine.PerFrame
 import koral.engine.Reinitialize
 import koral.engine.Setup
 import koral.engine.Script
+import koral.engine.Condition
+import koral.engine.Conditions
+import koral.engine.EntityMesh
+import koral.engine.MeshLayout
+
+// A script's component, and conditions of it a Filter keeps an entity by.
+class Glow : Script() {
+    var power = 0f
+}
+class GlowTests : Conditions() {
+    companion object {
+        @Condition(1) @JvmStatic
+        fun bright(glow: Glow, least: Float): Boolean = glow.power >= least
+        @Condition(2) @JvmStatic
+        fun shaped(mesh: EntityMesh, glow: Glow, needs: MeshLayout): Boolean = needs.isSubsetOf(mesh.layout)
+    }
+}
 
 class Spin : Script() {
     var angle = 0f

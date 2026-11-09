@@ -424,6 +424,11 @@ class World internal constructor(internal val document: MemorySegment) {
         if (!(Native.kengine_node_connect.invokeExact(document, a.allocateFrom(from), a.allocateFrom(output), a.allocateFrom(node), a.allocateFrom(input)) as Boolean))
             throw EngineException(Native.lastError)
     }
+    /** What a node's output holds now, as JSON (`"3"`, `"[1, 0, 0]"`); null when it gives no such value. */
+    fun valueJson(node: String, output: String = "out"): String? = native { a ->
+        val held = Native.kengine_node_value_json.invokeExact(document, a.allocateFrom(node), a.allocateFrom(output)) as MemorySegment
+        if (held == MemorySegment.NULL) null else Native.text(held)
+    }
     /** Why a node is not built; null when it is. */
     fun nodeProblem(node: String): String? = native { a ->
         if (Native.kengine_node_ok.invokeExact(document, a.allocateFrom(node)) as Boolean) null else Native.lastError

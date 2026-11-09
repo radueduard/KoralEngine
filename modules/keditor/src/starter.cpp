@@ -324,9 +324,9 @@ repositories {{
     mavenCentral()
 }}
 
-// The JVM the engine's own Kotlin is built for.
+// The JVM the engine's own Kotlin is built for; arguments by their names, as a condition's inputs are called.
 kotlin {{
-    compilerOptions {{ jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25) }}
+    compilerOptions {{ jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_25); javaParameters.set(true) }}
 }}
 java {{
     targetCompatibility = JavaVersion.VERSION_25

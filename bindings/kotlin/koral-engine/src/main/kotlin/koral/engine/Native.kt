@@ -126,6 +126,7 @@ internal object Native {
     val kengine_node_resource = call("kengine_node_resource", ADDRESS, ADDRESS, ADDRESS, ADDRESS)
     val kengine_node_set_input_json = call("kengine_node_set_input_json", JAVA_BOOLEAN, ADDRESS, ADDRESS, ADDRESS, ADDRESS)
     val kengine_node_ok = call("kengine_node_ok", JAVA_BOOLEAN, ADDRESS, ADDRESS)
+    val kengine_node_value_json = call("kengine_node_value_json", ADDRESS, ADDRESS, ADDRESS, ADDRESS)
 
     val kecs_destroy = call("kecs_destroy", JAVA_BOOLEAN, ADDRESS, ENTITY)
     val kecs_alive = call("kecs_alive", JAVA_BOOLEAN, ADDRESS, ENTITY)
@@ -194,6 +195,13 @@ internal object Native {
     val FILL: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG)
     val kengine_resource_script_register = call("kengine_resource_script_register", JAVA_BOOLEAN, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
     val kengine_resource_script_unregister = call("kengine_resource_script_unregister", null, ADDRESS, ADDRESS)
+    /** KengineConditionInput: name, type, initial. */
+    val CONDITION_INPUT: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("type"), ADDRESS.withName("initial"))
+    /** KengineConditionCallbacks: user, then test. */
+    val CONDITION_CALLBACKS: StructLayout = MemoryLayout.structLayout(ADDRESS, ADDRESS)
+    val TEST: FunctionDescriptor = FunctionDescriptor.of(JAVA_INT, ADDRESS, ADDRESS, ADDRESS)
+    val kengine_condition_register = call("kengine_condition_register", JAVA_BOOLEAN, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
+    val kengine_condition_unregister = call("kengine_condition_unregister", null, ADDRESS, ADDRESS)
 
     /** KengineAttribute: the semantic, the type and count of its numbers, and the numbers. */
     val ATTRIBUTE: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("semantic"), JAVA_INT.withName("type"), JAVA_INT.withName("count"), ADDRESS.withName("data"))
