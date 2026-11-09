@@ -680,6 +680,16 @@ from its own folder (`../physics`) where the two are on one drive. What is impor
 imports, each once; one that is not there, is a project, is in the other language of scripts, or imports what imports
 it, is left out and said in the Problems.
 
+A module of shaders, functions and assets alone — no scripts — is any project's, C# or Kotlin. A module says, as
+`"library"`, the version of the engine's shader library it was made for (see [shaders.md](shaders.md)); one made for
+another, or saying none, is imported and said in the Problems, as is a shader or a function two imported modules have by
+one name — the nearest's is found, the other's never. A module's files are best named after it (`filters_passes.slang`)
+so that none hides another's.
+
+The engine's own modules are in `packages/modules`, beside its package: **Import a module...** lists them, a button
+each, and a new project's form offers them wherever it is made. A project keeps one by its name, `@modules/filters`,
+found wherever the engine is. What each has is in [shaders.md](shaders.md), The engine's modules.
+
 ### The scene view's tools
 
 Along the top of the Scene panel are two toolbars; where the panel is narrow they go onto more than one line.

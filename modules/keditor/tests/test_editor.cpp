@@ -4061,3 +4061,49 @@ TEST_F(EditorTest, AProjectHasAsManyScenesAsAreMadeInIt) {
     EXPECT_FALSE(Session().AddScene("second")) << "a name the project has";
     EXPECT_FALSE(Session().AddScene("a/b")) << "no file's name";
 }
+
+// A module of shaders and functions alone is any project's, whatever its scripts' language; a module says the version
+// of the shader library it was made for, and one made for another — or saying none — is said; two modules that have a
+// shader of one name are said too. The engine's own modules are imported by their names, wherever the engine is.
+TEST_F(EditorTest, ModulesSayWhatTheyAreMadeForAndTheEnginesAreByName) {
+    const auto root = std::filesystem::temp_directory_path() / "keditor-tests" / "module-rules";
+    std::filesystem::remove_all(root);
+    Open();
+    const auto write = [](const std::filesystem::path& file, const std::string& text) {
+        std::filesystem::create_directories(file.parent_path());
+        std::ofstream(file, std::ios::binary) << text;
+    };
+    ASSERT_TRUE(Session().NewProject(root / "glow", 0, true)) << Session().Status();
+    EXPECT_EQ(Session().CurrentProject().library, keditor::Project::LibraryVersion()) << "made for this engine's library";
+    write(root / "glow" / "shaders" / "glow.slang", "module glow;\npublic float Glow(float x) { return x * 2.0; }\n");
+    ASSERT_TRUE(Session().NewProject(root / "bright", 0, true)) << Session().Status();
+    write(root / "bright" / "shaders" / "glow.slang", "module glow;\npublic float Glow(float x) { return x; }\n");
+    // Made before modules said what they were made for.
+    write(root / "old" / "project.json", R"({ "koral-engine-project": 1, "name": "old", "kind": "module", "scenes": ["test"], "start": "test" })");
+
+    for (const char language : { 'c', 'k' }) {
+        const auto project = root / (language == 'c' ? "sharp" : "kotlin");
+        ASSERT_TRUE(Session().NewProject(project, language, false, { root / "glow" })) << "a module of shaders alone is a project's of any language: " << Session().Status();
+        EXPECT_EQ(Session().CurrentProject().modules, std::vector<std::string> { "../glow" });
+    }
+    keditor::Project game;
+    std::string error;
+    ASSERT_TRUE(keditor::Project::Create(root / "game", "game", game, error, 'k', false, { root / "glow", root / "bright", root / "old" })) << error;
+    std::vector<std::string> problems;
+    EXPECT_EQ(game.Imported(&problems).size(), 3u) << "each is imported, and what is wrong with it said";
+    const auto said = [&](const std::string& what) { return std::ranges::any_of(problems, [&](const std::string& p) { return p.find(what) != std::string::npos; }); };
+    EXPECT_TRUE(said("old says no version of the shader library")) << ::testing::PrintToString(problems);
+    EXPECT_TRUE(said("shaders/glow.slang")) << "two modules have one shader: " << ::testing::PrintToString(problems);
+
+    // The engine's own: by name.
+    const auto filters = keditor::Project::OfficialModules() / "filters";
+    ASSERT_TRUE(std::filesystem::exists(filters / "project.json")) << filters.generic_string();
+    EXPECT_EQ(game.Reference(filters), "@modules/filters");
+    ASSERT_TRUE(Session().OpenProject(root / "kotlin")) << Session().Status();
+    ASSERT_TRUE(Session().ImportModule(filters)) << Session().Status();
+    EXPECT_TRUE(std::ranges::contains(Session().CurrentProject().modules, std::string("@modules/filters")));
+    EXPECT_TRUE(std::ranges::contains(Doc().Functions(), std::string("Sharpen"))) << "its functions are the project's";
+    std::vector<std::string> none;
+    for (const auto& module : Session().CurrentProject().Imported(&none)) EXPECT_EQ(module.library, keditor::Project::LibraryVersion()) << module.name;
+    EXPECT_TRUE(none.empty()) << ::testing::PrintToString(none);
+}

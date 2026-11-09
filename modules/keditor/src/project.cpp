@@ -27,6 +27,30 @@ namespace keditor
         kor::Shader::AddSearchPath(ShaderDirectory(), true);
     }
 
+    int Project::LibraryVersion() { return 2; }
+
+    std::filesystem::path Project::OfficialModules() { return kscript::PackageDirectory().parent_path() / "modules"; }
+
+    namespace {
+        /** A module's folder from what imports it: one of the engine's by its name, else from the importer's folder, or whole. */
+        std::filesystem::path FolderOf(const std::string& reference, const std::filesystem::path& from)
+        {
+            if (reference.starts_with("@modules/")) return Project::OfficialModules() / reference.substr(9);
+            return std::filesystem::path(reference).is_absolute() ? std::filesystem::path(reference) : from / reference;
+        }
+
+        /** The names of what a module has that is found by name: its shaders' and its functions' files. */
+        std::vector<std::string> NamedFiles(const std::filesystem::path& folder)
+        {
+            std::vector<std::string> names;
+            std::error_code ignored;
+            for (const auto& [sub, ending] : { std::pair { "shaders", ".slang" }, { "functions", ".kfunc" } })
+                for (const auto& entry : std::filesystem::directory_iterator(folder / sub, ignored))
+                    if (entry.path().extension() == ending) names.push_back(std::string(sub) + "/" + entry.path().filename().string());
+            return names;
+        }
+    }
+
     std::string Project::LanguageName(const char language) { return language == 'k' ? "kotlin" : language == 'c' ? "csharp" : std::string(); }
 
     namespace {
@@ -108,7 +132,7 @@ namespace keditor
         std::string imports;
         for (const auto& module : modules) imports += std::format("{}{}", imports.empty() ? "" : ", ", kecs::json::Quote(module));
         out << std::format("{{\n  \"koral-engine-project\": 1,\n  \"name\": {},{}\n  \"scenes\": [{}],\n  \"start\": {}{}{}{}{}\n}}\n",
-                           kecs::json::Quote(name), module ? "\n  \"kind\": \"module\"," : "", list, kecs::json::Quote(start),
+                           kecs::json::Quote(name), module ? std::format("\n  \"kind\": \"module\",\n  \"library\": {},", library) : std::string(), list, kecs::json::Quote(start),
                            scripts.empty() ? std::string() : std::format(",\n  \"scripts\": {}", kecs::json::Quote(scripts)),
                            imports.empty() ? std::string() : std::format(",\n  \"modules\": [{}]", imports), textures, materials);
         return true;
@@ -123,6 +147,7 @@ namespace keditor
         out = Project { directory, std::move(name), { scene }, scene };
         out.scripts = LanguageName(language);
         out.module = module;
+        if (module) out.library = LibraryVersion();
         for (const auto& imported : modules) out.modules.push_back(out.Reference(imported));
         if (!out.Save(error)) return false;
         std::ofstream file(out.ScenePath(scene), std::ios::trunc);
@@ -135,6 +160,10 @@ namespace keditor
         std::error_code ignored;
         const std::filesystem::path whole = std::filesystem::weakly_canonical(std::filesystem::absolute(module, ignored), ignored);
         const std::filesystem::path from = std::filesystem::weakly_canonical(std::filesystem::absolute(directory, ignored), ignored);
+        // One of the engine's by its name: it is wherever the engine is.
+        const std::filesystem::path official = std::filesystem::weakly_canonical(OfficialModules(), ignored);
+        if (const std::filesystem::path within = whole.lexically_relative(official); !within.empty() && *within.begin() != ".." && within.has_filename())
+            return "@modules/" + within.generic_string();
         // From this one's folder where both are on one drive, so that the two can be moved together; whole otherwise.
         if (whole.root_name() == from.root_name())
             if (const std::filesystem::path relative = whole.lexically_relative(from); !relative.empty()) return relative.generic_string();
@@ -153,7 +182,7 @@ namespace keditor
         // Each one's modules after it, depth first: the nearest first, and each once however many import it.
         const std::function<void(const Project&)> visit = [&](const Project& from) {
             for (const auto& reference : from.modules) {
-                const std::filesystem::path folder = std::filesystem::path(reference).is_absolute() ? std::filesystem::path(reference) : from.directory / reference;
+                const std::filesystem::path folder = FolderOf(reference, from.directory);
                 const std::filesystem::path whole = canonical(folder);
                 if (std::ranges::contains(seen, whole)) continue;     // this one, one already found, or round in a circle
                 seen.push_back(whole);
@@ -166,11 +195,22 @@ namespace keditor
                                     language == 'k' ? "Kotlin" : "C#"));
                     continue;
                 }
+                if (module.library != LibraryVersion())
+                    say(module.library == 0 ? std::format("{} says no version of the shader library it was made for: this engine's is {}", module.name, LibraryVersion())
+                                            : std::format("{} was made for version {} of the shader library, and this engine's is {}: its shaders may not build",
+                                                          module.name, module.library, LibraryVersion()));
                 found.push_back(module);
                 visit(module);
             }
         };
         visit(*this);
+        // A shader or a function two of them have by one name: the nearest's is found, the other's never.
+        std::map<std::string, std::string> had;
+        for (const auto& module : found)
+            for (const auto& file : NamedFiles(module.directory)) {
+                const auto [it, first] = had.emplace(file, module.name);
+                if (!first) say(std::format("{} has {}, as {} does: {}'s is found first, and {}'s never", module.name, file, it->second, it->second, module.name));
+            }
         return found;
     }
 
@@ -214,6 +254,7 @@ namespace keditor
         if (const auto* start = file.Find("start")) out.start = start->string;
         if (const auto* scripts = file.Find("scripts")) out.scripts = scripts->string;
         if (const auto* kind = file.Find("kind")) out.module = kind->string == "module";
+        if (const auto* library = file.Find("library"); library && library->kind == kecs::json::Value::Kind::eNumber) out.library = static_cast<int>(library->number);
         if (const auto* modules = file.Find("modules"))
             for (const auto& module : modules->items) if (module.kind == kecs::json::Value::Kind::eString) out.modules.push_back(module.string);
         if (const auto* textures = file.Find("textures")) {

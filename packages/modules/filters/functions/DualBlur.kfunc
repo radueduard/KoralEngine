@@ -1,0 +1,419 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture blurred as wide as `levels` halvings: the dual filter (Bj\u00f8rge's), down a chain of pictures each half the last and back up it. `blurred` is the top of the way up: half the picture's size, to be read with a linear sampler.",
+ "tags": [
+  "blur",
+  "dual filter",
+  "dual kawase",
+  "wide blur",
+  "post",
+  "filter"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "levels",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "levels",
+     "kind": "eValue",
+     "default": 4
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "half",
+    "type": "Divide",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "b": [
+      2,
+      2,
+      1
+     ]
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     220
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "down chain",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     },
+     "mipLevels": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "up chain",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "half",
+       "out"
+      ]
+     },
+     "mipLevels": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "down levels",
+    "type": "Repeat",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "count": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "down level",
+    "type": "ImageView",
+    "at": [
+     840,
+     130
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "down chain",
+       "out"
+      ]
+     },
+     "baseMipLevel": {
+      "$link": [
+       "down levels",
+       "index"
+      ]
+     },
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "source view",
+    "type": "ImageView",
+    "at": [
+     840,
+     220
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "level above",
+    "type": "Previous",
+    "at": [
+     840,
+     310
+    ],
+    "inputs": {
+     "of": "down level",
+     "first": "source view"
+    }
+   },
+   {
+    "id": "down",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "dualDown",
+     "param.source": {
+      "$link": [
+       "level above",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "down level",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run down",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "down",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "last level",
+    "type": "Subtract",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     },
+     "b": 1
+    }
+   },
+   {
+    "id": "up levels",
+    "type": "Repeat",
+    "at": [
+     840,
+     130
+    ],
+    "inputs": {
+     "count": {
+      "$link": [
+       "last level",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "up level",
+    "type": "ImageView",
+    "at": [
+     840,
+     220
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "up chain",
+       "out"
+      ]
+     },
+     "baseMipLevel": {
+      "$link": [
+       "up levels",
+       "reverse"
+      ]
+     },
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "smallest",
+    "type": "Element",
+    "at": [
+     840,
+     310
+    ],
+    "inputs": {
+     "of": "down level"
+    }
+   },
+   {
+    "id": "level below",
+    "type": "Previous",
+    "at": [
+     840,
+     400
+    ],
+    "inputs": {
+     "of": "up level",
+     "first": "smallest"
+    }
+   },
+   {
+    "id": "up",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "dualUp",
+     "param.source": {
+      "$link": [
+       "level below",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "up level",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run up",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "up",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "top",
+    "type": "Element",
+    "at": [
+     1620,
+     40
+    ],
+    "inputs": {
+     "of": "up level"
+    }
+   },
+   {
+    "id": "out blurred",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "blurred",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "top",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

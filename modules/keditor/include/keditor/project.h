@@ -39,8 +39,21 @@ namespace keditor
         std::map<std::string, std::map<std::string, std::string>> importKinds;
         /** A module: what it has is for the projects that import it, and its one scene is `test`. In `project.json` as `"kind": "module"`. */
         bool module = false;
-        /** The modules it imports, each its folder from this one's (`../physics`), or whole. In `project.json` as `"modules"`. */
+        /**
+         * The modules it imports, each its folder from this one's (`../physics`), whole, or one of the engine's by its name
+         * (`@modules/filters`: in OfficialModules). In `project.json` as `"modules"`.
+         */
         std::vector<std::string> modules;
+        /**
+         * A module's: the version of the engine's shader library it was made for (LibraryVersion), what its shaders import and
+         * build on. 0 for one made before modules said so. In `project.json` as `"library"`.
+         */
+        int library = 0;
+
+        /** @brief The version of the engine's shader library (packages/koral/shaders): one more each time what a module builds on changes. */
+        [[nodiscard]] static int LibraryVersion();
+        /** @brief Where the engine's own modules are: packages/modules, beside its package. */
+        [[nodiscard]] static std::filesystem::path OfficialModules();
 
         /**
          * @brief Makes a project in @p directory, which is made too: one empty scene, "main" — "test", for a module —
@@ -71,14 +84,19 @@ namespace keditor
         /**
          * @brief The modules it imports, and those they import, each once: the nearest first, in the order each says them.
          *        One that is not there, is no module, or has its scripts in another language than this one is left out
-         *        and said in @p problems — as is one that imports, round about, what imports it.
+         *        and said in @p problems — as is one that imports, round about, what imports it. Said too, and kept: one
+         *        made for another version of the shader library, and a shader or a function two of them have by one name
+         *        (the nearest's is found first).
          */
         [[nodiscard]] std::vector<Project> Imported(std::vector<std::string>* problems = nullptr) const;
         /** @brief The folders of Imported: where what the modules have is. */
         [[nodiscard]] std::vector<std::filesystem::path> ImportedDirectories(std::vector<std::string>* problems = nullptr) const;
         /** @brief The modules found in @p folder, one level down: those a project made there is offered to import. */
         [[nodiscard]] static std::vector<Project> ModulesIn(const std::filesystem::path& folder);
-        /** @brief @p module 's folder as this one keeps it: from its own folder where the two share a drive, or whole. */
+        /**
+         * @brief @p module 's folder as this one keeps it: one of the engine's by its name (`@modules/filters`), else from its own
+         *        folder where the two share a drive, or whole.
+         */
         [[nodiscard]] std::string Reference(const std::filesystem::path& module) const;
     };
 }

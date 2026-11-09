@@ -34,7 +34,7 @@ namespace keditor
     using namespace widgets;
 
     /** Which of the editor's dialogs is in front of everything: one at a time. */
-    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eNewProjectFolder, eNewProjectModule, eImportModule, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame, eNewScene };
+    enum class EditorDialog { eNone, eAddNode, ePortChoice, eNewProject, eNewProjectFolder, eNewProjectModule, eImportModule, eImportModuleFolder, eOpenProject, eNewShader, eNewScript, eImportModel, eImportOptions, eConfirm, eNewFolder, eTrash, eNewFunction, eNewPrefab, eCompressTextures, eMoveAsset, eExportGame, eNewScene };
 
     class AssetsView {
     public:

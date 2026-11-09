@@ -1,0 +1,335 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "How bright a picture is, as a histogram of its log brightness from 2^`lowest` to 2^`highest`, and the exposure that shows its middle as `key` (0.18, middle grey), kept between `darkest` and `brightest` and moved `speed` of the way towards it each frame: `exposure`, a buffer of one number \u2014 what GradeExposed multiplies by.",
+ "tags": [
+  "auto exposure",
+  "eye adaptation",
+  "histogram",
+  "exposure",
+  "brightness",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "lowest",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "lowest",
+     "kind": "eValue",
+     "default": -10
+    }
+   },
+   {
+    "id": "highest",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "highest",
+     "kind": "eValue",
+     "default": 6
+    }
+   },
+   {
+    "id": "key",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "key",
+     "kind": "eValue",
+     "default": 0.18
+    }
+   },
+   {
+    "id": "speed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "speed",
+     "kind": "eValue",
+     "default": 0.05
+    }
+   },
+   {
+    "id": "darkest",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "darkest",
+     "kind": "eValue",
+     "default": 0.01
+    }
+   },
+   {
+    "id": "brightest",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "brightest",
+     "kind": "eValue",
+     "default": 64
+    }
+   },
+   {
+    "id": "bins",
+    "type": "Buffer",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "instanceCount": 1024,
+     "usage": [
+      "eStorage",
+      "eTransferDst"
+     ]
+    }
+   },
+   {
+    "id": "adapted",
+    "type": "Buffer",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "instanceCount": 4,
+     "usage": [
+      "eStorage",
+      "eTransferSrc",
+      "eTransferDst"
+     ]
+    }
+   },
+   {
+    "id": "clear bins",
+    "type": "ClearBuffer",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "buffer": {
+      "$link": [
+       "bins",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "histogram",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "color_grading_passes",
+     "compute.entry": "histogram",
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.bins": {
+      "$link": [
+       "bins",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run histogram",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "histogram",
+       "out"
+      ]
+     },
+     "push.lowest": {
+      "$link": [
+       "lowest",
+       "out"
+      ]
+     },
+     "push.highest": {
+      "$link": [
+       "highest",
+       "out"
+      ]
+     },
+     "push.key": {
+      "$link": [
+       "key",
+       "out"
+      ]
+     },
+     "push.speed": {
+      "$link": [
+       "speed",
+       "out"
+      ]
+     },
+     "push.darkest": {
+      "$link": [
+       "darkest",
+       "out"
+      ]
+     },
+     "push.brightest": {
+      "$link": [
+       "brightest",
+       "out"
+      ]
+     },
+     "cover": "picture"
+    }
+   },
+   {
+    "id": "average",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "color_grading_passes",
+     "compute.entry": "average",
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.bins": {
+      "$link": [
+       "bins",
+       "out"
+      ]
+     },
+     "param.adapted": {
+      "$link": [
+       "adapted",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run average",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "average",
+       "out"
+      ]
+     },
+     "push.lowest": {
+      "$link": [
+       "lowest",
+       "out"
+      ]
+     },
+     "push.highest": {
+      "$link": [
+       "highest",
+       "out"
+      ]
+     },
+     "push.key": {
+      "$link": [
+       "key",
+       "out"
+      ]
+     },
+     "push.speed": {
+      "$link": [
+       "speed",
+       "out"
+      ]
+     },
+     "push.darkest": {
+      "$link": [
+       "darkest",
+       "out"
+      ]
+     },
+     "push.brightest": {
+      "$link": [
+       "brightest",
+       "out"
+      ]
+     },
+     "groups.x": 1,
+     "groups.y": 1,
+     "groups.z": 1
+    }
+   },
+   {
+    "id": "out exposure",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "exposure",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "adapted",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

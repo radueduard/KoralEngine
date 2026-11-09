@@ -68,18 +68,28 @@ namespace {
 
 namespace support
 {
-    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
+    namespace {
+        std::shared_ptr<const kgraph::Graph> FunctionFile(const std::filesystem::path& file)
+        {
+            std::ifstream in(file, std::ios::binary);
+            std::stringstream read;
+            read << in.rdbuf();
+            kecs::json::Value parsed;
+            std::string error;
+            auto graph = std::make_shared<kgraph::Graph>();
+            if (!kecs::json::Parse(read.str(), parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
+                ADD_FAILURE() << file.generic_string() << ": " << error;
+            return graph;
+        }
+    }
+
+    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name) { return FunctionFile(kscript::PackageDirectory() / "functions" / (name + ".kfunc")); }
+
+    std::filesystem::path OfficialModules() { return kscript::PackageDirectory().parent_path() / "modules"; }
+
+    std::shared_ptr<const kgraph::Graph> ModuleFunction(const std::string& module, const std::string& name)
     {
-        const std::filesystem::path file = kscript::PackageDirectory() / "functions" / (name + ".kfunc");
-        std::ifstream in(file, std::ios::binary);
-        std::stringstream read;
-        read << in.rdbuf();
-        kecs::json::Value parsed;
-        std::string error;
-        auto graph = std::make_shared<kgraph::Graph>();
-        if (!kecs::json::Parse(read.str(), parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
-            ADD_FAILURE() << name << ": " << error;
-        return graph;
+        return FunctionFile(OfficialModules() / module / "functions" / (name + ".kfunc"));
     }
 
     kor::App* App() { return s_app.get(); }

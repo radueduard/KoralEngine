@@ -1,0 +1,505 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A noisy picture \u2014 traced, sampled once a pixel \u2014 smoothed but at its edges: four steps of an \u00e0-trous filter (1, 2, 4 and 8 pixels apart, a B3 spline's weights), each neighbour counting as it is near in `depth` and faces as the same way (`normals`, xyz -1 to 1), and by its colour (`range`, 0 for not). `denoised` is it, RGBA16F.",
+ "tags": [
+  "denoise",
+  "a-trous",
+  "atrous",
+  "wavelet",
+  "svgf",
+  "edge stopping",
+  "filter",
+  "ray tracing"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "normals",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "normals",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depthSigma",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "depthSigma",
+     "kind": "eValue",
+     "default": 0.05
+    }
+   },
+   {
+    "id": "normalPower",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "normalPower",
+     "kind": "eValue",
+     "default": 64
+    }
+   },
+   {
+    "id": "range",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "range",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "step 0 picture",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "step 1 picture",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "step 2 picture",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "denoised",
+    "type": "Image",
+    "at": [
+     580,
+     310
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "step 0",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "atrous",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "step 0 picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run step 0",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "step 0",
+       "out"
+      ]
+     },
+     "push.step": 1,
+     "push.depthSigma": {
+      "$link": [
+       "depthSigma",
+       "out"
+      ]
+     },
+     "push.normalPower": {
+      "$link": [
+       "normalPower",
+       "out"
+      ]
+     },
+     "push.range": {
+      "$link": [
+       "range",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "step 1",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "atrous",
+     "param.source": {
+      "$link": [
+       "step 0 picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "step 1 picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run step 1",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "step 1",
+       "out"
+      ]
+     },
+     "push.step": 2,
+     "push.depthSigma": {
+      "$link": [
+       "depthSigma",
+       "out"
+      ]
+     },
+     "push.normalPower": {
+      "$link": [
+       "normalPower",
+       "out"
+      ]
+     },
+     "push.range": {
+      "$link": [
+       "range",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "step 2",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "atrous",
+     "param.source": {
+      "$link": [
+       "step 1 picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "step 2 picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run step 2",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "step 2",
+       "out"
+      ]
+     },
+     "push.step": 4,
+     "push.depthSigma": {
+      "$link": [
+       "depthSigma",
+       "out"
+      ]
+     },
+     "push.normalPower": {
+      "$link": [
+       "normalPower",
+       "out"
+      ]
+     },
+     "push.range": {
+      "$link": [
+       "range",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "step 3",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "atrous",
+     "param.source": {
+      "$link": [
+       "step 2 picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "denoised",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run step 3",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "step 3",
+       "out"
+      ]
+     },
+     "push.step": 8,
+     "push.depthSigma": {
+      "$link": [
+       "depthSigma",
+       "out"
+      ]
+     },
+     "push.normalPower": {
+      "$link": [
+       "normalPower",
+       "out"
+      ]
+     },
+     "push.range": {
+      "$link": [
+       "range",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out denoised",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "denoised",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "denoised",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

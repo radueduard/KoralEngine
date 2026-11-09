@@ -1,0 +1,358 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture blurred wide and cheaply: four turns of Kawase's blur, each four bilinear reads further out, each into a picture of its size (RGBA16F). `blurred` is the last.",
+ "tags": [
+  "blur",
+  "kawase",
+  "wide blur",
+  "soften",
+  "post",
+  "filter"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "linear",
+    "type": "Sampler",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "minFilter": "eLinear",
+     "magFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "turn 0 picture",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "turn 1 picture",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "turn 2 picture",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blurred",
+    "type": "Image",
+    "at": [
+     580,
+     310
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "turn 0",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "kawase",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "turn 0 picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run turn 0",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "turn 0",
+       "out"
+      ]
+     },
+     "push.turn": 0,
+     "cover": "target"
+    }
+   },
+   {
+    "id": "turn 1",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "kawase",
+     "param.source": {
+      "$link": [
+       "turn 0 picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "turn 1 picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run turn 1",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "turn 1",
+       "out"
+      ]
+     },
+     "push.turn": 1,
+     "cover": "target"
+    }
+   },
+   {
+    "id": "turn 2",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "kawase",
+     "param.source": {
+      "$link": [
+       "turn 1 picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "turn 2 picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run turn 2",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "turn 2",
+       "out"
+      ]
+     },
+     "push.turn": 2,
+     "cover": "target"
+    }
+   },
+   {
+    "id": "turn 3",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "kawase",
+     "param.source": {
+      "$link": [
+       "turn 2 picture",
+       "out"
+      ]
+     },
+     "param.linearSampler": {
+      "$link": [
+       "linear",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run turn 3",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "turn 3",
+       "out"
+      ]
+     },
+     "push.turn": 3,
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out blurred",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "blurred",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,146 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture sharpened by as much as its contrast leaves room for (as AMD's CAS): `sharpness` 0 to 1. `sharpened` is it, RGBA16F.",
+ "tags": [
+  "sharpen",
+  "cas",
+  "contrast adaptive",
+  "crisp",
+  "filter",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "sharpness",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "sharpness",
+     "kind": "eValue",
+     "default": 0.5
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "sharpened",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "sharpen",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "sharpen",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "sharpened",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run sharpen",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "sharpen",
+       "out"
+      ]
+     },
+     "push.sharpness": {
+      "$link": [
+       "sharpness",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out sharpened",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "sharpened",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "sharpened",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,334 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture of light graded to the display: exposed (times `exposure`, and the exposure an AutoExposure works out, its `exposure` wired here), white balanced (`temperature`, `tint`, -1 to 1), its `contrast` and `saturation` set (1 as it is), through a `curve` (0 the engine's ACES fit, 1 PBR Neutral, 2 AgX, 3 Reinhard's, 4 Hable's, 5 Lottes's), then lifted, gammaed and gained. `shown` is an RGBA8 picture of it, as the display takes it: what Tonemap would give, graded.",
+ "tags": [
+  "grade",
+  "color grading",
+  "tonemap",
+  "agx",
+  "white balance",
+  "contrast",
+  "saturation",
+  "lift gamma gain",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "exposure",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "exposure",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "temperature",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "temperature",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "tint",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "tint",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "contrast",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "contrast",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "saturation",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "saturation",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "curve",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "curve",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "lift",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "lift",
+     "kind": "eValue",
+     "default": [
+      0,
+      0,
+      0,
+      0
+     ]
+    }
+   },
+   {
+    "id": "gamma",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     760
+    ],
+    "inputs": {
+     "name": "gamma",
+     "kind": "eValue",
+     "default": [
+      1,
+      1,
+      1,
+      1
+     ]
+    }
+   },
+   {
+    "id": "gain",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     850
+    ],
+    "inputs": {
+     "name": "gain",
+     "kind": "eValue",
+     "default": [
+      1,
+      1,
+      1,
+      1
+     ]
+    }
+   },
+   {
+    "id": "autoExposure",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     940
+    ],
+    "inputs": {
+     "name": "autoExposure",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "shown",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA8_UNORM",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "grade",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "color_grading_passes",
+     "compute.entry": "gradeExposed",
+     "param.hdrImage": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.ldrImage": {
+      "$link": [
+       "shown",
+       "out"
+      ]
+     },
+     "param.exposure": {
+      "$link": [
+       "autoExposure",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run grade",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "grade",
+       "out"
+      ]
+     },
+     "push.exposure": {
+      "$link": [
+       "exposure",
+       "out"
+      ]
+     },
+     "push.temperature": {
+      "$link": [
+       "temperature",
+       "out"
+      ]
+     },
+     "push.tint": {
+      "$link": [
+       "tint",
+       "out"
+      ]
+     },
+     "push.contrast": {
+      "$link": [
+       "contrast",
+       "out"
+      ]
+     },
+     "push.saturation": {
+      "$link": [
+       "saturation",
+       "out"
+      ]
+     },
+     "push.curve": {
+      "$link": [
+       "curve",
+       "out"
+      ]
+     },
+     "push.lift": {
+      "$link": [
+       "lift",
+       "out"
+      ]
+     },
+     "push.gamma": {
+      "$link": [
+       "gamma",
+       "out"
+      ]
+     },
+     "push.gain": {
+      "$link": [
+       "gain",
+       "out"
+      ]
+     },
+     "cover": "ldrImage"
+    }
+   },
+   {
+    "id": "out shown",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "shown",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "shown",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

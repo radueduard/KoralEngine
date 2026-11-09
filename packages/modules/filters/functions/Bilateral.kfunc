@@ -1,0 +1,184 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture smoothed where it is smooth and kept sharp at its edges: a bilateral, a Gaussian of `sigma` pixels over `radius` each way, each neighbour counting less the more its colour differs (by `range`). `filtered` is it, RGBA16F.",
+ "tags": [
+  "bilateral",
+  "edge preserving",
+  "smooth",
+  "denoise",
+  "filter",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "radius",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "radius",
+     "kind": "eValue",
+     "default": 3
+    }
+   },
+   {
+    "id": "sigma",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "sigma",
+     "kind": "eValue",
+     "default": 2
+    }
+   },
+   {
+    "id": "range",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "range",
+     "kind": "eValue",
+     "default": 0.1
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "filtered",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "bilateral",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "filters_passes",
+     "compute.entry": "bilateral",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "filtered",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run bilateral",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "bilateral",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.sigma": {
+      "$link": [
+       "sigma",
+       "out"
+      ]
+     },
+     "push.range": {
+      "$link": [
+       "range",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out filtered",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "filtered",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "filtered",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

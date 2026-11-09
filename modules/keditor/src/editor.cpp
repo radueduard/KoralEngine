@@ -1396,6 +1396,31 @@ namespace keditor
                     SetState([&] { _dialog = Dialog::eConfirm; _confirmWhat = what; _confirmed = then; });
                 };
             }
+            /** The engine's own modules, a button each, and any other from a folder. */
+            kui::Widget ImportModuleDialog()
+            {
+                const auto close = [this] { SetState([&] { _dialog = Dialog::eNone; }); };
+                const auto secondary = kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary);
+                std::vector<kui::Widget> rows;
+                rows.push_back(Heading("Import a module"));
+                const auto official = keditor::Project::ModulesIn(keditor::Project::OfficialModules());
+                rows.push_back(kgui::Line(official.empty() ? "The engine has no modules of its own beside it." : "The engine's own: what a project can do without."));
+                std::vector<kui::Widget> buttons;
+                for (const auto& module : official) {
+                    const bool imported = std::ranges::contains(_session->CurrentProject().modules, _session->CurrentProject().Reference(module.directory));
+                    buttons.push_back(kui::Button(imported ? module.name + " (imported)" : module.name,
+                                                  [this, close, folder = module.directory] { close(); _session->ImportModule(folder); },
+                                                  kui::ButtonOptions {}.SetStyle(imported ? kui::ButtonStyle::eSecondary : kui::ButtonStyle::ePrimary)));
+                }
+                if (!buttons.empty()) rows.push_back(kui::Wrap(std::move(buttons), 6.f, 6.f));
+                rows.push_back(kui::Row({
+                    kui::Button("From a folder...", [this] { SetState([&] { _dialog = Dialog::eImportModuleFolder; }); }, secondary),
+                    kui::Button("Cancel", close, secondary),
+                }, kui::FlexOptions {}.SetGap(8.f)));
+                return kui::Padding(kui::EdgeInsets::All(16.f), kui::Column(std::move(rows),
+                    kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetGap(10.f)).Width(560.f));
+            }
+
             kui::Widget ConfirmDialog()
             {
                 const auto close = [this] { SetState([&] { _dialog = Dialog::eNone; }); };
@@ -1471,6 +1496,8 @@ namespace keditor
                 // What it imports: the modules in the folder it is made in, and any picked from elsewhere — those of its language.
                 rows.push_back(label("It imports"));
                 std::vector<keditor::Project> offered = keditor::Project::ModulesIn(form.folder);
+                for (auto& official : keditor::Project::ModulesIn(keditor::Project::OfficialModules()))     // the engine's own, wherever it is made
+                    if (std::ranges::none_of(offered, [&](const auto& other) { return other.directory == official.directory; })) offered.push_back(std::move(official));
                 for (const auto& folder : form.picked) {
                     keditor::Project module;
                     std::string ignored;
@@ -2075,10 +2102,11 @@ namespace keditor
                     return kgui::FileBrowser({ .start = _newProject.folder, .directories = true, .confirm = "Import this module" },
                         [this](const std::filesystem::path& chosen) { PickModuleForNewProject(chosen); },
                         [this] { SetState([&] { _dialog = Dialog::eNewProject; }); });
-                case Dialog::eImportModule:
+                case Dialog::eImportModule: return ImportModuleDialog();
+                case Dialog::eImportModuleFolder:
                     return kgui::FileBrowser({ .start = _session->CurrentProject().directory.parent_path(), .directories = true, .confirm = "Import this module" },
                         [this](const std::filesystem::path& chosen) { _session->ImportModule(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
-                        [this] { SetState([&] { _dialog = Dialog::eNone; }); });
+                        [this] { SetState([&] { _dialog = Dialog::eImportModule; }); });
                 case Dialog::eOpenProject:
                     return kgui::FileBrowser({ .start = Session::ProjectsDirectory(), .directories = true, .confirm = "Open" },
                         [this](const std::filesystem::path& chosen) { _session->OpenProject(chosen); SetState([&] { _dialog = Dialog::eNone; }); },
