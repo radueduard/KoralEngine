@@ -1,0 +1,10 @@
+{
+  "koral-engine-project": 1,
+  "name": "shading_extended",
+  "kind": "module",
+  "library": 2,
+  "scenes": [
+    "test"
+  ],
+  "start": "test"
+}

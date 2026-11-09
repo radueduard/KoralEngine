@@ -1,0 +1,10 @@
+{
+  "koral-engine-project": 1,
+  "name": "raytracing_extras",
+  "kind": "module",
+  "library": 2,
+  "scenes": [
+    "test"
+  ],
+  "start": "test"
+}

@@ -20,6 +20,7 @@ public struct KoralAngles {
     public float nv;    // the normal and the way to the eye: never quite 0
     public float nh;    // the normal and the halfway between them
     public float vh;    // the eye and the halfway: as much as the light and the halfway
+    public float lv;    // the light and the eye: what a rough diffuse lobe (Oren and Nayar's) turns on
 };
 
 public KoralAngles KoralAnglesOf(float3 normal, float3 toEye, float3 toLight)
@@ -30,6 +31,7 @@ public KoralAngles KoralAnglesOf(float3 normal, float3 toEye, float3 toLight)
     a.nv = max(dot(normal, toEye), 1e-4);
     a.nh = saturate(dot(normal, halfway));
     a.vh = saturate(dot(toEye, halfway));
+    a.lv = dot(toLight, toEye);
     return a;
 }
 

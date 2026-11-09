@@ -6,11 +6,13 @@
 
 #include <cmath>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include <context.h>
 #include <shader.h>
 
 #include <kgraph/scene.h>
@@ -38,6 +40,7 @@ namespace {
         std::string module, function;
         std::function<void(kgraph::Node&)> call;
         std::string watched;            ///< The node of the call whose picture is looked at: `call/<node>`.
+        std::function<void(kgraph::Graph&)> besides = {};      ///< What else the graph needs: a scene to trace, say.
     };
 
     class ModuleTest : public ::testing::Test {
@@ -74,6 +77,7 @@ namespace {
             graph.Add("fill", "ComputePipeline").Set("compute.module", "inputs").Set("compute.entry", "computeMain")
                 .Wire("param.picture", "picture").Wire("param.depth", "depth").Wire("param.normals", "normals");
             graph.Add("run fill", "Dispatch").Wire("pipeline", "fill").Set("cover", "picture");
+            if (c.besides) c.besides(graph);
             kgraph::Node& call = graph.Add("call", "Function").Set("function", c.function);
             c.call(call);
             runtime.Set(graph);
@@ -131,4 +135,67 @@ TEST_F(ModuleTest, CameraEffectsDoWhatALensDoes) {
     }, "call/blurred" });
     Run({ "camera_effects", "LensEffects", picture, "call/lensed" });
     Run({ "camera_effects", "LensFlare", picture, "call/flare" });
+}
+
+// Each module's library — noise, shapes, curves, lobes, lights, skinning, tables, moments — works out what it says,
+// on the GPU: modulesCheck.slang's checks, each named by its line.
+TEST_F(ModuleTest, TheModulesLibrariesWorkOutWhatTheySay) {
+    auto& runtime = *scene->runtime;
+    std::vector<std::string> checks;
+    {
+        std::ifstream in(std::string(KGRAPH_TEST_SHADERS) + "/modulesCheck.slang");
+        for (std::string line; std::getline(in, line);)
+            if (const auto at = line.find("Check("); at != std::string::npos && line.find("void Check(") == std::string::npos) checks.push_back(line.substr(at));
+    }
+    ASSERT_GT(checks.size(), 40u);
+    kgraph::Graph graph;
+    graph.Add("results", "Buffer").Set("instanceCount", static_cast<double>(checks.size() * 16)).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("check", "ComputePipeline").Set("compute.module", "modulesCheck").Set("compute.entry", "computeMain").Wire("param.results", "results");
+    graph.Add("run", "Dispatch").Wire("pipeline", "check").Set("groups.x", 1).Set("groups.y", 1).Set("groups.z", 1);
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    for (int i = 0; i < 2; ++i) Frame();
+    runtime.Watch("results");
+    std::optional<kgraph::Peek> peek;
+    for (int i = 0; i < 8 && !(peek && peek->bytes.size() >= checks.size() * 16); ++i) { Frame(); peek = runtime.Watched("results"); }
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(peek && peek->bytes.size() >= checks.size() * 16) << "nothing to look at";
+    std::vector<float> got(checks.size() * 4);
+    std::memcpy(got.data(), peek->bytes.data(), got.size() * sizeof(float));
+    for (std::size_t i = 0; i < checks.size(); ++i) {
+        ASSERT_EQ(got[i * 4 + 3], 1.f) << "the shader stopped before " << checks[i];
+        EXPECT_LE(std::abs(got[i * 4] - got[i * 4 + 1]), got[i * 4 + 2]) << checks[i] << ": got " << got[i * 4];
+    }
+}
+
+TEST_F(ModuleTest, LightingModulesBakeAndShadow) {
+    Run({ "ibl_precise", "BrdfLut", [](kgraph::Node& call) { call.Set("size", 32).Set("samples", 64); }, "" });
+    Run({ "shadows_soft", "ShadowMoments", [](kgraph::Node& call) { call.Wire("depth", "depth"); }, "" });
+}
+
+// Ambient occlusion traced into a scene of two cubes, where the GPU traces rays.
+TEST_F(ModuleTest, OcclusionIsTracedIntoTheScene) {
+    if (!kor::Context::SupportsRayTracing()) GTEST_SKIP() << "no ray tracing here";
+    kecs::World& world = scene->world;
+    const auto cube = scene->runtime->ResourceOf("$cube");
+    ASSERT_TRUE(cube);
+    for (const float x : { -1.f, 1.f }) {
+        const kecs::Entity entity = world.Create();
+        world.SetPosition(entity, { x, 0, -3 });
+        world.Add<kgraph::Mesh>(entity, { cube });
+    }
+    Run({ "raytracing_extras", "TracedOcclusion", [](kgraph::Node& call) {
+        call.Wire("depth", "depth").Wire("normals", "normals").Wire("scene", "rays", "structure")
+            .Set("inverseViewProjection", Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 });
+    }, "", [](kgraph::Graph& graph) {
+        graph.Add("all", "Entities");
+        graph.Add("meshes", "Filter").Wire("entities", "all").Set("with", Value::List { "Mesh" }).Set("groupBy", "Mesh");
+        graph.Add("pack", "MeshPack").Wire("meshes", "meshes", "Mesh.mesh").Set("attributes", Value::List { "POSITION", "NORMAL", "UV" });
+        graph.Add("rays", "RayScene").Wire("meshes", "meshes", "Mesh.mesh").Wire("mesh", "pack", "mesh").Wire("ranges", "pack", "ranges");
+    } });
+}
+
+TEST_F(ModuleTest, OutlinesAreDrawnWhereDepthAndNormalsBreak) {
+    Run({ "shading_stylized", "Outline", [](kgraph::Node& call) { call.Wire("picture", "picture").Wire("depth", "depth").Wire("normals", "normals").Set("normalEdge", 0.01); },
+          "picture" });
 }

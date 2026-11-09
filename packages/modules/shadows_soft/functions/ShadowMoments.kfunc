@@ -1,0 +1,316 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "A shadow map of depth made EVSM's moments (exponentials of `positive` and `negative`) and blurred `radius` texels each way at 32 bits a channel: what shadows_soft's KoralEvsmVisibility reads with one tap \u2014 a shadow as soft as it is blurred.",
+ "tags": [
+  "shadows",
+  "vsm",
+  "evsm",
+  "variance shadow map",
+  "soft shadows",
+  "moments"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "positive",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "positive",
+     "kind": "eValue",
+     "default": 40
+    }
+   },
+   {
+    "id": "negative",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "negative",
+     "kind": "eValue",
+     "default": 5
+    }
+   },
+   {
+    "id": "radius",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "radius",
+     "kind": "eValue",
+     "default": 3
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "moments",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA32_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "across",
+    "type": "Image",
+    "at": [
+     580,
+     130
+    ],
+    "inputs": {
+     "format": "eRGBA32_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blurred",
+    "type": "Image",
+    "at": [
+     580,
+     220
+    ],
+    "inputs": {
+     "format": "eRGBA32_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "evsm",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "shadows_soft_passes",
+     "compute.entry": "evsm",
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.moments": {
+      "$link": [
+       "moments",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run evsm",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "evsm",
+       "out"
+      ]
+     },
+     "push.positive": {
+      "$link": [
+       "positive",
+       "out"
+      ]
+     },
+     "push.negative": {
+      "$link": [
+       "negative",
+       "out"
+      ]
+     },
+     "cover": "moments"
+    }
+   },
+   {
+    "id": "blur across",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "shadows_soft_passes",
+     "compute.entry": "blurAcross",
+     "param.source": {
+      "$link": [
+       "moments",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur across",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur across",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "blur down",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "shadows_soft_passes",
+     "compute.entry": "blurDown",
+     "param.source": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run blur down",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "blur down",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "cover": "target"
+    }
+   },
+   {
+    "id": "out moments",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "moments",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

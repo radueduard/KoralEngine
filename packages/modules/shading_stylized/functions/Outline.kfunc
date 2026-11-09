@@ -1,0 +1,201 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "Lines drawn over a picture where what is seen breaks: a step in `depth` of more than `depthEdge` of how far it is, or a turn of its `normals` (xyz) of more than `normalEdge` (1 - the cosine), `width` pixels wide, of `color` (its alpha how much). `picture` is it, drawn on where it is.",
+ "tags": [
+  "outline",
+  "edges",
+  "ink",
+  "toon",
+  "cel",
+  "stylized",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "normals",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "normals",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "color",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "color",
+     "kind": "eValue",
+     "default": [
+      0.05,
+      0.05,
+      0.08,
+      1
+     ]
+    }
+   },
+   {
+    "id": "depthEdge",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "depthEdge",
+     "kind": "eValue",
+     "default": 0.02
+    }
+   },
+   {
+    "id": "normalEdge",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "normalEdge",
+     "kind": "eValue",
+     "default": 0.3
+    }
+   },
+   {
+    "id": "width",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "width",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "outline",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "shading_stylized_passes",
+     "compute.entry": "outline",
+     "param.picture": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run outline",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "outline",
+       "out"
+      ]
+     },
+     "push.color": {
+      "$link": [
+       "color",
+       "out"
+      ]
+     },
+     "push.depthEdge": {
+      "$link": [
+       "depthEdge",
+       "out"
+      ]
+     },
+     "push.normalEdge": {
+      "$link": [
+       "normalEdge",
+       "out"
+      ]
+     },
+     "push.width": {
+      "$link": [
+       "width",
+       "out"
+      ]
+     },
+     "cover": "picture"
+    }
+   },
+   {
+    "id": "out picture",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

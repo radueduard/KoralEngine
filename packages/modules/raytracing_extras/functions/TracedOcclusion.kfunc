@@ -1,0 +1,257 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "A picture's ambient occlusion traced into `scene` (a RayScene's `structure`): from each pixel's place \u2014 its `depth` back through `inverseViewProjection` \u2014 and its `normals` (xyz), `rays` rays cosine-spread within `radius`, the share that hit nothing; another set each `frame`. `occlusion` is it (R16F, 1 open): noisy, for the filters module's Denoise.",
+ "tags": [
+  "ambient occlusion",
+  "rtao",
+  "ray traced",
+  "occlusion",
+  "ray query",
+  "lighting"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "scene",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "scene",
+     "kind": "eResource"
+    }
+   },
+   {
+    "id": "depth",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "depth",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "normals",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     220
+    ],
+    "inputs": {
+     "name": "normals",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "inverseViewProjection",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     310
+    ],
+    "inputs": {
+     "name": "inverseViewProjection",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "radius",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     400
+    ],
+    "inputs": {
+     "name": "radius",
+     "kind": "eValue",
+     "default": 1
+    }
+   },
+   {
+    "id": "rays",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     490
+    ],
+    "inputs": {
+     "name": "rays",
+     "kind": "eValue",
+     "default": 4
+    }
+   },
+   {
+    "id": "frame",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     580
+    ],
+    "inputs": {
+     "name": "frame",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "reversed",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     670
+    ],
+    "inputs": {
+     "name": "reversed",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "occlusion",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eR16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "occlude",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "raytracing_extras_passes",
+     "compute.entry": "occlude",
+     "param.scene": {
+      "$link": [
+       "scene",
+       "out"
+      ]
+     },
+     "param.depth": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "param.normals": {
+      "$link": [
+       "normals",
+       "out"
+      ]
+     },
+     "param.occlusion": {
+      "$link": [
+       "occlusion",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run occlude",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "occlude",
+       "out"
+      ]
+     },
+     "push.inverseViewProjection": {
+      "$link": [
+       "inverseViewProjection",
+       "out"
+      ]
+     },
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.rays": {
+      "$link": [
+       "rays",
+       "out"
+      ]
+     },
+     "push.frame": {
+      "$link": [
+       "frame",
+       "out"
+      ]
+     },
+     "push.reversed": {
+      "$link": [
+       "reversed",
+       "out"
+      ]
+     },
+     "cover": "occlusion"
+    }
+   },
+   {
+    "id": "out occlusion",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "occlusion",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "occlusion",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

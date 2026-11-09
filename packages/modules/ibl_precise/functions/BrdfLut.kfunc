@@ -1,0 +1,165 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "The split sum's table, baked: a texel for each roughness (down) and each angle the surface is seen at (nv, across), its red the scale of f0 and its green the bias \u2014 what ibl_precise's KoralBrdfFromTable reads, more exactly than the base library's fit. `size` texels a side, `samples` GGX facets a texel. Bake it once: its pass can be turned off after.",
+ "tags": [
+  "brdf",
+  "lut",
+  "split sum",
+  "ibl",
+  "environment",
+  "table",
+  "dfg"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "size",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "size",
+     "kind": "eValue",
+     "default": 128
+    }
+   },
+   {
+    "id": "samples",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     130
+    ],
+    "inputs": {
+     "name": "samples",
+     "kind": "eValue",
+     "default": 256
+    }
+   },
+   {
+    "id": "extent",
+    "type": "Append",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "b": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "square",
+    "type": "Append",
+    "at": [
+     320,
+     130
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "extent",
+       "out"
+      ]
+     },
+     "b": 1
+    }
+   },
+   {
+    "id": "table",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRG16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "square",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "bake",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "ibl_precise_passes",
+     "compute.entry": "bake",
+     "param.table": {
+      "$link": [
+       "table",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run bake",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "bake",
+       "out"
+      ]
+     },
+     "push.samples": {
+      "$link": [
+       "samples",
+       "out"
+      ]
+     },
+     "cover": "table"
+    }
+   },
+   {
+    "id": "out table",
+    "type": "FunctionOutput",
+    "at": [
+     3180,
+     40
+    ],
+    "inputs": {
+     "name": "table",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "table",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

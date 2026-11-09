@@ -85,11 +85,11 @@ public float3 KoralCurve(float3 light, uint curve)
 
 // ---- grading -----------------------------------------------------------------------------------------------------
 
-/** Lift (the shadows), gamma (the middle) and gain (the highlights), each a colour about white (ASC CDL's slope, offset and power). */
+/** Lift (raises the shadows), gamma (the middle) and gain (scales the highlights), each a colour: 0, 1 and 1 leave it as it is. */
 public float3 KoralLiftGammaGain(float3 c, float3 lift, float3 gamma, float3 gain)
 {
-    const float3 lifted = c * (1.5 - 0.5 * lift) + 0.5 * lift - 0.5;
-    return pow(max(saturate(lifted) * gain, 0.0), 1.0 / max(gamma, 1e-3));
+    const float3 lifted = saturate(c + lift * (1.0 - c)) * gain;
+    return pow(max(lifted, 0.0), 1.0 / max(gamma, 1e-3));
 }
 
 /** Contrast about a middle grey of 0.18, in log terms: 1 leaves it as it is. */
