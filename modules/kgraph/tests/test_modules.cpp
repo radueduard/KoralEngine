@@ -185,7 +185,7 @@ TEST_F(ModuleTest, OcclusionIsTracedIntoTheScene) {
         world.Add<kgraph::Mesh>(entity, { cube });
     }
     Run({ "raytracing_extras", "TracedOcclusion", [](kgraph::Node& call) {
-        call.Wire("depth", "depth").Wire("normals", "normals").Wire("scene", "rays", "structure")
+        call.Wire("depth", "depth").Wire("normals", "normals").Wire("scene", "rays", "scene")
             .Set("inverseViewProjection", Value::List { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 });
     }, "", [](kgraph::Graph& graph) {
         graph.Add("all", "Entities");

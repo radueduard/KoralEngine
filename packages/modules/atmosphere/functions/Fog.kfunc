@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "Light in the air near the eye: the view cut into 160 x 90 x 64 cells out to `distance` metres, each lit by the sun through the clouds, by the sky and by every light of `lights` (the Lights function's, `lightCount` of them); a haze of `density` a metre at `floor`, thinning `height` metres up; blended with last frame's (`previousViewProjection`); gathered along each pixel's ray and laid over `picture` by its `depth`. `view`, `clouds` and `light` are the Atmosphere function's.",
+ "description": "Light in the air near the eye: the view cut into 160 x 90 x 64 cells out to `distance` metres, each lit by the sun through the clouds, by the sky and by every light of `lights` (the Lights function's, `lightCount` of them); a haze of `density` a metre at `floor`, thinning `height` metres up; blended with last frame's (`previousViewProjection`); gathered along each pixel's ray and laid over `picture` by its `depth`. `view`, `clouds` and `light` are the Atmosphere function's. Passes off while `idle` is not 0.",
  "tags": [
   "fog",
   "volumetric",
@@ -150,11 +150,24 @@
     }
    },
    {
-    "id": "density",
+    "id": "idle",
     "type": "FunctionInput",
     "at": [
      60,
      1030
+    ],
+    "inputs": {
+     "name": "idle",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "density",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     1120
     ],
     "inputs": {
      "name": "density",
@@ -167,7 +180,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1120
+     1210
     ],
     "inputs": {
      "name": "anisotropy",
@@ -180,7 +193,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1210
+     1300
     ],
     "inputs": {
      "name": "strength",
@@ -193,7 +206,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1300
+     1390
     ],
     "inputs": {
      "name": "distance",
@@ -206,7 +219,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1390
+     1480
     ],
     "inputs": {
      "name": "ambient",
@@ -219,7 +232,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1480
+     1570
     ],
     "inputs": {
      "name": "history",
@@ -232,7 +245,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1570
+     1660
     ],
     "inputs": {
      "name": "height",
@@ -245,7 +258,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1660
+     1750
     ],
     "inputs": {
      "name": "floor",
@@ -258,7 +271,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1750
+     1840
     ],
     "inputs": {
      "name": "near",
@@ -271,7 +284,7 @@
     "type": "FunctionInput",
     "at": [
      60,
-     1840
+     1930
     ],
     "inputs": {
      "name": "samples",
@@ -537,7 +550,13 @@
      },
      "groups.x": 20,
      "groups.y": 12,
-     "groups.z": 64
+     "groups.z": 64,
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
     }
    },
    {
@@ -604,7 +623,13 @@
      },
      "groups.x": 20,
      "groups.y": 12,
-     "groups.z": 64
+     "groups.z": 64,
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
     }
    },
    {
@@ -659,7 +684,13 @@
      },
      "groups.x": 20,
      "groups.y": 12,
-     "groups.z": 1
+     "groups.z": 1,
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
     }
    },
    {
@@ -730,7 +761,13 @@
        "out"
       ]
      },
-     "cover": "picture"
+     "cover": "picture",
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
     }
    },
    {

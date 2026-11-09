@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "The sky drawn where nothing was (`depth` far: 1, or 0 when `reversed`) into `picture`: the air as the Atmosphere function's `skyView` has it, the ground under it, the sun's disc, and the clouds over them, marched at a quarter of the picture's size (`clouds` rgb their light, a what of the sky gets through). `view`, `air`, `clouds` and `light` are the Atmosphere function's.",
+ "description": "The sky drawn where nothing was (`depth` far: 1, or 0 when `reversed`) into `picture`: the air as the Atmosphere function's `skyView` has it, the ground under it, the sun's disc, and the clouds over them, marched at a quarter of the picture's size (`clouds` rgb their light, a what of the sky gets through). `view`, `air`, `clouds` and `light` are the Atmosphere function's. While `idle` is not 0 the sky is not drawn, though the clouds are still marched: for what draws its own sky, a tracer.",
  "tags": [
   "sky",
   "atmosphere",
@@ -121,6 +121,19 @@
      "name": "intensity",
      "kind": "eValue",
      "default": 1
+    }
+   },
+   {
+    "id": "idle",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     850
+    ],
+    "inputs": {
+     "name": "idle",
+     "kind": "eValue",
+     "default": 0
     }
    },
    {
@@ -354,7 +367,13 @@
        "out"
       ]
      },
-     "cover": "picture"
+     "cover": "picture",
+     "idle": {
+      "$link": [
+       "idle",
+       "out"
+      ]
+     }
     }
    },
    {

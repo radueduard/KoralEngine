@@ -43,6 +43,15 @@ public float KoralValueNoise(float3 p)
     return lerp(a, b, f.z);
 }
 
+/** Value noise over a plane: the lattice's own, so as spread from 0 to 1 as the 3D one at its points — not a slice
+ *  between two of its planes, which averages them and gathers about the middle. */
+public float KoralValueNoise(float2 p)
+{
+    const int3 i = int3(int2(floor(p)), 0);
+    const float2 f = Fade(float3(frac(p), 0.0)).xy;
+    return lerp(lerp(Hash1(i), Hash1(i + int3(1, 0, 0)), f.x), lerp(Hash1(i + int3(0, 1, 0)), Hash1(i + int3(1, 1, 0)), f.x), f.y);
+}
+
 float PerlinAt(float3 p, int3 period)
 {
     const int3 i = int3(floor(p));

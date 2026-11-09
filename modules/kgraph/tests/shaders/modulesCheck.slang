@@ -46,6 +46,7 @@ void computeMain()
         Check(KoralPerlinTiled(float3(0.3, 0.6, 0.2), int3(4, 4, 4)) - KoralPerlinTiled(float3(4.3, 0.6, 0.2), int3(4, 4, 4)), 0.0, 1e-5);
         Check(float(cellLow >= 0.0), 1.0, 0.0);
         Check(value / 512.0, 0.5, 0.1);
+        Check(KoralValueNoise(float2(0.3, 0.6)) - KoralValueNoise(float3(0.3, 0.6, 0.0)), 0.0, 1e-6);     // the plane is the lattice's own
         Check(float(abs(KoralSimplex(float3(1.3, 2.7, -0.4))) <= 1.2), 1.0, 0.0);
         const float3 c = KoralCurl(float3(0.4, 1.1, 2.3));
         Check(float(all(isfinite(c))), 1.0, 0.0);

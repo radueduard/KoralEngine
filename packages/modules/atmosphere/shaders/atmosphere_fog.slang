@@ -15,6 +15,7 @@ import koral_random;
 import koral_depth;
 import koral_lights;
 import koral_shadows;
+import koral_bindless;
 
 /** What the haze is, and how its grid is laid. */
 public struct KoralFog {
@@ -73,14 +74,16 @@ struct SunSight : ISight {
     float LightSeen(KoralLight light, float3 p, float distance) { return 1.0; }
 };
 
-// By rays into the scene.
-RaytracingAccelerationStructure scene;
+// By rays into the scene: a RayScene's `scene`, x its structure's bindless index (~0 while it has nothing). Traced with a
+// mask of 1, as shadows are: what casts none (a RayScene's `noShadow`, a lamp's own ball, mask 2) is passed through.
+StructuredBuffer<uint4> scene;
 struct RaySight : ISight {
     float Clear(float3 p, float3 direction, float far)
     {
+        if (scene[0].x == ~0u) return 1.0;
         RayDesc ray = { p, 0.02, direction, far };
         RayQuery<RAY_FLAG_FORCE_OPAQUE | RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH> q;
-        q.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+        q.TraceRayInline(kor::accelerationStructure(scene[0].x), RAY_FLAG_NONE, 1, ray);
         q.Proceed();
         return q.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? 0.0 : 1.0;
     }

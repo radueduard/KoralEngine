@@ -12,9 +12,22 @@ module raytracing_extras;
 import koral_math;
 import koral_sampling;
 import koral_random;
+import koral_bindless;
 
-/** Whether anything is in the way from @p origin along @p direction within @p distance: the first hit ends it. */
-public bool KoralTraceAny(RaytracingAccelerationStructure scene, float3 origin, float3 direction, float distance)
+/** What a ray asking whether light gets through is traced with: a RayScene gives what casts no shadow (its `noShadow`,
+ *  a lamp's own ball) a mask of 2, everything else 3 — so these pass through the first and stop at the rest. */
+public static const uint KoralShadowMask = 1;
+
+/** Whether a RayScene's `scene` (its 16 bytes: x the structure's bindless index) has anything to trace: ~0 while it has
+ *  no instance, and no structure. Look before tracing. */
+public bool KoralSceneTraceable(StructuredBuffer<uint4> scene) { return scene[0].x != ~0u; }
+
+/** A RayScene's structure, by the bindless index its `scene` holds. */
+public RaytracingAccelerationStructure KoralSceneStructure(StructuredBuffer<uint4> scene) { return kor::accelerationStructure(scene[0].x); }
+
+/** Whether anything is in the way from @p origin along @p direction within @p distance: the first hit ends it. What
+ *  casts no shadow is passed through unless @p mask says otherwise. */
+public bool KoralTraceAny(RaytracingAccelerationStructure scene, float3 origin, float3 direction, float distance, uint mask = KoralShadowMask)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -22,13 +35,13 @@ public bool KoralTraceAny(RaytracingAccelerationStructure scene, float3 origin, 
     ray.TMin = 0.0;
     ray.TMax = distance;
     RayQuery<RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH | RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    query.TraceRayInline(scene, RAY_FLAG_NONE, mask, ray);
     while (query.Proceed()) {}
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT;
 }
 
-/** How far along a ray the nearest hit is, or @p distance where nothing is. */
-public float KoralTraceDistance(RaytracingAccelerationStructure scene, float3 origin, float3 direction, float distance)
+/** How far along a ray the nearest hit is, or @p distance where nothing is: of every instance @p mask has a bit of. */
+public float KoralTraceDistance(RaytracingAccelerationStructure scene, float3 origin, float3 direction, float distance, uint mask = 0xFF)
 {
     RayDesc ray;
     ray.Origin = origin;
@@ -36,7 +49,7 @@ public float KoralTraceDistance(RaytracingAccelerationStructure scene, float3 or
     ray.TMin = 0.0;
     ray.TMax = distance;
     RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> query;
-    query.TraceRayInline(scene, RAY_FLAG_NONE, 0xFF, ray);
+    query.TraceRayInline(scene, RAY_FLAG_NONE, mask, ray);
     while (query.Proceed()) {}
     return query.CommittedStatus() == COMMITTED_TRIANGLE_HIT ? query.CommittedRayT() : distance;
 }

@@ -57,11 +57,11 @@ float2 WeatherAt(float2 xz, float time, KoralClouds c, uint octaves = Octaves)
     const float2 wind = Wind(c, time);
     float2 p = (xz - wind) / c.scale;
     // Warped first, by a coarse noise of its own: outlines that curl and pinch, not round blobs.
-    p += (float2(KoralValueNoise(float3(p * 0.35 + 3.1, 0.5)), KoralValueNoise(float3(p * 0.35 + 8.7, 0.5))) - 0.5) * 1.4;
+    p += (float2(KoralValueNoise(p * 0.35 + 3.1), KoralValueNoise(p * 0.35 + 8.7)) - 0.5) * 1.4;
     float sum = 0.0, weight = 0.5, total = 0.0, fine = 0.0;
     for (uint o = 0; o < octaves; ++o) {
         // Each finer octave drifts a third faster than the one before, and is turned a little, against grid lines.
-        const float octave = KoralValueNoise(float3(p - wind / c.scale * (0.33 * float(o)), 0.5));
+        const float octave = KoralValueNoise(p - wind / c.scale * (0.33 * float(o)));
         sum += octave * weight;
         total += weight;
         if (o == octaves - 1) fine = octave;

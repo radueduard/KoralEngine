@@ -1,7 +1,7 @@
 {
  "koral-function": 1,
  "purpose": "Lighting",
- "description": "A picture's ambient occlusion traced into `scene` (a RayScene's `structure`): from each pixel's place \u2014 its `depth` back through `inverseViewProjection` \u2014 and its `normals` (xyz), `rays` rays cosine-spread within `radius`, the share that hit nothing; another set each `frame`. `occlusion` is it (R16F, 1 open): noisy, for the filters module's Denoise.",
+ "description": "A picture's ambient occlusion traced into `scene` (a RayScene's `scene`: nothing is hit while it has nothing, and what casts no shadow, its `noShadow`, never): from each pixel's place \u2014 its `depth` back through `inverseViewProjection` \u2014 and its `normals` (xyz), `rays` rays cosine-spread within `radius`, the share that hit nothing; another set each `frame`. `occlusion` is it (R16F, 1 open): noisy, for the filters module's Denoise.",
  "tags": [
   "ambient occlusion",
   "rtao",

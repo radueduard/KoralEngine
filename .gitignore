@@ -21,3 +21,6 @@ bindings/kotlin/**/build/
 
 # An 18 MB environment map, kept locally only
 packages/koral/editor/studio_small_09_4k.exr
+
+# What the engine keeps of an official module while a project uses it: ids of its files, made on each machine
+packages/modules/*/.koral/

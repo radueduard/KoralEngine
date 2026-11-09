@@ -6,7 +6,7 @@ import raytracing_extras;
 import koral_depth;
 import koral_math;
 
-RaytracingAccelerationStructure scene;
+StructuredBuffer<uint4> scene;         // a RayScene's: its structure's bindless index (~0 while it has nothing)
 Texture2D<float> depth;
 Texture2D<float4> normals;
 [[vk::image_format("r16f")]] RWTexture2D<float> occlusion;
@@ -20,8 +20,8 @@ void occlude(uint3 id : SV_DispatchThreadID, uniform float4x4 inverseViewProject
     occlusion.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
     const float d = depth.Load(int3(id.xy, 0));
-    if (reversed != 0 ? d <= 0.0 : d >= 1.0) { occlusion[id.xy] = 1.0; return; }     // the sky
+    if ((reversed != 0 ? d <= 0.0 : d >= 1.0) || !KoralSceneTraceable(scene)) { occlusion[id.xy] = 1.0; return; }     // the sky, or nothing to hit
     const float3 position = KoralWorldFromDepth(KoralPixelUv(id.xy, uint2(width, height)), d, inverseViewProjection);
     const float3 normal = KoralSafeNormalize(normals.Load(int3(id.xy, 0)).xyz);
-    occlusion[id.xy] = KoralTracedOcclusion(scene, position, normal, radius, rays, id.xy, frame);
+    occlusion[id.xy] = KoralTracedOcclusion(KoralSceneStructure(scene), position, normal, radius, rays, id.xy, frame);
 }
