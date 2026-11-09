@@ -306,8 +306,8 @@ the editor will build its node list and its nodes from.
   MatrixDeterminant; MatrixTranslate, MatrixRotate (x, y, z in degrees, as an entity's rotation), MatrixAxisAngle,
   MatrixScale and MatrixCompose (position, rotation and scale, as the world composes an entity's); TransformPoint
   (divided by its w), TransformDirection and TransformPlane (a plane where a matrix that moves points puts it).
-- **Cameras:** View, Perspective, Orthographic, Frustum, Oblique, Paraboloid, CubeFace, ShadowCascades, PointShadows and
-  Jitter. See [The scene](#the-scene).
+- **Cameras:** View, Perspective, Orthographic, Frustum, Oblique, Paraboloid, CubeFace, ShadowCascades, PointShadows,
+  SpotShadows and Jitter. See [The scene](#the-scene).
 - **Logic:** Less, LessOrEqual, Greater, GreaterOrEqual, Equal, NotEqual, Not, And, Or, Xor, Any, All and Select
   (`a` when its condition is true, `b` when not). Less to GreaterOrEqual compare vectors a component at a time — a
   number with every component — giving true or false for each; Any and All say those as one, and a Select given one
@@ -722,7 +722,8 @@ these, which work out what is not held:
 | **Jitter** | A place within a pixel for each `frame` (a Time's), of a Halton (2, 3) sequence `phases` long (8): `pixels` (-0.5 to 0.5 each way), `clip` (2 * pixels / `size`), and `jittered`, a `projection` moved by it in clip space — what a temporal antialiasing draws with. |
 | **Collect** | `out`: a value worked out once an element of a ForEach, every element's one after another, as one list; `count`. |
 | **ShadowCascades** | A light's shadow maps, fitted to what a camera sees: `matrices` (four, one after another), `splits` (how far from the camera each reaches), `worldTexel`, `tileTexel`, `direction`. Inputs: the camera's `view` and `projection` (where its near and far planes are is read from it), `direction` (the way the light travels: a DirectionalLight's entity's `forward`), `resolution` of one cascade, `distance`, `lambda`, and `boundsMin` and `boundsMax` of what casts. |
-| **PointShadows** | See [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame). |
+| **PointShadows** | See [Lights' shadows](#lights-shadows-and-passes-that-need-not-run-every-frame). |
+| **SpotShadows** | The same for spots: a map each. See there. |
 
 Each lens gives `projection` (and `out`) and `inverseProjection`, with depth 0 at its near plane and 1 at its far
 one and Y pointing down, as the device has it — `flipY` false for one as glm makes it. A lens and a View know nothing
@@ -1082,7 +1083,7 @@ device as `VertexData`: every attribute, in its buffers, and its indices (a mode
 A Dispatch, a TraceRays, a Keep, a CopyBuffer and a ClearBuffer take `idle`: while what they are given is not zero (or
 is true), they record nothing that frame — given a number, always or never; wired from a value worked out each frame (a
 FixedStep's `steps` compared with 0, a count), on the frames it says. A Draw's `idle` is a number for each turn of its
-`cullIndex` (see [Point lights' shadows](#point-lights-shadows-and-passes-that-need-not-run-every-frame)).
+`cullIndex` (see [Lights' shadows](#lights-shadows-and-passes-that-need-not-run-every-frame)).
 
 A pass nothing that runs reads rests by itself, with no `idle` of its own: when every pass that reads what it writes is
 resting that frame — idle, or resting so in its turn — it records nothing, and what it made is left as it was until one
@@ -1575,14 +1576,24 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 - Fields for C++ components are still declared with `KECS_FIELDS`. Nothing reads the framework's
   `KORAL_REFLECT` for them.
 
-## Point lights' shadows, and passes that need not run every frame
+## Lights' shadows, and passes that need not run every frame
 
 - **PointShadows** takes `lights`, four numbers each — where it is and how far it reaches: a Collect of an Append of a
   ForEach of PointLight's `worldPosition` and `field.range` — and gives, for the first `most`, six matrices each —
   towards +x, -x, +y, -y, +z, -z, a quarter turn wide, from `near` to the light's range: `matrices` (a Draw's `cull`,
   with `cullIndex`, and the shader's), `count`, `faces` (six times `most`), and `idle`.
+- **SpotShadows** takes `lights`, eight numbers each — where it is, how far it reaches, the way it shines and its outer
+  angle in degrees: a Collect of an Append of a ForEach of SpotLight's `worldPosition`, `field.range`, `forward` and
+  `field.outerAngle` — and gives, for the first `most`, a matrix each, square, twice its outer angle wide and two
+  degrees more, from `near` to its range: `matrices`, `count`, `maps` (`most`), and `idle`.
 - With `each` given, only that many lights are due a frame, one after another — and any light that moved or
-  changed its range. `idle` has a 0 for each face that is due and a 1 for each that is not.
+  changed its range (a spot: or turned, or widened). `idle` has a 0 for each face or map that is due and a 1 for each
+  that is not.
+- The engine's functions draw them: **SunShadows** (the sun's cascades in one atlas), **PointLightShadows** (a cube
+  of six layers for each of the first `most` point lights, up to 42) and **SpotLightShadows** (a layer for each of the
+  first `most` spots), each of every entity with a Mesh among `entities` but `without`'s, and giving its maps, a
+  buffer of their matrices and a comparison sampler — what koral_shadows reads (see [shaders.md](shaders.md)). A light
+  finds its map by its `kindIndex`, the Lights function's.
 - A **Draw's `idle`**, wired from such a list and counted by `cullIndex`, makes the pass draw nothing while its
   number is not zero: its target is not cleared, and stays as it was drawn last. Wired from one number, or true or
   false, it is that for every turn: an editor's ids are drawn only while something is picked (a **Selected**'s

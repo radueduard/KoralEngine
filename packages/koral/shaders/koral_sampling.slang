@@ -97,3 +97,14 @@ public float3 KoralFibonacciSphere(uint index, uint count)
     const float r = sqrt(max(0.0, 1.0 - z * z)), phi = float(index) * 2.39996322972865;
     return float3(r * cos(phi), r * sin(phi), z);
 }
+
+/**
+ * Point @p index of @p count on the unit disc, spread evenly out from the middle along Vogel's spiral (the golden
+ * angle), the whole turned by @p turn radians: taps for a soft shadow's or a blur's disc, another turn each pixel.
+ */
+public float2 KoralVogelDisk(uint index, uint count, float turn)
+{
+    const float r = sqrt((float(index) + 0.5) / float(count));
+    const float angle = float(index) * 2.39996322972865 + turn;
+    return r * float2(cos(angle), sin(angle));
+}

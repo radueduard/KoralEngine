@@ -32,3 +32,17 @@ Cast shadowVertex(float3 position : POSITION, uniform float4x4 model, uniform ui
 
 [shader("fragment")]
 void shadowFragment() {}
+
+// ---- a map a layer: a point light's face, a spot ----------------------------------------------------------------
+//
+// The engine's PointLightShadows and SpotLightShadows functions draw each map into a layer of one depth image, a turn of a loop
+// a layer: `maps` is a buffer of the maps' matrices (a PointShadows or a SpotShadows node's `matrices`), and `layer`
+// which is being drawn (push.layer, the turn's number).
+
+StructuredBuffer<float4x4> maps;
+
+[shader("vertex")]
+float4 layerVertex(float3 position : POSITION, uniform float4x4 model, uniform uint layer) : SV_Position
+{
+    return mul(mul(float4(position, 1.0), model), maps[layer]);
+}

@@ -106,6 +106,7 @@ namespace kgraph
                 { { "Repeat", "count" }, { 1.f, 256.f } }, { { "ForEach", "repeat" }, { 1.f, 256.f } },
                 { { "Element", "index" }, { none, any } }, { { "Switch", "index" }, { none, any } }, { { "CubeFace", "face" }, { none, 5.f } },
                 { { "PointShadows", "most" }, { 1.f, any } }, { { "PointShadows", "each" }, { none, any } }, { { "PointShadows", "near" }, { 0.001f, any, log } },
+                { { "SpotShadows", "most" }, { 1.f, any } }, { { "SpotShadows", "each" }, { none, any } }, { { "SpotShadows", "near" }, { 0.001f, any, log } },
                 // What is drawn and run: none or more of it; a group, of one or more.
                 { { "Draw", "vertexCount" }, { none, any, log } }, { { "Draw", "firstVertex" }, { none, any } }, { { "Draw", "vertexOffset" }, { -any, any } }, { { "Draw", "instances" }, { none, any, log } },
                 { { "Draw", "firstInstance" }, { none, any } }, { { "Draw", "tasks" }, { none, any, log } }, { { "Draw", "indirectOffset" }, { none, any } },
@@ -431,6 +432,7 @@ namespace kgraph
                 { "Bundle", "bundle struct record make pack group named values camera" }, { "Unbundle", "unbundle split unpack struct members fields" },
                 { "ShadowCascades", "csm cascaded shadow map sun directional light matrices" },
                 { "PointShadows", "cube map omnidirectional shadow point light lamp six faces matrices" },
+                { "SpotShadows", "spot spotlight cone shadow map matrices torch flashlight" },
                 { "ImageFile", "texture picture png jpg hdr environment map load import asset" },
                 { "Script", "fill init initial data cpu generate noise table lut bytes texels code" },
                 { "Repeat", "loop for each times iterate count mip chain" }, { "Previous", "loop last turn before feedback chain" },
@@ -504,7 +506,7 @@ namespace kgraph
                 // Cameras.
                 { "View", "visibility" }, { "Perspective", "videocam" }, { "Orthographic", "crop_square" }, { "Frustum", "change_history" },
                 { "Oblique", "flip" }, { "Paraboloid", "panorama_fish_eye" }, { "CubeFace", "view_in_ar" }, { "ShadowCascades", "wb_sunny" },
-                { "PointShadows", "lightbulb" },
+                { "PointShadows", "lightbulb" }, { "SpotShadows", "flashlight_on" },
                 // The world.
                 { "Entities", "public" }, { "Filter", "filter_alt" }, { "ForEach", "loop" }, { "Entity", "place" }, 
                 { "Selected", "near_me" }, { "FixedStep", "timer" }, { "Time", "schedule" }, { "WriteBack", "move_down" }, { "Collect", "collections" }, { "SceneBounds", "fit_screen" }, { "WriteComponent", "edit" }, { "Bundle", "inventory_2" }, { "Unbundle", "unarchive" },
@@ -844,6 +846,18 @@ namespace kgraph
                                     in("faces", "number", "Six times `most`: how many matrices there are, and how many layers an image of every face has."),
                                     in("idle", "vector", "A number a face: 0 for the faces that are drawn this frame, 1 for those left as they are — a Draw's `idle`.") },
                                   "The point lights' shadow maps, a cube each: six square views from where the light is, a quarter turn wide, as far as its range. Its matrices are a Draw's `cull`, a face at a time, and the shader's.", nullptr });
+                Port spots { "lights", PortKind::eValue, "vector", false,
+                             "The spots, eight numbers each: where it is, how far it reaches, the way it shines and its outer angle in degrees — a Collect of an Append of a ForEach of SpotLight's `worldPosition`, `field.range`, `forward` and `field.outerAngle`.", nullptr };
+                types.push_back({ "SpotShadows", "Cameras",
+                                  { std::move(spots),
+                                    in("most", "number", "How many spots have a shadow map at the most: the first that many. 8 when not given."),
+                                    in("near", "number", "How near a spot its map starts: 0.05 when not given. It ends at the spot's range."),
+                                    in("each", "number", "How many spots' maps are drawn again each frame, a spot after another: the rest stay as they were drawn last. Every one each frame, when 0 or not given. A spot that moved, turned, or reaches another distance or angle, is drawn again at once.") },
+                                  { { "matrices", PortKind::eValue, "vector", false, "A matrix a spot, sixteen numbers each: what a position in the world is multiplied by to be where the spot's map has it. For a spot there is none of, one nothing is inside.", nullptr },
+                                    in("count", "number", "How many spots have a map: no more than `most`."),
+                                    in("maps", "number", "`most`: how many matrices there are, and how many layers an image of every map has."),
+                                    in("idle", "vector", "A number a map: 0 for the maps that are drawn this frame, 1 for those left as they are — a Draw's `idle`.") },
+                                  "The spots' shadow maps, one each: a square view from where the spot is, the way it shines, as wide as its cone, as far as its range. Its matrices are a Draw's `cull`, a map at a time, and the shader's.", nullptr });
             }
             value("VertexLayout", { hinted({ "attributes", PortKind::eValue, "list", false,
                                       "What a vertex has, in order: { \"semantic\": \"POSITION\", \"type\": \"eFloat\", \"count\": 3 }, and optionally \"binding\", \"instanced\", \"namespace\".", nullptr }, "attributes") },
@@ -1614,7 +1628,7 @@ namespace kgraph
                 // node, where it is read; so is a pass's being on, a loop's count. What only a node can make —
                 // a struct, a matrix, a vertex layout — is wired, from the node that sets it up. The rest is the inspector's.
                 static const std::set<std::string_view> worked { "Values", "Math", "Vectors", "Logic", "Cameras", "Random" };
-                static const std::set<std::string_view> lenses { "ShadowCascades", "PointShadows" };
+                static const std::set<std::string_view> lenses { "ShadowCascades", "PointShadows", "SpotShadows" };
                 for (auto& port : type.inputs) {
                     if (port.kind != PortKind::eValue) continue;
                     const bool small = port.type == "number" || port.type == "bool" || port.type == "vector" || port.type == "value" || port.editor == "color";

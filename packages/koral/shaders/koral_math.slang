@@ -39,6 +39,9 @@ public float3 KoralSafeNormalize(float3 v, float3 otherwise = float3(0.0, 0.0, 1
     return length2 > 1e-24 ? v * rsqrt(length2) : otherwise;
 }
 
+/** A Gaussian's weight @p x from its middle, of spread @p sigma: not normalised — a blur divides by the sum of its taps'. */
+public float KoralGaussianWeight(float x, float sigma) { return exp(-0.5 * x * x / max(sigma * sigma, 1e-8)); }
+
 // ---- where things are --------------------------------------------------------------------------------------------
 
 /** A point through a matrix: where @p model puts it. */

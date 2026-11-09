@@ -1315,21 +1315,6 @@ TEST_F(RuntimeTest, AMeshsBuffersAreBuffersAShaderCanRead) {
 }
 
 namespace {
-    /** One of the engine's functions, as its file has it: packages/koral/functions/<name>.kfunc. */
-    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
-    {
-        const std::filesystem::path file = std::filesystem::path(KGRAPH_PACKAGE_SHADERS).parent_path() / "functions" / (name + ".kfunc");
-        std::ifstream in(file, std::ios::binary);
-        std::stringstream read;
-        read << in.rdbuf();
-        const std::string text = read.str();
-        kecs::json::Value parsed;
-        std::string error;
-        auto graph = std::make_shared<kgraph::Graph>();
-        if (!kecs::json::Parse(text, parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
-            ADD_FAILURE() << name << ": " << error;
-        return graph;
-    }
     std::uint32_t SeedHash(std::uint32_t i) { i *= 2654435761u; i ^= i >> 15; i *= 2246822519u; i ^= i >> 13; return i; }
 }
 
@@ -1341,7 +1326,7 @@ TEST_F(RuntimeTest, TheEnginesFunctionsSortCompactAndCountOnTheGpu) {
     using kgraph::Value;
     constexpr std::uint32_t n = 70000;
     kgraph::Graph graph;
-    for (const char* name : { "Scan", "RadixSort", "Compact", "IndirectArgs" }) graph.functions[name] = EngineFunction(name);
+    for (const char* name : { "Scan", "RadixSort", "Compact", "IndirectArgs" }) graph.functions[name] = support::EngineFunction(name);
     const Value storage = Value::List { "eStorage", "eTransferSrc", "eTransferDst" };
     for (const char* name : { "keys", "values", "flags" }) graph.Add(name, "Buffer").Set("instanceCount", n * 4).Set("usage", storage);
     graph.Add("counter", "Buffer").Set("instanceCount", 16).Set("usage", storage);
@@ -1418,7 +1403,7 @@ TEST_F(RuntimeTest, ABitonicSortSortsWhatIsComparable) {
     auto& runtime = *scene->runtime;
     constexpr std::uint32_t n = 70000, reach = 1u << 20;
     kgraph::Graph graph;
-    graph.functions["BitonicSort"] = EngineFunction("BitonicSort");
+    graph.functions["BitonicSort"] = support::EngineFunction("BitonicSort");
     AddSortables(graph, n, reach);
     graph.Add("sort", "Function").Set("function", "BitonicSort").Set("type", "sortable.Sortable").Wire("elements", "structs").Set("count", n).Set("passes", 153);
     graph.Add("sort floats", "Function").Set("function", "BitonicSort").Set("type", "float").Wire("elements", "floats").Set("count", n);
@@ -1459,7 +1444,7 @@ TEST_F(RuntimeTest, AnOddEvenSortSortsStablyAndALittleAtATime) {
     constexpr std::uint32_t n = 200, reach = 8;
     const auto sortedAfter = [&](const int phases, const int start = 0) {
         kgraph::Graph graph;
-        graph.functions["OddEvenSort"] = EngineFunction("OddEvenSort");
+        graph.functions["OddEvenSort"] = support::EngineFunction("OddEvenSort");
         AddSortables(graph, n, reach);
         graph.Add("sort", "Function").Set("function", "OddEvenSort").Set("type", "sortable.Sortable").Wire("elements", "structs").Set("count", n).Set("phases", phases).Set("start", start);
         graph.Add("copy structs", "CopyBuffer").Wire("source", "sort", "elements").Wire("destination", "out structs");
@@ -1497,7 +1482,7 @@ TEST_F(RuntimeTest, ASortSaysWhatItCannotSort) {
     auto& runtime = *scene->runtime;
     const auto failure = [&](const std::string& type) {
         kgraph::Graph graph;
-        graph.functions["BitonicSort"] = EngineFunction("BitonicSort");
+        graph.functions["BitonicSort"] = support::EngineFunction("BitonicSort");
         graph.Add("elements", "Buffer").Set("instanceCount", 1024).Set("usage", kgraph::Value::List { "eStorage", "eTransferDst" });
         graph.Add("sort", "Function").Set("function", "BitonicSort").Set("type", type).Wire("elements", "elements").Set("count", 16);
         runtime.Set(graph);
@@ -2049,7 +2034,7 @@ TEST_F(RuntimeTest, TheEnginesHiZAndTAAWorkOnTheGpu) {
     using kgraph::Value;
     kgraph::Graph graph;
     graph.passes = { "frame" };
-    for (const char* name : { "HiZ", "TAA" }) graph.functions[name] = EngineFunction(name);
+    for (const char* name : { "HiZ", "TAA" }) graph.functions[name] = support::EngineFunction(name);
     graph.Add("depth", "Image").Set("format", "eR32_SFLOAT").Set("extent", Value::List { 64, 32 }).pass = "frame";
     graph.Add("halves", "ComputePass").Set("module", "halves").Set("entry", "computeMain").Wire("param.target", "depth").Set("cover", "target").pass = "frame";
     graph.Add("far", "Function").Set("function", "HiZ").Wire("depth", "depth").pass = "frame";
@@ -2089,7 +2074,7 @@ TEST_F(RuntimeTest, TheEnginesBloomBleedsWhatIsBright) {
     using kgraph::Value;
     kgraph::Graph graph;
     graph.passes = { "frame" };
-    graph.functions["Bloom"] = EngineFunction("Bloom");
+    graph.functions["Bloom"] = support::EngineFunction("Bloom");
     graph.Add("picture", "Image").Set("format", "eRGBA16_SFLOAT").Set("extent", Value::List { 64, 64 }).pass = "frame";
     graph.Add("paint", "Clear").Wire("image", "picture").Set("color", Value::List { 4, 4, 4, 1 }).pass = "frame";
     graph.Add("linear", "Sampler").Set("minFilter", "eLinear").Set("magFilter", "eLinear").Set("addressModeU", "eClampToEdge").Set("addressModeV", "eClampToEdge").pass = "frame";

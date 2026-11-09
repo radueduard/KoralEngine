@@ -1,0 +1,240 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture blurred by a Gaussian of spread `sigma` pixels, `radius` taps each side: across, then down \u2014 two passes of 2 radius + 1 taps each, normalised. `picture` is read, and `blurred` (RGBA16F, its size) is what it gives.",
+ "tags": [
+  "blur",
+  "gaussian",
+  "soften",
+  "smooth",
+  "filter",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "radius",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     120
+    ],
+    "inputs": {
+     "name": "radius",
+     "kind": "eValue",
+     "default": 6
+    }
+   },
+   {
+    "id": "sigma",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     200
+    ],
+    "inputs": {
+     "name": "sigma",
+     "kind": "eValue",
+     "default": 3
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "across",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "blurred",
+    "type": "Image",
+    "at": [
+     580,
+     200
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "horizontal",
+    "type": "ComputePipeline",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "compute.module": "koral_blur",
+     "compute.entry": "horizontal",
+     "param.source": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run horizontal",
+    "type": "Dispatch",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "horizontal",
+       "out"
+      ]
+     },
+     "cover": "target",
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.sigma": {
+      "$link": [
+       "sigma",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "vertical",
+    "type": "ComputePipeline",
+    "at": [
+     840,
+     200
+    ],
+    "inputs": {
+     "compute.module": "koral_blur",
+     "compute.entry": "vertical",
+     "param.source": {
+      "$link": [
+       "across",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run vertical",
+    "type": "Dispatch",
+    "at": [
+     1100,
+     200
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "vertical",
+       "out"
+      ]
+     },
+     "cover": "target",
+     "push.radius": {
+      "$link": [
+       "radius",
+       "out"
+      ]
+     },
+     "push.sigma": {
+      "$link": [
+       "sigma",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out blurred",
+    "type": "FunctionOutput",
+    "at": [
+     1360,
+     200
+    ],
+    "inputs": {
+     "name": "blurred",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "blurred",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

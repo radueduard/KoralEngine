@@ -163,8 +163,45 @@ The contracts a material kind and its shading are written to (see [scripts.md](s
 Every lit thing the engine draws goes through these: the material previews and small pictures (`KoralStudioLights`
 and a cube map), the editor's mesh thumbnails and mesh viewer, its clay view, and the starter scenes' shaders.
 
+### `koral_shadows`: how much of a light reaches past what hides it
+
+Read from the maps the engine's functions draw (see [kgraph.md](kgraph.md), Lights' shadows): a point is moved off its
+surface and toward its light by as much of the world as a texel of the map covers there before it is compared, and
+filtered — the sun's 5 x 5 taps, as wide in the world in every cascade and faded into the next over each one's last
+part; a point light's or a spot's over a disc of `taps` comparisons (`KoralVogelDisk`, turned by `noise` for TAA to
+average).
+
+| | |
+|---|---|
+| `KoralSunShadows(atlas, cascades, viewDepth, filter)` | SunShadows' atlas, `KoralSunCascades` as ShadowCascades fits them (matrices, splits, world texels). |
+| `KoralPointShadows(maps, faces, compare, filter)` | PointLightShadows' cubes, six layers a light. |
+| `KoralSpotShadows(maps, matrices, compare, filter)` | SpotLightShadows' maps. |
+| `KoralCombineShadows(a, b)` | Two of them as one, for KoralLit: what both let through. |
+| `KoralShadowFilter` | `bias`, `softness`, `taps`, `cascadeBlend`, `noise`. |
+| `KoralSunVisibility`, `KoralSunVisibilityTap`, `KoralPointVisibility`, `KoralSpotVisibility`, `KoralMapPlaceOf`, `KoralCubeFaceOf` | The parts: a tap for fog, a map of a shader's own. |
+
+Each lets through every light but its own kind, and a light past its function's `most`.
+
+## The engine's passes
+
+| Function | Shader | |
+|---|---|---|
+| Lights | — | Every light in one buffer of `KoralLight`. |
+| SunShadows, PointLightShadows, SpotLightShadows | `koral_shadow` | The shadow maps koral_shadows reads. |
+| GaussianBlur | `koral_blur` | A picture blurred across then down: `radius` taps each side, of spread `sigma`. |
+| MipChain | `koral_mips` | A picture's levels, each the average of the one before. |
+| Bloom | `koral_bloom` | What is brighter than a threshold bleeds round it: a 13-tap chain down and a tent back up. |
+| Tonemap | `koral_tonemap` | `KoralDisplay` of each pixel, exposed. |
+| TAA | `koral_taa` | Each pixel blended with where it was, held to what is round it now. |
+| HiZ | `koral_hiz` | A depth pyramid, each level the farthest of four. |
+| CullInSight, InstanceCull | `koral_cull`, `koral_occlusion` | What of an indirect draw is in sight; and not behind what was drawn first. |
+| Instances, CullInstances, SplatPoints | `koral_instancer`, `koral_instance_cull`, `koral_points` | Millions of one mesh, made, culled and drawn far off as points, on the GPU. |
+| Scan, RadixSort, BitonicSort, OddEvenSort, Compact, IndirectArgs | `koral_scan`, `koral_sort`, `koral_compare_sort`, `koral_compact`, `koral_args` | Prefix sums, sorts, what is kept, how many groups. |
+
 ## Tests
 
 `LibraryTest` (kgraph) runs `modules/kgraph/tests/shaders/library.slang` on the GPU: each check of the library — round
 trips of every curve and packing, the spread of every way of sampling, boxes and rays against a lens — writes what it
-got and what it should be, and the test names each by its line.
+got and what it should be, and the test names each by its line. `shadowCheck.slang` does the same with what
+PointLightShadows and SpotLightShadows drew of a cube under two lights; another test blurs one white pixel and takes a
+mip chain of it.

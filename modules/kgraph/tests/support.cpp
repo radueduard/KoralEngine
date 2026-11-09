@@ -1,9 +1,13 @@
 #include "support.h"
 
+#include <kecs/json.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <system_error>
 
@@ -64,6 +68,20 @@ namespace {
 
 namespace support
 {
+    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
+    {
+        const std::filesystem::path file = kscript::PackageDirectory() / "functions" / (name + ".kfunc");
+        std::ifstream in(file, std::ios::binary);
+        std::stringstream read;
+        read << in.rdbuf();
+        kecs::json::Value parsed;
+        std::string error;
+        auto graph = std::make_shared<kgraph::Graph>();
+        if (!kecs::json::Parse(read.str(), parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
+            ADD_FAILURE() << name << ": " << error;
+        return graph;
+    }
+
     kor::App* App() { return s_app.get(); }
     const std::string& Reason() { return s_reason; }
     void Frame()

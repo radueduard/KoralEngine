@@ -48,6 +48,8 @@ namespace support
      * @p fields says, each as its numbers. Those not said start as the component's source says.
      */
     void Give(kecs::World& world, kecs::Entity entity, std::string_view component, std::initializer_list<std::pair<std::string_view, std::vector<float>>> fields = {});
+    /** One of the engine's functions, as its file in the package has it: packages/koral/functions/<name>.kfunc. */
+    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name);
     /** A field of an entity's component, as its numbers: a float, or a vector's. */
     std::vector<float> FieldOf(const kecs::World& world, kecs::Entity entity, std::string_view component, std::string_view field);
 

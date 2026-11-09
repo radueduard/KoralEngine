@@ -1,0 +1,220 @@
+{
+ "koral-function": 1,
+ "purpose": "Post",
+ "description": "A picture's mip chain: `levels` levels (RGBA16F), the first a copy of the picture and each after the average of what it halves of the one before. What a blur by distance, a glossy reflection or an exposure reads at the level that suits it.",
+ "tags": [
+  "mips",
+  "mipmap",
+  "downsample",
+  "pyramid",
+  "levels",
+  "reduce",
+  "post"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "picture",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "picture",
+     "kind": "eImage"
+    }
+   },
+   {
+    "id": "levels",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     120
+    ],
+    "inputs": {
+     "name": "levels",
+     "kind": "eValue",
+     "default": 6
+    }
+   },
+   {
+    "id": "size",
+    "type": "ImageExtent",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "chain",
+    "type": "Image",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "format": "eRGBA16_SFLOAT",
+     "usage": [
+      "eStorage",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "mipLevels": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "source view",
+    "type": "ImageView",
+    "at": [
+     580,
+     200
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "picture",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "level",
+    "type": "Repeat",
+    "at": [
+     580,
+     320
+    ],
+    "inputs": {
+     "count": {
+      "$link": [
+       "levels",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "level view",
+    "type": "ImageView",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "chain",
+       "out"
+      ]
+     },
+     "baseMipLevel": {
+      "$link": [
+       "level",
+       "index"
+      ]
+     },
+     "mipLevelCount": 1
+    }
+   },
+   {
+    "id": "level above",
+    "type": "Previous",
+    "at": [
+     840,
+     200
+    ],
+    "inputs": {
+     "of": "level view",
+     "first": "source view"
+    }
+   },
+   {
+    "id": "down",
+    "type": "ComputePipeline",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "compute.module": "koral_mips",
+     "compute.entry": "downsample",
+     "param.source": {
+      "$link": [
+       "level above",
+       "out"
+      ]
+     },
+     "param.target": {
+      "$link": [
+       "level view",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "run down",
+    "type": "Dispatch",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "down",
+       "out"
+      ]
+     },
+     "cover": "target",
+     "push.level": {
+      "$link": [
+       "level",
+       "index"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out chain",
+    "type": "FunctionOutput",
+    "at": [
+     1620,
+     40
+    ],
+    "inputs": {
+     "name": "chain",
+     "kind": "eImage",
+     "value": {
+      "$link": [
+       "chain",
+       "out"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}

@@ -1812,6 +1812,7 @@ namespace kgraph
          * light after another — and whichever is not where, or as far-reaching, as it was when it was drawn last.
          */
         Expected<void> BuildPointShadows(const Node& node, const Inputs& inputs, Built& out);
+        Expected<void> BuildSpotShadows(const Node& node, const Inputs& inputs, Built& out);
 
         /**
          * The shape of the input @p name of @p consumer, when it is said: of its type's, or a draw's `push.` and `param.`
@@ -1930,9 +1931,10 @@ namespace kgraph
         static Arrived Together(std::vector<std::pair<std::string, VertexData>> meshes, const std::map<std::string, std::string>& names);
         std::shared_ptr<std::atomic<bool>> alive = std::make_shared<std::atomic<bool>>(true);
         std::vector<kor::Task<void>> reading;                   // the files being read
-        /// A PointShadows node's lights as their maps were last drawn — where each was, and how far it reached — and
-        /// whose turn it is to be drawn again. Forgotten when the graph is built again: the maps are then new.
-        struct ShadowsDrawn { std::vector<std::array<float, 4>> as; int next = 0; };
+        /// A PointShadows' or a SpotShadows' lights as their maps were last drawn — where each was, how far it reached,
+        /// and a spot's way and cone — and whose turn it is to be drawn again. Forgotten when the graph is built again:
+        /// the maps are then new.
+        struct ShadowsDrawn { std::vector<std::array<float, 8>> as; int next = 0; };
         std::map<std::string, ShadowsDrawn> pointShadowsDrawn;
         /// Each RandomDevice's seed, and the `draw` it was drawn for: kept while the graph runs, so that an edit elsewhere
         /// draws nothing new. A `draw` changed draws again.

@@ -173,21 +173,6 @@ namespace {
 #endif
     }
 
-    /** One of the engine's functions, as its file in the package has it. */
-    std::shared_ptr<const kgraph::Graph> EngineFunction(const std::string& name)
-    {
-        const std::filesystem::path file = std::filesystem::path(KGRAPH_PACKAGE_SHADERS).parent_path() / "functions" / (name + ".kfunc");
-        std::ifstream in(file, std::ios::binary);
-        std::stringstream read;
-        read << in.rdbuf();
-        kecs::json::Value parsed;
-        std::string error;
-        auto graph = std::make_shared<kgraph::Graph>();
-        if (!kecs::json::Parse(read.str(), parsed, error) || !parsed.Find("graph") || !kgraph::Graph::FromJson(parsed.Find("graph")->raw, *graph, error))
-            ADD_FAILURE() << name << ": " << error;
-        return graph;
-    }
-
     /** Sets an int field of an entity's component, by name: support::Give sets floats. */
     void GiveInt(kecs::World& world, const kecs::Entity entity, const std::string_view component, const std::string_view field, const std::int32_t value)
     {
@@ -256,7 +241,7 @@ TEST_F(ScaleTest, AnInstancersMillionsCostTheCpuNothing) {
         .Set("width", Picture).Set("height", Picture).Set("meshRadius", 0.9);
     graph.Add("screen", "Screen");
     graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
-    for (const char* name : { "Instances", "CullInstances", "SplatPoints" }) graph.functions[name] = EngineFunction(name);
+    for (const char* name : { "Instances", "CullInstances", "SplatPoints" }) graph.functions[name] = support::EngineFunction(name);
 
     const auto start = std::chrono::steady_clock::now();
     runtime.Set(graph);
@@ -552,7 +537,7 @@ TEST_F(ScaleTest, CullInSightDrawsOnlyWhatIsSeen) {
         .Wire("indirect", "cull", "commands").Wire("drawCount", "commands", "drawCount").Wire("param.visible", "cull", "visible");
     graph.Add("screen", "Screen");
     graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
-    graph.functions["CullInSight"] = EngineFunction("CullInSight");
+    graph.functions["CullInSight"] = support::EngineFunction("CullInSight");
 
     // Eight in the picture, along its middle; eight beside it, to the right.
     std::vector<kecs::Entity> entities;
@@ -791,7 +776,7 @@ TEST_F(ScaleTest, InstanceCullDrawsNothingBehindWhatItDrewFirst) {
     ASSERT_TRUE(cube);
 
     kgraph::Graph graph;
-    graph.functions["InstanceCull"] = EngineFunction("InstanceCull");
+    graph.functions["InstanceCull"] = support::EngineFunction("InstanceCull");
     graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { support::Size, support::Size })
         .Set("usage", Value::List { "eColorAttachment", "eTransferSrc" });
     graph.Add("depth", "Image").Set("format", "eD32_SFLOAT").Set("extent", Value::List { support::Size, support::Size });

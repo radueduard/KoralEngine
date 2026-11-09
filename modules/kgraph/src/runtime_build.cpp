@@ -2249,8 +2249,8 @@ namespace kgraph
                 const kor::Vec3 from(static_cast<float>(lights[at]), static_cast<float>(lights[at + 1]), static_cast<float>(lights[at + 2]));
                 const float range = static_cast<float>(lights[at + 3]);
                 const kor::Mat4 lens = kor::Perspective(1.5707963f, 1.f, near, std::max(range, near * 2.f));
-                const std::array<float, 4> now { from.x, from.y, from.z, range };
-                if (static_cast<std::size_t>(light) >= drawn.as.size()) drawn.as.resize(static_cast<std::size_t>(light) + 1, { 0.f, 0.f, 0.f, -1.f });
+                const std::array<float, 8> now { from.x, from.y, from.z, range, 0.f, 0.f, 0.f, 0.f };
+                if (static_cast<std::size_t>(light) >= drawn.as.size()) drawn.as.resize(static_cast<std::size_t>(light) + 1, { 0.f, 0.f, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f });
                 if (drawn.as[static_cast<std::size_t>(light)] != now) { drawn.as[static_cast<std::size_t>(light)] = now; due[static_cast<std::size_t>(light)] = true; }
                 for (int face = 0; face < 6; ++face) {
                     const kor::Mat4 both = lens * kor::LookAt(from, from + towards[face], ups[face]);
@@ -2271,6 +2271,62 @@ namespace kgraph
             out.outputs["idle"].value = Value(std::move(idle));
             out.outputs["count"].value = count;
             out.outputs["faces"].value = most * 6;
+            return {};
+        }
+
+    auto Runtime::Impl::BuildSpotShadows(const Node& node, const Inputs& inputs, Built& out) -> Expected<void>
+    {
+            const auto number = [&](const char* name, const float otherwise) {
+                const auto it = inputs.find(name);
+                const double* given = it == inputs.end() ? nullptr : it->second.value.Number();
+                return given ? static_cast<float>(*given) : otherwise;
+            };
+            std::vector<double> lights;
+            if (const auto it = inputs.find("lights"); it != inputs.end() && !it->second.value.IsNull()
+                                                       && !(it->second.value.Items() && it->second.value.Items()->empty())) {    // none yet: no spots
+                auto numbers = NumbersOf(it->second.value, "lights");
+                if (!numbers || numbers->size() % 8 != 0)
+                    return Fail("'lights' is eight numbers a spot: where it is, how far it reaches, the way it shines, and its outer angle in degrees");
+                lights = std::move(*numbers);
+            }
+            const int most = std::clamp(static_cast<int>(number("most", 8.f)), 1, 64);
+            const float near = std::max(number("near", 0.05f), 0.001f);
+            Value::List matrices;
+            matrices.reserve(static_cast<std::size_t>(most) * 16);
+            const int each = static_cast<int>(number("each", 0.f));
+            auto& drawn = pointShadowsDrawn[node.id];
+            std::vector<bool> due(static_cast<std::size_t>(most), each <= 0);
+            const int count = std::min(most, static_cast<int>(lights.size() / 8));
+            for (int light = 0; light < count; ++light) {
+                const auto at = static_cast<std::size_t>(light) * 8;
+                const auto f = [&](const std::size_t i) { return static_cast<float>(lights[at + i]); };
+                const kor::Vec3 from(f(0), f(1), f(2)), way(f(4), f(5), f(6));
+                const float range = f(3), outer = f(7);
+                const std::array<float, 8> now { from.x, from.y, from.z, range, way.x, way.y, way.z, outer };
+                if (static_cast<std::size_t>(light) >= drawn.as.size()) drawn.as.resize(static_cast<std::size_t>(light) + 1, { 0.f, 0.f, 0.f, -1.f, 0.f, 0.f, 0.f, 0.f });
+                if (drawn.as[static_cast<std::size_t>(light)] != now) { drawn.as[static_cast<std::size_t>(light)] = now; due[static_cast<std::size_t>(light)] = true; }
+                // Twice its outer angle wide, and a little more, so that its cone's edge is inside the map; as far as its range.
+                const float wide = std::clamp((2.f * outer + 2.f) * 0.0174532925f, 0.02f, 3.0f);
+                const kor::Mat4 lens = kor::Perspective(wide, 1.f, near, std::max(range, near * 2.f));
+                const kor::Vec3 forward = kor::Length(way) > 1e-6f ? kor::Normalize(way) : kor::Vec3(0.f, 0.f, -1.f);
+                const kor::Vec3 up = std::abs(forward.y) > 0.99f ? kor::Vec3(0.f, 0.f, 1.f) : kor::Vec3(0.f, 1.f, 0.f);
+                const kor::Mat4 both = lens * kor::LookAt(from, from + forward, up);
+                for (int column = 0; column < 4; ++column)
+                    for (int row = 0; row < 4; ++row) matrices.emplace_back(both[column][row]);
+            }
+            // A spot there is none of: everything is to one side of what it sees, and is drawn into none.
+            for (int map = count; map < most; ++map)
+                for (int i = 0; i < 16; ++i) matrices.emplace_back(i == 12 ? 2.0 : i == 15 ? 1.0 : 0.0);
+            out.outputs["matrices"].value = Value(std::move(matrices));
+            out.outputs["out"].value = out.outputs["matrices"].value;
+            if (each > 0 && count > 0)
+                for (int i = 0; i < each; ++i) due[static_cast<std::size_t>((drawn.next + i) % count)] = true;
+            if (count > 0) drawn.next = (drawn.next + std::max(each, 0)) % count;
+            Value::List idle;
+            for (int map = 0; map < most; ++map) idle.emplace_back(map < count && due[static_cast<std::size_t>(map)] ? 0 : 1);
+            out.outputs["idle"].value = Value(std::move(idle));
+            out.outputs["count"].value = count;
+            out.outputs["maps"].value = most;
             return {};
         }
 
@@ -2784,6 +2840,8 @@ namespace kgraph
                 return BuildCascades(inputs, out);
             } else if (type == "PointShadows") {
                 return BuildPointShadows(node, inputs, out);
+            } else if (type == "SpotShadows") {
+                return BuildSpotShadows(node, inputs, out);
             } else if (type == "ImageExtent") {
                 const auto it = inputs.find("image");
                 const auto image = it == inputs.end() ? kor::ResourceRef<const kor::Image>() : ImageRefOf(it->second.resource.get());

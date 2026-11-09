@@ -1,0 +1,530 @@
+{
+ "koral-function": 1,
+ "purpose": "Lighting",
+ "description": "The point lights' shadow maps: a cube for each of the first `most` (up to 42), six faces of `size` each, every face a layer of `maps` \u2014 every entity with a Mesh among `entities` (but those of `without`) drawn as each face sees it; `each` lights' cubes drawn again a frame, one after another, and any light that moved at once. `matrices` is a buffer of the faces' matrices, the n-th light's six from 6n: what koral_shadows' KoralPointShadows reads, with `maps` and `compare`. A point light finds its cube by its kindIndex.",
+ "tags": [
+  "shadows",
+  "point light",
+  "lamp",
+  "cube map",
+  "omnidirectional",
+  "shadow map"
+ ],
+ "graph": {
+  "kgraph": 1,
+  "nodes": [
+   {
+    "id": "entities",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     40
+    ],
+    "inputs": {
+     "name": "entities",
+     "kind": "eEntities"
+    }
+   },
+   {
+    "id": "layout",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     120
+    ],
+    "inputs": {
+     "name": "layout",
+     "kind": "eValue"
+    }
+   },
+   {
+    "id": "size",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     200
+    ],
+    "inputs": {
+     "name": "size",
+     "kind": "eValue",
+     "default": 1024
+    }
+   },
+   {
+    "id": "most",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     280
+    ],
+    "inputs": {
+     "name": "most",
+     "kind": "eValue",
+     "default": 8
+    }
+   },
+   {
+    "id": "each",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     360
+    ],
+    "inputs": {
+     "name": "each",
+     "kind": "eValue",
+     "default": 0
+    }
+   },
+   {
+    "id": "near",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     440
+    ],
+    "inputs": {
+     "name": "near",
+     "kind": "eValue",
+     "default": 0.05
+    }
+   },
+   {
+    "id": "without",
+    "type": "FunctionInput",
+    "at": [
+     60,
+     520
+    ],
+    "inputs": {
+     "name": "without",
+     "kind": "eValue",
+     "default": [
+      "PointLight",
+      "SpotLight"
+     ]
+    }
+   },
+   {
+    "id": "lights",
+    "type": "ForEach",
+    "at": [
+     320,
+     40
+    ],
+    "inputs": {
+     "component": "PointLight"
+    }
+   },
+   {
+    "id": "light numbers",
+    "type": "Append",
+    "at": [
+     580,
+     40
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "lights",
+       "worldPosition"
+      ]
+     },
+     "b": {
+      "$link": [
+       "lights",
+       "field.range"
+      ]
+     }
+    }
+   },
+   {
+    "id": "collected",
+    "type": "Collect",
+    "at": [
+     840,
+     40
+    ],
+    "inputs": {
+     "value": {
+      "$link": [
+       "light numbers",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "views",
+    "type": "PointShadows",
+    "at": [
+     1100,
+     40
+    ],
+    "inputs": {
+     "lights": {
+      "$link": [
+       "collected",
+       "out"
+      ]
+     },
+     "most": {
+      "$link": [
+       "most",
+       "out"
+      ]
+     },
+     "each": {
+      "$link": [
+       "each",
+       "out"
+      ]
+     },
+     "near": {
+      "$link": [
+       "near",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "matrix block",
+    "type": "BufferBuilder",
+    "at": [
+     1360,
+     40
+    ],
+    "inputs": {
+     "layout": [
+      {
+       "name": "maps",
+       "type": "eMat4",
+       "count": 252
+      }
+     ],
+     "field.maps": {
+      "$link": [
+       "views",
+       "matrices"
+      ]
+     }
+    }
+   },
+   {
+    "id": "depth",
+    "type": "Image",
+    "at": [
+     1360,
+     160
+    ],
+    "inputs": {
+     "format": "eD32_SFLOAT",
+     "usage": [
+      "eDepthStencilAttachment",
+      "eSampled",
+      "eTransferSrc"
+     ],
+     "extent.x": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "extent.y": {
+      "$link": [
+       "size",
+       "out"
+      ]
+     },
+     "arrayLayers": {
+      "$link": [
+       "views",
+       "faces"
+      ]
+     }
+    }
+   },
+   {
+    "id": "layer",
+    "type": "Repeat",
+    "at": [
+     1360,
+     300
+    ],
+    "inputs": {
+     "count": {
+      "$link": [
+       "views",
+       "faces"
+      ]
+     }
+    }
+   },
+   {
+    "id": "layer view",
+    "type": "ImageView",
+    "at": [
+     1620,
+     160
+    ],
+    "inputs": {
+     "image": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     },
+     "viewType": "e2D",
+     "baseArrayLayer": {
+      "$link": [
+       "layer",
+       "index"
+      ]
+     },
+     "arrayLayerCount": 1
+    }
+   },
+   {
+    "id": "layer target",
+    "type": "Framebuffer",
+    "at": [
+     1880,
+     160
+    ],
+    "inputs": {
+     "depthStencil.view": {
+      "$link": [
+       "layer view",
+       "out"
+      ]
+     },
+     "depthStencil.depth": 1,
+     "depthStencil.name": "depth",
+     "depthStencil.which": "Depth"
+    }
+   },
+   {
+    "id": "first target",
+    "type": "Element",
+    "at": [
+     2140,
+     160
+    ],
+    "inputs": {
+     "of": "layer target",
+     "index": 0
+    }
+   },
+   {
+    "id": "caster",
+    "type": "GraphicsPipeline",
+    "at": [
+     2400,
+     40
+    ],
+    "inputs": {
+     "stages": "eVertex",
+     "vertex.module": "koral_shadow",
+     "vertex.entry": "layerVertex",
+     "fragment.module": "koral_shadow",
+     "fragment.entry": "shadowFragment",
+     "vertex.layout": {
+      "$link": [
+       "layout",
+       "out"
+      ]
+     },
+     "framebuffer": {
+      "$link": [
+       "first target",
+       "out"
+      ]
+     },
+     "param.maps": {
+      "$link": [
+       "matrix block",
+       "out"
+      ]
+     },
+     "depthStencilState": {
+      "depthTestEnable": true,
+      "depthWriteEnable": true,
+      "depthCompareOp": "eLessOrEqual"
+     }
+    }
+   },
+   {
+    "id": "casters",
+    "type": "Filter",
+    "at": [
+     2400,
+     300
+    ],
+    "inputs": {
+     "entities": {
+      "$link": [
+       "entities",
+       "out"
+      ]
+     },
+     "with": [
+      "Mesh"
+     ],
+     "without": {
+      "$link": [
+       "without",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "cast",
+    "type": "Draw",
+    "at": [
+     2660,
+     40
+    ],
+    "inputs": {
+     "pipeline": {
+      "$link": [
+       "caster",
+       "out"
+      ]
+     },
+     "framebuffer": {
+      "$link": [
+       "layer target",
+       "out"
+      ]
+     },
+     "mesh": {
+      "$link": [
+       "casters",
+       "Mesh.mesh"
+      ]
+     },
+     "push.model": {
+      "$link": [
+       "casters",
+       "matrix"
+      ]
+     },
+     "push.layer": {
+      "$link": [
+       "layer",
+       "index"
+      ]
+     },
+     "cull": {
+      "$link": [
+       "views",
+       "matrices"
+      ]
+     },
+     "cullIndex": {
+      "$link": [
+       "layer",
+       "index"
+      ]
+     },
+     "idle": {
+      "$link": [
+       "views",
+       "idle"
+      ]
+     }
+    }
+   },
+   {
+    "id": "compare",
+    "type": "Sampler",
+    "at": [
+     2660,
+     300
+    ],
+    "inputs": {
+     "compareEnable": true,
+     "compareOp": "eLessOrEqual",
+     "magFilter": "eLinear",
+     "minFilter": "eLinear",
+     "addressModeU": "eClampToEdge",
+     "addressModeV": "eClampToEdge"
+    }
+   },
+   {
+    "id": "out maps",
+    "type": "FunctionOutput",
+    "at": [
+     2920,
+     40
+    ],
+    "inputs": {
+     "name": "maps",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "depth",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out matrices",
+    "type": "FunctionOutput",
+    "at": [
+     2920,
+     120
+    ],
+    "inputs": {
+     "name": "matrices",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "matrix block",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out compare",
+    "type": "FunctionOutput",
+    "at": [
+     2920,
+     200
+    ],
+    "inputs": {
+     "name": "compare",
+     "kind": "eResource",
+     "value": {
+      "$link": [
+       "compare",
+       "out"
+      ]
+     }
+    }
+   },
+   {
+    "id": "out count",
+    "type": "FunctionOutput",
+    "at": [
+     2920,
+     280
+    ],
+    "inputs": {
+     "name": "count",
+     "kind": "eValue",
+     "value": {
+      "$link": [
+       "views",
+       "count"
+      ]
+     }
+    }
+   }
+  ]
+ }
+}
