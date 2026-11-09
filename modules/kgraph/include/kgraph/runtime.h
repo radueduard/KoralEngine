@@ -664,6 +664,12 @@ namespace kgraph
         void RemoveCondition(std::string_view name);
         /** @brief The conditions there are: the engine's (HasAttributes) and those set, by name. */
         [[nodiscard]] std::vector<Condition> Conditions() const;
+        /**
+         * @brief One of an entity's components as a script is given it, a JSON object of its fields by name: a number, a
+         *        vector, true or false; a mesh it holds as `{"layout": [{"semantic": "POSITION", "type": "eFloat", "count": 3}, ...]}`
+         *        (empty while it is read); any other resource as null. @p bytes are its, as a condition is given them.
+         */
+        [[nodiscard]] static std::string ComponentJson(const kecs::World& world, std::string_view component, const void* bytes);
 
         // ---- materials ------------------------------------------------------------------------------------------------
 

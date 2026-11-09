@@ -116,6 +116,21 @@ internal unsafe struct KengineContents
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineConditionInput
+{
+    public byte* Name;
+    public byte* Type;
+    public byte* Initial;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KengineConditionCallbacks
+{
+    public IntPtr User;
+    public delegate* unmanaged[Cdecl]<IntPtr, byte*, byte*, int> Test;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct KengineResourceScriptCallbacks
 {
     public IntPtr User;
@@ -240,6 +255,10 @@ internal static unsafe partial class Native
     public static partial bool kengine_resource_script_register(IntPtr document, string name, nuint size, KecsField* fields, nuint fieldCount,
                                                                 KengineScriptResource* resources, nuint resourceCount, KengineResourceScriptCallbacks* callbacks);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_resource_script_unregister(IntPtr document, string name);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_condition_register(IntPtr document, string name, IntPtr* components, nuint componentCount,
+                                                          KengineConditionInput* inputs, nuint inputCount, KengineConditionCallbacks* callbacks);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_condition_unregister(IntPtr document, string name);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     public static partial byte* kengine_image_create(IntPtr document, string name, uint width, uint height, byte* rgba);

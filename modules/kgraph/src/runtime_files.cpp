@@ -1205,6 +1205,35 @@ namespace kgraph
             return {};
         }
 
+    std::string Runtime::ComponentJson(const kecs::World& world, const std::string_view component, const void* bytes)
+    {
+        const kecs::ComponentId id = world.Find(component);
+        if (id == kecs::NoComponent || !bytes) return "{}";
+        Value::Members fields;
+        for (const auto& field : world.Describe(id).fields) {
+            const std::byte* at = static_cast<const std::byte*>(bytes) + field.offset;
+            if (field.type != "Mesh" && field.type != "resource" && field.type != "Image" && field.type != "Buffer") {
+                fields.emplace_back(field.name, Impl::FieldValue(field, at));
+                continue;
+            }
+            const Resource* held = reinterpret_cast<const Held*>(at)->get();
+            while (held && held->replacedBy) held = held->replacedBy.get();
+            if (held && held->part) held = held->source.get();
+            if (!held || held->kind != "Mesh") { fields.emplace_back(field.name, Value()); continue; }
+            // A mesh: as what it lays its vertices out as.
+            static constexpr const char* types[] { "eFloat", "eInt", "eUInt", "eShort", "eUShort", "eByte", "eUByte", "eDouble" };
+            Value::List attributes;
+            if (held->handle && !held->pending)
+                for (const auto& attribute : kor::capi::MeshOf(held->handle)->Layout().attributes) {
+                    const auto type = static_cast<std::size_t>(attribute.channelType);
+                    attributes.emplace_back(Value::Members { { "semantic", attribute.semantic }, { "type", type < std::size(types) ? types[type] : "eFloat" },
+                                                             { "count", static_cast<double>(attribute.channelCount) } });
+                }
+            fields.emplace_back(field.name, Value(Value::Members { { "layout", Value(std::move(attributes)) } }));
+        }
+        return Value(std::move(fields)).ToJson();
+    }
+
     auto Runtime::Impl::FindCondition(const std::string_view name) const -> const Condition*
     {
             if (const auto it = conditions.find(name); it != conditions.end()) return &it->second;

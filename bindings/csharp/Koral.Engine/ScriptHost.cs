@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Loader;
 using System.Text;
+using System.Text.Json;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -44,6 +45,10 @@ public sealed unsafe class ScriptHost : IDisposable
     private ScriptContext? _context;
     private readonly Dictionary<string, Registered> _registered = [];
     private readonly Dictionary<string, RegisteredResource> _resources = [];
+    private readonly Dictionary<string, RegisteredCondition> _conditions = [];
+
+    /// <summary>The conditions the scripts declare, by the name a node's <c>conditions</c> gives them: <c>&lt;Class&gt;.&lt;function&gt;</c>.</summary>
+    public IReadOnlyCollection<string> ConditionNames => _conditions.Keys;
     private string _snapshot = "", _pending = "";
     private DateTime _pendingSince, _lastPoll;
     private int _generation;
@@ -118,9 +123,10 @@ public sealed unsafe class ScriptHost : IDisposable
 
         // The layouts first: a field a script cannot keep is an error like one of the compiler's, and changes nothing.
         var layouts = new List<(Type Type, ScriptLayout Layout)>();
+        var conditionTypes = types.Where(t => t.IsSubclassOf(typeof(Conditions))).ToList();
         try
         {
-            foreach (var type in types) layouts.Add((type, ScriptLayout.Of(type)));
+            foreach (var type in types.Except(conditionTypes)) layouts.Add((type, ScriptLayout.Of(type)));
         }
         catch (EngineException e)
         {
@@ -138,8 +144,20 @@ public sealed unsafe class ScriptHost : IDisposable
         foreach (var resource in _resources.Values) Native.kengine_resource_script_unregister(_world.Document, resource.Layout.Name);
         foreach (var resource in _resources.Values) resource.Free();
         _resources.Clear();
+        UnregisterConditions();
 
         var failed = new List<string>();
+        // Each [Condition(N)] function of a Conditions class: one the graph's ForEach and Filter nodes can name.
+        foreach (var type in conditionTypes)
+            foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly))
+            {
+                if (method.GetCustomAttribute<ConditionAttribute>() is not { } marked) continue;
+                var condition = new RegisteredCondition(_world, $"{type.Name}.{method.Name}", method, marked.Components);
+                if (condition.Problem is { } problem) { failed.Add($"{condition.Name}: {problem}"); continue; }
+                if (_conditions.ContainsKey(condition.Name)) { failed.Add($"{condition.Name}: there is another of that name — a condition's function has no overloads"); continue; }
+                if (condition.Register()) _conditions[condition.Name] = condition;
+                else { failed.Add($"{condition.Name}: {Native.LastError()}"); condition.Free(); }
+            }
         foreach (var (type, layout) in layouts)
         {
             // One that makes resources is a Script node's to run, and no component.
@@ -183,9 +201,119 @@ public sealed unsafe class ScriptHost : IDisposable
             resource.Free();
         }
         _resources.Clear();
+        UnregisterConditions();
         if (_context is not null) Unload(_context);
         _context = null;
         _running = null;
+    }
+
+    private void UnregisterConditions()
+    {
+        foreach (var condition in _conditions.Values)
+        {
+            Native.kengine_condition_unregister(_world.Document, condition.Name);
+            condition.Free();
+        }
+        _conditions.Clear();
+    }
+
+    // ---- one condition, registered -----------------------------------------------------------------------------
+
+    /// <summary>A Conditions class's [Condition(N)] function, as the graph runs it: its components and inputs from JSON.</summary>
+    private sealed unsafe class RegisteredCondition
+    {
+        private readonly World _world;
+        private readonly MethodInfo _method;
+        private readonly ParameterInfo[] _parameters;
+        private readonly int _components;
+        private GCHandle _self;
+        private bool _complained;
+
+        public string Name { get; }
+        /// <summary>Why it cannot be one: what is wrong with how it is written. Null when nothing is.</summary>
+        public string? Problem { get; }
+
+        public RegisteredCondition(World world, string name, MethodInfo method, int components)
+        {
+            _world = world;
+            Name = name;
+            _method = method;
+            _parameters = method.GetParameters();
+            _components = components;
+            if (method.ReturnType != typeof(bool)) Problem = "a condition returns a bool: whether to keep the entity";
+            else if (components < 0 || components > _parameters.Length) Problem = $"[Condition({components})] says {components} components, and it takes {_parameters.Length} arguments";
+            else
+                for (var i = 0; i < _parameters.Length && Problem is null; ++i)
+                {
+                    var type = _parameters[i].ParameterType;
+                    if (i < components && !ConditionValues.IsComponent(type))
+                        Problem = $"'{_parameters[i].Name}' is one of its {components} components, and a {type.Name} is none: an EntityMesh, or a Data class of a script's";
+                    else if (i < components && _parameters.Take(i).Any(p => p.ParameterType == type))
+                        Problem = $"'{_parameters[i].Name}' is a {type.Name} again: an entity has one of each";
+                    else if (i >= components && ConditionValues.PortType(type) is null)
+                        Problem = $"its input '{_parameters[i].Name}' is a {type.Name}: an input is a number, a bool, a string, a vector, a MeshLayout, a list of strings, or a component of a script's";
+                }
+        }
+
+        public bool Register()
+        {
+            _self = GCHandle.Alloc(this);
+            var callbacks = new KengineConditionCallbacks { User = GCHandle.ToIntPtr(_self), Test = &OnTest };
+            var texts = new List<IntPtr>();
+            IntPtr Utf8(string? text) { if (text is null) return IntPtr.Zero; var at = Marshal.StringToCoTaskMemUTF8(text); texts.Add(at); return at; }
+            try
+            {
+                var components = stackalloc IntPtr[Math.Max(_components, 1)];
+                for (var i = 0; i < _components; ++i) components[i] = Utf8(ConditionValues.ComponentName(_parameters[i].ParameterType));
+                var count = _parameters.Length - _components;
+                var inputs = stackalloc KengineConditionInput[Math.Max(count, 1)];
+                for (var i = 0; i < count; ++i)
+                {
+                    var parameter = _parameters[_components + i];
+                    inputs[i] = new KengineConditionInput { Name = (byte*)Utf8(parameter.Name), Type = (byte*)Utf8(ConditionValues.PortType(parameter.ParameterType)),
+                                                            Initial = (byte*)Utf8(ConditionValues.Initial(parameter)) };
+                }
+                return Native.kengine_condition_register(_world.Document, Name, components, (nuint)_components, inputs, (nuint)count, &callbacks);
+            }
+            finally
+            {
+                foreach (var text in texts) Marshal.FreeCoTaskMem(text);
+            }
+        }
+
+        public void Free() { if (_self.IsAllocated) _self.Free(); }
+
+        private bool Test(string components, string inputs)
+        {
+            using var given = JsonDocument.Parse(components);
+            using var values = JsonDocument.Parse(inputs);
+            var arguments = new object?[_parameters.Length];
+            var c = given.RootElement.ValueKind == JsonValueKind.Array ? given.RootElement.EnumerateArray().ToList() : [];
+            var v = values.RootElement.ValueKind == JsonValueKind.Array ? values.RootElement.EnumerateArray().ToList() : [];
+            for (var i = 0; i < _parameters.Length; ++i)
+            {
+                var json = i < _components ? (i < c.Count ? c[i] : default) : (i - _components < v.Count ? v[i - _components] : default);
+                arguments[i] = json.ValueKind == JsonValueKind.Undefined ? null : ConditionValues.From(json, _parameters[i].ParameterType);
+            }
+            return _method.Invoke(null, arguments) is true;
+        }
+
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static int OnTest(IntPtr user, byte* components, byte* inputs)
+        {
+            if (GCHandle.FromIntPtr(user).Target is not RegisteredCondition registered) return 0;
+            try
+            {
+                return registered.Test(Native.Text(components) ?? "[]", Native.Text(inputs) ?? "[]") ? 1 : 0;
+            }
+            catch (Exception e)
+            {
+                // Said once, not once an entity: and the entity is not kept.
+                if (!registered._complained) Log.Error($"[scripts] {registered.Name} threw {(e as TargetInvocationException)?.InnerException?.GetType().Name ?? e.GetType().Name}: {(e as TargetInvocationException)?.InnerException?.Message ?? e.Message}");
+                registered._complained = true;
+                return 0;
+            }
+        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -627,7 +755,8 @@ public sealed unsafe class ScriptHost : IDisposable
         pdb.Position = 0;
         var assembly = context.LoadFromStream(pe, pdb);
         var types = assembly.GetExportedTypes()
-            .Where(t => t.IsClass && !t.IsAbstract && (t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
+            .Where(t => t.IsClass && !t.IsAbstract && (((t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
+                                                       || t.IsSubclassOf(typeof(Conditions))))
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .ToList();
         return (context, types, MetadataUpdater.IsSupported ? Running.Of(compilation, assembly, pe.ToArray()) : null);

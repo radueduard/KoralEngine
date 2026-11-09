@@ -728,6 +728,46 @@ void kengine_resource_script_unregister(KengineDocument* document, const char* n
     Guarded([&] { Doc(document).UnregisterResourceScript(Text(name)); return 0; }, 0);
 }
 
+// ---- conditions -------------------------------------------------------------------------------------------------------
+
+bool kengine_condition_register(KengineDocument* document, const char* name, const char* const* components, const size_t component_count,
+                                const KengineConditionInput* inputs, const size_t input_count, const KengineConditionCallbacks* callbacks)
+{
+    return Guarded([&] {
+        if (!name || !*name) { Fail("a condition needs a name"); return false; }
+        if (!callbacks || !callbacks->test) { Fail(std::format("condition '{}' needs a test", name)); return false; }
+        kgraph::Condition condition;
+        condition.name = name;
+        for (size_t i = 0; i < component_count; ++i) {
+            if (!components[i] || !*components[i]) { Fail(std::format("condition '{}': its component {} has no name", name, i)); return false; }
+            condition.components.emplace_back(components[i]);
+        }
+        for (size_t i = 0; i < input_count; ++i) {
+            if (!inputs[i].name || !*inputs[i].name) { Fail(std::format("condition '{}': its input {} has no name", name, i)); return false; }
+            kgraph::Port port { inputs[i].name, kgraph::PortKind::eValue, inputs[i].type && *inputs[i].type ? inputs[i].type : "value", false, {}, nullptr };
+            if (inputs[i].initial && *inputs[i].initial && !Parse(inputs[i].initial, port.initial)) return false;
+            condition.parameters.push_back(std::move(port));
+        }
+        condition.test = [user = callbacks->user, test = callbacks->test, world = &Doc(document).World(), names = condition.components](
+                             const std::span<const void* const> given, const std::span<const kgraph::Value> values) {
+            std::string components = "[";
+            for (std::size_t i = 0; i < given.size() && i < names.size(); ++i)
+                components += (i ? "," : "") + kgraph::Runtime::ComponentJson(*world, names[i], given[i]);
+            components += "]";
+            const std::string inputs = kgraph::Value(kgraph::Value::List(values.begin(), values.end())).ToJson();
+            return test(user, components.c_str(), inputs.c_str()) != 0;
+        };
+        Doc(document).Runtime().SetCondition(std::move(condition));
+        return true;
+    }, false);
+}
+
+void kengine_condition_unregister(KengineDocument* document, const char* name)
+{
+    Guarded([&] { Doc(document).Runtime().RemoveCondition(Text(name)); return 0; }, 0);
+}
+
+
 // ---- meshes ---------------------------------------------------------------------------------------------------------
 
 namespace {

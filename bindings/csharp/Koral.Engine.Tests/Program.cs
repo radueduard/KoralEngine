@@ -171,11 +171,22 @@ Write("Watcher.cs", """
         }
     }
     """);
+Write("Glow.cs", """
+    // A script's component, and conditions of it a Filter keeps an entity by.
+    public sealed class Glow : Script { public float Power; }
+    public sealed class GlowTests : Conditions
+    {
+        [Condition(1)]
+        public static bool Bright(Glow glow, float least = 2f) => glow.Power >= least;
+        [Condition(2)]
+        public static bool Shaped(EntityMesh mesh, Glow glow, MeshLayout? needs = null) => needs is null || needs.IsSubsetOf(mesh.Layout);
+    }
+    """);
 using var host = new ScriptHost(world, scripts);
 Check(host.Load(), $"the scripts compile: {string.Join("; ", host.Errors)}");
 // The project's: the engine's package is compiled with them, so that a script reads a light as it reads its own, but
 // its cameras, lights and sky are Data, which no host runs.
-Check(host.Scripts.Order().SequenceEqual(["Checker", "Feeder", "Pyramid", "Restarter", "Roller", "Sign", "Spin", "Watcher"]),
+Check(host.Scripts.Order().SequenceEqual(["Checker", "Feeder", "Glow", "Pyramid", "Restarter", "Roller", "Sign", "Spin", "Watcher"]),
       $"each is a script, and the package's data none: {string.Join(", ", host.Scripts)}");
 Check(world.HasComponentType("Spin"), "a script is a component type, by its class name");
 {
@@ -399,6 +410,32 @@ Check(world.Resource<Resource>("ramp", "RowsView") is not null && world.Resource
 world.SetInput("ramp", "field.Step", "2");
 Frames(2);
 Near(world.Buffer("ramp", "Table")!.Read<float>(8)[3], 6, "a field changed: made and filled again");
+
+// ---- a script's conditions: what a Filter keeps an entity by -----------------------------------------------------
+
+Check(host.ConditionNames.Order().SequenceEqual(["GlowTests.Bright", "GlowTests.Shaped"]), $"each [Condition(N)] function is one: {string.Join(", ", host.ConditionNames)}");
+var dim = world.Create("Dim");
+world.Add(dim, "Glow");
+world.Set(dim, "Glow", "Power", 1);
+var shining = world.Create("Shining");
+world.Add(shining, "Glow");
+world.Set(shining, "Glow", "Power", 5);
+world.AddNode("Entities", "everyone");
+world.AddNode("Filter", "glowing");
+world.Connect("everyone", "glowing", "entities");
+world.SetInput("glowing", "with", "[\"Glow\"]");
+world.SetInput("glowing", "conditions", "[\"GlowTests.Bright\"]");
+Frames(1);
+Check(world.NodeOk("glowing", out why), $"a Filter of a script's condition builds: {why}");
+Equal(world.ValueJson("glowing", "count"), "1", "only the bright one: its input as its default says");
+world.SetInput("glowing", "GlowTests.Bright.least", "0.5");
+Frames(1);
+Equal(world.ValueJson("glowing", "count"), "2", "its input set on the node: both");
+world.Set(dim, "Glow", "Power", 0);
+Frames(1);
+Equal(world.ValueJson("glowing", "count"), "1", "its component changed: asked again");
+world.RemoveNode("glowing");
+world.RemoveNode("everyone");
 
 // ---- edited while it runs: the code is new, the data is the entity's -------------------------------------------
 

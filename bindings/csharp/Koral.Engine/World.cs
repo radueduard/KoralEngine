@@ -348,6 +348,8 @@ public sealed unsafe class World
     {
         if (!Native.kengine_node_connect(Document, from, output, node, input)) throw new EngineException(Native.LastError());
     }
+    /// <summary>What a node's output holds now, as JSON (<c>"3"</c>, <c>"[1, 0, 0]"</c>); null when it gives no such value.</summary>
+    public string? ValueJson(string node, string output = "out") => Native.kengine_node_value_json(Document, node, output) is var at && at is null ? null : Native.Text(at);
     /// <summary>Whether a node is built; <paramref name="why"/> says why not.</summary>
     public bool NodeOk(string node, out string why)
     {

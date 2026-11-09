@@ -373,6 +373,34 @@ KENGINE_API bool kengine_resource_script_register(KengineDocument* document, con
 /** Stops running a resource script: its code is about to go. A Script node still names it, and what it made is made empty. */
 KENGINE_API void kengine_resource_script_unregister(KengineDocument* document, const char* name);
 
+/* ---- conditions: what a ForEach or a Filter keeps an entity by --------------------------------------------------- */
+
+/** One input of a condition besides its components: an input on the node, `<condition>.<name>`. */
+typedef struct KengineConditionInput {
+    const char* name;
+    const char* type;           /* as a port's: "number", "bool", "vector", "string", "list", "struct KoralVertexLayout", "bundle" */
+    const char* initial;        /* JSON: what it is when the node is given nothing; null for nothing */
+} KengineConditionInput;
+
+typedef struct KengineConditionCallbacks {
+    void* user;
+    /* Whether to keep the entity, given its components — a JSON array, one object each in the order it registered their
+     * names, of each field by name: a number, a vector, true or false; a mesh it holds as {"layout": [{"semantic":
+     * "POSITION", "type": "eFloat", "count": 3}, ...]}; another resource as null — and its inputs' values, a JSON array
+     * in their order. Nonzero keeps it. It is to read nothing else: it is asked again only when they change. */
+    int (*test)(void* user, const char* components, const char* inputs);
+} KengineConditionCallbacks;
+
+/**
+ * Makes a condition a ForEach's or a Filter's `conditions` can name, as @p name — `<Class>.<function>` for a script's
+ * Conditions class — of @p components (names of components; an entity without one is not kept) and @p inputs; or puts it
+ * in the place of the one so named. False, with kengine_last_error saying why, when it cannot be.
+ */
+KENGINE_API bool kengine_condition_register(KengineDocument* document, const char* name, const char* const* components, size_t component_count,
+                                            const KengineConditionInput* inputs, size_t input_count, const KengineConditionCallbacks* callbacks);
+/** Forgets a condition: its code is about to go. A node that names it says there is none. */
+KENGINE_API void kengine_condition_unregister(KengineDocument* document, const char* name);
+
 #ifdef __cplusplus
 }
 #endif
