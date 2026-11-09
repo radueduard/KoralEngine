@@ -91,7 +91,7 @@ rotation in 32 bits), `KoralPackHalf2`, `KoralPackUnorm4x8`, `KoralPackSnorm2x16
 | `KoralPlaceBox(…, reversed)` → `KoralBoxInPicture` | The rectangle it covers and its nearest depth: what an occlusion test reads a depth pyramid with. |
 | `KoralSeeBox(centre, half, toClip, halfHeight)` → `KoralBoxSeen` | Out of sight, how far its nearest part is, how many pixels it spans: for many boxes cheaply. |
 | `KoralSphereOutOfSight` | |
-| `KoralRayPlane`, `KoralRayBox`, `KoralRayTriangle` → `KoralTriangleHit` | Where a ray meets them. |
+| `KoralRayPlane`, `KoralRaySphere`, `KoralRayBox`, `KoralRayTriangle` → `KoralTriangleHit` | Where a ray meets them. |
 
 ### `koral_depth`: depth and the view
 

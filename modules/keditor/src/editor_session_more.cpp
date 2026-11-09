@@ -947,11 +947,11 @@ namespace keditor
         if (std::error_code ignored; std::filesystem::exists(file, ignored)) { Say(std::format("{} has its shading already.", kind), true); return false; }
         std::ofstream out(file, std::ios::binary);
         out << std::format(R"slang(// How a {0} is lit. The material inspector and the Assets panel draw every {0} through this; a shader of the
-// project's does too, with KoralLit (see koral_shading in the engine's package).
+// project's does too, with KoralLit (see koral_shading in the engine's package, and docs/shaders.md).
 
 module {0}Shading;
 
-__exported import koral_shading;
+__exported import koral_shadings;
 __exported import {0};
 
 /** What is at a point of the surface, read, and how it answers light. */
@@ -959,7 +959,11 @@ public struct {0}Lit : IKoralShading {{
     public float3 normal;
     public float3 colour;
 
-    public float3 Reflected(float3 toEye, float3 toLight, float3 light) {{ return colour / KoralPi * light * saturate(dot(normal, toLight)); }}
+    public float3 Reflected(float3 toEye, float3 toLight, float3 light)
+    {{
+        const KoralAngles a = KoralAnglesOf(normal, toEye, toLight);     // a lobe of koral_brdf's: KoralBurleyLobe, KoralGgxLobe...
+        return colour * KoralLambertLobe.Reflected(a, 1.0) * light * a.nl;
+    }}
     public float3 Ambient<E : IKoralEnvironment>(E environment, float3 toEye) {{ return colour * environment.Diffuse(normal); }}
     public float3 Emitted() {{ return 0.0; }}
     public float Opacity() {{ return 1.0; }}

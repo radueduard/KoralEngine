@@ -195,6 +195,8 @@ namespace keditor
 // whose `cover` is `target`.
 module $NAME;
 
+import koral_math;
+
 [[vk::image_format("rgba8")]] RWTexture2D<float4> target;
 
 // A value the pipeline's node sets: `constant.strength`.
@@ -207,7 +209,7 @@ void computeMain(uint3 id : SV_DispatchThreadID)
     uint width, height;
     target.GetDimensions(width, height);
     if (id.x >= width || id.y >= height) return;
-    const float2 uv = (float2(id.xy) + 0.5) / float2(width, height);
+    const float2 uv = KoralPixelUv(id.xy, uint2(width, height));
     target[id.xy] = float4(uv * strength, 0.0, 1.0);
 }
 )slang";
@@ -227,23 +229,23 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             if (tess) out += "// Tessellated, the pipeline's `patchControlPoints` is 3, and `constant.level` says how fine.\n";
             if (!c.fragment) out += "// Without a fragment shader, its framebuffer needs only a depth attachment: a shadow map's, a depth prepass's.\n";
             out += "// Each entry point is called as a pipeline looks for it: vertexMain, fragmentMain and the rest.\nmodule $NAME;\n\n";
-            if (!whole) out += "import engineCommon;\n\n";
+            out += whole ? "import koral_math;\n\n" : "import engineCommon;\n\n";
             if (whole && c.fragment) out += "Texture2D<float4> source;\n\n";
             if (!whole) out += "struct Vertex {\n    float3 position : POSITION;\n    float3 normal : NORMAL;\n};\n\n"
                                "struct DrawData {\n    float4x4 model;         // where the entity is in the world: a Filter's `matrix`, to `push.model`\n"
                                "    float3 color;           // the entity's own: a field of the pipeline's component\n};\n"
                                "[[vk::push_constant]] ConstantBuffer<DrawData> draw;\n\n";
             if (tess) out += "// What each corner of a triangle carries to the tessellation shaders.\nstruct Corner {\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
-            out += "struct RasterInfo {\n    float4 position : SV_Position;\n    float3 normal;\n    float2 uv;\n};\n\n";
+            out += "struct RasterInfo {\n    float4 position : SV_Position;\n    float3 place;\n    float3 normal;\n    float2 uv;\n};\n\n";
             out += std::string("// Where a place is in the picture.\nfloat4 Placed(float3 place)\n{\n    return ")
                  + (whole ? "float4(place, 1.0);" : "mul(float4(place, 1.0), frame.viewProjection);") + "\n}\n\n";
             const std::string made = tess ? "Corner" : "RasterInfo";
-            out += "[shader(\"vertex\")]\n" + made + (whole ? " vertexMain(uint index : SV_VertexID)\n{\n    const float2 corner = float2((index << 1) & 2, index & 2);\n"
-                                                              "    const float3 place = float3(corner * 2.0 - 1.0, 0.0);\n    const float3 normal = float3(0.0, 0.0, 1.0);\n    const float2 uv = corner;\n"
-                                                            : " vertexMain(Vertex vertex)\n{\n    const float3 place = mul(float4(vertex.position, 1.0), draw.model).xyz;\n"
-                                                              "    const float3 normal = mul(float4(vertex.normal, 0.0), draw.model).xyz;\n    const float2 uv = float2(0.0);\n");
+            out += "[shader(\"vertex\")]\n" + made + (whole ? " vertexMain(uint index : SV_VertexID)\n{\n    const float2 corner = KoralFullscreenCorner(index);\n"
+                                                              "    const float3 place = float3(corner, 0.0);\n    const float3 normal = float3(0.0, 0.0, 1.0);\n    const float2 uv = corner * 0.5 + 0.5;\n"
+                                                            : " vertexMain(Vertex vertex)\n{\n    const float3 place = KoralTransformPoint(vertex.position, draw.model);\n"
+                                                              "    const float3 normal = KoralTransformNormal(vertex.normal, draw.model);\n    const float2 uv = float2(0.0);\n");
             out += tess ? "    Corner made;\n    made.place = place;\n    made.normal = normal;\n    made.uv = uv;\n    return made;\n}\n\n"
-                        : "    RasterInfo raster;\n    raster.position = Placed(place);\n    raster.normal = normal;\n    raster.uv = uv;\n    return raster;\n}\n\n";
+                        : "    RasterInfo raster;\n    raster.position = Placed(place);\n    raster.place = place;\n    raster.normal = normal;\n    raster.uv = uv;\n    return raster;\n}\n\n";
             if (tess)
                 out += "// How fine each triangle is cut: the pipeline's `constant.level`.\n[vk::constant_id(0)] const float level = 4.0;\n\n"
                        "struct Patch {\n    float edges[3] : SV_TessFactor;\n    float inside : SV_InsideTessFactor;\n};\n\n"
@@ -253,7 +255,7 @@ void computeMain(uint3 id : SV_DispatchThreadID)
                        "Corner tessellationControlMain(InputPatch<Corner, 3> corners, uint i : SV_OutputControlPointID)\n{\n    return corners[i];\n}\n\n"
                        "[shader(\"domain\")]\n[domain(\"tri\")]\nRasterInfo tessellationEvaluationMain(Patch patch, float3 at : SV_DomainLocation, const OutputPatch<Corner, 3> corners)\n{\n"
                        "    const float3 place = corners[0].place * at.x + corners[1].place * at.y + corners[2].place * at.z;\n"
-                       "    RasterInfo raster;\n    raster.position = Placed(place);     // move `place` here: a height, a wave\n"
+                       "    RasterInfo raster;\n    raster.position = Placed(place);     // move `place` here: a height, a wave\n    raster.place = place;\n"
                        "    raster.normal = corners[0].normal * at.x + corners[1].normal * at.y + corners[2].normal * at.z;\n"
                        "    raster.uv = corners[0].uv * at.x + corners[1].uv * at.y + corners[2].uv * at.z;\n    return raster;\n}\n\n";
             if (c.geometry)
@@ -263,7 +265,12 @@ void computeMain(uint3 id : SV_DispatchThreadID)
                 out += whole ? "[shader(\"fragment\")]\nfloat4 fragmentMain(RasterInfo raster) : SV_Target\n{\n"
                                "    const float4 color = source.Load(int3(int2(raster.position.xy), 0));\n    return float4(1.0 - color.rgb, color.a);    // the picture, inverted: change this\n}\n"
                              : "[shader(\"fragment\")]\nfloat4 fragmentMain(RasterInfo raster) : SV_Target\n{\n"
-                               "    const float facing = saturate(dot(normalize(raster.normal), frame.sunDirection.xyz)) * 0.8 + 0.2;\n    return float4(draw.color * facing, 1.0);\n}\n";
+                               "    // Matte, of the entity's colour, lit by the sun and the sky as the engine's shadings are (koral_shadings).\n"
+                               "    const float3 normal = KoralSafeNormalize(raster.normal);\n"
+                               "    const KoralLight sun = KoralDirectionalLight(-frame.sunDirection.xyz, frame.sunColor.rgb);\n"
+                               "    const float3 lit = KoralLit(KoralMatte(normal, KoralLinearFromGamma22(draw.color)), raster.place, normal, FrameCamera(),\n"
+                               "                                KoralSingleLight(sun), FrameSky());\n"
+                               "    return float4(KoralDisplay(lit), 1.0);\n}\n";
             return out;
         }
 
@@ -299,12 +306,12 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             out += c.anyHit ? " with an any hit shader" : "";
             out += ".\n// A RayTracingPipeline names it as `raygen`, `miss[0]` and `hitGroup[0]`'s, and a TraceRays covers `target`.\n"
                    "// Wire an image to `param.target` and an AccelerationStructure to `param.scene`.\nmodule $NAME;\n\n"
-                   "[[vk::image_format(\"rgba8\")]] RWTexture2D<float4> target;\nRaytracingAccelerationStructure scene;\n\n"
+                   "import koral_math;\nimport koral_bounds;\n\n[[vk::image_format(\"rgba8\")]] RWTexture2D<float4> target;\nRaytracingAccelerationStructure scene;\n\n"
                    "struct Payload {\n    float3 color;\n};\n\n";
             const std::string hit = c.intersection ? "Attributes" : "BuiltInTriangleIntersectionAttributes";
             if (c.intersection) out += "// What the intersection shader says of a hit, for the hit shaders.\nstruct Attributes {\n    float3 normal;\n};\n\n";
             out += "[shader(\"raygeneration\")]\nvoid raygenMain()\n{\n    const uint2 at = DispatchRaysIndex().xy;\n"
-                   "    const float2 uv = (float2(at) + 0.5) / float2(DispatchRaysDimensions().xy);\n"
+                   "    const float2 uv = KoralPixelUv(at, DispatchRaysDimensions().xy);\n"
                    "    RayDesc ray;\n    ray.Origin = float3(uv * 2.0 - 1.0, -1.0);\n    ray.Direction = float3(0.0, 0.0, 1.0);\n    ray.TMin = 0.001;\n    ray.TMax = 1000.0;\n"
                    "    Payload payload;\n    payload.color = float3(0.0);\n    TraceRay(scene, RAY_FLAG_NONE, 0xFF, 0, 1, 0, ray, payload);\n"
                    "    target[at] = float4(payload.color, 1.0);\n}\n\n"
@@ -318,8 +325,7 @@ void computeMain(uint3 id : SV_DispatchThreadID)
             if (c.intersection)
                 out += "\n[shader(\"intersection\")]\nvoid intersectionMain()\n{\n    // A sphere of radius 0.5 in the middle of each box: where the ray meets it, the nearest.\n"
                        "    const float3 origin = ObjectRayOrigin(), direction = ObjectRayDirection();\n"
-                       "    const float a = dot(direction, direction), b = dot(origin, direction), c = dot(origin, origin) - 0.25;\n"
-                       "    const float seen = b * b - a * c;\n    if (seen < 0.0) return;\n    const float t = (-b - sqrt(seen)) / a;\n"
+                       "    const float t = KoralRaySphere(origin, direction, float3(0.0), 0.5).x;\n"
                        "    if (t < RayTMin() || t > RayTCurrent()) return;\n    Attributes attributes;\n"
                        "    attributes.normal = normalize(origin + t * direction);\n    ReportHit(t, 0, attributes);\n}\n";
             return out;

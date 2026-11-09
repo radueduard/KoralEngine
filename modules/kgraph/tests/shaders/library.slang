@@ -150,6 +150,8 @@ void computeMain()
         const KoralBoxSeen seen = KoralSeeBox(float3(0, 0, -10), float3(1.0), lens, 100.0);
         Check(seen.nearest, 9.0, 1e-3);
         Check(KoralRayBox(float3(0, 0, -10), float3(0, 0, 1), float3(-1), float3(1)).x, 9.0, 1e-5);
+        Check(KoralRaySphere(float3(0, 0, -10), float3(0, 0, 2), float3(0.0), 1.0).x, 4.5, 1e-5);     // a direction 2 long: half as far
+        Check(KoralRaySphere(float3(0, 5, -10), float3(0, 0, 1), float3(0.0), 1.0).x, -1e30, 0.0);
         Check(KoralRayPlane(float3(0, 5, 0), float3(0, -1, 0), float3(0.0), float3(0, 1, 0)), 5.0, 1e-6);
         const KoralTriangleHit hit = KoralRayTriangle(float3(0.25, 0.25, 1), float3(0, 0, -1), float3(0, 0, 0), float3(1, 0, 0), float3(0, 1, 0));
         Check(hit.distance, 1.0, 1e-6);

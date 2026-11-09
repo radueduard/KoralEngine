@@ -124,6 +124,17 @@ public float KoralRayPlane(float3 origin, float3 direction, float3 point, float3
     return abs(facing) < 1e-12 ? 1e30 : dot(point - origin, normal) / facing;
 }
 
+/** Where along a ray it is inside a sphere: (enters, leaves); it misses where both are -1e30. The ray's direction need not be of unit length. */
+public float2 KoralRaySphere(float3 origin, float3 direction, float3 centre, float radius)
+{
+    const float3 from = origin - centre;
+    const float a = dot(direction, direction), b = dot(from, direction), c = dot(from, from) - radius * radius;
+    const float seen = b * b - a * c;
+    if (seen < 0.0) return float2(-1e30, -1e30);
+    const float root = sqrt(seen);
+    return float2(-b - root, -b + root) / a;
+}
+
 /** Where along a ray it is inside a box: (enters, leaves); it misses where enters > leaves or leaves < 0. */
 public float2 KoralRayBox(float3 origin, float3 direction, float3 low, float3 high)
 {
