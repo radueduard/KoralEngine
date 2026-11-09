@@ -843,6 +843,15 @@ its pass, wired to the parameter and picked, for the data to be wired to its fie
 shaders is tried, and the first that declares the buffer lays it out. `Document::MakeBufferFor(pipeline,
 parameter)` is the same, for code.
 
+## A Bundle, taken apart
+
+A ForEach or an Entity gives each of its components as one output, a Bundle — `PbrMaterial`, `PointLight` — and where
+the entity is as another, `transform`: a field, or `matrix`, is on the node only once it is wired, or put there (the
+pin beside it in the inspector, once listed). A Bundle output has **Take it apart** beside it in the inspector, under
+What it gives: an Unbundle beside the node, in its pass, wired to it and picked — an output for each member, to wire
+from. A Bundle wires whole to a buffer's `fields` or a draw's `push`, which it fills by name.
+`Document::TakeApart(node, output)` is the same, for code.
+
 ## Working on the graph
 
 The graph has the middle of the window, and most of it; **View, Put the panels back where they start** gives it

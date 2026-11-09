@@ -66,6 +66,19 @@ namespace kgraph
      */
     using FieldsOf = std::function<std::optional<std::vector<std::pair<std::string, std::string>>>(std::string_view component)>;
 
+    /**
+     * @brief Whether a ForEach's (an Entity's...) output @p name is of where the entity is — `matrix`, `worldPosition`,
+     *        `forward`... — what its `transform` Bundle holds.
+     */
+    [[nodiscard]] bool IsPlacementOutput(std::string_view name);
+
+    /**
+     * @brief The Bundles a ForEach (an Entity, an Entities node, a Filter) gives besides its `element`: `transform`, where
+     *        the entity is; and one of each component's fields, by the component's name — its own (`component`), and each
+     *        of `with`'s. What each holds is its members: of `transform`, the placement outputs; of a component, its fields.
+     */
+    [[nodiscard]] std::vector<std::string> EachBundles(const Node& node);
+
     /** @brief Where a Bundle taken at input @p input of a node of type @p type goes: the prefix of the inputs it fills. Empty: none. */
     [[nodiscard]] std::string BundleTaken(std::string_view type, std::string_view input);
 

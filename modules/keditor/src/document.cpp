@@ -1515,6 +1515,29 @@ namespace keditor
         return fail(why.empty() ? std::format("no shader of '{}' declares a buffer '{}'", pipeline, parameter) : why);
     }
 
+    std::string Document::TakeApart(const std::string_view node, const std::string_view output, std::string* error)
+    {
+        const auto fail = [&](std::string why) { if (error) *error = std::move(why); return std::string(); };
+        const kgraph::Node* found = Graph().Find(node);
+        if (!found) return fail(std::format("there is no node '{}'", node));
+        const kgraph::Node of = *found;         // (a copy: every step below makes the graph anew)
+        const auto ports = _runtime->OutputsOf(of.id);
+        const auto port = std::ranges::find(ports, output, &kgraph::Port::name);
+        if (port == ports.end()) return fail(std::format("'{}' gives no '{}'", of.id, output));
+        if (port->type != "bundle") return fail(std::format("'{}' of '{}' is a {}, not a Bundle: it is one thing already", output, of.id, port->type));
+        // Beside it, to its right, a little lower for each taken apart already: an output a member.
+        double below = 0.0;
+        for (const auto& other : Graph().nodes)
+            if (other.type == "Unbundle")
+                if (const auto taken = other.inputs.find("of"); taken != other.inputs.end() && taken->second.link && taken->second.link->node == of.id) below += 160.0;
+        const std::string id = AddNode("Unbundle", of.x + 300.0, of.y + below, std::format("{} of {}", output, of.id), of.pass);
+        if (!Connect(of.id, std::string(output), id, "of")) {
+            RemoveNodes({ id });
+            return fail(std::format("'{}' of '{}' could not be wired to an Unbundle", output, of.id));
+        }
+        return id;
+    }
+
     std::string Document::Import(const std::string_view id, const std::string_view pass, const double x, const double y)
     {
         kgraph::Graph graph = Graph();

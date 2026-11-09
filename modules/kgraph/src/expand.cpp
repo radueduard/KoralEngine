@@ -279,6 +279,24 @@ namespace kgraph
         }
     }
 
+    bool IsPlacementOutput(const std::string_view name)
+    {
+        static constexpr std::array<std::string_view, 11> placement { "matrix", "normalMatrix", "previousMatrix", "worldPosition", "forward", "up", "right",
+                                                                       "position", "rotation", "orientation", "scale" };
+        return std::ranges::contains(placement, name);
+    }
+
+    std::vector<std::string> EachBundles(const Node& node)
+    {
+        std::vector<std::string> names { "transform" };
+        if (const auto component = node.inputs.find("component"); component != node.inputs.end() && component->second.value.String() && !component->second.value.String()->empty())
+            names.push_back(*component->second.value.String());
+        if (const auto with = node.inputs.find("with"); with != node.inputs.end() && with->second.value.Items())
+            for (const auto& name : *with->second.value.Items())
+                if (name.String() && !name.String()->empty() && !std::ranges::contains(names, *name.String())) names.push_back(*name.String());
+        return names;
+    }
+
     std::string BundleTaken(const std::string_view type, const std::string_view input)
     {
         if (input == "fields" && (type == "BufferBuilder" || type == "ShaderBuffer")) return "field.";
@@ -340,6 +358,16 @@ namespace kgraph
                     }
                 } else if (IsEach(node.type) && link.output == "element" && elementOf) {
                     for (const auto& [member, output] : elementOf(node)) members.emplace_back(member, Input { {}, Link { node.id, output } });
+                } else if (IsEach(node.type) && elementOf && std::ranges::contains(EachBundles(node), link.output)) {
+                    // Where it is (`transform`), or one component's fields (by its name): its own as `field.<name>`, each of
+                    // `with`'s as `<Component>.<name>` — each member by its field's name.
+                    const auto component = node.inputs.find("component");
+                    const bool own = component != node.inputs.end() && component->second.value.String() && *component->second.value.String() == link.output;
+                    const std::string prefix = own ? "field." : link.output + ".";
+                    for (const auto& output : elementOf(node) | std::views::values) {
+                        if (link.output == "transform" ? IsPlacementOutput(output) : output.starts_with(prefix))
+                            members.emplace_back(link.output == "transform" ? output : output.substr(prefix.size()), Input { {}, Link { node.id, output } });
+                    }
                 } else {
                     return std::nullopt;
                 }
@@ -350,7 +378,10 @@ namespace kgraph
             // Every Bundle there is, taken or not: what an editor offers a wire of one says how many of a node's it matches.
             for (const auto& node : graph.nodes) {
                 if (node.type == "Bundle") (void)resolve(Link { node.id, "out" }, 0);
-                else if (IsEach(node.type)) (void)resolve(Link { node.id, "element" }, 0);
+                else if (IsEach(node.type)) {
+                    (void)resolve(Link { node.id, "element" }, 0);
+                    for (const auto& bundle : EachBundles(node)) (void)resolve(Link { node.id, bundle }, 0);
+                }
             }
             for (auto& node : graph.nodes) {
                 // What an Unbundle gives, by name, is what its Bundle has of that name.

@@ -215,6 +215,12 @@ namespace keditor
          */
         std::string MakeBufferFor(std::string_view pipeline, std::string_view parameter, std::string* error = nullptr);
         /**
+         * @brief Takes a node's Bundle output apart: an Unbundle beside it, in its pass, wired to it — an output for each of
+         *        its members, to wire from. A ForEach's component (`PointLight`), its `transform`, its `element`; a Bundle's.
+         * @return The Unbundle's id; empty, with @p error saying why, when there is no such node or the output is no Bundle.
+         */
+        std::string TakeApart(std::string_view node, std::string_view output, std::string* error = nullptr);
+        /**
          * @brief Sets where @p node 's input @p input is set: on the node (`kgraph::Placement::eNode`), or in the
          *        inspector — what its type says, or otherwise. One its type has wired only stays so: false.
          */

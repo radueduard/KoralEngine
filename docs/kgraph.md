@@ -803,10 +803,13 @@ zero. A value with fewer numbers than the field fills the first of them.
 
 A **ForEach** node is every entity that has a `component` (and those of `with`, and none of `without`), in the
 hierarchy's order, an element at a time — with `where` (`{ "field.kind": 2 }`, a Filter's too), only those whose fields
-hold what it says, found again when those components change. It gives `field.<name>` for each number or vector field of the component
-(`Runtime::OutputsOf(id)`), and where the entity is: `matrix`, `worldPosition`, `forward`, `up`, `right`, `position`,
-`rotation`, `scale`. It gives no struct of them: each is wired where it goes. Also `count` and `entityId`, and — asked
-for, where the order matters more than the entity does — `index` (the element, from 0). With `repeat` (1 to 256) each
+hold what it says, found again when those components change. On the node it gives each component as one Bundle, by
+the component's name — its own and each of `with`'s: `PbrMaterial` — and where the entity is, `transform`. Each field is
+there to wire too — its component's as `field.<name>`, another's as `<Component>.<name>` (`Runtime::OutputsOf(id)`) —
+and so is each of where it is: `matrix`, `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`, `scale`;
+those are on the node only once wired, or asked for, and are what taking a Bundle apart gives (see Bundles). Also
+`count` and `entityId`, and — asked for, where the order matters more than the entity does — `index` (the element,
+from 0). With `repeat` (1 to 256) each
 entity is that many elements one after another — six for a point light's faces — and `turn` says which of them,
 `entityIndex` which entity and `entities` how many there are. It is every one of them: one is an Entity node's.
 
@@ -857,9 +860,11 @@ that), and an angle is in degrees. Pow, Radians and Cos nodes between the two do
 A **Bundle** is many values carried on one wire, each by its name. A ForEach, an Entity, an Entities node and a Filter
 give each element as one, `element`: its component's fields and `with`'s, by their own names (its component's first),
 and where it is — `matrix`, `normalMatrix`, `worldPosition`, `forward`, `up`, `right`, `position`, `rotation`,
-`orientation`, `scale`, `entityId`. A **Bundle** node is one of what it is given: an input for each of its `names`,
+`orientation`, `scale`, `entityId`. And in parts: each component as one, by its name (`PbrMaterial`: its fields), and
+where it is as one, `transform` (`matrix` to `scale`). A **Bundle** node is one of what it is given: an input for each of its `names`,
 `field.<name>`, a value or a wire, made on `base` (another Bundle, whose members of the same names its own replace).
-An **Unbundle** takes one apart: an output for each member, by its name. A function's input or output may carry one.
+An **Unbundle** takes one apart: an output for each member, by its name — of a ForEach's component, each field, worked
+out once an element. A function's input or output may carry one.
 
 A ShaderBuffer's or a BufferBuilder's `fields`, and a Draw's, a Dispatch's or a TraceRays' `push`, take a Bundle and fill
 each `field.<name>` (or `push.<name>`) of the same name — names match exactly, nothing more:

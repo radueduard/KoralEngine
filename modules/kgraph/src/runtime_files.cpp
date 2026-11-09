@@ -1014,6 +1014,11 @@ namespace kgraph
                     out.listed->shape = shape;
                     const auto gives = [&](const kecs::ComponentId each, const bool own) {
                         const kecs::ComponentDescription& description = world->Describe(each);
+                        // On the node: the component as one Bundle, of its fields by their names. Each field is there to wire —
+                        // and on the node only once it is, or asked for; listed as the component's, what taking it apart gives.
+                        out.gives.push_back({ description.name, PortKind::eValue, "bundle", false,
+                                              std::format("Each one's {}: its fields as one Bundle. Wired to a buffer's `fields`, it fills each field of the same name; "
+                                                          "taken apart (Unbundle), an output for each.", description.name), nullptr });
                         // What one is with nobody there: a new one, as its type makes it — plain data, as a script's is — or nothing.
                         std::vector<std::byte>& none = out.listed->nones[each];
                         none.assign(description.size, std::byte { 0 });
@@ -1022,15 +1027,16 @@ namespace kgraph
                             if (field.offset + field.size > description.size) continue;
                             const std::string output = own ? "field." + field.name : description.name + "." + field.name;
                             const std::string doc = std::format("Each one's {}.{}.", description.name, field.name);
+                            const auto member = [&](Port port) { port.optional = true; port.group = description.name; out.gives.push_back(std::move(port)); };
                             if (IsResourceField(field)) {
-                                out.gives.push_back({ output, PortKind::eResource, field.type == "resource" ? std::string("Resource") : field.type, false, doc, nullptr });
+                                member({ output, PortKind::eResource, field.type == "resource" ? std::string("Resource") : field.type, false, doc, nullptr });
                                 out.listed->fields.push_back({ output, each, field, true });
                                 continue;
                             }
                             const Value value = FieldValue(field, none.data() + field.offset);
                             if (value.IsNull()) continue;   // a string: nothing a buffer holds
                             const auto* items = value.Items();
-                            out.gives.push_back({ output, PortKind::eValue, items ? (items->size() == 16 ? "matrix" : "vector") : value.Bool() ? "bool" : "number", false, doc, nullptr });
+                            member({ output, PortKind::eValue, items ? (items->size() == 16 ? "matrix" : "vector") : value.Bool() ? "bool" : "number", false, doc, nullptr });
                             out.listed->fields.push_back({ output, each, field, false });
                         }
                     };

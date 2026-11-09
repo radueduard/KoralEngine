@@ -15,6 +15,7 @@
 
 #include <builderDescriptions.h>
 
+#include "expand.h"
 #include "names.h"
 
 namespace kgraph
@@ -945,7 +946,7 @@ namespace kgraph
                     repeat.initial = Value(1);
                     Port named = hinted({ "entity", PortKind::eValue, "string", false, "Which entity, by its name: the first that has the component, when not given.", nullptr }, "entity");
                     named.optional = true;
-                    const std::vector<Port> each {
+                    std::vector<Port> each {
                         out("index", "number", "Which element this is, from 0: there to be asked for, where the order matters."), out("count", "number", "How many elements there are: the entities, times `repeat`."),
                         out("turn", "number", "Which of the entity's `repeat` elements this is, from 0: a point light's face."),
                         out("entityIndex", "number", "Which of the entities this is, from 0."), out("entities", "number", "How many entities there are."),
@@ -962,6 +963,13 @@ namespace kgraph
                         out("present", "number", "1 when there is such an element, 0 when there is none."),
                         out("element", "bundle", "The element as one Bundle: its component's fields and `with`'s, by their names, and where it is (matrix, "
                                                  "worldPosition, forward...). Wired to a buffer's `fields`, it fills each field of the same name.") };
+                    // On the node: where it is, as one Bundle — and, as the graph runs, each of its components' fields as one,
+                    // by the component's name. The rest are there to wire, and put on the node by asking; what a Bundle holds is
+                    // shown by taking it apart (Unbundle), and grouped as it where the editor lists what a node gives.
+                    for (auto& port : each)
+                        if (IsPlacementOutput(port.name)) port.group = "transform";
+                    each.insert(each.begin(), out("transform", "bundle", "Where it is, as one Bundle: matrix, normalMatrix, previousMatrix, worldPosition, forward, "
+                                                                         "up, right, position, rotation, orientation, scale. Take it apart (Unbundle) for one of them.", true));
                     types.push_back({ "ForEach", "Scene", { component, with, without, where, repeat }, each,
                                       "Every entity that has a component, an element at a time: each field of it, its index, and where the entity is. "
                                       "Every node wired from it is worked out once an element, and a BufferBuilder or ShaderBuffer wired from those holds an element for each.", nullptr });

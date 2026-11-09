@@ -286,6 +286,56 @@ TEST_F(BufferTest, ABundleFillsTheFieldsOfItsNames) {
     EXPECT_NE(runtime.Status("view data")->error.find("takes a Bundle"), std::string::npos) << runtime.Status("view data")->error;
 }
 
+// A ForEach gives each of its components as one Bundle, by the component's name, and where each one is as `transform`:
+// those on the node; each field, and each of where it is, there to wire but on the node only once wired. A component's
+// Bundle fills a buffer's fields by name; `transform` taken apart (Unbundle) is an output a member — each element's own.
+TEST_F(BufferTest, AComponentIsOneBundleAndTakenApartAFieldEach) {
+    Lamp({ 1, 0, 0 }, 0.5f, 1.f, { 0, 4, 0 });
+    Lamp({ 0, 1, 0 }, 0.25f, 2.f, { 7, 0, 0 });
+    Lamp({ 0, 0, 1 }, 1.f, 0.25f);
+    support::Give(scene->world, scene->world.Create(), "SpotLight", { { "color", { 1, 1, 1 } } });
+
+    kgraph::Graph graph = Lights();
+    kgraph::Node& lamps = *graph.Find("lamp data");
+    lamps.inputs.erase("field.position");
+    lamps.inputs.erase("field.range");
+    lamps.Wire("fields", "lamps", "PointLight");       // its range by name; its colour is wired by itself
+    graph.Add("place", "Unbundle").Wire("of", "lamps", "transform");
+    graph.Find("lamp data")->Wire("field.position", "place", "worldPosition");
+    graph.Add("light parts", "Unbundle").Wire("of", "lamps", "PointLight");
+
+    auto& runtime = *scene->runtime;
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Ok());
+    Frame();
+    Frame();
+    const auto lights = Floats("light data");
+    ASSERT_GE(lights.size(), 4u * 12u);
+    EXPECT_EQ(lights[1], 4.f) << "the first lamp's place, from its transform taken apart";
+    EXPECT_EQ(lights[3], 1.f) << "its range, from its PointLight";
+    EXPECT_EQ(lights[4], 0.5f) << "its colour wired by itself, times its intensity";
+    EXPECT_EQ(lights[12], 7.f) << "the second's place: each element's own";
+
+    // On the node: the component, and where it is, each one Bundle; a field, and a place, only once wired.
+    const auto outputs = runtime.OutputsOf("lamps");
+    const auto port = [&](const char* name) { return std::ranges::find(outputs, std::string(name), &kgraph::Port::name); };
+    ASSERT_NE(port("PointLight"), outputs.end());
+    EXPECT_EQ(port("PointLight")->type, "bundle");
+    EXPECT_FALSE(port("PointLight")->optional) << "on the node";
+    ASSERT_NE(port("transform"), outputs.end());
+    EXPECT_FALSE(port("transform")->optional);
+    ASSERT_NE(port("field.range"), outputs.end()) << "still there to wire";
+    EXPECT_TRUE(port("field.range")->optional) << "on the node only once wired";
+    EXPECT_EQ(port("field.range")->group, "PointLight") << "listed as its component's";
+    ASSERT_NE(port("worldPosition"), outputs.end());
+    EXPECT_EQ(port("worldPosition")->group, "transform");
+    EXPECT_EQ(runtime.BundleOf("light parts", "of"), (std::vector<std::string> { "color", "intensity", "range" }));
+    EXPECT_TRUE(std::ranges::contains(runtime.BundleOf("place", "of"), std::string("matrix")));
+    EXPECT_FALSE(std::ranges::contains(runtime.BundleOf("place", "of"), std::string("range"))) << "where it is: no field of its component";
+    EXPECT_TRUE(Has(runtime.OutputsOf("light parts"), "range"));
+}
+
 // A shader's inputs as it declares them: a Dispatch's `push.` inputs are of the shader's kind and size, start as its
 // defaults — what runs when they are given nothing — and are kept and drawn as koral_inspector's attributes say. A random
 // number wired to one is of its kind: four of a float4.

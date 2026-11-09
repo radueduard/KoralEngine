@@ -4709,7 +4709,10 @@ namespace keditor
                 {
                     std::vector<kgraph::Port> made;
                     // What it gives that is none of its inputs, nor a part of one: what it makes, what it works out, what it is made as.
+                    // A member of a Bundle it gives — a ForEach's field of a component, where it is — is listed once it is wired
+                    // or put on the node: the rest are what taking its Bundle apart gives.
                     for (const auto& output : outputs) {
+                        if (!output.group.empty() && output.optional && wiresFrom(output.name) == 0 && !_session->Asked(id, "out:" + output.name)) continue;
                         std::string whole = output.name;
                         if (whole.size() > 2 && whole[whole.size() - 2] == '.' && std::string_view("xyzw").find(whole.back()) != std::string_view::npos) whole.resize(whole.size() - 2);
                         if (!inputNames.contains(output.name) && !inputNames.contains(whole)) made.push_back(output);
@@ -4734,6 +4737,15 @@ namespace keditor
                                             kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary).SetPadding(kui::EdgeInsets::Symmetric(4.f, 2.f)))));
                         if (wires > 0)
                             line.push_back(kui::Tooltip("Take its wires off", SmallIcon("close", [this, id, name = output.name] { _session->Hide(id, "out:" + name); Doc().DisconnectOutput(id, name); })));
+                        // A Bundle — a component's fields, where it is — taken apart beside it: an output a member, to wire from.
+                        if (output.type == "bundle")
+                            line.push_back(kui::Tooltip("Take it apart: an Unbundle beside the node, with an output for each of its members",
+                                Small("Take it apart", [this, id, name = output.name] {
+                                    std::string error;
+                                    const std::string made = Doc().TakeApart(id, name, &error);
+                                    if (made.empty()) _session->Say(error, true);
+                                    else { _session->Select(made); _session->Say(std::format("Took '{}' apart: '{}' gives each of its members.", name, made)); }
+                                })));
                         rows.push_back(kui::Tooltip(output.doc.empty() ? output.type : output.doc + " (" + output.type + ")",
                                                     label(PortLabel(output.name), onNode, kui::Row(std::move(line), kui::FlexOptions {}.SetGap(4.f)))));
                     }

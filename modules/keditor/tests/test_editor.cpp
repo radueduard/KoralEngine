@@ -805,10 +805,12 @@ TEST_F(EditorTest, AShadersBufferIsFilledFromAComponentsFields) {
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     for (const char* field : { "position", "range", "color", "kind", "cone" }) EXPECT_TRUE(Shows(field)) << field;
     Session().Select(std::string());
-    for (const char* field : { "intensity", "cone" }) EXPECT_TRUE(Shows(field)) << field << ": a port on its node, with nothing selected";
+    EXPECT_TRUE(Shows("cone")) << "the buffer's field, a port on its node, with nothing selected";
+    EXPECT_TRUE(Shows("PointLight")) << "the ForEach's component, one port: a Bundle of its fields";
+    EXPECT_FALSE(Shows("intensity")) << "a field of it is on the node only once wired";
 
-    Doc().Connect(lamps, "field.color", buffer, "field.color");
-    Doc().Connect(lamps, "worldPosition", buffer, "field.position");
+    EXPECT_TRUE(Doc().Connect(lamps, "field.color", buffer, "field.color")) << "a field is wired by its name all the same";
+    EXPECT_TRUE(Doc().Connect(lamps, "worldPosition", buffer, "field.position"));
     EXPECT_TRUE(NothingIsWrong());
     EXPECT_EQ(Doc().Runtime().ValueOf(buffer, "count"), kgraph::Value(1));
     Doc().AddComponent(Doc().CreateEntity("Another"), "PointLight");
@@ -1373,6 +1375,25 @@ TEST_F(EditorTest, TheGraphIsAPageAPass) {
     ASSERT_TRUE(keditor::AddLitGraph(Doc(), error)) << error;
     for (const auto& problem : Doc().Runtime().Problems()) ADD_FAILURE() << problem;
     EXPECT_EQ(Doc().Passes(), (std::vector<std::string> { "frame", "scene", "sky", "show" }));
+
+    // A ForEach's — an Entity's — component is one output, a Bundle: taken apart, an Unbundle beside it gives each field.
+    {
+        const auto given = Doc().Runtime().OutputsOf("sky values");
+        const auto sky = std::ranges::find(given, std::string("Sky"), &kgraph::Port::name);
+        ASSERT_NE(sky, given.end()) << "the Sky, as one output";
+        EXPECT_EQ(sky->type, "bundle");
+        std::string why;
+        const std::string parts = Doc().TakeApart("sky values", "Sky", &why);
+        ASSERT_FALSE(parts.empty()) << why;
+        EXPECT_EQ(Doc().Graph().Find(parts)->type, "Unbundle");
+        EXPECT_EQ(Doc().Graph().Find(parts)->pass, Doc().Graph().Find("sky values")->pass) << "beside it, on its page";
+        const auto members = Doc().Runtime().OutputsOf(parts);
+        for (const char* field : { "zenith", "horizon", "ground", "ambient", "sunSize" })
+            EXPECT_TRUE(std::ranges::contains(members, std::string(field), &kgraph::Port::name)) << field;
+        EXPECT_TRUE(Doc().TakeApart("sky values", "worldPosition", &why).empty()) << "one thing already";
+        EXPECT_NE(why.find("not a Bundle"), std::string::npos) << why;
+        Doc().RemoveNodes({ parts });
+    }
 
     // The first pass's page, to begin with: its nodes, and none of another's.
     for (const char* pass : { "frame", "scene", "show", "Every node at once" }) EXPECT_TRUE(Shows(pass)) << pass;
