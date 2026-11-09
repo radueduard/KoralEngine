@@ -11,6 +11,13 @@ import java.util.concurrent.Executors
 fun interface ScriptCompiler {
     /** Compiles into [into], an empty folder. Null when that worked; what was wrong when it did not. */
     fun compile(into: Path): List<String>?
+
+    /**
+     * Everything what it compiles depends on: folders of sources, and the files it compiles against. A build is of them
+     * as they were; when one has changed since — the engine's package, a module's scripts, the engine itself — it is
+     * built again. None: only the [ScriptHost]'s own sources.
+     */
+    val inputs: List<Path> get() = emptyList()
 }
 
 /** Where a [ScriptHost]'s [ScriptCompiler] runs: one thread, apart from the frames, which carry on as it does. */
@@ -27,6 +34,9 @@ class InProcessKotlinCompiler(
     compilerJars: List<Path>,
     private val jvmTarget: String = "25",
 ) : ScriptCompiler {
+    // Every folder of sources, the engine's package's and the modules' among them, and every jar it compiles against.
+    override val inputs: List<Path> = sources + classpath.split(java.io.File.pathSeparatorChar).filter { it.isNotBlank() }.map { Path.of(it) }
+
     // One for every compiler of the same jars: what one loaded — and the JVM made fast of it — the next has.
     private val loader = loaderOf(compilerJars)
 

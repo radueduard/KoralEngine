@@ -295,13 +295,24 @@ class ScriptHost(
         }
     }
 
+    /**
+     * What a build is of, as it is now: each file's path, when it was written and how big it is — of the scripts, and of
+     * whatever else the [compiler] reads (the engine's package, the modules' scripts, the jars it compiles against). A
+     * build kept from before is loaded only when this is what it was built of.
+     */
     private fun snapshot(): String {
         val watched = sources?.takeIf { compile != null || compiler != null } ?: classes
-        if (!Files.isDirectory(watched)) return ""
-        return Files.walk(watched).use { files ->
-            files.filter { Files.isRegularFile(it) && (it.toString().endsWith(".kt") || it.toString().endsWith(".class")) }
-                .sorted().map { "$it|${Files.getLastModifiedTime(it).toMillis()}|${Files.size(it)}" }.toList().joinToString("\n")
-        }
+        val all = (listOf(watched) + (compiler?.inputs ?: emptyList())).distinct()
+        fun stamp(file: Path) = "$file|${Files.getLastModifiedTime(file).toMillis()}|${Files.size(file)}"
+        return all.flatMap { path ->
+            when {
+                Files.isDirectory(path) -> Files.walk(path).use { files ->
+                    files.filter { Files.isRegularFile(it) && (it.toString().endsWith(".kt") || it.toString().endsWith(".class")) }.sorted().map(::stamp).toList()
+                }
+                Files.isRegularFile(path) -> listOf(stamp(path))
+                else -> emptyList()
+            }
+        }.joinToString("\n")
     }
 
     /**
