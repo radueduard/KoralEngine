@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -365,4 +366,39 @@ public sealed class Sign : Script
     EXPECT_EQ(text(two, "Words"), "hello") << "a new one starts as the source says now";
     world.Destroy(one);
     world.Destroy(two);
+}
+
+// A kind is had by nobody, but it starts as its source says: what one of nothing reads as — the graph's Entity node of a
+// Camera, before anything that is one is there, gives its near and far, not zeros. Nothing can be given one all the same.
+TEST(Scripts, AKindStartsAsItsSourceSays) {
+    const auto declared = kscript::Declare(R"(
+        public abstract class Lens : Data
+        {
+            public float near = 0.1f;
+            public float far = 100f;
+        }
+        public sealed class Wide : Lens { public float fieldOfView = 60f; }
+    )", false, "Lens.cs");
+    ASSERT_EQ(declared.types.size(), 2u);
+    kecs::World world;
+    kscript::Scripts scripts(world);
+    kecs::ComponentId lens = kecs::NoComponent;
+    for (auto type : declared.types) {
+        std::string error;
+        const kecs::ComponentId id = scripts.Declare(std::move(type), &error);
+        ASSERT_NE(id, kecs::NoComponent) << error;
+        if (world.Describe(id).name == "Lens") lens = id;
+    }
+    ASSERT_NE(lens, kecs::NoComponent);
+    const kecs::ComponentDescription& kind = world.Describe(lens);
+    EXPECT_TRUE(kind.abstract);
+    ASSERT_TRUE(kind.construct) << "what one of nothing is, made";
+    std::vector<std::byte> none(kind.size);
+    kind.construct(none.data(), kind);
+    float near = 0.f, far = 0.f;
+    std::memcpy(&near, none.data() + kind.FindField("near")->offset, 4);
+    std::memcpy(&far, none.data() + kind.FindField("far")->offset, 4);
+    EXPECT_FLOAT_EQ(near, 0.1f);
+    EXPECT_FLOAT_EQ(far, 100.f);
+    EXPECT_FALSE(world.Add(world.Create(), lens, none.data())) << "a kind is had through what is one of it";
 }

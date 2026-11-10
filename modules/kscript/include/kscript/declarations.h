@@ -54,10 +54,12 @@ namespace kscript
 
     /**
      * @brief The engine's own package: scripts every project has — the scene's Camera, its lights, its Sky — in its
-     *        `scripts` folder. `KORAL_ENGINE_PACKAGE` in the environment says where, and otherwise where the engine
-     *        was built from.
+     *        `scripts` folder. `KORAL_ENGINE_PACKAGE` in the environment says where; otherwise `packages/koral` beside
+     *        the program, as a release of the engine has it; otherwise where the engine was built from.
      */
     [[nodiscard]] std::filesystem::path PackageDirectory();
+    /** @brief The folder the running program is in: where a release of the engine keeps what it ships with it. */
+    [[nodiscard]] std::filesystem::path ProgramDirectory();
     /**
      * @brief Makes the package's script types known to @p scripts' world, as data (Scripts::Declare): every world an
      *        engine scene is of has them. Its material kinds are no Scripts' components: they are put in @p materials,

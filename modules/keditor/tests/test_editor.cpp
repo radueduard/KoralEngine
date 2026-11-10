@@ -455,6 +455,42 @@ TEST_F(EditorTest, AThemeChosenIsTheOneTheEditorIsIn) {
     EXPECT_FALSE(Session().themeChosen) << "put on, and done with";
 }
 
+// Nothing picked, the inspector lists what was picked last — each picked again, pressed — of what is still there.
+TEST_F(EditorTest, NothingPickedTheInspectorListsWhatWasPickedLast) {
+    Open();
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    Settle();
+    const auto entities = Doc().Entities();
+    ASSERT_GE(entities.size(), 2u);
+    Session().Select(entities[0]);
+    Frame();
+    Session().Select(entities[1]);
+    Frame();
+    Session().Select(kecs::NullEntity);
+    EXPECT_TRUE(Shows("RECENTLY PICKED"));
+    // (Their names are in the scene tree too: the first line is pressed where it says what it is.)
+    const auto kind = Where("entity");
+    ASSERT_TRUE(kind);
+    Click((kind->first + kind->second) * 0.5f);
+    EXPECT_EQ(Session().selectedEntity, entities[1]) << "the last picked first, and pressed, picked again";
+}
+
+// For looking at: the Scene panel's tools in each theme, dark and light — `scene-<design>-<shade>.ppm`.
+TEST_F(EditorTest, DISABLED_SceneToolsInEachTheme) {
+    Open();
+    scene::BuildGraph(Doc());
+    scene::BuildEntities(Doc());
+    Settle();
+    for (const auto& [name, design] : { std::pair { "koral", kui::ThemeDesign::eKoral }, std::pair { "material", kui::ThemeDesign::eMaterial },
+                                        std::pair { "cupertino", kui::ThemeDesign::eCupertino }, std::pair { "fluent", kui::ThemeDesign::eFluent } })
+        for (const bool dark : { true, false }) {
+            Session().ChooseTheme(design, dark);
+            Settle();
+            Sheet(std::format("scene-{}-{}", name, dark ? "dark" : "light"));
+        }
+}
+
 // For looking at: the inspector of one node of each kind, and a node being dragged.
 TEST_F(EditorTest, DISABLED_Sheets) {
     const auto project = scene::MakeProject("sheets");
@@ -1545,10 +1581,10 @@ TEST_F(EditorTest, SetupIsALaneOfItsOwnAndWhatAPageCanUseIsBesideIt) {
     EXPECT_EQ(std::ranges::find(importable, "color"), importable.end()) << "setup comes before any frame: what a frame makes is not there yet";
     EXPECT_TRUE(std::ranges::contains(Doc().Importable("show"), texture)) << "and what setup made is there for every frame";
 
-    // A lane each, in the Outline as in the frame.
+    // A lane each, in the Outline as in the frame: a tab each, with how many pages it has.
     Session().ShowPass("noise");
-    EXPECT_TRUE(Shows("SETUP  ·  MADE ONCE  ·  1"));
-    EXPECT_TRUE(Shows("EVERY FRAME  ·  ")) << "every lane listed at once";
+    EXPECT_TRUE(Shows("Setup 1"));
+    EXPECT_TRUE(Shows("Per frame ")) << "every lane a tab";
     EXPECT_TRUE(Shows("Frame")) << "where the page is: the whole frame, gone back up to";
     Session().ShowPass("show");
 
@@ -3051,8 +3087,7 @@ TEST_F(EditorTest, TheAssetsPanelShowsWhatThingsAreMadeOf) {
     for (int i = 0; i < 600 && !Session().ModelPicture(kit->id).Get(); ++i) Frame();
     EXPECT_TRUE(Session().ModelPicture(kit->id).Get()) << "a model that is in no scene has its picture";
     for (int i = 0; i < 60; ++i) Frame();
-    EXPECT_TRUE(Shows("Resources"));
-    EXPECT_TRUE(Shows("Documents"));
+    EXPECT_TRUE(Shows("models")) << "where it is: the folders to it, each to go back to";
     Sheet("assets-folder");
 
     Session().OpenAsset(*kit);
@@ -3583,7 +3618,7 @@ TEST_F(EditorTest, APassRunsEveryFrameOnTheFixedStepOrOnceAndTheFixedStepIsTaken
     ASSERT_TRUE(Session().Undo());
     EXPECT_EQ(Doc().RateOf("simulate"), kgraph::PassRate::eFixed);
     Session().ShowPass("simulate");
-    EXPECT_TRUE(Shows("FIXED STEP  ·  1")) << "its lane";
+    EXPECT_TRUE(Shows("Fixed 1")) << "its lane's tab";
 
     // Its steps are taken while the scene plays, and not while it is paused.
     kgraph::Graph graph = Doc().Graph();

@@ -13,6 +13,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,6 +63,22 @@ namespace keditor::widgets
     kor::ResourceRef<const kor::Image> PictureOf(const kgraph::Resource* held);
     /** A tool of a panel's title bar: a picture of what it does, lit while it is on. */
     kui::Widget Tool(std::string_view icon, const std::string& what, bool active, std::function<void()> pressed, bool enabled = true);
+    /**
+     * A button naming what is chosen — after @p icon, where there is one — and a mark that it opens a list: shaped,
+     * outlined and lit while open as the theme's design draws one.
+     */
+    kui::Widget ToolChip(std::string_view icon, std::vector<kui::Widget> label, const std::string& what, bool open, std::function<void()> pressed);
+    /** What a chip says: in the theme's text, or (@p quiet) its muted text — a label before what is chosen. */
+    kui::Widget ChipText(std::string text, bool quiet = false);
+    /** A line between groups of tools: upright in a row, or (@p across) flat in a column. */
+    kui::Widget ToolDivider(bool across = false);
+    /**
+     * What tools over a scene's picture sit on, so that they read over whatever is behind them: of the theme's surface
+     * and as its design makes it — a pill (Koral), a raised container (Material), clear glass with a rim (Apple's),
+     * outlined acrylic (Windows'). @p round: its corners, in place of the design's (half its size: a disc);
+     * @p padding: round what it holds.
+     */
+    kui::Widget OverlayBacking(kui::Widget content, std::optional<float> round = std::nullopt, float padding = 4.f);
     /** A heading over a part of a list, and what it says, small and quiet; with something to do at its end. */
     kui::Widget ListHeading(std::string title, kui::Widget trailing = {});
 

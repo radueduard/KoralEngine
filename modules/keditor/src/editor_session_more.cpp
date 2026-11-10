@@ -595,6 +595,13 @@ namespace keditor
         const char* said = std::getenv("KORAL_ENGINE_PROJECTS");
         std::filesystem::path directory = said && *said ? said : KEDITOR_PROJECTS;
         std::error_code ignored;
+        // Where it was built for, on the machine it was built on; on another — a release's — KoralProjects in this user's home.
+        if (!(said && *said) && !std::filesystem::is_directory(directory, ignored))
+#ifdef _WIN32
+            if (const char* home = std::getenv("USERPROFILE"); home && *home) directory = std::filesystem::path(home) / "KoralProjects";
+#else
+            if (const char* home = std::getenv("HOME"); home && *home) directory = std::filesystem::path(home) / "KoralProjects";
+#endif
         std::filesystem::create_directories(directory, ignored);
         return directory;
     }

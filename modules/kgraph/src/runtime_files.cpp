@@ -2738,6 +2738,8 @@ namespace kgraph
             if (node.type == "DebugView") {
                 const auto picture = inputs.find("picture");
                 if (picture == inputs.end() || !picture->second.resource) return Fail("'picture' is the picture shown in its place: wire an image to it");
+                // A scene view samples what it shows: its image is made for that, though nothing in the graph samples it.
+                (void)MadeWithout(*picture->second.resource, kor::Image::Usage::eSampled);
                 out.outputs["out"].resource = picture->second.resource;
                 out.outputs["shown"].value = Value(node.id == debugView);
                 return {};

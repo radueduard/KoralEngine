@@ -849,27 +849,50 @@ namespace keditor
             bool _over = false, _down = false;
         };
 
-        /** How many frames a second, built again on its own as it changes: four times a second, it was the whole interface. */
+        /**
+         * How many frames a second and how long one takes, after a dot that says at a glance whether that is smooth:
+         * built again on its own as it changes — four times a second, it was the whole interface. Pressed, @p pressed
+         * (the Scene panel's: the frame's numbers shown or not).
+         */
         class FrameRate final : public kui::StatefulWidget {
         public:
-            explicit FrameRate(std::shared_ptr<Session> session) : _session(std::move(session)) {}
+            FrameRate(std::shared_ptr<Session> session, std::function<void()> pressed = {}, std::string tip = {})
+                : _session(std::move(session)), _pressed(std::move(pressed)), _tip(std::move(tip)) {}
 
             void InitState() override
             {
                 _shown = _session->Fps();
+                _ms = _session->FrameMs();
                 Animate([this](float) {
-                    if (const int now = _session->Fps(); now != _shown) SetState([&] { _shown = now; });
+                    if (const int now = _session->Fps(); now != _shown) SetState([&] { _shown = now; _ms = _session->FrameMs(); });
                     return true;
                 });
             }
+            void DidUpdateWidget(const kui::StatefulWidget& newer) override
+            {
+                const auto& given = static_cast<const FrameRate&>(newer);
+                _pressed = given._pressed;
+                _tip = given._tip;
+            }
             kui::Widget Build() override
             {
-                return kui::Padding(kui::EdgeInsets::Symmetric(4.f, 0.f), kui::Text(std::format("{} fps", _shown), kui::TextStyle {}.SetColor(kui::Color::Hex(0xE0E0E0)).SetSize(12.f)));
+                const kui::Theme& t = kui::Theme::Current();
+                const kui::Color steady = _shown >= 55 ? kui::Color::Hex(0x4CC38A) : _shown >= 30 ? kui::Color::Hex(0xE6B84A) : kui::Color::Hex(0xEF6B6B);
+                kui::Widget line = kui::Padding(kui::EdgeInsets::Symmetric(6.f, 4.f), kui::Row({
+                    kui::SizedBox(7.f, 7.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(steady).SetRadius(3.5f)))),
+                    kui::Text(std::format("{} fps", _shown), kui::TextStyle {}.SetColor(t.text).SetSize(12.f)),
+                    kui::Text(std::format("{:.1f} ms", _ms), kui::TextStyle {}.SetColor(t.textMuted).SetSize(12.f)),
+                }, kui::FlexOptions {}.SetGap(7.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
+                if (_pressed) line = kui::Button(std::move(line), _pressed, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain));
+                return _tip.empty() ? line : kui::Tooltip(_tip, std::move(line));
             }
 
         private:
             std::shared_ptr<Session> _session;
+            std::function<void()> _pressed;
+            std::string _tip;
             int _shown = 0;
+            double _ms = 0.0;
         };
 
         /** A line or a few of text that follows what @p text says, asked a few times a second: built again only itself, when it changes. */
@@ -900,7 +923,7 @@ namespace keditor
             kui::Widget Build() override
             {
                 std::vector<kui::Widget> lines;
-                const kui::TextStyle style = kui::TextStyle {}.SetColor(kui::Color::Hex(0xE0E0E0)).SetSize(12.f);
+                const kui::TextStyle style = kui::TextStyle {}.SetColor(kui::Theme::Current().text).SetSize(12.f);
                 for (std::size_t at = 0; at <= _shown.size();) {
                     const auto end = std::min(_shown.find('\n', at), _shown.size());
                     lines.push_back(kui::Text(_shown.substr(at, end - at), style));
@@ -952,9 +975,11 @@ namespace keditor
                 };
                 // The far ones first: the near ones over them.
                 std::ranges::sort(ends, [&](const End& a, const End& b) { return kor::Dot(a.way, back) < kor::Dot(b.way, back); });
+                const kui::Theme& t = kui::Theme::Current();
                 std::vector<kui::Widget> layers;
-                layers.push_back(kui::Container(kui::ContainerOptions {}.SetSize(Size, Size)
-                                                    .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.55f)).SetRadius(Size * 0.5f))));
+                // On what the theme puts tools over the scene on, as a disc. The axes keep their colours: X red, Y green,
+                // Z blue, in every theme — what they are is their colour.
+                layers.push_back(OverlayBacking(kui::SizedBox(Size, Size, kui::Text("")), Size * 0.5f, 0.f));
                 for (const End& end : ends) {
                     const float x = Size * 0.5f + kor::Dot(end.way, right) * Reach - Disc * 0.5f, y = Size * 0.5f - kor::Dot(end.way, up) * Reach - Disc * 0.5f;
                     const bool near = kor::Dot(end.way, back) >= -0.05f;
@@ -968,13 +993,14 @@ namespace keditor
                                      kui::Button(std::move(disc), [this, axis = end.axis] { _session->LookAlong(axis, false, _second ? &_session->secondCamera : nullptr); },
                                                  kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)))));
                 }
-                // The middle: perspective, or straight on.
+                // The middle: perspective — a box seen at an angle — or straight on — a square; on the theme's surface.
                 const bool straight = _seen.z > 0.5f;
-                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = Size * 0.5f - 12.f, .top = Size * 0.5f - 12.f },
+                constexpr float Middle = 26.f;
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = (Size - Middle) * 0.5f, .top = (Size - Middle) * 0.5f },
                     kui::Tooltip(straight ? "Seen straight on: press for perspective" : "In perspective: press to see it straight on",
-                                 kui::Button(kui::Container(kui::ContainerOptions {}.SetSize(24.f, 24.f).SetAlignment(kui::Alignment::Center())
-                                                                .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x2A2A2E).WithAlpha(0.9f)).SetRadius(12.f)),
-                                                            kui::Text(straight ? "ORT" : "PER", kui::TextStyle {}.SetSize(8.f).SetColor(kui::Color::Hex(0xE0E0E0)))),
+                                 kui::Button(kui::Container(kui::ContainerOptions {}.SetSize(Middle, Middle).SetAlignment(kui::Alignment::Center())
+                                                                .SetDecoration(kui::Decoration {}.SetColor(t.surface).SetRadius(Middle * 0.5f).SetBorderWidth(1.f).SetBorderColor(t.border)),
+                                                            kui::SizedBox(16.f, 16.f, kui::Icon(straight ? "crop_square" : "view_in_ar", kui::IconStyle::eFilled, t.text))),
                                              [this, straight] { View().orthographic = !straight; _session->SetOrthographic(_session->camera.orthographic); },
                                              kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)))));
                 return kui::SizedBox(Size, Size, kui::Stack(std::move(layers)));
@@ -1297,25 +1323,21 @@ namespace keditor
             kui::Widget Build() override
             {
                 _shown = _session->Version();
-                // The window's own title bar, drawn here in place of the system's: the menus at its start, then which
-                // project is open, room to move the window by, and the window's buttons.
-                const std::string prefab = _session->PrefabOpen();
-                const std::string title = !prefab.empty()
-                    ? std::format("{}{} — {} — Koral Engine", std::filesystem::path(prefab).filename().string(), _session->PrefabChanged() ? " (not saved)" : "", _session->CurrentProject().name)
-                    : std::format("{}{} — Koral Engine", _session->HasProject() ? _session->CurrentProject().name : std::string("No project"), Doc().Dirty() ? " (not saved)" : "");
+                // The window's own title bar, drawn here in place of the system's: the menus at its start, in its middle
+                // what is open and the play controls, room to move the window by, and the window's buttons.
                 auto body = kui::Column({
-                    kui::TitleBar(title, TitleBarOptions()),
+                    kui::TitleBar(std::string(), TitleBarOptions()),
                     kui::Expanded(kui::DockSpace(_layout, {
                         Docked("graph", "Graph", "account_tree", Graph()),
                         ScenePanelDocked(),
                         GamePanelDocked(),
                         Docked("outliner", "Scene tree", "list", Outliner()),
                         Docked("passes", "Outline", "layers", PassList()),
-                        Docked("here", "Here to use", "inventory_2", HereToUse()),
+                        Docked("here", "From earlier passes", "input", HereToUse()),
                         Docked("inspector", "Inspector", "tune", Inspector()),
                         Docked("problems", "Log", "terminal", kui::Make<LogPanel>(_session)),
                         Docked("frame", "Frame", "timeline", FramePanel()),
-                        Docked("assets", "Assets", "folder", _assets.AssetsPanel()),
+                        AssetsDocked(),
                         ViewerDocked(),
                     }, kui::DockOptions {}.OnChanged([this] { SaveLayout(); }).OnClosed([this](const std::string& panel) {
                         if (panel == "viewer") _session->StopViewing();     // closed, what it copied out and drew stops
@@ -1357,7 +1379,7 @@ namespace keditor
             kui::TitleBarOptions TitleBarOptions()
             {
                 auto options = kui::TitleBarOptions {}.SetLeading(kui::Row({ Logo(), Menus() }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)))
-                    .SetCenter(PlayControls());
+                    .SetCenter(kui::Row({ OpenNow(), PlayControls() }, kui::FlexOptions {}.SetGap(14.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
 #ifndef __APPLE__
                 using Does = WindowButton::Does;
                 options.SetButtons(false).SetTrailing(kui::Padding(kui::EdgeInsets::Only(0.f, 0.f, 6.f, 0.f), kui::Row({
@@ -1570,6 +1592,14 @@ namespace keditor
                 return panel;
             }
 
+            /** The Assets panel, with how big it shows things in its title bar: over everything it holds. */
+            kui::DockPanel AssetsDocked()
+            {
+                kui::DockPanel panel = Docked("assets", "Assets", "folder", _assets.AssetsPanel());
+                panel.titleBar = _assets.SizeTools();
+                return panel;
+            }
+
             kui::DockPanel ViewerDocked()
             {
                 kui::DockPanel panel { "viewer", "Viewer", ViewerPanel(_session), true };
@@ -1603,13 +1633,15 @@ namespace keditor
              */
             kui::DockPanel GamePanelDocked()
             {
-                kui::Widget view = _session->Game() ? kgui::SceneView(*_session->Game()) : kui::Text("");
+                // How fast it runs, in its corner as in the Scene panel's.
+                kui::Widget view = _session->Game() ? kui::Stack({ kgui::SceneView(*_session->Game()),
+                                                                   kui::Positioned(kui::PositionedOptions { .left = 8.f, .bottom = 8.f }, OverlayBacking(kui::Make<FrameRate>(_session))) })
+                                                    : kui::Text("");
                 kui::DockPanel panel { "game", "Game", std::move(view), false };
                 panel.icon = kui::MaterialIcon("sports_esports");
                 return panel;
             }
 
-            static kui::Widget ToolSeparator() { return kui::SizedBox(1.f, 16.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x606060))))); }
 
             /** What the Scene panel's title bar has, at its end: whose eyes it is seen through. */
             kui::Widget TitleTools()
@@ -1627,15 +1659,50 @@ namespace keditor
              */
             kui::Widget PlayControls()
             {
+                const kui::Theme& t = kui::Theme::Current();
                 const bool playMode = _session->InPlayMode(), playing = _session->IsPlaying();
+                // A button of the group: the first — play, or pause — filled with the accent, so that it is found at a glance.
+                const auto button = [&t](const char* icon, const std::string& what, const bool main, std::function<void()> pressed, const bool enabled = true) {
+                    const kui::Color ink = !enabled ? t.textMuted.WithAlpha(0.5f) : main ? t.onPrimary : t.text;
+                    return kui::Tooltip(what, kui::Button(
+                        kui::Container(kui::ContainerOptions {}.SetSize(32.f, 26.f).SetAlignment(kui::Alignment::Center())
+                                           .SetDecoration(kui::Decoration {}.SetColor(main ? t.primary : kui::colors::Transparent).SetRadius(std::min(13.f, t.ButtonRadius()))),
+                                       kui::SizedBox(18.f, 18.f, kui::Icon(icon, kui::IconStyle::eFilled, ink))),
+                        std::move(pressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain).SetEnabled(enabled)));
+                };
                 std::vector<kui::Widget> tools;
-                if (playing) tools.push_back(Tool("pause", "Pause", false, [this] { _session->Pause(); }));
-                else tools.push_back(Tool("play_arrow", playMode ? "Resume" : "Play: scripts and the scene's systems run", playMode, [this] { _session->StartPlaying(); }));
-                tools.push_back(Tool("skip_next", "One fixed step, and paused: the scripts' fixedUpdate and the graph's fixed pages, once", false, [this] { _session->Step(); }, !playing));
-                tools.push_back(Tool("stop", "Stop, and put the scene back as it was", false, [this] { _session->Stop(); }, playMode));
-                const kui::Color backing = playing ? kui::Theme::Current().primary.WithAlpha(0.45f) : playMode ? kui::Theme::Current().primary.WithAlpha(0.2f) : kui::colors::Transparent;
-                return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(4.f, 2.f)).SetDecoration(kui::Decoration {}.SetColor(backing).SetRadius(6.f)),
+                if (playing) tools.push_back(button("pause", "Pause (Ctrl+P)", true, [this] { _session->Pause(); }));
+                else tools.push_back(button("play_arrow", playMode ? "Resume (Ctrl+P)" : "Play: scripts and the scene's systems run (Ctrl+P)", true, [this] { _session->StartPlaying(); }));
+                tools.push_back(button("skip_next", "One fixed step, and paused: the scripts' fixedUpdate and the graph's fixed pages, once", false, [this] { _session->Step(); }, !playing));
+                tools.push_back(button("stop", "Stop, and put the scene back as it was (Ctrl+Shift+P)", false, [this] { _session->Stop(); }, playMode));
+                // The group's backing: the theme's surface, edged — tinted with the accent while it plays or is paused.
+                const kui::Color backing = playing ? t.primary.WithAlpha(0.3f) : playMode ? t.primary.WithAlpha(0.15f) : t.surface;
+                return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(2.f))
+                                          .SetDecoration(kui::Decoration {}.SetColor(backing).SetRadius(std::min(15.f, t.ButtonRadius() + 2.f)).SetBorderWidth(1.f).SetBorderColor(t.border)),
                                       kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
+            }
+
+            /**
+             * What is open, in the middle of the title bar beside the play controls: the project, and the scene — or the
+             * prefab being changed — after it; a dot of the accent while there is what is not saved.
+             */
+            kui::Widget OpenNow()
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                const std::string prefab = _session->PrefabOpen();
+                const bool changed = prefab.empty() ? Doc().Dirty() : _session->PrefabChanged();
+                const std::string project = _session->HasProject() ? _session->CurrentProject().name : std::string("No project");
+                const std::string open = !prefab.empty() ? std::filesystem::path(prefab).filename().string() : _session->SceneName();
+                const auto icon = [&](const char* name) { return kui::SizedBox(15.f, 15.f, kui::Icon(name, kui::IconStyle::eFilled, t.textMuted)); };
+                std::vector<kui::Widget> parts { icon("folder"), kui::Text(project, kui::TextStyle {}.SetSize(13.f).SetColor(t.textMuted)) };
+                if (!open.empty()) {
+                    parts.push_back(icon("chevron_right"));
+                    if (!prefab.empty()) parts.push_back(icon("inventory_2"));
+                    parts.push_back(kui::Text(open, kui::TextStyle {}.SetSize(13.f).SetColor(t.text)));
+                }
+                if (changed)
+                    parts.push_back(kui::Tooltip("Not saved: Ctrl+S saves it", kui::SizedBox(7.f, 7.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.primary).SetRadius(3.5f))))));
+                return kui::Row(std::move(parts), kui::FlexOptions {}.SetGap(5.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin));
             }
 
             /**
@@ -1649,62 +1716,59 @@ namespace keditor
             {
                 const kecs::Entity selected = _session->selectedEntity;
                 const bool some = !_session->Selection().empty();
-                const auto backing = [](kui::Widget content) {
-                    return kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(5.f, 4.f))
-                                              .SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x101012).WithAlpha(0.69f)).SetRadius(6.f)),
-                                          std::move(content));
-                };
                 const auto row = [](std::vector<kui::Widget> tools) {
-                    return kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
+                    return kui::Row(std::move(tools), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin));
                 };
+                // Down the left edge, the room the rail takes, and what sits beside it.
+                constexpr float edge = 8.f, rail = 32.f, besideRail = edge + rail + 6.f;
 
-                // ---- what is picked, and how it is moved
+                // ---- the rail: what is picked, how it is moved, what is done to it, and what is measured — one column,
+                // so at any width of the panel it is one line
                 std::vector<kui::Widget> tools;
-                tools.push_back(Tool("near_me", "Select only: no gizmo. A drag from where nothing is picks what is in its box; Ctrl or Shift adds", !_session->gizmoEnabled,
+                tools.push_back(Tool("near_me", "Select only: no gizmo (Q). A drag from where nothing is picks what is in its box; Ctrl or Shift adds", !_session->gizmoEnabled,
                                      [this] { _session->SetGizmo(false, _session->gizmo); }));
-                for (const auto& [mode, icon, what] : { std::tuple { kor::GizmoMode::eTranslate, "open_with", "Move what is picked" },
-                                                        std::tuple { kor::GizmoMode::eRotate, "3d_rotation", "Rotate what is picked" },
-                                                        std::tuple { kor::GizmoMode::eScale, "open_in_full", "Scale what is picked" } })
+                for (const auto& [mode, icon, what] : { std::tuple { kor::GizmoMode::eTranslate, "open_with", "Move what is picked (W)" },
+                                                        std::tuple { kor::GizmoMode::eRotate, "3d_rotation", "Rotate what is picked (E)" },
+                                                        std::tuple { kor::GizmoMode::eScale, "open_in_full", "Scale what is picked (R)" } })
                     tools.push_back(Tool(icon, what, _session->gizmoEnabled && _session->gizmo == mode, [this, mode] { _session->SetGizmo(true, mode); }));
+                tools.push_back(ToolDivider(true));
                 tools.push_back(Tool(_session->gizmoWorld ? "public" : "my_location", _session->gizmoWorld ? "Along the world's axes: press for its own" : "Along its own axes: press for the world's",
                                      _session->gizmoWorld, [this] { _session->gizmoWorld = !_session->gizmoWorld; SetState(); }));
                 tools.push_back(SnapTool());
                 tools.push_back(Tool("vertical_align_bottom", "Moved, put on the surface under the pointer", _session->surfaceSnap,
                                      [this] { _session->surfaceSnap = !_session->surfaceSnap; SetState(); }));
-                tools.push_back(ToolSeparator());
-                tools.push_back(Tool("center_focus_strong", "Frame what is picked (the view: right-drag turns, middle-drag moves, the wheel zooms)", false,
+                tools.push_back(ToolDivider(true));
+                tools.push_back(Tool("center_focus_strong", "Frame what is picked (F). The view: right-drag turns, middle-drag moves, the wheel zooms", false,
                                      [this, selected] { _session->Frame(selected); }, !selected.IsNull()));
                 tools.push_back(Tool("visibility_off", "Hide what is picked in this view (H)", false, [this] { _session->HideSelected(); }, some));
                 tools.push_back(Tool("filter_center_focus", "Show what is picked by itself (Shift+H)", _session->Isolated(), [this] { _session->Isolate(); }, some));
                 if (!_session->ViewHidden().empty())
                     tools.push_back(Tool("visibility", std::format("Show the {} hidden again (Alt+H)", _session->ViewHidden().size()), true, [this] { _session->ShowAll(); }));
-                tools.push_back(ToolSeparator());
+                tools.push_back(ToolDivider(true));
                 const auto measure = _session->measure;
                 tools.push_back(Tool("straighten", "A ruler: click two points on a surface", measure == Session::Measure::eRuler, [this, measure] {
                     _session->SetMeasure(measure == Session::Measure::eRuler ? Session::Measure::eOff : Session::Measure::eRuler); }));
                 tools.push_back(Tool("colorize", "What is under the pointer: the entity, where and which way its surface faces", measure == Session::Measure::eProbe, [this, measure] {
                     _session->SetMeasure(measure == Session::Measure::eProbe ? Session::Measure::eOff : Session::Measure::eProbe); }));
-                tools.push_back(ToolSeparator());
-                tools.push_back(ViewModeTool());
-                tools.push_back(GridTool());
-                tools.push_back(ToolSeparator());
-                tools.push_back(kui::Make<FrameRate>(_session));
-                // What the graph can be switched between — its picture, a debug view of it — without going to the node that says which.
+
+                // ---- beside the rail, at the top: what the graph can be switched between — its picture, a debug view
+                // of it — without going to the node that says which
+                std::vector<kui::Widget> switches;
+                float switchesWide = 8.f;       // about: a chip's room for its words, and its mark
                 for (const auto& choice : _session->Choices()) {
-                    tools.push_back(ToolSeparator());
-                    tools.push_back(kui::Tooltip(std::format("{}: what the graph's Switch shows", choice.driver),
-                                                 kui::SizedBox(150.f, 24.f, kui::Dropdown(choice.options, std::clamp(choice.chosen, 0, static_cast<int>(choice.options.size()) - 1),
-                                                                                          [this, driver = choice.driver](const int index) { _session->Choose(driver, index); }))));
+                    const std::string chosen = choice.options.empty() ? std::string() : choice.options[static_cast<std::size_t>(std::clamp(choice.chosen, 0, static_cast<int>(choice.options.size()) - 1))];
+                    switchesWide += 40.f + 7.f * static_cast<float>(choice.driver.size() + chosen.size());
+                    switches.push_back(ChoiceTool(choice));
                 }
 
-                // ---- how it is seen
+                // ---- at the top right: how it is seen
                 std::vector<kui::Widget> seen;
-                seen.push_back(kui::Make<LiveText>([session = _session] { return std::format("{:.2g}x", session->flySpeed); }, "How fast the view flies: the wheel while the right button is held"));
-                seen.push_back(ViewsTool());
+                seen.push_back(ViewModeTool());
+                seen.push_back(ToolDivider());
+                seen.push_back(GridTool());
                 seen.push_back(Tool("lightbulb", "Icons for the lights, cameras and what draws nothing: a click on one picks it", _session->iconsShown,
                                     [this] { _session->iconsShown = !_session->iconsShown; SetState(); }));
-                seen.push_back(Tool("query_stats", "The frame's numbers: what was drawn, computed, traced, and what it took", _session->statsShown,
-                                    [this] { _session->statsShown = !_session->statsShown; SetState(); }));
+                seen.push_back(ViewsTool());
                 seen.push_back(Tool("vertical_split", _session->splitView ? "One view" : "Two views side by side", _session->splitView,
                                     [this] { _session->SetSplit(!_session->splitView); }));
 
@@ -1720,28 +1784,37 @@ namespace keditor
                 if (_session->Play().Over())
                     if (const auto picture = _session->OverPicture(); picture.Get())
                         layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 0.f, .top = 0.f, .right = 0.f, .bottom = 0.f }, kui::IgnorePointer(kui::Image(picture, kui::ImageFit::eFill))));
-                // The two toolbars along the top, the second after the first where there is room and under it where
-                // not; the first's tools a line after another where the panel is narrower than they are.
-                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f, .right = 8.f },
-                    kui::Wrap({ backing(kui::Wrap(std::move(tools), 4.f, 4.f)), backing(row(std::move(seen))) }, 8.f, 6.f)));
-                // At the foot, on the left: what is measured, over the frame's numbers.
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = edge, .top = edge },
+                    OverlayBacking(kui::Column(std::move(tools), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)))));
+                // The switches and how it is seen share the top: the switches after the rail and how it is seen at the end
+                // — the switches a line lower where the panel is too narrow for both on one.
+                constexpr float seenWide = 250.f, line = 40.f;
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .top = edge, .right = edge }, OverlayBacking(row(std::move(seen)))));
+                if (!switches.empty()) {
+                    const float wide = static_cast<float>(_session->viewport->Size().x);
+                    const bool under = wide > 0.f && besideRail + switchesWide + 8.f + seenWide + edge > wide;
+                    layers.push_back(kui::Positioned(kui::PositionedOptions { .left = besideRail, .top = under ? edge + line : edge }, OverlayBacking(row(std::move(switches)))));
+                }
+                // At the foot, beside the rail: what is measured, over the frame's numbers, over how fast it runs — which
+                // shows them, pressed.
                 std::vector<kui::Widget> foot;
-                if (measure != Session::Measure::eOff) foot.push_back(backing(kui::Make<LiveText>([this] { return MeasureText(); }, std::string(), 15)));
-                if (_session->statsShown) foot.push_back(backing(kui::Make<LiveText>([this] { return StatsText(); }, std::string(), 4)));
-                if (!foot.empty())
-                    layers.push_back(kui::Positioned(kui::PositionedOptions { .left = 8.f, .bottom = 8.f },
-                        kui::Column(std::move(foot), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin))));
-                layers.push_back(kui::Positioned(kui::PositionedOptions { .right = 8.f, .bottom = 8.f }, kui::Make<ViewCube>(_session)));
+                if (measure != Session::Measure::eOff) foot.push_back(OverlayBacking(kui::Make<LiveText>([this] { return MeasureText(); }, std::string(), 15)));
+                if (_session->statsShown) foot.push_back(OverlayBacking(kui::Make<LiveText>([this] { return StatsText(); }, std::string(), 4)));
+                foot.push_back(OverlayBacking(kui::Make<FrameRate>(_session, [this] { _session->statsShown = !_session->statsShown; SetState(); },
+                                                                    _session->statsShown ? "Hide the frame's numbers" : "The frame's numbers: what was drawn, computed, traced, and what it took")));
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .left = besideRail, .bottom = edge },
+                    kui::Column(std::move(foot), kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin))));
+                layers.push_back(kui::Positioned(kui::PositionedOptions { .right = edge, .bottom = edge }, kui::Make<ViewCube>(_session)));
                 kui::Widget first = kui::Stack(std::move(layers));
                 if (!_session->splitView || !_session->SecondView()) return first;
                 // The second view: the scene as the first draws it, from its own place, and nothing of the editor's over it.
                 kui::Widget second = kui::Stack({
                     kgui::SceneView(*_session->SecondView(), _session->secondViewport),
-                    kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f }, backing(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f),
-                        kui::Text("Second view", kui::TextStyle {}.SetSize(12.f).SetColor(kui::Color::Hex(0xE0E0E0)))))),
+                    kui::Positioned(kui::PositionedOptions { .left = 8.f, .top = 8.f }, OverlayBacking(kui::Padding(kui::EdgeInsets::Symmetric(6.f, 4.f),
+                        kui::Text("Second view", kui::TextStyle {}.SetSize(12.f).SetColor(kui::Theme::Current().text))))),
                     kui::Positioned(kui::PositionedOptions { .right = 8.f, .bottom = 8.f }, kui::Make<ViewCube>(_session, true)),
                 });
-                return kui::Row({ kui::Expanded(std::move(first)), kui::SizedBox(2.f, -1.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Color::Hex(0x303034))))),
+                return kui::Row({ kui::Expanded(std::move(first)), kui::SizedBox(2.f, -1.f, kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Theme::Current().border)))),
                                   kui::Expanded(std::move(second)) }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch));
             }
 
@@ -1811,14 +1884,19 @@ namespace keditor
                                                                 kui::DragValueOptions {}.SetRange(0.1f, 180.f).SetSpeed(0.5f).SetDecimals(1))));
                 lines.push_back(line("Scale by", kui::DragValue(snap.scale, [change](const double v) { change([&](Session::Snap& s) { s.scale = static_cast<float>(v); }); },
                                                                 kui::DragValueOptions {}.SetRange(0.001f, 10.f).SetLogarithmic(true).SetDecimals(3))));
-                return kui::Row({
+                // In the rail: on or off, and under it a narrow button for its steps, which open beside the rail.
+                const kui::Theme& t = kui::Theme::Current();
+                kui::Widget more = kui::Tooltip("How far a step snaps", kui::Button(
+                    kui::Container(kui::ContainerOptions {}.SetSize(24.f, 12.f).SetAlignment(kui::Alignment::Center())
+                                       .SetDecoration(kui::Decoration {}.SetColor(_snapOpen ? t.primary.WithAlpha(0.3f) : kui::colors::Transparent).SetRadius(3.f)),
+                                   kui::SizedBox(14.f, 14.f, kui::Icon("more_horiz", kui::IconStyle::eFilled, t.textMuted))),
+                    [this] { SetState([&] { const bool open = !_snapOpen; ClosePopups(); _snapOpen = open; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+                return kui::Column({
                     Tool("grid_4x4", snap.on ? "Snapped (Ctrl held: free)" : "Free (Ctrl held: snapped)", snap.on, [change] { change([](Session::Snap& s) { s.on = !s.on; }); }),
-                    kui::Column({
-                        Tool("expand_more", "How far a step snaps", _snapOpen, [this] { SetState([&] { const bool open = !_snapOpen; ClosePopups(); _snapOpen = open; }); }),
-                        kui::PopupAnchor(_snapOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 240.f),
-                                         [this] { SetState([&] { _snapOpen = false; }); }, { 0.f, 4.f }),
-                    }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin)),
-                }, kui::FlexOptions {}.SetGap(0.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart).SetMainAxisSize(kui::MainAxisSize::eMin));
+                    std::move(more),
+                    kui::PopupAnchor(_snapOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 240.f),
+                                     [this] { SetState([&] { _snapOpen = false; }); }, { 34.f, -36.f }),
+                }, kui::FlexOptions {}.SetGap(0.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin));
             }
 
             /** Which way the view looks — along an axis, in perspective or straight on — and its bookmarks. */
@@ -1858,16 +1936,42 @@ namespace keditor
                 }
                 lines.push_back(line(std::move(go)));
                 lines.push_back(line(std::move(save)));
+                lines.push_back(PopupHeading("Fly speed: the wheel while the right button is held"));
+                lines.push_back(kui::Padding(kui::EdgeInsets::Symmetric(8.f, 3.f), kui::Make<LiveText>([session = _session] { return std::format("{:.2g}x", session->flySpeed); })));
+
                 return kui::Column({
-                    Tool(straight ? "crop_square" : "visibility", straight ? "Seen straight on: which way the view looks, and its bookmarks" : "Which way the view looks, and its bookmarks",
-                         _viewsOpen, [this] { SetState([&] { const bool open = !_viewsOpen; ClosePopups(); _viewsOpen = open; }); }),
+                    ToolChip("photo_camera", { ChipText(straight ? "Ortho" : "Persp", !_viewsOpen) },
+                             "The view: which way it looks, perspective or straight on, its bookmarks and how fast it flies",
+                             _viewsOpen, [this] { SetState([&] { const bool open = !_viewsOpen; ClosePopups(); _viewsOpen = open; }); }),
                     kui::PopupAnchor(_viewsOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 300.f),
                                      [this] { SetState([&] { _viewsOpen = false; }); }, { 0.f, 4.f }),
                 }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
             }
 
             /** Every one of the Scene panel's popups shut: one is open at a time. */
-            void ClosePopups() { _viewModesOpen = _gridOpen = _snapOpen = _viewsOpen = false; }
+            void ClosePopups() { _viewModesOpen = _gridOpen = _snapOpen = _viewsOpen = false; _choiceOpen.clear(); }
+
+            /** One of the graph's switches as a chip — what it switches, and what it shows now — that lists what it can show. */
+            kui::Widget ChoiceTool(const Session::Choice& choice)
+            {
+                const int chosen = std::clamp(choice.chosen, 0, static_cast<int>(choice.options.size()) - 1);
+                const bool open = _choiceOpen == choice.driver;
+                std::vector<kui::Widget> lines;
+                lines.push_back(PopupHeading(std::format("{}: what the graph's Switch shows", choice.driver)));
+                for (int i = 0; i < static_cast<int>(choice.options.size()); ++i)
+                    lines.push_back(kui::Button(kui::Row({ kui::SizedBox(16.f, 16.f, i == chosen ? kui::Icon("check", kui::IconStyle::eFilled, kui::Theme::Current().text) : kui::Text("")),
+                                                           kui::Text(choice.options[static_cast<std::size_t>(i)], kui::TextStyle {}.SetSize(13.f)) },
+                                                         kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)),
+                                                [this, driver = choice.driver, i] { _session->Choose(driver, i); SetState([&] { _choiceOpen.clear(); }); },
+                                                kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+                return kui::Column({
+                    ToolChip({}, { ChipText(choice.driver, true), ChipText(chosen >= 0 ? choice.options[static_cast<std::size_t>(chosen)] : std::string()) },
+                             std::format("{}: what the graph's Switch shows", choice.driver), open,
+                             [this, driver = choice.driver, open] { SetState([&] { ClosePopups(); if (!open) _choiceOpen = driver; }); }),
+                    kui::PopupAnchor(open, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 220.f),
+                                     [this] { SetState([&] { _choiceOpen.clear(); }); }, { 0.f, 4.f }),
+                }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
+            }
             std::string _shaderPicking;     // the slot of a pipeline whose list of shaders is open: `<node>/<slot>`
 
             /** A heading over a group of lines in one of the Scene panel's popups. */
@@ -1919,16 +2023,9 @@ namespace keditor
                         lines.push_back(kui::Padding(kui::EdgeInsets::Only(8.f, 8.f, 6.f, 4.f), kui::Text(std::format("Lit still: {} — its shaders do not import koral_debug.",
                             [&] { std::string all; for (const auto& id : without) all += (all.empty() ? "" : ", ") + id; return all; }()),
                             kui::TextStyle {}.SetSize(11.f).SetColor(kui::Theme::Current().textMuted))));
-                const kui::Color ink = kui::Color::Hex(0xE0E0E0);
-                // (As wide as what it says: centred in a box of no width, it would be as wide as the line it is in.)
-                kui::Widget face = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(4.f, 4.f))
-                                                      .SetDecoration(kui::Decoration {}.SetColor(_viewModesOpen ? kui::Theme::Current().primary.WithAlpha(0.35f) : kui::colors::Transparent).SetRadius(3.f)),
-                    kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("layers", kui::IconStyle::eFilled, ink)), kui::Text(name, kui::TextStyle {}.SetSize(12.f).SetColor(ink)),
-                               kui::SizedBox(14.f, 14.f, kui::Icon("expand_more", kui::IconStyle::eFilled, ink)) },
-                             kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
                 return kui::Column({
-                    kui::Tooltip("How the scene is shown here: lit, a channel of its materials, or a debug view", kui::Button(std::move(face), [this] { SetState([&] { const bool open = !_viewModesOpen; ClosePopups(); _viewModesOpen = open; }); },
-                                                                                                                    kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))),
+                    ToolChip({}, { ChipText(name) }, "How the scene is shown here: lit, a channel of its materials, or a debug view", _viewModesOpen,
+                             [this] { SetState([&] { const bool open = !_viewModesOpen; ClosePopups(); _viewModesOpen = open; }); }),
                     kui::PopupAnchor(_viewModesOpen, PopupPanel(kui::Column(std::move(lines), kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStart)), 220.f), [this] { SetState([&] { _viewModesOpen = false; }); }, { 0.f, 4.f }),
                 }, kui::FlexOptions {}.SetMainAxisSize(kui::MainAxisSize::eMin));
             }
@@ -1998,40 +2095,58 @@ namespace keditor
                 std::vector<kui::MenuItem> scenes;
                 for (const auto& scene : _session->CurrentProject().scenes)
                     scenes.push_back({ .label = ticked(scene == _session->SceneName(), scene.c_str()), .onSelected = [this, scene] { _session->OpenScene(scene); SetState(); } });
+                // Six menus: the project and its scenes; what is done to what is picked; what there is to make; how it is
+                // seen; the project's files; the graph. Playing is the title bar's, in its middle (and Ctrl+P).
+                std::vector<kui::MenuItem> make {
+                    { "New entity", [this] { _session->Select(Doc().CreateEntity()); }, !playMode },
+                    { "New tag...", [this] { SetState([&] { _dialog = Dialog::eNone; _session->Say("Give the tag a name in the inspector of an entity."); }); } },
+                    { .separator = true },
+                };
+                for (auto& item : create) make.push_back(std::move(item));
                 return kui::MenuBar({
                     { "File", {
                         { "New project...", Asking("Making another project", [this] { AskForNewProject(); }) },
                         { "Open project...", Asking("Opening another project", [this] { SetState([&] { _dialog = Dialog::eOpenProject; }); }) },
+                        { ticked(_session->HasProject() && Same(Session::StartupProject(), _session->CurrentProject().directory), "Open at startup"),
+                          [this] { ToggleStartup(); }, _session->HasProject() },
+                        { "Open in Visual Studio Code", needsProject([this] { _session->OpenInCode(); }) },
                         { "Import a module...", [this] { SetState([&] { _dialog = Dialog::eImportModule; }); }, _session->HasProject() && !playMode },
                         { .label = "Stop importing", .enabled = !imported.empty() && !playMode, .items = std::move(imported) },
                         { .separator = true },
+                        { "Save scene   Ctrl+S", needsProject([this] { _session->Save(); }), !playMode },
                         { .label = "Open scene", .enabled = scenes.size() > 1 && !playMode, .items = std::move(scenes) },
                         { "Add a scene...", needsProject([this] { SetState([&] { _dialog = Dialog::eNewScene; _newId.clear(); }); }), !playMode },
                         { "New scene", Asking("Making the scene anew", needsProject([this] { _session->NewStandardScene(); })), !playMode },
                         { "New lit scene", Asking("Making the scene anew, lit under a sky", needsProject([this] { _session->NewLitScene(); })), !playMode },
                         { "Revert to saved", Asking("Putting the saved scene back", [this] { _session->Revert(); }), _session->HasProject() && !playMode },
-                        { "Save scene", needsProject([this] { _session->Save(); }), !playMode },
+                        { .separator = true },
+                        { "Run the game   Ctrl+R", needsProject([this] { _session->Run(); }) },
+                        { "Export the game...", needsProject([this] {
+                            SetState([&] { _dialog = Dialog::eExportGame; _newId = (_session->CurrentProject().directory / "build" / _session->CurrentProject().name).generic_string(); });
+                        }) },
+                        { .separator = true },
+                        { .label = "Settings", .items = { { .label = "Theme", .items = ThemeMenu() } } },
                     } },
                     { "Edit", {
                         { "Undo   Ctrl+Z", [this] { _session->Undo(); }, _session->CanUndo() && !playMode },
                         { "Redo   Ctrl+Y", [this] { _session->Redo(); }, _session->CanRedo() && !playMode },
                         { .separator = true },
-                        { "Duplicate", [this, selected] { _session->Duplicate(selected); }, some },
+                        { "Duplicate   Ctrl+D", [this, selected] { _session->Duplicate(selected); }, some },
+                        { "Delete   Del", [this, selected] { _session->Delete(selected); }, some },
                         { "Move to the top", [this, selected] { Doc().SetParent(selected, kecs::NullEntity); }, some && !Doc().World().ParentOf(selected).IsNull() },
-                        { "Save as object", [this, selected] { _session->SaveAsObject(selected); }, some },
-                        { "Save as prefab", [this, selected] { _session->SaveAsPrefab(selected); }, some },
                         { .separator = true },
-                        { "Delete", [this, selected] { _session->Delete(selected); }, some },
+                        { "Save as prefab", [this, selected] { _session->SaveAsPrefab(selected); }, some },
+                        { "Save as object", [this, selected] { _session->SaveAsObject(selected); }, some },
                     } },
-                    { "Create", std::move(create) },
+                    { "Create", std::move(make) },
                     { "View", {
-                        { "Frame the selection", [this, selected] { _session->Frame(selected); }, some },
+                        { "Frame the selection   F", [this, selected] { _session->Frame(selected); }, some },
                         { ticked(_session->ThroughSceneCamera(), "Look through the scene's camera"), [this] { _session->SetLookThroughCamera(!_session->lookThroughCamera); } },
                         { .separator = true },
-                        { ticked(!_session->gizmoEnabled, "Select only"), [this] { _session->SetGizmo(false, _session->gizmo); } },
-                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eTranslate, "Move"), [this] { _session->SetGizmo(true, kor::GizmoMode::eTranslate); } },
-                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eRotate, "Rotate"), [this] { _session->SetGizmo(true, kor::GizmoMode::eRotate); } },
-                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eScale, "Scale"), [this] { _session->SetGizmo(true, kor::GizmoMode::eScale); } },
+                        { ticked(!_session->gizmoEnabled, "Select only   Q"), [this] { _session->SetGizmo(false, _session->gizmo); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eTranslate, "Move   W"), [this] { _session->SetGizmo(true, kor::GizmoMode::eTranslate); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eRotate, "Rotate   E"), [this] { _session->SetGizmo(true, kor::GizmoMode::eRotate); } },
+                        { ticked(_session->gizmoEnabled && _session->gizmo == kor::GizmoMode::eScale, "Scale   R"), [this] { _session->SetGizmo(true, kor::GizmoMode::eScale); } },
                         { .separator = true },
                         { "Put the panels back where they start", [this] { SetState([&] { _layout = StartingLayout(); }); SaveLayout(); } },
                     } },
@@ -2042,34 +2157,14 @@ namespace keditor
                         { .separator = true },
                         { "Compress textures...", needsProject([this] { _assets.OpenCompressTextures(); }) },
                     } },
-                    { "Scene", {
-                        _session->IsPlaying() ? kui::MenuItem { "Pause", [this] { _session->Pause(); } }
-                                              : kui::MenuItem { playMode ? "Resume" : "Play", [this] { _session->StartPlaying(); } },
-                        { "Stop", [this] { _session->Stop(); }, playMode },
-                    } },
-                    { "Project", {
-                        { "Run", needsProject([this] { _session->Run(); }) },
-                        { ticked(_session->HasProject() && Same(Session::StartupProject(), _session->CurrentProject().directory), "Open at startup"),
-                          [this] { ToggleStartup(); }, _session->HasProject() },
-                        { "Open in Visual Studio Code", needsProject([this] { _session->OpenInCode(); }) },
-                        { "Export the game...", needsProject([this] {
-                            SetState([&] { _dialog = Dialog::eExportGame; _newId = (_session->CurrentProject().directory / "build" / _session->CurrentProject().name).generic_string(); });
-                        }) },
-                    } },
                     { "Graph", {
                         { "Add node...   Ctrl+Space", [this] { AskForNode(NewNodeAt()); } },
                         { "Paste   Ctrl+V", [this] { const kor::Vec2 at = NewNodeAt(); _session->PasteNodes(at.x, at.y); }, _session->HasCopiedNodes() },
                         { "Duplicate   Ctrl+D", [this] { if (!_session->selectedNode.empty()) _session->DuplicateNodes({ _session->selectedNode }); }, !_session->selectedNode.empty() },
+                        { .separator = true },
                         { "Arrange this page", [this] { Arrange(); } },
                         { "Arrange every page", [this] { _session->ArrangeEveryPage(); } },
                         { "Frame everything   F", [this] { _view->Frame(); SetState(); } },
-                    } },
-                    { "Settings", {
-                        { .label = "Theme", .items = ThemeMenu() },
-                    } },
-                    { "Entity", {
-                        { "New entity", [this] { _session->Select(Doc().CreateEntity()); } },
-                        { "New tag...", [this] { SetState([&] { _dialog = Dialog::eNone; _session->Say("Give the tag a name in the inspector of an entity."); }); } },
                     } },
                 });
             }
@@ -2730,26 +2825,50 @@ namespace keditor
                 const auto unchosen = _session->PagesNotChosen();
                 std::size_t leftOut = 0;
                 bool anyUnchosen = false;
+                // A tab for each: the one the page shown is in, until another is chosen.
+                if (shown != _laneFollows) {
+                    _laneFollows = shown;
+                    if (!shown.empty() && std::ranges::contains(passes, shown)) _lane = Doc().RateOf(shown);
+                }
+                std::map<Rate, std::size_t> counts;
+                for (const auto& pass : passes) ++counts[Doc().RateOf(pass)];
+                {
+                    std::vector<kui::Widget> tabs;
+                    for (const auto& [rate, label, what] : { std::tuple { Rate::eFrame, "Per frame", "The pages drawn every frame" },
+                                                             std::tuple { Rate::eSetup, "Setup", "The pages made once, before the first frame" },
+                                                             std::tuple { Rate::eFixed, "Fixed", "The pages run on the fixed step, while the scene plays" } }) {
+                        const bool on = _lane == rate;
+                        tabs.push_back(kui::Expanded(kui::Tooltip(what, kui::Button(
+                            kui::Container(kui::ContainerOptions {}.SetHeight(24.f).SetAlignment(kui::Alignment::Center())
+                                               .SetDecoration(kui::Decoration {}.SetColor(on ? t.surfaceHover : kui::colors::Transparent).SetRadius(std::min(12.f, t.ButtonRadius()))),
+                                kui::Text(std::format("{} {}", label, counts[rate]), kui::TextStyle {}.SetSize(12.f).SetColor(on ? t.text : t.textMuted), kui::TextAlign::eCenter, false, 1, true)),
+                            [this, rate] { SetState([&] { _lane = rate; _addingPass = false; }); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)))));
+                    }
+                    rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(0.f, 4.f), kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::All(2.f))
+                        .SetDecoration(kui::Decoration {}.SetColor(t.background).SetBorderWidth(1.f).SetBorderColor(t.border).SetRadius(std::min(14.f, t.ButtonRadius() + 2.f))),
+                        kui::Row(std::move(tabs), kui::FlexOptions {}.SetGap(2.f)))));
+                }
                 int offset = 0;
                 for (const Rate rate : { Rate::eSetup, Rate::eFixed, Rate::eFrame }) {
                     std::vector<std::string> listed;
                     for (const auto& pass : passes) if (Doc().RateOf(pass) == rate) listed.push_back(pass);
-                    const std::string laneKey = std::format("lane {}", static_cast<int>(rate));
-                    const bool open = !_lanesShut.contains(laneKey);
-                    const char* title = rate == Rate::eSetup ? "SETUP  ·  MADE ONCE" : rate == Rate::eFixed ? "FIXED STEP" : "EVERY FRAME";
-                    rows.push_back(section(listed.empty() ? std::string(title) : std::format("{}  ·  {}", title, listed.size()), kui::Row({
-                        kui::Tooltip(rate == Rate::eSetup ? "A new setup page, made after the rest of setup" : rate == Rate::eFixed ? "A new page of the fixed step, run after the rest of it" : "A new page, drawn after the rest",
-                                     SmallIcon("add", [this, rate] { SetState([&] { _addingPass = true; _addingRate = rate; ++_passFocus; _lanesShut.erase(std::format("lane {}", static_cast<int>(rate))); }); })),
-                        kui::Tooltip(open ? "Fold it" : "Unfold it", SmallIcon(open ? "expand_less" : "expand_more", [this, laneKey, open] { SetState([&] { if (open) _lanesShut.insert(laneKey); else _lanesShut.erase(laneKey); }); })) },
-                        kui::FlexOptions {}.SetGap(2.f))));
                     const int laneOffset = offset;
                     offset += static_cast<int>(listed.size());
-                    if (!open) continue;
-                    if (listed.empty() && !(_addingPass && _addingRate == rate))
-                        rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(rate == Rate::eSetup
-                            ? "Nothing is made once yet: a noise texture, a table worked out on the GPU, a buffer cleared to start with. + makes a page."
-                            : rate == Rate::eFixed ? "Nothing runs on the fixed step yet: a simulation that must not go faster or slower with the frame rate. + makes a page."
-                                                   : "None yet: every node is on one page. + makes the first.", 11.f)));
+                    if (rate != _lane) continue;
+                    const char* kind = rate == Rate::eSetup ? "setup page" : rate == Rate::eFixed ? "page of the fixed step" : "page, every frame";
+                    const auto add = [this, rate] { SetState([&] { _addingPass = true; _addingRate = rate; ++_passFocus; }); };
+                    // None of this rate: what it is for, with room to read it, and a button for the first.
+                    if (listed.empty() && !(_addingPass && _addingRate == rate)) {
+                        rows.push_back(kui::Padding(kui::EdgeInsets::Symmetric(8.f, 18.f), kui::Column({
+                            kui::SizedBox(28.f, 28.f, kui::Icon(rate == Rate::eSetup ? "bolt" : rate == Rate::eFixed ? "timer" : "replay", kui::IconStyle::eFilled, t.textMuted)),
+                            kui::Text(rate == Rate::eSetup ? "Pages made once, before the first frame: a noise texture, a table worked out on the GPU, a buffer cleared to start with."
+                                      : rate == Rate::eFixed ? "Pages run on the fixed step while the scene plays: a simulation that must not go faster or slower with the frame rate."
+                                                             : "Pages drawn every frame. None yet: every node is on one page.",
+                                      kui::TextStyle {}.SetSize(12.f).SetColor(t.textMuted), kui::TextAlign::eCenter, true),
+                            kui::Button(std::format("New {}", kind), add, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)),
+                        }, kui::FlexOptions {}.SetGap(10.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
+                        continue;
+                    }
                     for (std::size_t i = 0; i < listed.size(); ++i) {
                         const std::string& pass = listed[i];
                         const bool notChosen = unchosen.contains(pass);
@@ -2827,6 +2946,12 @@ namespace keditor
                                 if (Doc().AddPass(typed, -1, rate)) { _session->ShowPass(typed); SetState([&] { _addingPass = false; }); }
                                 else _session->Say(std::format("There is a pass called '{}' already.", typed), true);
                             }, .focus = _passFocus, .onEscape = [this] { SetState([&] { _addingPass = false; }); } }).Key(std::format("new pass {} {}", static_cast<int>(rate), passes.size())));
+                    else rows.push_back(kui::Padding(kui::EdgeInsets::Only(0.f, 4.f, 0.f, 0.f), kui::Button(
+                        kui::Container(kui::ContainerOptions {}.SetHeight(26.f).SetPadding(kui::EdgeInsets::Symmetric(8.f, 0.f))
+                                           .SetDecoration(kui::Decoration {}.SetBorderWidth(1.f).SetBorderColor(t.border).SetRadius(std::min(13.f, t.ButtonRadius()))),
+                            kui::Row({ kui::SizedBox(16.f, 16.f, kui::Icon("add", kui::IconStyle::eFilled, t.textMuted)), kui::Text(std::format("New {}", kind), kui::TextStyle {}.SetSize(12.f).SetColor(t.textMuted)) },
+                                     kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))),
+                        add, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))));
                 }
                 if (leftOut > 0 || (_everyChoice && anyUnchosen))
                     rows.push_back(kui::Tooltip("Pages whose passes all idle as the choices are — another renderer's, say — are left out of the list. Choose another in the frame's Switch, or the scene view's switch, and its pages are listed.",
@@ -3043,13 +3168,21 @@ namespace keditor
             kui::Widget HereToUse()
             {
                 const std::string page = _session->ShowsFrame() ? std::string() : ShownPass();
-                if (page.empty())
-                    return SideList({ kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kgui::Muted(_session->ShowsFrame()
-                        ? "The whole frame is shown. Go into a page — press its card twice — and what it can use of the pages before it is here, to drag onto it."
-                        : Doc().Passes().empty()
-                        ? "What a pass can use of the passes before it is shown here, once the graph has passes."
-                        : "Pick a pass's page, in Passes: what it can use of the passes before it is shown here, to drag onto it.", 11.f)) });
                 const kui::Theme& t = kui::Theme::Current();
+                if (page.empty()) {
+                    // Nothing to show yet: what will be here, in the middle, and — where there are pages — the way to one.
+                    std::vector<kui::Widget> lines {
+                        kui::SizedBox(28.f, 28.f, kui::Icon("input", kui::IconStyle::eFilled, t.textMuted)),
+                        kui::Text(_session->ShowsFrame() ? "Go into a pass's page, pressing its card twice: what the passes before it made is shown here, to drag onto it."
+                                  : Doc().Passes().empty() ? "Once the graph has passes, what each can use of those before it is shown here."
+                                                           : "Open a pass's page to see what the passes before it made, to drag onto it.",
+                                  kui::TextStyle {}.SetSize(12.f).SetColor(t.textMuted), kui::TextAlign::eCenter, true),
+                    };
+                    if (!_session->ShowsFrame() && !Doc().Passes().empty())
+                        lines.push_back(kui::Button("Show the frame", [this] { _session->ShowFrame(); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::eSecondary)));
+                    return kui::Align(kui::Alignment::Center(), kui::Padding(kui::EdgeInsets::All(16.f),
+                        kui::Column(std::move(lines), kui::FlexOptions {}.SetGap(10.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))));
+                }
                 const kgraph::Graph& graph = Doc().Graph();
                 const kgraph::Runtime& runtime = Doc().Runtime();
                 const bool setupPage = Doc().IsSetup(page);
@@ -3099,9 +3232,16 @@ namespace keditor
                         here ? kui::MenuItem { "Pick it here", [this, reference = there->second] { _session->Select(reference); } } : kui::MenuItem { "Bring it in", bring },
                         { "Go to where it is made", [this, id] { _session->GoTo(id); } },
                     };
+                    // Under its name, the one thing most worth knowing of it: an image's format, a buffer's size.
+                    std::string under;
+                    if (!list) {
+                        const auto parts = holds | std::views::split(std::string_view("  ·  ")) | std::views::transform([](auto&& part) { return std::string(part.begin(), part.end()); })
+                                         | std::ranges::to<std::vector<std::string>>();
+                        under = parts.size() > 1 ? parts[1] : holds;   // after an image's extent, its format; after a buffer's kind, its size
+                    }
                     kui::Widget made = _assets.Tile("use " + id, std::move(picture), node->title.empty() ? id : node->title, here, false, size,
                                             [this, here, bring, reference = here ? there->second : std::string()] { if (here) _session->Select(reference); else bring(); },
-                                            std::move(menu));
+                                            std::move(menu), 260.f, under);
                     return kui::Tooltip(std::move(said), kui::Draggable({ "resource", id }, std::move(made)));
                 };
                 const auto group = [&](const std::map<std::string, std::vector<std::string>>& of) {
@@ -4058,11 +4198,58 @@ namespace keditor
                     const auto assets = _session->Assets();
                     if (const auto it = std::ranges::find(assets, _session->selectedAsset, &Session::Asset::id); it != assets.end()) return _assets.AssetInspector(*it);
                 }
-                if (const kecs::Entity entity = _session->selectedEntity; Doc().World().Alive(entity))
+                if (const kecs::Entity entity = _session->selectedEntity; Doc().World().Alive(entity)) {
+                    Picked({ entity, {} });
                     return kui::Make<Following>(_session, entity, [this, entity] { return EntityInspector(entity); });
-                if (const kgraph::Node* node = Doc().Graph().Find(_session->selectedNode)) return NodeInspector(*node);
-                return Panel({ kgui::Muted("Pick a node or an entity to see what it is made of.") });
+                }
+                if (const kgraph::Node* node = Doc().Graph().Find(_session->selectedNode)) {
+                    Picked({ kecs::NullEntity, node->id });
+                    return NodeInspector(*node);
+                }
+                return RecentlyPicked();
             }
+
+            /** An entity or a node the inspector showed: the last few, to go back to when nothing is picked. */
+            struct Recent {
+                kecs::Entity entity = kecs::NullEntity;
+                std::string node;
+                bool operator==(const Recent&) const = default;
+            };
+            static constexpr std::size_t RecentKept = 6;
+            void Picked(Recent recent)
+            {
+                if (!_recent.empty() && _recent.front() == recent) return;
+                std::erase(_recent, recent);
+                _recent.insert(_recent.begin(), std::move(recent));
+                if (_recent.size() > RecentKept) _recent.resize(RecentKept);
+            }
+
+            /** Nothing picked: so it says, and under it what was picked last — each picked again, pressed — of what is still there. */
+            kui::Widget RecentlyPicked()
+            {
+                const kui::Theme& t = kui::Theme::Current();
+                std::erase_if(_recent, [&](const Recent& r) { return r.node.empty() ? !Doc().World().Alive(r.entity) : !Doc().Graph().Find(r.node); });
+                if (_recent.empty()) return Panel({ kgui::Muted("Nothing picked. Click an entity in the scene or a node in the graph to see what it is made of.") });
+                std::vector<kui::Widget> rows { kgui::Muted("Nothing picked."), ListHeading("RECENTLY PICKED") };
+                for (const Recent& r : _recent) {
+                    if (r.node.empty()) {
+                        const auto [icon, tint] = EntityIcon(_session->EntityKind(r.entity));
+                        rows.push_back(ListLine(std::format("recent entity {}", r.entity.index), false,
+                                                { ListIcon(icon, tint), ListName(Doc().NameOf(r.entity), false), ListPill("entity", t.textMuted) },
+                                                [this, entity = r.entity] { _session->Select(entity); }));
+                    } else {
+                        const kgraph::Node* node = Doc().Graph().Find(r.node);
+                        const kgraph::NodeType* type = kgraph::FindType(node->type);
+                        const std::string title = node->title.empty() ? node->id : node->title;
+                        rows.push_back(ListLine("recent node " + r.node, false,
+                                                { ListIcon(type && !type->icon.empty() ? std::string_view(type->icon) : std::string_view("category"), t.textMuted),
+                                                  ListName(node->pass.empty() ? title : std::format("{} / {}", node->pass, title), false), ListPill("node", t.textMuted) },
+                                                [this, id = r.node] { _session->GoTo(id); }));
+                    }
+                }
+                return Panel(std::move(rows));
+            }
+            std::vector<Recent> _recent;    // most recent first
 
             /**
              * An input's control on its node: small, a row high — a number to drag, a box to tick, a colour, a choice, a
@@ -5889,6 +6076,7 @@ namespace keditor
             Dialog _dialog = Dialog::eNone;
             bool _viewModesOpen = false, _gridOpen = false;     // the Scene panel's popups: how it shows the scene, the grid's settings
             bool _snapOpen = false, _viewsOpen = false;         // how the gizmo snaps; which way the view looks, and its bookmarks
+            std::string _choiceOpen;                            // the driver of the graph's switch whose list is open
             kor::Vec2 _addAt {};
             std::string _filter, _newId;
             std::string _menuCategory;      // the node menu's: the category shown, empty for all of them
@@ -6167,7 +6355,8 @@ namespace keditor
             bool _everyChoice = false;  // the pass list lists the pages of what the choices do not choose too
             Session::ShaderChoice _shaderChoice;    // what the New shader dialog has ticked
             kgraph::PassRate _addingRate = kgraph::PassRate::eFrame;  // the lane of the Outline a new page's name is asked for in
-            std::set<std::string> _lanesShut;   // the Outline's lanes folded
+            kgraph::PassRate _lane = kgraph::PassRate::eFrame;  // the Outline's tab: the pages of which rate are listed
+            std::string _laneFollows;           // the page shown when the tab was last made to follow it
             bool _drawerValues = false; // and it lists values too, not only resources
             std::uint32_t _passFocus = 0;
             std::vector<std::string> _functionOf;   // the nodes a function is being made of
@@ -6841,6 +7030,12 @@ namespace keditor
             if (input.IsKeyPressed(kor::Key::eS)) _session->Save();
             if (input.IsKeyPressed(kor::Key::eSpace)) _session->AskForNodes();     // Control+Space: the nodes there are to add
             if (input.IsKeyPressed(kor::Key::eR)) _session->Run();
+            // Control+P: play, or pause what plays — Shift with it, stop.
+            if (input.IsKeyPressed(kor::Key::eP)) {
+                if (input.IsKeyHeld(kor::Key::eLeftShift) || input.IsKeyHeld(kor::Key::eRightShift)) { if (_session->InPlayMode()) _session->Stop(); }
+                else if (_session->IsPlaying()) _session->Pause();
+                else _session->StartPlaying();
+            }
         }
     }
 

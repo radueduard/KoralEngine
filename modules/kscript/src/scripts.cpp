@@ -114,14 +114,17 @@ namespace kscript
         description.alignment = std::max<std::size_t>(type.alignment, 1);
         description.construct = &ConstructScript;
         description.kinds = type.kinds;
-        // A kind is had by nobody itself: nothing makes one, and it is only its fields' places.
+        // A kind is had by nobody itself: it is only its fields' places — and what they start as, which is what one of
+        // nothing reads as (an Entity node of a kind, with nothing yet that is one: a Camera's near and far, not zeros).
+        // Made only by its constructor there, so a kind with text, which would have to be let go of, starts as zeros.
+        const bool kindWithText = type.abstract && std::ranges::any_of(type.fields, IsText);
         if (type.abstract) {
             if (live) {
                 if (error) *error = std::format("{} is abstract: it is a kind, which nothing runs", type.name);
                 return kecs::NoComponent;
             }
             description.abstract = true;
-            description.construct = nullptr;
+            if (kindWithText) description.construct = nullptr;
             description.size = type.size;
         }
         // What its source says the fields are kept within, when what registers it does not say: a host gives the shape.
@@ -149,7 +152,7 @@ namespace kscript
             if (std::all_of(at, at + sizeof(kecs::Entity), [](const std::byte b) { return b == std::byte { 0 }; }))
                 std::memcpy(at, &kecs::NullEntity, sizeof(kecs::Entity));
         }
-        if (type.abstract) { type.initial.clear(); type.texts.clear(); }
+        if (kindWithText) { type.initial.clear(); type.texts.clear(); }
         if (!type.initial.empty() || !type.texts.empty()) {
             if (!type.initial.empty()) type.initial.resize(description.size, std::byte { 0 });
             description.context = std::make_shared<const Start>(Start { type.initial, type.texts });

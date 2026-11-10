@@ -402,7 +402,10 @@ namespace kecs
                         const auto was = saved->second.fields.find(fieldName);
                         // A field the file's type does not list — newer than it, written in by hand or by a script — is read
                         // as the world's type has it; one it lists otherwise than the world has it is left at its default.
-                        if (!field || (was != saved->second.fields.end() && (!codecs.ReadsAs(field->type, was->second.first) || was->second.second != field->size))) {
+                        // Text is saved as text: the size of the string it was kept in where it was saved — a debug build's,
+                        // another compiler's — is not what it is.
+                        const bool resized = field && was != saved->second.fields.end() && was->second.second != field->size && field->type != "string";
+                        if (!field || (was != saved->second.fields.end() && (!codecs.ReadsAs(field->type, was->second.first) || resized))) {
                             problems.insert(std::format("'{}.{}' is not what it was when saved: left at its default", name, fieldName));
                             continue;
                         }

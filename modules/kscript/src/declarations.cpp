@@ -5,6 +5,10 @@
 
 #include <kscript/declarations.h>
 
+#ifdef _WIN32
+extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void* module, wchar_t* path, unsigned long size);
+#endif
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -656,9 +660,29 @@ namespace kscript
         return out;
     }
 
+    std::filesystem::path ProgramDirectory()
+    {
+        static const std::filesystem::path directory = [] {
+#ifdef _WIN32
+            wchar_t path[4096];
+            const unsigned long length = GetModuleFileNameW(nullptr, path, static_cast<unsigned long>(std::size(path)));
+            return length > 0 && length < std::size(path) ? std::filesystem::path(std::wstring(path, length)).parent_path() : std::filesystem::path();
+#else
+            std::error_code ignored;
+            return std::filesystem::read_symlink("/proc/self/exe", ignored).parent_path();
+#endif
+        }();
+        return directory;
+    }
+
     std::filesystem::path PackageDirectory()
     {
         if (const char* given = std::getenv("KORAL_ENGINE_PACKAGE"); given && *given) return given;
+        // A release: the package beside the program, which is not where it was built.
+        if (const std::filesystem::path shipped = ProgramDirectory() / "packages" / "koral"; !ProgramDirectory().empty()) {
+            std::error_code ignored;
+            if (std::filesystem::is_directory(shipped / "scripts", ignored)) return shipped;
+        }
 #ifdef KORAL_ENGINE_PACKAGE
         return KORAL_ENGINE_PACKAGE;
 #else

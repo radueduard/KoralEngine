@@ -168,16 +168,37 @@
     }
    },
    {
-    "id": "quarter",
-    "type": "Divide",
+    "id": "quarter rounded up",
+    "type": "Add",
     "at": [
      320,
-     220
+     175
     ],
     "inputs": {
      "a": {
       "$link": [
        "size",
+       "out"
+      ]
+     },
+     "b": [
+      3,
+      3,
+      0
+     ]
+    }
+   },
+   {
+    "id": "quarter",
+    "type": "Divide",
+    "at": [
+     320,
+     260
+    ],
+    "inputs": {
+     "a": {
+      "$link": [
+       "quarter rounded up",
        "out"
       ]
      },

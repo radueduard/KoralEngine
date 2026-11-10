@@ -10,6 +10,9 @@
 #include <array>
 #include <cstring>
 
+#include <capiInterop.h>
+#include <image.h>
+
 #include <kgraph/scene.h>
 
 #include "support.h"
@@ -430,6 +433,28 @@ TEST_F(FlowTest, APassIsLeftOutAndWhatANodeMadeIsLookedAt) {
     EXPECT_TRUE(runtime.Status("paint")->ok);
     EXPECT_FALSE(runtime.Watched("lights"));
     EXPECT_TRUE(runtime.Watched("picture")) << "what is still watched is still copied out, whatever the graph is set to";
+}
+
+// What a DebugView shows, a scene view samples: its picture is made to be sampled, though nothing in the graph samples it —
+// a picture a compute pass alone writes, given no usage, would otherwise be made only to be written.
+TEST_F(FlowTest, ADebugViewsPictureIsMadeToBeSampled) {
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph;
+    graph.Add("heat", "Image").Set("format", "eRGBA8_UNORM").Set("extent.x", 8).Set("extent.y", 8);
+    graph.Add("heat view", "DebugView").Set("name", "Heat").Wire("picture", "heat");
+    graph.Add("warm", "ComputePass").Set("module", "fill").Set("entry", "computeMain").Wire("param.target", "heat")
+        .Set("cover", "target").Wire("enabled", "heat view", "shown");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    runtime.ShowDebugView("heat view");
+    runtime.SetEditorView(true);
+    for (int i = 0; i < 4; ++i) Frame();
+    EXPECT_TRUE(runtime.Status("warm")->ok);
+    const auto shown = runtime.ResourceOf("heat view");
+    ASSERT_TRUE(shown && shown->handle);
+    const auto usage = kor::capi::ImageOf(shown->handle)->UsageFlags();
+    EXPECT_FALSE(!(usage & kor::Image::Usage::eSampled)) << "a scene view samples what it shows";
+    EXPECT_FALSE(!(usage & kor::Image::Usage::eStorage)) << "and the pass still writes it";
 }
 
 // A DebugView is a picture an editor's scene view can show in place of the graph's: listed by its name, its passes run

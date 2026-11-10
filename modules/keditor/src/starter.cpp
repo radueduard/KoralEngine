@@ -276,7 +276,12 @@ namespace keditor
         if (std::string unread; Project::Open(project, opened, unread)) modules = opened.ImportedDirectories();
         const auto generic = [](const std::filesystem::path& folder) { return folder.lexically_normal().generic_string(); };
 
-        const std::filesystem::path assemblies = KEDITOR_DOTNET;
+        // What a release ships beside the program, or else this build's own.
+        const auto shipped = [&](const char* folder, const char* marker, const std::filesystem::path& built) {
+            const std::filesystem::path here = kscript::ProgramDirectory() / folder;
+            return std::filesystem::exists(here / marker, ignored) ? here : built;
+        };
+        const std::filesystem::path assemblies = shipped("dotnet", "Koral.Engine.dll", KEDITOR_DOTNET);
         if (std::filesystem::exists(assemblies / "Koral.Engine.dll", ignored)) {
             std::string references;
             for (const char* assembly : { "Koral.Engine", "Koral", "Koral.UI", "Koral.Net" })
@@ -308,7 +313,7 @@ namespace keditor
         // the scripts themselves, as they run — but that an editor of code imports to know which names there are: the
         // project's scripts, its modules', the engine's own, and the engine's libraries. It names this machine's files,
         // so it is written again each time, and is not the project's to commit.
-        const std::filesystem::path kotlin = KEDITOR_KOTLIN;
+        const std::filesystem::path kotlin = shipped("kotlin", "lib/koral-engine.jar", KEDITOR_KOTLIN);
         if (opened.Language() == 'k' && std::filesystem::exists(kotlin / "lib" / "koral-engine.jar", ignored)) {
             std::string sources = "            \"scripts\",\n";
             for (const auto& module : modules) sources += std::format("            \"{}/scripts\",\n", generic(module));
@@ -347,10 +352,13 @@ dependencies {{
 )kts", sources, generic(kotlin / "lib")), true);
             write("settings.gradle.kts", std::format("// Written by the Koral Engine editor: see build.gradle.kts.\nrootProject.name = \"{}\"\n", name), true);
             std::string properties = "# Written by the Koral Engine editor: see build.gradle.kts.\nkotlin.stdlib.default.dependency=false\n";
-            if (const std::filesystem::path java = KEDITOR_JAVA_HOME; !java.empty()) properties += std::format("org.gradle.java.home={}\n", generic(java));
+            // The JDK it was built with, where there is one; a release's own runtime; or else whichever Gradle finds.
+            std::filesystem::path java = KEDITOR_JAVA_HOME;
+            if (java.empty() || !std::filesystem::exists(java / "bin", ignored)) java = shipped("jre", "release", {});
+            if (!java.empty()) properties += std::format("org.gradle.java.home={}\n", generic(java));
             write("gradle.properties", properties, true);
             // The wrapper, so that it is imported without a Gradle of this machine's own.
-            const std::filesystem::path wrapper = KEDITOR_GRADLE_WRAPPER;
+            const std::filesystem::path wrapper = shipped("gradle-wrapper", "gradlew.bat", KEDITOR_GRADLE_WRAPPER);
             for (const char* file : { "gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties" }) {
                 if (std::filesystem::exists(project / file, ignored) || !std::filesystem::exists(wrapper / file, ignored)) continue;
                 std::filesystem::create_directories((project / file).parent_path(), ignored);

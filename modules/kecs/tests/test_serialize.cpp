@@ -135,6 +135,42 @@ TEST(Serialize, AFieldThatIsNotWhatItWasIsLeftAtItsDefault) {
     EXPECT_NE(loaded.problems[0].find("blur.passes"), std::string::npos) << loaded.problems[0];
 }
 
+// Text is saved as text: how big a std::string is where it was saved — another compiler's, a debug build's — is not what
+// it is, and it is read whatever size the file says it had.
+TEST(Serialize, TextIsReadWhateverSizeItsStringWasWhereItWasSaved) {
+    struct Named { std::string text; };
+    const auto describe = [] {
+        kecs::ComponentDescription d;
+        d.name = "Named";
+        d.size = sizeof(Named);
+        d.alignment = alignof(Named);
+        d.construct = [](void* at, const kecs::ComponentDescription&) { new (at) Named(); };
+        d.copy = [](void* to, const void* from, const kecs::ComponentDescription&) { new (to) Named(*static_cast<const Named*>(from)); };
+        d.relocate = [](void* to, void* from, const kecs::ComponentDescription&) { new (to) Named(std::move(*static_cast<Named*>(from))); static_cast<Named*>(from)->~Named(); };
+        d.destroy = [](void* at, const kecs::ComponentDescription&) { static_cast<Named*>(at)->~Named(); };
+        d.fields = { { "text", "string", 0, sizeof(std::string) } };
+        return d;
+    };
+    World world;
+    const kecs::ComponentId id = world.Register(describe());
+    const Entity e = world.Create();
+    world.Add(e, id);
+    static_cast<Named*>(world.Mutable(e, id))->text = "brass";
+    std::string json = kecs::Save(world).json;
+    // As another build saved it: its string 8 bytes bigger.
+    const std::string size = std::format("\"size\": {}", sizeof(std::string)), bigger = std::format("\"size\": {}", sizeof(std::string) + 8);
+    ASSERT_NE(json.find("\"type\": \"string\", \"offset\": 0, " + size), std::string::npos) << json;
+    json.replace(json.find("\"type\": \"string\", \"offset\": 0, " + size), std::string("\"type\": \"string\", \"offset\": 0, " + size).size(),
+                 "\"type\": \"string\", \"offset\": 0, " + bigger);
+
+    World other;
+    const kecs::ComponentId now = other.Register(describe());
+    const kecs::Loaded loaded = kecs::Load(other, json);
+    ASSERT_TRUE(loaded.ok);
+    EXPECT_TRUE(loaded.problems.empty()) << loaded.problems.front();
+    EXPECT_EQ(static_cast<const Named*>(other.Get(loaded.entities[0], now))->text, "brass");
+}
+
 namespace {
     struct Vec3 { float x, y, z; };
     struct Opaque { int a = 1; int b = 2; };              // plain, and says nothing of its fields

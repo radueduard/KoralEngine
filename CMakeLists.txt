@@ -269,6 +269,8 @@ if(Koral_FOUND)
     foreach(app koral-editor koral-play)
         koral_engine_runtime(${app})
     endforeach()
+    # A release: the programs and everything they run with, in one folder for another Windows PC.
+    include(cmake/Release.cmake)
 
     # khost, as the apps are linked with it: what finds and starts .NET and a JVM, each test a process of its own.
     if(KORAL_ENGINE_BUILD_TESTS)

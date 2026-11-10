@@ -433,10 +433,16 @@ namespace keditor
                     std::vector<kui::MenuItem> menu;
                     if (!path.empty()) menu = FileMenu(path, true);
                     menu.insert(menu.begin(), { "Open", [this, folder] { ShowFolder(folder); } });
+                    // Under its name, how much is in it: its folders and what is in it of its own.
+                    std::size_t inside = 0;
+                    for (const auto& other : folders)
+                        if (const auto at = other.rfind('/'); at != std::string::npos && other.substr(0, at) == folder) ++inside;
+                    for (const auto& asset : assets)
+                        if (asset.folder == folder && asset.kind != Kind::eMesh && asset.parent.empty()) ++inside;
                     tiles.push_back(Tile("folder " + folder, kui::SizedBox(preview, preview, kui::Icon("folder", kui::IconStyle::eFilled, kui::Color::Hex(0xC9A227))), FolderName(folder),
                                          folder == _folderPicked, false, size,
                                          [this, folder] { Pressed("folder " + folder, [&] { SetState([&] { _folderPicked = folder; }); }, [&] { ShowFolder(folder); }); },
-                                         std::move(menu)));
+                                         std::move(menu), 260.f, size <= ListSize ? std::string() : inside == 1 ? std::string("1 item") : std::format("{} items", inside)));
                 }
                 // By name, as a folder is read; a model that is open has its meshes after it.
                 // A shader's entries by their module's name, as it declares them.
@@ -500,7 +506,7 @@ namespace keditor
                 kui::TextStyle style = kui::TextStyle {}.SetSize(12.f).SetColor(last ? t.text : t.textMuted);
                 crumbs.push_back(kui::Button(kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kui::Text(label, style, kui::TextAlign::eStart, false)),
                                              [this, folder = std::move(folder)] { ShowFolder(folder); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
-                if (!last) crumbs.push_back(kgui::Muted(">", 12.f));
+                if (!last) crumbs.push_back(kui::SizedBox(14.f, 14.f, kui::Icon("chevron_right", kui::IconStyle::eFilled, t.textMuted)));
             };
             if (searching) {
                 const char* kinds[] { "models", "meshes", "textures", "shaders", "scripts", "scenes", "prefabs", "materials", "generators", "functions" };
@@ -517,69 +523,26 @@ namespace keditor
                 if (!model.empty()) crumb(within->label, shown, true);
             }
 
-            // ---- the folders, down the side
-            const std::function<kui::Widget(const std::string&)> branch = [&](const std::string& folder) -> kui::Widget {
-                std::vector<kui::Widget> under;
-                const bool open = !_foldersShut.contains(folder);
-                bool any = false;
-                for (const auto& other : folders) {
-                    const auto slash = other.rfind('/');
-                    if ((slash == std::string::npos ? std::string() : other.substr(0, slash)) != folder) continue;
-                    if (other == "Materials" || other == "Meshes" || other.starts_with("Materials/") || other.starts_with("Meshes/")) continue;    // of no file: under Built in
-                    any = true;
-                    if (open) under.push_back(branch(other));
-                }
-                // The models in it, each gone into as a folder is.
-                for (const auto& asset : assets) {
-                    if (asset.kind != Kind::eModel || asset.folder != folder) continue;
-                    any = true;
-                    if (!open) continue;
-                    const bool inside = !searching && asset.id == _session->assetModel;
-                    kui::Widget line = kui::Row({ kui::SizedBox(14.f, 14.f, kui::Icon("category", kui::IconStyle::eFilled, kui::Color::Hex(0x7DBB4B))),
-                                                  kui::Expanded(kui::Text(asset.label, kui::TextStyle {}.SetSize(13.f).SetColor(inside ? t.primary : t.text), kui::TextAlign::eStart, false, 1, true)) },
-                                                kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
-                    under.push_back(kui::TreeNode({}, false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(inside).SetIndent(14.f)
-                        .OnTap([this, asset] { SetState([&] { _session->OpenAsset(asset); }); }).SetTitle(std::move(line))));
-                }
-                const bool here = !searching && folder == shown && _session->assetModel.empty();
-                kui::Widget title = kui::Row({ kui::SizedBox(14.f, 14.f, kui::Icon(open && any ? "folder_open" : "folder", kui::IconStyle::eFilled, kui::Color::Hex(0xC9A227))),
-                                               kui::Expanded(kui::Text(folder.empty() ? root : FolderName(folder), kui::TextStyle {}.SetSize(13.f).SetColor(here ? t.primary : t.text), kui::TextAlign::eStart, false, 1, true)) },
-                                             kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
-                return kui::TreeNode({}, open, [this, folder](const bool nowOpen) { SetState([&] { if (nowOpen) _foldersShut.erase(folder); else _foldersShut.insert(folder); }); }, std::move(under),
-                                     kui::TreeNodeOptions {}.SetLeaf(!any).SetSelected(here).SetIndent(14.f).OnTap([this, folder] { ShowFolder(folder); }).SetTitle(std::move(title)));
-            };
-            // The project's folders first; under them, everything of one kind, wherever it is.
-            std::vector<kui::Widget> side;
-            const auto group = [&](const char* title, const char* shut, const std::vector<std::pair<const char*, Kind>>& members) {
-                std::vector<kui::Widget> lines;
-                for (const auto& [label, kind] : members) {
-                    const bool on = _session->assetKind == static_cast<int>(kind);
-                    const auto count = std::ranges::count(assets, kind, &Session::Asset::kind);
-                    lines.push_back(kui::TreeNode(std::format("{}  ·  {}", label, count), false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(on).SetIndent(14.f).OnTap([this, kind, on] {
-                        SetState([&] { _session->assetKind = on ? -1 : static_cast<int>(kind); });
-                    })));
-                }
-                side.push_back(kui::TreeNode(title, !_foldersShut.contains(shut), [this, shut = std::string(shut)](const bool open) { SetState([&] { if (open) _foldersShut.erase(shut); else _foldersShut.insert(shut); }); },
-                                             std::move(lines), kui::TreeNodeOptions {}.SetIndent(14.f)));
-            };
-            // What a pipeline uses as data, and what is opened and edited as a whole: wherever each is.
-            group("Resources", "*resources", { { "Models", Kind::eModel }, { "Meshes", Kind::eMesh }, { "Materials", Kind::eMaterial }, { "Textures", Kind::eTexture },
-                                               { "Shaders", Kind::eShader }, { "Generators", Kind::eGenerator } });
-            group("Documents", "*documents", { { "Scenes", Kind::eScene }, { "Prefabs", Kind::ePrefab }, { "Functions", Kind::eFunction }, { "Scripts", Kind::eScript } });
-            // Then where it all is on disk.
-            side.push_back(ListHeading("FOLDERS"));
-            side.push_back(branch({}));
-            // And what every project has, of no file.
-            side.push_back(ListHeading("BUILT IN"));
-            for (const auto& [label, folder] : { std::pair<const char*, const char*> { "PBR materials", "Materials/PBR" }, { "Blinn-Phong materials", "Materials/Blinn-Phong" } }) {
-                const bool here = !searching && _session->assetFolder == folder;
-                side.push_back(kui::TreeNode(label, false, [](bool) {}, {}, kui::TreeNodeOptions {}.SetLeaf(true).SetSelected(here).SetIndent(14.f).OnTap([this, folder = std::string(folder)] { ShowFolder(folder); })));
-            }
-
-            // ---- over it all: something made, something looked for; under it: what is picked, and how big things are shown
+            // ---- over it all: where it is, then what it shows — what it is made of or its files, of one kind — what is
+            // looked for, and something made. How big things are is the panel's title bar's (SizeTools).
             const std::vector<std::string> made { "Folder...", "Shader...", "Script...", "Import a model or a picture...", "Prefab of the picked entity", "Prefab...", "Material" };
             const std::vector<std::string> kindNames { "Every kind", "Models", "Meshes", "Textures", "Shaders", "Scripts", "Scenes", "Prefabs", "Materials", "Generators", "Functions" };
+            std::vector<kui::Widget> where { kui::Tooltip("The project's own folder", kui::Button(kui::SizedBox(16.f, 16.f, kui::Icon("home", kui::IconStyle::eFilled, t.textMuted)),
+                                                                                                 [this] { ShowFolder({}); }, kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain))) };
+            for (auto& crumbed : crumbs) where.push_back(std::move(crumbed));
             kui::Widget bar = kui::Row({
+                kui::Expanded(kui::ClipRRect(0.f, kui::Row(std::move(where), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)))),
+                // What it is made of, or its files as they are on disk.
+                kui::Row({
+                    Tool("category", "Assets: what the project is made of — the scripts' components, Data, kinds, models, pictures — and only the folders they are in",
+                         !_session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(false); _folderPicked.clear(); }); }),
+                    Tool("folder_open", "Files: the folders as they are on disk, empty ones too, and every file in them",
+                         _session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(true); _folderPicked.clear(); }); }),
+                }, kui::FlexOptions {}.SetGap(2.f)),
+                kui::Tooltip("Shows only one kind of thing, wherever it is: the materials the engine has among them.",
+                    kui::Dropdown(kindNames, _session->assetKind + 1, [this](const int index) { SetState([&] { _session->assetKind = index - 1; }); }, kui::DropdownOptions {}.SetWidth(120.f))),
+                kui::SizedBox(170.f, -1.f, kui::TextField(kui::TextFieldOptions { .text = _session->assetFilter, .placeholder = "Search every folder",
+                    .onChanged = [this](const std::string& typed) { SetState([&] { _session->assetFilter = typed; }); } }).Key("asset filter")),
                 kui::Tooltip("Makes something in the project: a folder here, a shader, a script, a prefab of the picked entity; or brings a model's or a picture's file in.",
                     kui::Dropdown(made, -1, [this](const int index) {
                         if (index == 6) { _session->NewMaterial(); SetState(); return; }
@@ -596,29 +559,8 @@ namespace keditor
                             _newKind = 0;
                             _dialog = index == 0 ? Dialog::eNewFolder : index == 1 ? Dialog::eNewShader : index == 2 ? Dialog::eNewScript : Dialog::eImportModel;
                         });
-                    }, kui::DropdownOptions {}.SetPlaceholder("+  Create").SetWidth(120.f))),
-                // What it is made of, or its files as they are on disk.
-                kui::Row({
-                    Tool("category", "Assets: what the project is made of — the scripts' components, Data, kinds, models, pictures — and only the folders they are in",
-                         !_session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(false); _folderPicked.clear(); }); }),
-                    Tool("folder_open", "Files: the folders as they are on disk, empty ones too, and every file in them",
-                         _session->assetFiles, [this] { SetState([&] { _session->SetAssetFiles(true); _folderPicked.clear(); }); }),
-                }, kui::FlexOptions {}.SetGap(2.f)),
-                kui::Expanded(kui::TextField(kui::TextFieldOptions { .text = _session->assetFilter, .placeholder = "Search: part of a name, in every folder",
-                    .onChanged = [this](const std::string& typed) { SetState([&] { _session->assetFilter = typed; }); } }).Key("asset filter")),
-                kui::Tooltip("Shows only one kind of thing, wherever it is.",
-                    kui::Dropdown(kindNames, _session->assetKind + 1, [this](const int index) { SetState([&] { _session->assetKind = index - 1; }); }, kui::DropdownOptions {}.SetWidth(130.f))),
+                    }, kui::DropdownOptions {}.SetPlaceholder("+  Create").SetWidth(110.f))),
             }, kui::FlexOptions {}.SetGap(6.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
-
-            std::string picked;
-            if (const auto it = std::ranges::find(assets, _session->selectedAsset, &Session::Asset::id); it != assets.end() && !_session->selectedAsset.empty())
-                picked = it->builtIn ? std::format("{}, the editor's own", it->label) : it->kind == Kind::eMesh ? std::format("{}, of {}", it->label, it->file.generic_string()) : it->file.generic_string();
-            else if (!_folderPicked.empty()) picked = _folderPicked;
-            kui::Widget foot = kui::Row({
-                kui::Expanded(kui::Text(picked, kui::TextStyle {}.SetSize(11.f).SetColor(t.textMuted), kui::TextAlign::eStart, false, 1, true)),
-                kui::Tooltip("How big each thing is shown. At its least, a line each.",
-                    kui::SizedBox(110.f, -1.f, kui::Slider(size, [this](const float value) { SetState([&] { _session->assetTileSize = value; }); }, ListSize, 128.f))),
-            }, kui::FlexOptions {}.SetGap(8.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter));
 
             // An entity dragged here from the outliner is saved as a prefab — it, and what is under it — and is its first instance.
             return kui::DropTarget(kui::DropTargetOptions {}.AcceptsType("entity").OnDrop([this](const kui::DragData& dragged, kor::Vec2) {
@@ -627,18 +569,24 @@ namespace keditor
             }), kui::Column({
                 kui::Padding(kui::EdgeInsets { 8.f, 6.f, 8.f, 4.f }, std::move(bar)),
                 kui::Separator(),
-                kui::Expanded(kui::Row({
-                    kui::ScrollView(kui::Padding(kui::EdgeInsets::All(6.f), Rows(std::move(side), 1.f))).Width(190.f),
-                    kui::Separator(kui::Axis::eVertical),
-                    kui::Expanded(kui::Column({
-                        kui::Padding(kui::EdgeInsets { 6.f, 3.f, 6.f, 3.f }, kui::Row(std::move(crumbs), kui::FlexOptions {}.SetGap(2.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))),
-                        kui::Separator(),
-                        kui::Expanded(kui::ContextMenu(FolderMenu(), kui::ScrollView(std::move(content)))),
-                    }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch))),
-                }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch))),
-                kui::Separator(),
-                kui::Padding(kui::EdgeInsets { 8.f, 2.f, 8.f, 2.f }, std::move(foot)),
+                kui::Expanded(kui::ContextMenu(FolderMenu(), kui::ScrollView(std::move(content)))),
             }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch)));
+        }
+
+        /** In the Assets panel's title bar: how big each thing is shown, from a line each to the biggest pictures. */
+        kui::Widget SizeTools()
+        {
+            const kui::Theme& t = kui::Theme::Current();
+            const float size = std::clamp(_session->assetTileSize, ListSize, 128.f);
+            const auto icon = [&](const char* name, const float wide) { return kui::SizedBox(wide, wide, kui::Icon(name, kui::IconStyle::eFilled, t.textMuted)); };
+            return kui::Padding(kui::EdgeInsets::Symmetric(4.f, 2.f), kui::Row({
+                kui::Expanded(kui::Text("")),
+                kui::Tooltip("How big each thing is shown. At its least, a line each.", kui::Row({
+                    icon("photo_size_select_small", 14.f),
+                    kui::SizedBox(80.f, -1.f, kui::Slider(size, [this](const float value) { SetState([&] { _session->assetTileSize = value; }); }, ListSize, 128.f)),
+                    icon("photo_size_select_large", 16.f),
+                }, kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter))),
+            }, kui::FlexOptions {}.SetGap(4.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter)));
         }
 
         /** A name, for a folder to be made in the one the Assets panel shows. */

@@ -253,14 +253,104 @@ namespace keditor::widgets
         return {};
     }
 
-    /** A square button with an icon: lit while what it stands for is on, dim while it cannot be pressed. */
+    namespace {
+        /** How a tool that is on, or a chip whose list is open, is filled, and what it is written in: as the theme's design marks it. */
+        struct Lit { kui::Color fill, ink; };
+        Lit LitAs(const kui::Theme& t)
+        {
+            switch (t.design) {
+            case kui::ThemeDesign::eKoral:
+            case kui::ThemeDesign::eCupertino: return { t.primary, t.onPrimary };              // the accent, filled
+            case kui::ThemeDesign::eMaterial: return { t.primary.WithAlpha(0.26f), t.text };   // a tonal fill
+            case kui::ThemeDesign::eFluent: return { t.text.WithAlpha(0.09f), t.text };        // a quiet fill, and an accent line under it
+            }
+            return { t.primary.WithAlpha(0.35f), t.text };
+        }
+        /** How round a tool is: a circle in Koral's and Material's manner, a rounded square in Apple's, a near square in Windows'. */
+        float ToolRadius(const kui::Theme& t, const float size)
+        {
+            switch (t.design) {
+            case kui::ThemeDesign::eKoral:
+            case kui::ThemeDesign::eMaterial: return size * 0.5f;
+            case kui::ThemeDesign::eCupertino: return 7.f;
+            case kui::ThemeDesign::eFluent: return 4.f;
+            }
+            return 4.f;
+        }
+        /** Windows' mark of what is chosen: a short line of the accent along the foot. */
+        kui::Widget WithFluentMark(const kui::Theme& t, kui::Widget face, const float width)
+        {
+            const float mark = std::min(12.f, width - 8.f);
+            return kui::Stack({ std::move(face), kui::Positioned(kui::PositionedOptions { .left = (width - mark) * 0.5f, .bottom = 1.f, .width = mark, .height = 3.f },
+                                                                 kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.primary).SetRadius(1.5f)))) });
+        }
+    }
+
+    /** A square button with an icon: lit while what it stands for is on, as the theme's design lights it; dim while it cannot be pressed. */
     kui::Widget Tool(const std::string_view icon, const std::string& what, const bool active, std::function<void()> pressed, const bool enabled)
     {
-        const kui::Color tint = enabled ? kui::Color::Hex(0xE0E0E0) : kui::Color::Hex(0x707070);
-        kui::Widget face = kui::Container(kui::ContainerOptions {}.SetSize(24.f, 24.f).SetAlignment(kui::Alignment::Center())
-                                              .SetDecoration(kui::Decoration {}.SetColor(active ? kui::Theme::Current().primary.WithAlpha(0.35f) : kui::colors::Transparent).SetRadius(3.f)),
-                                          kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, tint)));
+        const kui::Theme& t = kui::Theme::Current();
+        constexpr float size = 24.f;
+        const Lit lit = LitAs(t);
+        const kui::Color ink = !enabled ? t.textMuted.WithAlpha(0.6f) : active ? lit.ink : t.text;
+        kui::Widget face = kui::Container(kui::ContainerOptions {}.SetSize(size, size).SetAlignment(kui::Alignment::Center())
+                                              .SetDecoration(kui::Decoration {}.SetColor(active ? lit.fill : kui::colors::Transparent).SetRadius(ToolRadius(t, size))),
+                                          kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, ink)));
+        if (active && t.design == kui::ThemeDesign::eFluent) face = WithFluentMark(t, std::move(face), size);
         return kui::Tooltip(what, kui::Button(std::move(face), std::move(pressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain).SetEnabled(enabled)));
+    }
+
+    kui::Widget ToolChip(const std::string_view icon, std::vector<kui::Widget> label, const std::string& what, const bool open, std::function<void()> pressed)
+    {
+        const kui::Theme& t = kui::Theme::Current();
+        const Lit lit = LitAs(t);
+        if (!icon.empty()) label.insert(label.begin(), kui::SizedBox(16.f, 16.f, kui::Icon(icon, kui::IconStyle::eFilled, open ? lit.ink : t.text)));
+        const bool outlined = t.design == kui::ThemeDesign::eMaterial || t.design == kui::ThemeDesign::eFluent;
+        const float radius = t.design == kui::ThemeDesign::eKoral ? 12.f : t.design == kui::ThemeDesign::eMaterial ? 8.f : ToolRadius(t, 24.f);
+        label.push_back(kui::SizedBox(14.f, 14.f, kui::Icon("expand_more", kui::IconStyle::eFilled, open ? lit.ink : t.textMuted)));
+        kui::Decoration decoration = kui::Decoration {}.SetColor(open ? lit.fill : kui::colors::Transparent).SetRadius(radius);
+        if (outlined) decoration.SetBorderWidth(1.f).SetBorderColor(t.border);
+        // (As wide as what it says: centred in a box of no width, it would be as wide as the line it is in.)
+        kui::Widget face = kui::Container(kui::ContainerOptions {}.SetPadding(kui::EdgeInsets::Symmetric(8.f, 4.f)).SetDecoration(decoration),
+                                          kui::Row(std::move(label), kui::FlexOptions {}.SetGap(5.f).SetCrossAxisAlignment(kui::CrossAxisAlignment::eCenter).SetMainAxisSize(kui::MainAxisSize::eMin)));
+        return kui::Tooltip(what, kui::Button(std::move(face), std::move(pressed), kui::ButtonOptions {}.SetStyle(kui::ButtonStyle::ePlain)));
+    }
+
+    kui::Widget ChipText(std::string text, const bool quiet)
+    {
+        const kui::Theme& t = kui::Theme::Current();
+        return kui::Text(std::move(text), kui::TextStyle {}.SetSize(12.f).SetColor(quiet ? t.textMuted : t.text));
+    }
+
+    kui::Widget ToolDivider(const bool across)
+    {
+        const kui::Widget line = kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(kui::Theme::Current().border)));
+        return across ? kui::Padding(kui::EdgeInsets::Symmetric(0.f, 3.f), kui::SizedBox(16.f, 1.f, line)) : kui::Padding(kui::EdgeInsets::Symmetric(3.f, 0.f), kui::SizedBox(1.f, 16.f, line));
+    }
+
+    kui::Widget OverlayBacking(kui::Widget content, const std::optional<float> round, const float padding)
+    {
+        const kui::Theme& t = kui::Theme::Current();
+        const bool dark = t.IsDark();
+        content = kui::Padding(kui::EdgeInsets::All(padding), std::move(content));
+        // Each design's own corner, where it is not given one: a disc is round in all of them.
+        const auto radius = [&](const float own) { return round.value_or(own); };
+        switch (t.design) {
+        case kui::ThemeDesign::eKoral:          // a pill of the surface, nearly opaque
+            return kui::BackdropFilter(kui::Backdrop {}.SetBlur(8.f).SetTint(t.surface.WithAlpha(0.8f)), radius(16.f), std::move(content));
+        case kui::ThemeDesign::eMaterial:       // a raised surface container: opaque, with its shadow
+            return kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetColor(t.surface.WithAlpha(0.94f)).SetRadius(radius(16.f))
+                                                                             .SetShadowColor(kui::Color::Hex(0x000000).WithAlpha(0.3f)).SetShadowBlur(6.f).SetShadowOffset({ 0.f, 2.f })),
+                                  std::move(content));
+        case kui::ThemeDesign::eCupertino:      // clear glass, bent at its edge, with a bright rim
+            return kui::BackdropFilter(kui::Backdrop {}.SetBlur(18.f).SetTint(t.surface.WithAlpha(dark ? 0.5f : 0.62f)).SetRefraction(3.f), radius(14.f),
+                kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetRadius(radius(14.f)).SetBorderWidth(1.f)
+                                                                          .SetBorderColor(kui::Color::Hex(0xFFFFFF).WithAlpha(dark ? 0.18f : 0.7f))), std::move(content)));
+        case kui::ThemeDesign::eFluent:         // acrylic, outlined
+            return kui::BackdropFilter(kui::Backdrop {}.SetBlur(24.f).SetTint(t.surface.WithAlpha(0.78f)), radius(8.f),
+                kui::Container(kui::ContainerOptions {}.SetDecoration(kui::Decoration {}.SetRadius(radius(8.f)).SetBorderWidth(1.f).SetBorderColor(t.border)), std::move(content)));
+        }
+        return content;
     }
 
     /** A heading over a part of a list, and what it says, small and quiet; with something to do at its end. */
