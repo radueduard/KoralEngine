@@ -11,6 +11,7 @@ on:
       - 'docs/**'
       - 'GLOSSARY.md'
       - 'mkdocs.yml'
+      - 'tools/wiki/**'
       - '.github/workflows/wiki.yml'
   pull_request:
     paths:
@@ -56,3 +57,32 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  # The same guides, copied into the repository's GitHub wiki (its Wiki tab) by tools/wiki/mirror.py: a page a guide,
+  # the nav its sidebar. The wiki is a copy, replaced whole each time; docs/ is what is edited.
+  mirror:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}.wiki
+          path: .wiki
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install pyyaml
+      - run: python3 tools/wiki/mirror.py .wiki
+      - name: Publish
+        working-directory: .wiki
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then echo "The wiki is as the guides are."; exit 0; fi
+          git commit -m "The guides as of ${GITHUB_SHA::7}"
+          git push
+
