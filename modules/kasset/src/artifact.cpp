@@ -54,6 +54,7 @@ namespace kasset
                 const std::uint32_t n = Count();
                 if (!Has(static_cast<std::size_t>(n) * sizeof(T))) return;
                 list.resize(n);
+                if (n == 0) return;     // an empty list's data() may be null, which memcpy is never given
                 std::memcpy(list.data(), in.data() + at, n * sizeof(T));
                 at += n * sizeof(T);
             }

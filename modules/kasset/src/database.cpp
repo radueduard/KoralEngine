@@ -58,8 +58,13 @@ namespace kasset
 
     std::filesystem::path Database::MetaOf(const std::filesystem::path& file) const
     {
-        if (const std::string named = NamedUnder(file, _root); !named.empty()) return MetaPathOf(_root, named);
         std::error_code failed;
+        // Named as the project names it — a folder linked in not followed — and then written out as the rest are, whole:
+        // the meta folder is the project's own, so this is where it is however the file was reached.
+        if (const std::string named = NamedUnder(file, _root); !named.empty()) {
+            const std::filesystem::path meta = std::filesystem::weakly_canonical(MetaPathOf(_root, named), failed);
+            return failed ? MetaPathOf(_root, named).lexically_normal() : meta;
+        }
         const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
         const std::filesystem::path root = std::filesystem::weakly_canonical(ModuleOf(whole).value_or(_root), failed);
         return MetaPathOf(root, whole);
