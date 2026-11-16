@@ -349,7 +349,10 @@ the editor will build its node list and its nodes from.
   ComponentBuffer, told the component.
 - **Screen** is the scene's window. Its `extent`, `size`, `width`, `height` and `aspect` outputs are the window's
   size: an image whose `extent` is wired to it is rebuilt when the window is resized, and so is whatever is
-  made of that image. **Reference** stands for another node by id: how a pass brings in what an
+  made of that image. **ScreenFramebuffer** is the window's own framebuffer: its picture, with a depth and stencil of
+  the window's beside it. A Draw into it — its pipeline's `framebuffer`, or its own — draws straight onto the screen,
+  with no image of its own and nothing to Blit after; it is not made again when the window is resized, and nor is a
+  pipeline made for it. **Reference** stands for another node by id: how a pass brings in what an
   earlier one made.
 - **ImageFile** is a picture from a file. See [Files](#files).
 - **Script** runs one of the project's `ResourceScript`s (see [scripts](scripts.md#scripts-that-make-resources)), by
@@ -366,6 +369,23 @@ the editor will build its node list and its nodes from.
   nothing makes what it makes empty, and the node's `Status(id)->note` says so. A per-frame resource, or an image of a
   format whose texel is no plain numbers, cannot be filled: it says why. An editor offers a Script node of each script
   among the nodes to add (`Runtime::Presets`).
+- **ScriptPass** runs one of the project's `PassScript`s (see [scripts](scripts.md#scripts-that-say-what-a-pass-does)),
+  by its class, in `script`: a pass whose commands the script says each frame, on the scene's thread before the frame
+  is recorded (`PassPlan::prepare`), and that the pass records as they were said. Its inputs are what the script uses,
+  each by its name — a ComputePipeline or a GraphicsPipeline, its parameters all wired on its node; a Framebuffer; a
+  Mesh; a Buffer; an Image; a view; a Sampler — and its fields, `field.<name>`. What the script makes
+  (`PassScriptUse::made`) is written out as nodes of its own before it (`<pass>/<name>`, of the type it is made as, with
+  its `settings` and then the node's `<name>.<input>`; a setting naming another of the script's is a wire to it; a
+  pipeline's `maybe.param.<name>`, taken where its shaders have that parameter), wired to the input of its name, and given
+  as the node's output of that name. Expand is told what each makes (`MadeOf`). What it uses is what the frame graph is told it reads, and
+  writes where the script says it does — a GraphicsPipeline's framebuffer and a Framebuffer read and written, the screen
+  for a ScreenFramebuffer's; its commands (`PassCommand`: dispatches, writes, copies, clears, and between a begun and an
+  ended rendering, draws — of vertices, of a mesh with the pipeline made for its layout, indexed, indirect, of mesh tasks
+  — viewports, scissors and vertex buffers) are checked as they are said, push constants laid out by the names in the
+  shader, and one wrong makes the frame's pass do nothing, said in the node's
+  `Status(id)->note`. Whoever runs the graph says which scripts there are (`Runtime::SetPassScript`, a `PassScript` with
+  its `uses` and a `record` function); one declared and run by nothing does nothing, and the note says so. One that
+  draws nothing can run on the async compute queue (`async`); it takes an `idle`.
 - **Repeat**, **Previous**, **Element** and **Switch** are what is done more than once, and one of several
   ways. See [Loops and branches](#loops-and-branches).
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a
@@ -806,8 +826,8 @@ hierarchy's order, an element at a time — with `where` (`{ "field.kind": 2 }`,
 hold what it says, found again when those components change. `conditions` names tests an entity must meet as well
 (`Runtime::SetCondition`, `Runtime::Conditions`): each reads a few of its components — an entity without one is not kept
 — and has inputs of its own on the node, `<condition>.<input>`, a value a frame, wired or set. The engine's
-`HasAttributes` keeps a mesh with every vertex attribute `required` has, by semantic: a vertex layout (a pipeline's, a
-VertexLayout's, a Primitive's `layout`) or a list of semantics. A script's `Conditions` class declares more,
+`HasAttributes` keeps a mesh with every vertex attribute `required` has, by semantic: a vertex layout (a pipeline's
+`layout` — what its vertex shader reads —, a VertexLayout's, a Primitive's `layout`) or a list of semantics. A script's `Conditions` class declares more,
 `[Condition(N)]` on a function whose first N arguments are components and the rest its inputs. A condition reads nothing
 but what it is given, so the entities are found again only when one of its components changes or an input's value does
 (a mesh still being read is looked at again the next frame). An input is one value for all of them: wired from the
@@ -1152,7 +1172,9 @@ light from it (an `emission` above nothing), and its rays are lit by that.
   is drawn when it has what the vertex shader reads, found by semantic in the shader's reflection: what else the
   mesh has, and in which buffers, is no matter. One laid out otherwise than the pipeline's `vertex.layout` is drawn
   with the same pipeline made again for its layout, the first time one of that layout is drawn, and kept while the
-  node is.
+  node is. A pipeline given no `vertex.layout` works one out of its vertex shader: each input by its semantic, packed
+  in the order of their locations (an input with no semantic, or a matrix, has it say to wire one). Either way the
+  pipeline gives it as `layout`: wired to a Filter's `HasAttributes.required`, the meshes kept are those it can draw.
 - **One mesh,** wired from a node that makes one — a Primitive — or given as a default mesh's id.
 - **No mesh.** A vertex shader that takes no vertex inputs makes its own vertices from `SV_VertexID`, and
   the pipeline needs no `vertex.layout`. `vertexCount` says how many, 3 when not given: a triangle. A vertex
@@ -1254,7 +1276,8 @@ struct Instance {
 ```
 
 A field marked `MATRIX`, `NORMAL_MATRIX` (both `float4x4`), `POSITION` (`float3`) or `ID` (`uint`, one more than the
-entity's index) is where the entity is, or which. One marked `TEXTURE` or `STORAGE` (`uint`) is an image the entity
+entity's index) is where the entity is, or which. One marked `JOINTS` (`uint`) is where the entity's joints start among
+the skinned entities' (~0 for one not skinned): see [Skinned meshes, and clips](#skinned-meshes-and-clips). One marked `TEXTURE` or `STORAGE` (`uint`) is an image the entity
 holds — a field of the component, an Image — by its bindless index for reading, or for writing; ~0 for none. One
 marked with a material kind's attribute — `[PbrMaterial("roughness")] float rough;`, or `[PbrMaterial] float roughness;`
 for the field of the member's name (`import PbrMaterial;`, or `import koral_materials;` for every kind) — is that field
@@ -1396,6 +1419,45 @@ laptop GPU, a picture of 512 by 512: `ScaleTest.AnInstancersMillionsCostTheCpuNo
 Making them takes the first frames about a second. What is not done yet: an instance's own colour or picture, more than
 one mesh between the near one and a point, occlusion, and instances placed other than as Instances scatters them — for
 which the function is opened and its `generate` given another shader.
+
+### Skinned meshes, and clips
+
+A model is put in a scene as an entity for each of its nodes, under one for the whole (`Document::ImportModel`). Its
+skins and clips are read with it (`kasset::Model::skins`, `animations`), and two components of the runtime's
+(`kgraph/animation.h`) make them move:
+
+| Component | Fields | What it does |
+|---|---|---|
+| `Skin` | `model` (`@fox.gltf`), `skin` (its number in the file), `root` (the entity for the whole) | On a drawn part whose mesh is bent by joints. Its joints are the model's nodes, found under `root` by name as they were made. |
+| `Animator` | `model`, `clip` (by name, `#2` by number, empty for the first), `time`, `speed` (1), `fade` (0.2 s), `loop` (true), `paused`, `length` (written: the clip's) | On the entity for the whole: plays the clip on the nodes under it — each node's position, turn and scale, as the clip keys them. Another clip set starts from its beginning, faded into over `fade` seconds. |
+
+Every Animator is moved on each frame the scene plays, after the scripts' updates and before their late updates
+(`Document::Animate`, `kgraph::Animate`): a script chooses the clip, and one that runs late sees this frame's pose — a
+hand where it is now. A model whose file has clips is given an Animator playing the first; the editor does not play it.
+
+A skinned mesh is drawn bent by a shader that reads its joints. The runtime works them out once a frame, for every
+entity with a Skin: each joint's entity where it is in the world, after its inverse bind, in the skinned entity's own
+space — the matrices one after another, an entity's together. A buffer marked `[entity("JOINT_MATRICES")]`
+(`StructuredBuffer<float4x4>`) is bound to them, unwired; an instance's `[entity("JOINTS")] uint` is where its own
+begin. The vertex's `BONE_IDS` and `BONE_WEIGHTS` (a model's meshes have them, unless they are left out) say which four
+and how much of each:
+
+```slang
+struct Instance { [entity("MATRIX")] float4x4 model; [entity("JOINTS")] uint firstJoint; };
+[entity("PER_INSTANCE")] StructuredBuffer<Instance> instances;
+[entity("JOINT_MATRICES")] StructuredBuffer<float4x4> joints;
+...
+const uint at = instance.firstJoint;
+const float4x4 skin = joints[at + bones.x] * weights.x + joints[at + bones.y] * weights.y
+                    + joints[at + bones.z] * weights.z + joints[at + bones.w] * weights.w;
+const float4 world = mul(mul(float4(position, 1.0), skin), instance.model);
+```
+
+The animation module's `KoralSkinLinear` (and `KoralSkinDualQuaternion`) do the same from such a buffer. A skinned mesh
+has more attributes than one that is not, so it is drawn by a Filter or ForEach of its own (`with` Skin), and left out of
+the others' (`without` Skin): a MeshPack packs only meshes laid out alike. There is room for 16384 joints in all; past
+that, a skin is drawn as it was bound, and the log says so once. A mesh's box is its bound pose's: a cull by it may
+leave out a limb reaching beyond it. (`SkinningTest.ASkinnedMeshIsDrawnWhereItsJointsAre`, `Animation.*`.)
 
 ### When a pipeline changes
 
@@ -1539,7 +1601,9 @@ Dispatch that writes them, and a wired image that some entity also holds is orde
 
 ## Limits
 
-- Draw goes into a framebuffer, not straight to the screen: Blit one of the framebuffer's images to show it.
+- Draw goes into a framebuffer: a ScreenFramebuffer to draw straight onto the screen, or one of images, one of which
+  a Blit then shows. The screen's picture is not an attachment of a Framebuffer made in the graph (a multisampled
+  one resolved onto it, its own depth image beside it): the window's framebuffer is as the window made it.
 - A draw's stencil operations (what happens on fail and pass) are the pipeline's `depthStencilState`
   only; the reference and masks can be set on the draw. One `clearColor` is for every colour attachment.
 - A buffer holds no data of its own in a graph: an indirect buffer is written by a compute pass, or by an

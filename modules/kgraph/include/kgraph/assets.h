@@ -19,5 +19,7 @@ namespace kgraph
     using kasset::ModelNode;
     using kasset::ModelLight;
     using kasset::ModelCamera;
+    using kasset::ModelSkin;
+    using kasset::ModelAnimation;
     using kasset::Model;
 }

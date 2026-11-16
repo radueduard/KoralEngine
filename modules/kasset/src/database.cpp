@@ -34,6 +34,17 @@ namespace kasset
             return value;
         }
 
+        /** @p file named from @p root as it is written, a folder linked in (assets/x -> elsewhere) not followed: empty if
+         *  it is not under @p root so named. What is the project's by its name is the project's wherever its bytes are. */
+        std::string NamedUnder(const std::filesystem::path& file, const std::filesystem::path& root)
+        {
+            std::error_code failed;
+            const std::filesystem::path top = std::filesystem::absolute(root, failed).lexically_normal();
+            const std::filesystem::path whole = (file.is_absolute() ? file : top / file).lexically_normal();
+            const std::string text = whole.lexically_relative(top).generic_string();
+            return failed || text.empty() || text == "." || text.starts_with("..") ? std::string() : text;
+        }
+
         /** The file a meta kept beside it is of: `wall.png.meta` → `wall.png`. */
         std::filesystem::path FileBeside(const std::filesystem::path& meta)
         {
@@ -47,6 +58,7 @@ namespace kasset
 
     std::filesystem::path Database::MetaOf(const std::filesystem::path& file) const
     {
+        if (const std::string named = NamedUnder(file, _root); !named.empty()) return MetaPathOf(_root, named);
         std::error_code failed;
         const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
         const std::filesystem::path root = std::filesystem::weakly_canonical(ModuleOf(whole).value_or(_root), failed);
@@ -55,6 +67,7 @@ namespace kasset
 
     std::string Database::Relative(const std::filesystem::path& file) const
     {
+        if (std::string named = NamedUnder(file, _root); !named.empty()) return named;
         std::error_code failed;
         const std::filesystem::path whole = std::filesystem::weakly_canonical(file.is_absolute() ? file : _root / file, failed);
         const std::filesystem::path root = std::filesystem::weakly_canonical(_root, failed);
@@ -110,10 +123,16 @@ namespace kasset
         for (const auto& root : roots) {
             const bool module = root != _root;
             std::vector<std::filesystem::path> beside;      // metas where they were kept before MetaFolder: beside their files
-            for (auto it = std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, failed);
+            // A folder linked in (assets/x -> somewhere else) is gone into as if it were there; one reached twice, once.
+            std::set<std::filesystem::path> walked { std::filesystem::weakly_canonical(root, failed) };
+            failed.clear();
+            constexpr auto options = std::filesystem::directory_options::skip_permission_denied | std::filesystem::directory_options::follow_directory_symlink;
+            for (auto it = std::filesystem::recursive_directory_iterator(root, options, failed);
                  !failed && it != std::filesystem::recursive_directory_iterator(); it.increment(failed)) {
                 if (it->is_directory(failed)) {
                     if (PassedBy(it->path()) || (module && it.depth() == 0 && it->path().filename() == "scenes")) it.disable_recursion_pending();
+                    else if (!walked.insert(std::filesystem::weakly_canonical(it->path(), failed)).second) it.disable_recursion_pending();
+                    failed.clear();
                     continue;
                 }
                 if (!it->is_regular_file(failed)) continue;

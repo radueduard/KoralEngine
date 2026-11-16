@@ -1849,6 +1849,17 @@ TEST_F(EntityTest, AFilterKeepsWhatMeetsItsConditions) {
     Frame();
     EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(2)) << "what the cube has, both have";
 
+    // Wired a pipeline's: what its vertex shader reads — a position — when the pipeline is given no layout.
+    graph.Add("canvas", "Image").Set("format", "eRGBA8_UNORM").Set("extent", Value::List { 32, 32 }).Set("usage", Value::List { "eColorAttachment" });
+    graph.Add("target", "Framebuffer").Wire("color[0].view", "canvas");
+    graph.Add("flat", "GraphicsPipeline").Set("vertex.module", "flat").Set("vertex.entry", "vertexMain")
+        .Set("fragment.module", "flat").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Find("meshes")->Wire("HasAttributes.required", "flat", "layout");
+    runtime.Set(graph);
+    Frame();
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    EXPECT_EQ(runtime.ValueOf("meshes", "count"), Value(2)) << "both have a position";
+
     // One there is none of: said.
     graph.Find("meshes")->Set("conditions", Value::List { "NoSuchThing" });
     runtime.Set(graph);

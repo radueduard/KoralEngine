@@ -84,7 +84,14 @@ namespace kgraph
                     if (input.link) {
                         resolved.linked = true;
                         const auto source = built.find(input.link->node);
+                        // What it may be wired, and cannot be: not given (a ScriptPass's pipeline's `maybe.param.<name>`).
+                        if (name.starts_with("maybe.") && (source == built.end() || !source->second.status.ok)) continue;
                         if (!graph.Find(input.link->node) || source == built.end()) { blocked = std::format("'{}' is wired to '{}', which is not in the graph", name, input.link->node); break; }
+                        // What a ScriptPass makes is a node of its own: why that could not be made is why it cannot be.
+                        if (!source->second.status.ok && input.link->node == node->id + "/" + name) {
+                            blocked = std::format("'{}' could not be made: {}", name, source->second.status.error);
+                            break;
+                        }
                         if (!source->second.status.ok) { blocked = std::format("'{}' comes from '{}', which failed", name, input.link->node); break; }
                         const auto output = source->second.outputs.find(input.link->output);
                         if (output == source->second.outputs.end()) { blocked = std::format("'{}' has no output '{}'", input.link->node, input.link->output); break; }
@@ -97,7 +104,7 @@ namespace kgraph
                     }
                     inputs.emplace(name, std::move(resolved));
                 }
-                if (node->type == "Screen") signature += std::format("|{}x{}", screenExtent.x, screenExtent.y);
+                if (node->type == "Screen") signature += std::format("|{}x{}|{}|{}", screenExtent.x, screenExtent.y, screenFormat, screenScale);
                 // A Random is of the shape of what it is wired to: drawn again when that is another.
                 if (random::DistributionOfNode(node->type)) {
                     const Shape shape = RandomShape(*node);
@@ -115,6 +122,10 @@ namespace kgraph
                 if (node->type == "Script")
                     if (const auto it = node->inputs.find("script"); it != node->inputs.end() && it->second.value.String())
                         if (const Scripted* script = ScriptNamed(*it->second.value.String())) signature += std::format("|script#{}", script->generation);
+                // A ScriptPass the same, of its PassScript.
+                if (node->type == "ScriptPass")
+                    if (const auto it = node->inputs.find("script"); it != node->inputs.end() && it->second.value.String())
+                        if (const PassScripted* script = PassScriptNamed(*it->second.value.String())) signature += std::format("|script#{}", script->generation);
                 // A ForEach gives what its components hold: made again when one of them is another shape — a pipeline's, reshaped just now.
                 if (IsEach(node->type) && world) {
                     const auto shape = [&](const std::string& name) {
@@ -379,6 +390,10 @@ namespace kgraph
 
             auto instances = std::make_shared<Instances>();
             instances->instancing = instancing;
+            if (std::ranges::any_of(instancing->fields, [](const auto& field) { return field.from == Instancing::Field::From::eJoints; })) {
+                instances->skinning = Skinned();
+                if (!instances->skinning) return Fail(std::format("'{}': the joints' buffer could not be made", port));
+            }
             instances->source = filter->id;
             instances->draws = { draw.id };
             instances->component = info.component;
@@ -400,6 +415,58 @@ namespace kgraph
             run.instances.push_back(std::move(instances));
             return source;
         }
+
+    auto Runtime::Impl::ModelNamed(const std::string& name) -> std::shared_ptr<const Model>
+    {
+            Impl& files = source ? *source : *this;
+            const std::filesystem::path file = files.AssetFile(name.starts_with('@') ? std::string_view(name).substr(1) : std::string_view(name));
+            if (const auto it = files.models.find(file.lexically_normal().generic_string()); it != files.models.end()) return it->second;
+            files.WantModel(file);
+            return nullptr;
+    }
+
+    auto Runtime::Impl::Skinned() -> std::shared_ptr<Skinning>
+    {
+            Impl& files = source ? *source : *this;
+            if (files.skinning) return files.skinning;
+            auto buffer = kor::Buffer::RawBuilder {}.SetRawSize(static_cast<kor::i64>(Skinning::Capacity * sizeof(kecs::Mat4)))
+                .SetUsage(kor::Flags<kor::Buffer::Usage>(kor::Buffer::Usage::eStorage))
+                .SetType(kor::Buffer::Type::eDynamic).SetIsPerFrame(true).Build();
+            if (!buffer.Valid()) return nullptr;
+            auto made = std::make_shared<Skinning>();
+            made->buffer = kor::ResourceRef<kor::Buffer>(buffer);
+            made->held = MakeResource(std::move(buffer));
+            made->held->node = "joints";
+            // Every joint where it was bound, until anything is skinned: the mesh as it is.
+            made->staged.assign(1, kecs::Mat4 {});
+            files.skinning = made;
+            return made;
+    }
+
+    auto Runtime::Impl::ComputeSkinning(Skinning& skinning, const std::uint64_t frame) -> void
+    {
+            if (skinning.computed == frame || !world) return;
+            skinning.computed = frame;
+            std::vector<kecs::Mat4> matrices;
+            std::unordered_map<std::uint64_t, std::uint32_t> first;
+            matrices.push_back({});     // the first is the identity: what a joint past the end reads
+            world->Query<const Skin>().Each([&](const kecs::Entity entity, const Skin& skin) {
+                const auto model = ModelNamed(skin.model);
+                if (!model) return;
+                const std::size_t at = matrices.size();
+                if (!JointMatrices(*world, entity, skin, *model, matrices)) return;
+                if (matrices.size() > Skinning::Capacity) {
+                    matrices.resize(at);
+                    if (!skinning.full) kor::log::Warn("[animation] more joints than the {} there is room for: the rest are drawn as they are bound", Skinning::Capacity);
+                    skinning.full = true;
+                    return;
+                }
+                first.emplace(KeyOf(entity), static_cast<std::uint32_t>(at));
+            });
+            if (first != skinning.first) { skinning.first = std::move(first); ++skinning.layout; }
+            skinning.staged = std::move(matrices);
+            ++skinning.version;
+    }
 
     auto Runtime::Impl::FillInstances(Instances& instances, const bool now) -> void
     {
@@ -453,7 +520,11 @@ namespace kgraph
             // An entity is drawn only with every material kind its fields are of: without one, it is laid out as no one's.
             const std::uint32_t needed = ((1u << instances.materials.size()) - 1u) << 1;
             const std::uint64_t listed = list ? list->version : 0;
-            const bool replaced = pictured > 0 && replacements != instances.seenReplacements;
+            // Skinned: the joints worked out for this frame; where each entity's start, changed, is every element laid out again.
+            if (instances.skinning) ComputeSkinning(*instances.skinning, frame);
+            const bool reskinned = instances.skinning && instances.skinning->layout != instances.seenSkinLayout;
+            if (instances.skinning) instances.seenSkinLayout = instances.skinning->layout;
+            const bool replaced = (pictured > 0 && replacements != instances.seenReplacements) || reskinned;
             if (!fresh && !replaced && list == instances.seenList && listed == instances.seenListed && moves == instances.seenMoves
                 && owns == instances.seenOwns && laid == instances.laid)
                 return;
@@ -606,6 +677,13 @@ namespace kgraph
                         case Instancing::Field::From::eId: {
                             const std::uint32_t id = entity.index + 1;
                             std::memcpy(at, &id, 4);
+                            break;
+                        }
+                        case Instancing::Field::From::eJoints: {
+                            std::uint32_t joints = ~0u;
+                            if (instances.skinning)
+                                if (const auto found = instances.skinning->first.find(KeyOf(entity)); found != instances.skinning->first.end()) joints = found->second;
+                            std::memcpy(at, &joints, 4);
                             break;
                         }
                         case Instancing::Field::From::eMaterial:
@@ -1642,6 +1720,7 @@ namespace kgraph
                 pass->holds = holds != holdsOf.end() ? holds->second : std::vector<std::pair<std::string, const void*>> {};
                 if (pass->plan != plan) {
                     declarations = declarations || pass->plan->readsScreen != plan->readsScreen || pass->plan->writesScreen != plan->writesScreen
+                                || pass->plan->drawsScreen != plan->drawsScreen
                                 || pass->plan->async != plan->async;   // which queue it is on is said in its Setup
                     pass->plan = plan;
                 }

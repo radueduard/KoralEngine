@@ -148,6 +148,7 @@ Less, LessOrEqual, Greater, GreaterOrEqual, Equal, NotEqual (comparisons that gi
 | Node | Purpose | Level | Composite? |
 |---|---|---|---|
 | Screen | The window's swap-chain image and its size and aspect | L1 | Atomic |
+| ScreenFramebuffer | The window's own framebuffer, its picture and its depth: what a Draw draws into to draw straight onto the screen | L1 | Atomic |
 | Reference | Stands for another node's output by id, so pages can share resources without wires | L1 | Atomic. It is graph plumbing, an alias, and typed as a resource |
 | ImageFile | An image loaded from disk with its mips generated | L1 | Atomic |
 | Script | A project `ResourceScript` that makes images, buffers, views and samplers, filled on the CPU | L1 | Composite: it expands to several resources, and to whatever the script declares |

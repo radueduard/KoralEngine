@@ -323,6 +323,7 @@ namespace keditor
 // they run. It names this machine's files, and is written again each time the project is opened.
 plugins {{
     kotlin("jvm") version "2.4.20"
+    kotlin("plugin.compose") version "2.4.20"   // a script's interface, in Compose, as the engine compiles it
 }}
 
 repositories {{

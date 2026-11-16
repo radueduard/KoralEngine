@@ -387,7 +387,8 @@ namespace kgraph
                 { "AccelerationStructure", "ray tracing bvh blas tlas" },
                 { "ComputePipeline", "compute shader kernel gpu program" }, { "GraphicsPipeline", "vertex fragment mesh shader material render program" },
                 { "RayTracingPipeline", "ray tracing shader raygen hit miss" },
-                { "Screen", "window swapchain present output backbuffer" }, { "Reference", "alias link portal reroute" },
+                { "Screen", "window swapchain present output backbuffer" },
+                { "ScreenFramebuffer", "window swapchain present output backbuffer default render target draw screen" }, { "Reference", "alias link portal reroute" },
                 { "Clear", "fill colour color wipe erase" }, { "Blit", "copy scale show present stretch resize" },
                 { "Copy", "duplicate image transfer" }, { "CopyBuffer", "duplicate buffer transfer" }, { "Keep", "previous history last step frame before snapshot copy state ping pong" }, { "MeshBuffers", "mesh vertices indices triangles storage collider compute read" },
                 { "GenerateMipmaps", "mip mipmap levels downsample" },
@@ -436,6 +437,7 @@ namespace kgraph
                 { "SpotShadows", "spot spotlight cone shadow map matrices torch flashlight" },
                 { "ImageFile", "texture picture png jpg hdr environment map load import asset" },
                 { "Script", "fill init initial data cpu generate noise table lut bytes texels code" },
+                { "ScriptPass", "script code record commands dispatch loop kotlin csharp custom pass" },
                 { "Repeat", "loop for each times iterate count mip chain" }, { "Previous", "loop last turn before feedback chain" },
                 { "Element", "loop index pick one turn result" }, { "Note", "comment text label remark annotate" }, { "Switch", "branch choose select if either option toggle" }, { "DebugView", "debug view visualize visualise buffer inspect scene view editor heat" },
                 { "ShaderBuffer", "ssbo struct storage structured uniform constant buffer map fields entities array lights" },
@@ -487,7 +489,7 @@ namespace kgraph
                 // What is made.
                 { "Image", "image" }, { "ImageView", "crop" }, { "Buffer", "storage" }, { "BufferView", "view_list" }, { "Sampler", "texture" },
                 { "Framebuffer", "layers" }, { "Mesh", "category" }, { "Shader", "code" }, { "AccelerationStructure", "account_tree" },
-                { "Primitive", "view_in_ar" }, { "ImageFile", "insert_photo" }, { "Script", "code" }, { "Screen", "monitor" }, { "Reference", "link" },
+                { "Primitive", "view_in_ar" }, { "ImageFile", "insert_photo" }, { "Script", "code" }, { "ScriptPass", "terminal" }, { "Screen", "monitor" }, { "ScreenFramebuffer", "desktop_windows" }, { "Reference", "link" },
                 { "VertexLayout", "reorder" }, { "ShaderBuffer", "table_chart" }, { "BufferBuilder", "view_module" }, { "RenderTarget", "wallpaper" }, { "ComponentBuffer", "dataset" }, { "MeshPack", "inventory_2" }, { "Meshlets", "grid_view" }, { "RayScene", "flare" }, { "Function", "functions" }, { "FunctionInput", "login" }, { "FunctionOutput", "logout" }, { "IndirectDraws", "format_list_numbered" },
                 { "ComputePipeline", "memory" }, { "GraphicsPipeline", "brush" }, { "RayTracingPipeline", "flare" },
                 // What is run.
@@ -878,6 +880,10 @@ namespace kgraph
                                     given("format", "string", "What a pixel of it is: eBGRA8_SRGB, or whatever the window was given."),
                                     given("scale", "number", "How many of its pixels a point of the desktop is: 2 on a screen of twice the density. What a user interface is scaled by.") },
                                   "The scene's window: what a pass writes to show something.", nullptr });
+                types.push_back({ "ScreenFramebuffer", "Resources", {},
+                                  { ResourcePort("out", "Framebuffer") },
+                                  "The window's own framebuffer — its picture, and a depth and stencil of its own beside it: what a Draw draws into to draw "
+                                  "straight onto the screen, with nothing to Blit after. A pipeline's `framebuffer`, or a Draw's. How big it is, a Screen says.", nullptr });
 // What a scene's own components hold, as values: read from the world every frame, to be worked on by
                 // other nodes and packed into the buffers shaders read.
                 const auto out = [&](std::string name, std::string type, std::string doc, const bool shown = false) {
@@ -1396,6 +1402,15 @@ namespace kgraph
                                   "A compute shader run: a ComputePipeline and a Dispatch of it as one node. Its shader's parameters are inputs, `param.<name>`, and "
                                   "its push constants, `push.<name>`, and its specialization constants, `constant.<name>`, as they would be on the two.", nullptr });
             }
+            types.push_back({ "ScriptPass", "Passes",
+                              { hinted({ "script", PortKind::eValue, "string", false, "The class of one of the project's PassScripts: what says what this pass does, each frame.", nullptr }, "passScript"),
+                                optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) },
+                              {},
+                              "One of the project's PassScripts: a pass whose commands its script says each frame — dispatches of its pipelines, as many as it likes, "
+                              "each with its push constants; draws, into a pipeline's framebuffer or another, of meshes or of what the shader makes, directly or as a "
+                              "buffer says, mesh tasks; buffers written, copied, dispatched and drawn from; images cleared. What it uses is an input each, by its name, "
+                              "wired: a ComputePipeline or a GraphicsPipeline, its parameters wired on it; a Framebuffer; a Mesh; a Buffer or an Image it reads (and "
+                              "writes, as it says). Its fields are inputs, `field.<name>`. What is needed between its commands is put there for it.", nullptr });
             types.push_back({ "ClearBuffer", "Passes",
                               { ResourcePort("buffer", "Buffer"), optional(Number("offset", "The byte it starts at.")), optional(Number("bytes", "How many bytes: to the buffer's end, when not given.")), optional(Number("idle", "While not zero (or true), it records nothing this frame: wired from a value — a count that is 0, a step that is not due — it runs on a condition.")) }, {},
                               "Fills a buffer, or a part of it, with zeroes.", nullptr });
@@ -1695,6 +1710,8 @@ namespace kgraph
                     offer("height", "number", "How many pixels down.");
                 } else if (made == "ComputePipeline") {
                     offer("numThreads", "vector", "Its shader's work group, [numthreads(x, y, z)]: how much one dispatched group works on. An image's extent divided by it is how many groups cover the image.");
+                } else if (made == "GraphicsPipeline") {
+                    offer("layout", "struct KoralVertexLayout", "What a vertex is, to it: its `vertex.layout` — or, given none, what its vertex shader reads, by semantic. A Filter's `HasAttributes.required`: the meshes it can draw.");
                 } else if (made == "Mesh") {
                     offer("vertexCount", "number", "How many vertices it has.");
                     offer("indexCount", "number", "How many indices it has; 0 when it has none.");
@@ -1733,7 +1750,7 @@ namespace kgraph
 
     bool RunsAsync(const std::string_view type)
     {
-        return type == "Dispatch" || type == "CopyBuffer" || type == "ClearBuffer" || type == "Copy" || type == "CopyBufferToImage" || type == "CopyImageToBuffer";
+        return type == "Dispatch" || type == "ScriptPass" || type == "CopyBuffer" || type == "ClearBuffer" || type == "Copy" || type == "CopyBufferToImage" || type == "CopyImageToBuffer";
     }
 
     Shape ShapeNamed(const std::string_view name)

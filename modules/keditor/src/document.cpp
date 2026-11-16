@@ -1,4 +1,5 @@
 #include <keditor/document.h>
+#include <kgraph/animation.h>
 #include <keditor/scripting.h>
 #include <keditor/project.h>
 
@@ -186,6 +187,7 @@ namespace keditor
         for (auto& problem : declared.problems) _notes.push_back(std::move(problem));
         for (auto& type : declared.types) {
             if (type.makesResources) { DeclareResourceScript(std::move(type)); continue; }    // what a Script node runs, no component
+            if (type.recordsPass) { DeclarePassScript(std::move(type)); continue; }           // what a ScriptPass node runs, no component
             if (type.material) { DeclareMaterialKind(std::move(type)); continue; }
             std::string error;
             const std::string name = type.name;
@@ -334,6 +336,72 @@ namespace keditor
             return script;
         }
     }
+
+    namespace {
+        kgraph::PassScript PassScriptOf(kscript::ScriptType type)
+        {
+            kgraph::PassScript script;
+            script.name = std::move(type.name);
+            for (auto& declared : type.resources) {
+                kgraph::PassScriptUse use { std::move(declared.name), std::move(declared.kind), false };
+                use.made = declared.made;
+                for (auto& [setting, json] : declared.settings) {
+                    if (!use.made) { if (setting == "writes") use.writes = json == "true"; continue; }
+                    // What it is made with, by its kind's inputs.
+                    kecs::json::Value parsed;
+                    std::string ignored;
+                    if (kecs::json::Parse(json, parsed, ignored)) use.settings.emplace_back(std::move(setting), kgraph::Value::FromJson(parsed));
+                }
+                script.uses.push_back(std::move(use));
+            }
+            script.fields = std::move(type.fields);
+            script.initial = std::move(type.initial);
+            script.size = type.size;
+            return script;
+        }
+    }
+
+    void Document::DeclarePassScript(kscript::ScriptType type)
+    {
+        for (const auto& running : _runtime->PassScripts())
+            if (running.name == type.name && running.record) return;
+        _runtime->SetPassScript(PassScriptOf(std::move(type)));
+        Changed();
+    }
+
+    void Document::RegisterPassScript(kscript::ScriptType type, std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record)
+    {
+        kgraph::PassScript script = PassScriptOf(std::move(type));
+        script.record = std::move(record);
+        // As a resource script's: what its fields start as, and their ranges, are its source's; what it uses too, when the host says none.
+        for (const auto& declared : _runtime->PassScripts()) {
+            if (declared.name != script.name) continue;
+            if (script.initial.empty() && declared.size == script.size) script.initial = declared.initial;
+            if (script.uses.empty()) script.uses = declared.uses;
+            for (auto& field : script.fields)
+                if (const auto was = std::ranges::find(declared.fields, field.name, &kecs::FieldDescription::name);
+                    was != declared.fields.end() && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic && !field.shown) {
+                    field.min = was->min;
+                    field.max = was->max;
+                    field.logarithmic = was->logarithmic;
+                    field.shown = was->shown;
+                }
+        }
+        _runtime->SetPassScript(std::move(script));
+        Changed();
+    }
+
+    void Document::UnregisterPassScript(const std::string_view name)
+    {
+        for (auto script : _runtime->PassScripts())
+            if (script.name == name && script.record) {
+                script.record = nullptr;
+                _runtime->SetPassScript(std::move(script));
+                Changed();
+            }
+    }
+
+    std::vector<kgraph::PassScript> Document::PassScripts() const { return _runtime->PassScripts(); }
 
     void Document::DeclareResourceScript(kscript::ScriptType type)
     {
@@ -990,6 +1058,11 @@ namespace keditor
         _scripts.Shutdown();    // while the world they are told of is whole
         if (scriptRuntime) scriptRuntime->Forget(this);     // and what runs them lets go of it, before it is gone
         if (const auto it = Documents().find(_frameGraph); it != Documents().end() && it->second == this) Documents().erase(it);
+    }
+
+    void Document::Animate(const float delta)
+    {
+        kgraph::Animate(_world, [this](const std::string& file) { return _runtime->ModelOf(file.starts_with('@') ? file.substr(1) : file); }, delta);
     }
 
     void Document::Update()
@@ -2198,6 +2271,52 @@ namespace keditor
         return true;
     }
 
+    void Document::ShowInterface(const ScriptInterface& shown)
+    {
+        if (!shown.ui) return;
+        if (const auto it = std::ranges::find(_interfaces, shown.ui, &ScriptInterface::ui); it != _interfaces.end()) { *it = shown; return; }
+        _interfaces.push_back(shown);
+    }
+
+    void Document::HideInterface(const kui::Ui* ui)
+    {
+        std::erase_if(_interfaces, [&](const ScriptInterface& shown) { return shown.ui == ui; });
+    }
+
+    std::string Document::EntityJson(const kecs::Entity entity, const std::set<std::string, std::less<>>& skip) const
+    {
+        Value::Members components;
+        if (_world.Alive(entity))
+            for (const kecs::ComponentId id : _world.ComponentsOf(entity)) {
+                const kecs::ComponentDescription& description = _world.Describe(id);
+                if (skip.contains(description.name)) continue;
+                Value::Members fields;
+                for (const auto& field : description.fields) fields.emplace_back(field.name, ReadField(_world, entity, id, field.name));
+                components.emplace_back(description.name, Value(std::move(fields)));
+            }
+        return Value(Value::Members { { "name", Value(_world.NameOf(entity)) }, { "components", Value(std::move(components)) } }).ToJson();
+    }
+
+    bool Document::SetEntityJson(const kecs::Entity entity, const std::string_view json, std::string* error)
+    {
+        kecs::json::Value parsed;
+        std::string why;
+        if (!kecs::json::Parse(json, parsed, why)) { if (error) *error = why; return false; }
+        if (!_world.Alive(entity)) { if (error) *error = "the entity is not there"; return false; }
+        const Value value = Value::FromJson(parsed);
+        if (const Value* name = value.Find("name"); name && name->String() && _world.NameOf(entity) != *name->String()) Rename(entity, *name->String());
+        const Value* components = value.Find("components");
+        if (!components || !components->Named()) return true;
+        for (const auto& [component, fields] : *components->Named()) {
+            const kecs::ComponentId id = _world.Find(component);
+            if (id == kecs::NoComponent) continue;      // a type this world has not: a script of the other's alone
+            if (!_world.Has(entity, id) && !AddComponent(entity, component)) continue;
+            if (!fields.Named()) continue;
+            for (const auto& [field, held] : *fields.Named()) (void)SetField(entity, component, field, held);
+        }
+        return true;
+    }
+
     bool Document::SetField(const kecs::Entity entity, const std::string_view component, const std::string_view field, const Value& value, std::string* error)
     {
         const kecs::ComponentId id = _world.Find(component);
@@ -2528,13 +2647,13 @@ namespace keditor
         return true;
     }
 
-    kecs::Entity Document::ImportModel(const std::filesystem::path& file, std::string* error)
+    kecs::Entity Document::ImportModel(const std::filesystem::path& file, std::string* error, const kecs::Entity parent)
     {
         std::error_code ec;
         const std::filesystem::path where = file.is_absolute() || _runtime->AssetDirectory().empty() ? file : _runtime->AssetDirectory() / file;
         if (!std::filesystem::is_regular_file(where, ec)) { if (error) *error = std::format("there is no file '{}'", where.generic_string()); return kecs::NullEntity; }
         // The file is read off the frame: the entity over what it holds is there now, and the rest when it is read.
-        const kecs::Entity root = CreateEntity(file.stem().string());
+        const kecs::Entity root = CreateEntity(file.stem().string(), parent);
         _importing.push_back({ file, root });
         (void)_runtime->ModelOf(file);
         return root;
@@ -2606,6 +2725,13 @@ namespace keditor
         const auto drawn = [&](const kecs::Entity entity, const kgraph::ModelNode::Part& part) {
             AddComponent(entity, "Mesh");
             SetField(entity, "Mesh", "mesh", Value(part.mesh));
+            // Skinned: bent by its joints, the model's nodes under the whole.
+            if (part.skin >= 0 && part.skin < static_cast<int>(model->skins.size())) {
+                AddComponent(entity, "Skin");
+                SetField(entity, "Skin", "model", Value(named));
+                SetField(entity, "Skin", "skin", Value(part.skin));
+                SetField(entity, "Skin", "root", EntityValue(root));
+            }
             if (part.material < 0 || part.material >= static_cast<int>(model->materials.size())) {
                 // The file says nothing of what it is made of: something matte and pale, rather than nothing at all.
                 if (!MaterialAssetOf("material:Default"))
@@ -2657,6 +2783,11 @@ namespace keditor
                 SetField(entity, component, "innerAngle", Value(light.innerAngle));
                 SetField(entity, component, "outerAngle", Value(light.outerAngle));
             }
+        }
+        // Its clips: played on its nodes by an Animator on the whole, the first of them to begin with.
+        if (!model->animations.empty()) {
+            AddComponent(root, "Animator");
+            SetField(root, "Animator", "model", Value(named));
         }
         for (const auto& camera : model->cameras) {
             const kecs::Entity entity = holder(camera.node, camera.atNode, camera.name.empty() ? std::string("Camera") : camera.name, camera.position, camera.direction);
@@ -2842,6 +2973,49 @@ namespace keditor
         if (!project.empty() && std::filesystem::exists(project / file, ignored)) return false;
         for (const auto& module : _modules) if (std::filesystem::exists(module / "functions" / file, ignored)) return false;     // a module's
         return std::filesystem::exists(EngineFunctionsDirectory() / file, ignored);
+    }
+
+    bool Document::ShowsAnything(const std::filesystem::path& file)
+    {
+        std::ifstream in(file, std::ios::binary);
+        if (!in) return true;
+        std::stringstream text;
+        text << in.rdbuf();
+        const std::string read = text.str();
+        kecs::json::Value parsed;
+        std::string error;
+        if (!kecs::json::Parse(read, parsed, error)) return true;
+        const auto* graphText = parsed.Find("graph");
+        kgraph::Graph graph;
+        if (!graphText || !kgraph::Graph::FromJson(graphText->raw, graph, error)) return true;
+        // Where a call's function is found: the project's, its modules', the engine's — as a document finds it.
+        const std::filesystem::path project = std::filesystem::absolute(file).parent_path().parent_path();
+        std::vector<std::filesystem::path> folders { project / "functions" };
+        if (Project opened; std::filesystem::exists(project / "project.json") && Project::Open(project, opened, error))
+            for (const auto& module : opened.ImportedDirectories()) folders.push_back(module / "functions");
+        folders.push_back(EngineFunctionsDirectory());
+        const auto fileOf = [&](const std::string& name) -> std::filesystem::path {
+            std::error_code ignored;
+            for (const auto& folder : folders)
+                if (std::filesystem::exists(folder / (name + FunctionEnding), ignored)) return folder / (name + FunctionEnding);
+            return {};
+        };
+        std::set<std::string> seen;
+        std::vector<kgraph::Graph> look;
+        look.push_back(std::move(graph));
+        while (!look.empty()) {
+            const kgraph::Graph of = std::move(look.back());
+            look.pop_back();
+            for (const auto& node : of.nodes) {
+                if (node.type == "Screen" || node.type == "ScreenFramebuffer") return true;
+                if (node.type != "Function") continue;
+                const std::string* name = TextOf(node, "function");
+                if (!name || !seen.insert(*name).second) continue;
+                kgraph::Graph called;
+                if (const auto found = fileOf(*name); !found.empty() && ReadFunction(found, called, error)) look.push_back(std::move(called));
+            }
+        }
+        return false;
     }
 
     FunctionAbout Document::AboutFunction(const std::string_view name) const

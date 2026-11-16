@@ -131,6 +131,23 @@ internal unsafe struct KengineConditionCallbacks
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KenginePassUse
+{
+    public byte* Name;
+    public byte* Kind;
+    public byte Writes;
+    public byte Made;
+    public byte* Settings;
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct KenginePassScriptCallbacks
+{
+    public IntPtr User;
+    public delegate* unmanaged[Cdecl]<IntPtr, IntPtr, byte*, nuint, byte, byte*> Record;
+}
+
+[StructLayout(LayoutKind.Sequential)]
 internal unsafe struct KengineResourceScriptCallbacks
 {
     public IntPtr User;
@@ -212,9 +229,12 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_scale(IntPtr world, Entity entity, Vec3* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_local_matrix(IntPtr world, Entity entity, Mat4* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_world_matrix(IntPtr world, Entity entity, Mat4* value);
+    [LibraryImport(Lib)] public static partial nuint kecs_world_matrices(IntPtr world, Entity* entities, nuint count, Mat4* values);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_set_world_matrix(IntPtr world, Entity entity, Mat4* value);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial Entity kengine_entity_create(IntPtr document, string? name);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial Entity kengine_model_place(IntPtr document, string file, Entity parent);
+    [LibraryImport(Lib)] public static unsafe partial nuint kengine_skin_joints(IntPtr document, Entity entity, Entity* found, nuint capacity);
     [LibraryImport(Lib)] public static partial byte* kengine_entity_name(IntPtr document, Entity entity);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_entity_set_name(IntPtr document, Entity entity, string name);
@@ -226,6 +246,9 @@ internal static unsafe partial class Native
     [LibraryImport(Lib)] public static partial uint kecs_component_field_count(IntPtr world, uint component);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_component_field(IntPtr world, uint component, uint index, KecsField* field);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial uint kecs_register_tag(IntPtr world, string name);
+    [LibraryImport(Lib)] public static partial uint kecs_components_of(IntPtr world, Entity entity, uint* ids, uint capacity);
+    [LibraryImport(Lib)] public static partial uint kecs_current_tick(IntPtr world);
+    [LibraryImport(Lib)] public static partial nuint kecs_changed_ticks(IntPtr world, Entity* entities, nuint count, uint* ignore, nuint ignoreCount, uint* ticks);
 
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_add(IntPtr world, Entity entity, uint component, void* value);
     [LibraryImport(Lib)] [return: MarshalAs(UnmanagedType.U1)] public static partial bool kecs_remove(IntPtr world, Entity entity, uint component);
@@ -243,6 +266,10 @@ internal static unsafe partial class Native
     public static partial byte* kengine_field_json(IntPtr document, Entity entity, string component, string field);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_field_set_json(IntPtr document, Entity entity, string component, string field, string json);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    public static partial byte* kengine_entity_json(IntPtr document, Entity entity, string skip);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_entity_set_json(IntPtr document, Entity entity, string json);
 
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
     public static partial uint kengine_script_register(IntPtr document, string name, nuint size, nuint alignment, KecsField* fields, nuint fieldCount,
@@ -255,6 +282,35 @@ internal static unsafe partial class Native
     public static partial bool kengine_resource_script_register(IntPtr document, string name, nuint size, KecsField* fields, nuint fieldCount,
                                                                 KengineScriptResource* resources, nuint resourceCount, KengineResourceScriptCallbacks* callbacks);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_resource_script_unregister(IntPtr document, string name);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
+    public static partial bool kengine_pass_script_register(IntPtr document, string name, nuint size, KecsField* fields, nuint fieldCount,
+                                                            KenginePassUse* uses, nuint useCount, KenginePassScriptCallbacks* callbacks);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_pass_script_unregister(IntPtr document, string name);
+    [LibraryImport(Lib)] public static partial void kengine_pass_dispatch(IntPtr commands, uint pipeline, uint x, uint y, uint z);
+    [LibraryImport(Lib)] public static partial void kengine_pass_dispatch_indirect(IntPtr commands, uint pipeline, uint buffer, ulong offset);
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] public static partial void kengine_pass_push(IntPtr commands, string name, double* values, nuint count);
+    [LibraryImport(Lib)] public static partial void kengine_pass_write(IntPtr commands, uint buffer, ulong offset, void* bytes, nuint size);
+    [LibraryImport(Lib)] public static partial void kengine_pass_copy(IntPtr commands, uint from, uint to, ulong size, ulong fromOffset, ulong toOffset);
+    [LibraryImport(Lib)] public static partial void kengine_pass_clear(IntPtr commands, uint image, float red, float green, float blue, float alpha);
+    [LibraryImport(Lib)] public static partial void kengine_pass_copy_buffer_to_image(IntPtr commands, uint buffer, uint image, ulong offset);
+    [LibraryImport(Lib)] public static partial void kengine_pass_copy_image_to_buffer(IntPtr commands, uint image, uint buffer, ulong offset);
+    [LibraryImport(Lib)] public static partial void kengine_pass_copy_image(IntPtr commands, uint from, uint to);
+    [LibraryImport(Lib)] public static partial void kengine_pass_blit(IntPtr commands, uint from, uint to);
+    [LibraryImport(Lib)] public static partial void kengine_pass_generate_mipmaps(IntPtr commands, uint image);
+    [LibraryImport(Lib)] public static partial void kengine_pass_begin_rendering(IntPtr commands, uint target, [MarshalAs(UnmanagedType.U1)] bool load,
+                                                                                 float red, float green, float blue, float alpha, float depth);
+    [LibraryImport(Lib)] public static partial void kengine_pass_end_rendering(IntPtr commands);
+    [LibraryImport(Lib)] public static partial void kengine_pass_viewport(IntPtr commands, uint x, uint y, uint width, uint height);
+    [LibraryImport(Lib)] public static partial void kengine_pass_scissor(IntPtr commands, uint x, uint y, uint width, uint height);
+    [LibraryImport(Lib)] public static partial void kengine_pass_vertex_buffer(IntPtr commands, uint binding, uint buffer, ulong offset);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw(IntPtr commands, uint pipeline, uint vertexCount, uint instances, uint firstVertex, uint firstInstance);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw_mesh(IntPtr commands, uint pipeline, uint mesh, uint instances, uint firstInstance);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw_indexed(IntPtr commands, uint pipeline, uint mesh, uint indexCount, uint instances, uint firstIndex,
+                                                                              int vertexOffset, uint firstInstance);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw_indirect(IntPtr commands, uint pipeline, uint mesh, [MarshalAs(UnmanagedType.U1)] bool indexed, uint buffer,
+                                                                               ulong offset, uint count, uint stride);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw_mesh_tasks(IntPtr commands, uint pipeline, uint x, uint y, uint z);
+    [LibraryImport(Lib)] public static partial void kengine_pass_draw_mesh_tasks_indirect(IntPtr commands, uint pipeline, uint buffer, ulong offset, uint count, uint stride);
     [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)] [return: MarshalAs(UnmanagedType.U1)]
     public static partial bool kengine_condition_register(IntPtr document, string name, IntPtr* components, nuint componentCount,
                                                           KengineConditionInput* inputs, nuint inputCount, KengineConditionCallbacks* callbacks);

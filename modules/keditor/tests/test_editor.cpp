@@ -8,6 +8,8 @@
 #include <kasset/parameters.h>
 
 #include <kui/icons.h>
+#include <kui/rendering.h>
+#include <kui/widgets.h>
 #include <functional>
 #include <optional>
 
@@ -46,6 +48,8 @@ namespace {
             if (!support::App()) GTEST_SKIP() << "no Vulkan device: " << support::Reason();
         }
         void Open(const std::filesystem::path& project = {}) {
+            // One editor at a time: another on the same project would only look at its scenes (SceneLock).
+            if (editor) { support::App()->Close(*editor); editor = nullptr; Frame(); Frame(); }
             editor = support::App()->OpenOffscreen<keditor::EditorScene>({ .title = "editor", .extent = Extent }, project);
             ASSERT_NE(editor, nullptr);
             Frame();
@@ -282,6 +286,108 @@ TEST_F(EditorTest, ADrawOfEachElementIsOfferedBeingOne) {
     EXPECT_TRUE(Shows("Batched: one draw of 4 elements."));
     EXPECT_FALSE(Shows("Batch: one draw of them all"));
     EXPECT_TRUE(NothingIsWrong());
+}
+
+// A project open in two editors at once — two clients and a server's, say: each scene is changed by the editor that
+// opened it first. The other looks at it and plays it, reads it again as it is saved, undoes what is done to it, and
+// takes it over once the first lets go.
+// What a script shows over the game is shown where the game is: played in the editor, the Game panel — laid out in its
+// size, given its input — and not the editor's own view of the scene; built once a frame, not once for each.
+TEST_F(EditorTest, AnInterfaceOverTheGameIsInTheGamePanel) {
+    const auto project = scene::MakeProject("interface");
+    Open(project.directory);
+    Session().StartPlaying();
+    for (int i = 0; i < 6; ++i) Frame();
+    keditor::GameScene* game = Session().Game();
+    ASSERT_NE(game, nullptr);
+    ASSERT_TRUE(game->Shown());
+    kui::Ui ui { kui::Container(kui::ContainerOptions {}.SetSize(4096.f, 4096.f).SetDecoration({ .color = kui::Color { 1.f, 0.f, 1.f, 1.f } })) };
+    int composed = 0;
+    Doc().ShowInterface({ &ui, [](void* user) { ++*static_cast<int*>(user); }, &composed });
+    for (int i = 0; i < 10; ++i) Frame();
+    EXPECT_GE(composed, 9);
+    EXPECT_LE(composed, 11) << "once a frame: by the Game panel alone";
+    ASSERT_NE(ui.RootRenderObject(), nullptr);
+    const kor::UVec2 panel = game->SceneWindow().Extent();
+    const kor::Vec2 laid = ui.RootRenderObject()->Size() * ui.PixelScale();
+    EXPECT_NEAR(laid.x, static_cast<float>(panel.x), 1.f) << "as wide as the Game panel";
+    EXPECT_NEAR(laid.y, static_cast<float>(panel.y), 1.f);
+    EXPECT_NE(panel, editor->SceneWindow().Extent()) << "the panel, not the editor's window";
+    Doc().HideInterface(&ui);
+    for (int i = 0; i < 2; ++i) Frame();
+    const int after = composed;
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_EQ(composed, after) << "hidden, it is reached no more";
+    Session().Stop();
+    Frame();
+}
+
+TEST_F(EditorTest, AScenesTreeIsChangedByOneEditorAtATime) {
+    const auto directory = std::filesystem::temp_directory_path() / "keditor-tests" / "two-editors";
+    std::filesystem::remove_all(directory);
+    scene::MakeProject("scratch");
+    Open();
+    ASSERT_TRUE(Session().NewProject(directory)) << Session().Status();
+    support::App()->Close(*editor);
+    editor = nullptr;
+    Frame();
+    Frame();
+
+    Open(directory);
+    ASSERT_TRUE(Session().HasProject()) << Session().Status();
+    EXPECT_FALSE(Session().ReadOnly()) << "the first to open it changes it";
+    keditor::EditorScene* second = support::App()->OpenOffscreen<keditor::EditorScene>({ .title = "second", .extent = Extent }, directory);
+    ASSERT_NE(second, nullptr);
+    Frame();
+    Frame();
+    keditor::Session& other = second->CurrentSession();
+    ASSERT_TRUE(other.HasProject()) << other.Status();
+    EXPECT_TRUE(other.ReadOnly()) << "the second looks at it";
+    EXPECT_NE(other.SceneHolder().find("koral-editor"), std::string::npos) << other.SceneHolder();
+    const auto until = [&](const std::function<bool()>& done) {
+        const auto began = std::chrono::steady_clock::now();
+        while (!done() && std::chrono::steady_clock::now() - began < std::chrono::seconds(10)) Frame();
+        return done();
+    };
+    const std::size_t entities = other.Doc().Entities().size();
+
+    // Changed in the second: undone, and not saved.
+    other.Doc().CreateEntity("Not kept");
+    EXPECT_TRUE(until([&] { return other.Doc().Entities().size() == entities; })) << "what was done there is undone";
+    EXPECT_TRUE(other.Failed()) << other.Status();
+    EXPECT_FALSE(other.Save()) << "nor is it saved there";
+
+    // Changed and saved in the first: read again in the second.
+    Doc().CreateEntity("Kept");
+    ASSERT_TRUE(Session().Save()) << Session().Status();
+    EXPECT_TRUE(until([&] { return other.Doc().Entities().size() == entities + 1; })) << "read again as it was saved: " << other.Status();
+
+    // Another scene is the second's to change, while the first changes its own.
+    ASSERT_TRUE(other.AddScene("level", false)) << other.Status();
+    EXPECT_FALSE(other.ReadOnly());
+
+    // Each says in its title which scene it has, and whether it is another's to change.
+    for (int i = 0; i < 2; ++i) Frame();
+    EXPECT_NE(second->SceneWindow().Title().find("— level —"), std::string::npos) << second->SceneWindow().Title();
+    EXPECT_EQ(second->SceneWindow().Title().find("read-only"), std::string::npos) << second->SceneWindow().Title();
+    // Another editor, opened from one: this program again, on the project, with the scene asked for.
+    const std::string command = other.AnotherEditorCommand("level");
+    EXPECT_NE(command.find(directory.string()), std::string::npos) << command;
+    EXPECT_NE(command.find("--scene \"level\""), std::string::npos) << command;
+
+    // Let go of by the first: the second's, back on the first scene.
+    ASSERT_TRUE(other.OpenScene(Session().SceneName())) << other.Status();
+    EXPECT_TRUE(other.ReadOnly());
+    for (int i = 0; i < 2; ++i) Frame();
+    EXPECT_NE(second->SceneWindow().Title().find("(read-only)"), std::string::npos) << second->SceneWindow().Title();
+    support::App()->Close(*editor);
+    editor = nullptr;
+    EXPECT_TRUE(until([&] { return !other.ReadOnly(); })) << "taken over once let go of: " << other.Status();
+    other.Doc().CreateEntity("Kept now");
+    EXPECT_TRUE(other.Save()) << other.Status();
+    support::App()->Close(*second);
+    Frame();
+    Frame();
 }
 
 TEST_F(EditorTest, AProjectIsMadeSavedAndOpenedAgain) {
@@ -1882,7 +1988,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
 
     // A script, in either language, the first time: a file with a class of its name. Its language is the project's from
     // then on, kept in project.json, and a script in the other is refused.
-    EXPECT_EQ(Session().ScriptKindsHere().size(), 4u) << "either, until the first: a script of entities and a ResourceScript in each";
+    EXPECT_EQ(Session().ScriptKindsHere().size(), 6u) << "either, until the first: a script of entities, a ResourceScript and a PassScript in each";
     ASSERT_TRUE(Session().NewScript("Drifter", "Kotlin")) << Session().Status();
     const auto text = [&](const std::filesystem::path& folder, const char* file) {
         std::ifstream in(folder / file);
@@ -1890,7 +1996,7 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     };
     EXPECT_NE(text(directory, "project.json").find(R"("scripts": "kotlin")"), std::string::npos) << text(directory, "project.json");
     EXPECT_EQ(Session().CurrentProject().Language(), 'k');
-    ASSERT_EQ(Session().ScriptKindsHere().size(), 2u);
+    ASSERT_EQ(Session().ScriptKindsHere().size(), 3u);
     for (const auto& [kind, what] : Session().ScriptKindsHere()) EXPECT_TRUE(kind.starts_with("Kotlin")) << kind << ": the New script dialog offers the project's only";
     EXPECT_FALSE(Session().NewScript("Roller", "C#")) << "a project's scripts are in one language";
     EXPECT_NE(Session().Status().find("in Kotlin"), std::string::npos) << Session().Status();
@@ -1955,13 +2061,19 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     std::filesystem::remove_all(csharp);
     ASSERT_TRUE(Session().NewProject(csharp, 'c')) << Session().Status();
     EXPECT_NE(text(csharp, "project.json").find(R"("scripts": "csharp")"), std::string::npos) << text(csharp, "project.json");
-    EXPECT_EQ(Session().ScriptKindsHere().size(), 2u) << "only C#'s, from the start";
+    EXPECT_EQ(Session().ScriptKindsHere().size(), 3u) << "only C#'s, from the start";
     ASSERT_TRUE(Session().NewScript("Roller", "C#")) << Session().Status();
     EXPECT_NE(text(csharp / "scripts", "Roller.cs").find("public sealed class Roller : Setup, PerFrame"), std::string::npos);
     EXPECT_EQ(text(csharp / "scripts", "Roller.cs").find("$NAME"), std::string::npos);
     EXPECT_NE(Session().RunCommand().find("koral-play"), std::string::npos) << "the player runs C# scripts itself: " << Session().RunCommand();
     EXPECT_FALSE(Session().NewScript("Drifter", "Kotlin"));
     EXPECT_FALSE(std::filesystem::exists(csharp / "build.gradle.kts")) << "and no Kotlin build was made for it";
+
+    // A PassScript: a ScriptPass node of it is offered, what it uses its inputs, as its source declares them.
+    ASSERT_TRUE(Session().NewScript("Painter", "C# PassScript")) << Session().Status();
+    EXPECT_NE(text(csharp / "scripts", "Painter.cs").find("public sealed class Painter : PassScript"), std::string::npos);
+    ASSERT_TRUE(std::ranges::contains(Doc().PassScripts(), std::string("Painter"), &kgraph::PassScript::name)) << "declared from its source at once";
+    EXPECT_TRUE(std::ranges::contains(Doc().Runtime().Presets(), std::string("Painter"), &kgraph::Preset::name)) << "a ScriptPass node of it, among the nodes to add";
 }
 
 // A script's entity is set from the inspector; a script dropped on the inspector is the entity's; and a prefab is made,
@@ -2923,7 +3035,9 @@ TEST_F(EditorTest, LookingRoundIsSmoothAndLosesNothing) {
     const float first = before - camera.yaw;
     EXPECT_GT(first, 0.f) << "it turns at once";
     EXPECT_LT(first, 40.f * 0.15f * 0.99f) << "but not all of it in one frame";
-    for (int i = 0; i < 60; ++i) Frame();
+    // Sixty frames, and a quarter of a second: what is left of the turn goes by the clock, and frames can be quicker than that.
+    const auto turning = std::chrono::steady_clock::now();
+    for (int i = 0; i < 60 || std::chrono::steady_clock::now() - turning < std::chrono::milliseconds(250); ++i) Frame();
     EXPECT_NEAR(before - camera.yaw, 40.f * 0.15f, 0.05f) << "and all of it, in the end";
     input.FeedMouseButton(kor::MouseButton::eRight, false);
     for (int i = 0; i < 4; ++i) Frame();

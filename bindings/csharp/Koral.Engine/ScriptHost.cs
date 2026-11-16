@@ -45,6 +45,7 @@ public sealed unsafe class ScriptHost : IDisposable
     private ScriptContext? _context;
     private readonly Dictionary<string, Registered> _registered = [];
     private readonly Dictionary<string, RegisteredResource> _resources = [];
+    private readonly Dictionary<string, RegisteredPass> _passes = [];
     private readonly Dictionary<string, RegisteredCondition> _conditions = [];
 
     /// <summary>The conditions the scripts declare, by the name a node's <c>conditions</c> gives them: <c>&lt;Class&gt;.&lt;function&gt;</c>.</summary>
@@ -67,6 +68,8 @@ public sealed unsafe class ScriptHost : IDisposable
     public IReadOnlyCollection<string> Scripts => _registered.Keys;
     /// <summary>The scripts that make resources there are now, by name: what the graph's Script nodes can name.</summary>
     public IReadOnlyCollection<string> ResourceScripts => _resources.Keys;
+    /// <summary>The scripts that say what a pass does there are now, by name: what the graph's ScriptPass nodes can name.</summary>
+    public IReadOnlyCollection<string> PassScripts => _passes.Keys;
     /// <summary>How many times the scripts have been loaded.</summary>
     public int Generation => _generation;
     /// <summary>How many edits were applied to the code that runs, in place, rather than loaded.</summary>
@@ -137,13 +140,16 @@ public sealed unsafe class ScriptHost : IDisposable
         }
 
         // The code that is going stops being called before its functions go. Its data stays where it is.
-        var gone = _registered.Keys.Concat(_resources.Keys).Except(layouts.Select(l => l.Layout.Name)).ToList();
+        var gone = _registered.Keys.Concat(_resources.Keys).Concat(_passes.Keys).Except(layouts.Select(l => l.Layout.Name)).ToList();
         foreach (var registered in _registered.Values) Native.kengine_script_unregister(_world.Document, registered.Layout.Name);
         foreach (var registered in _registered.Values) registered.Free();
         _registered.Clear();
         foreach (var resource in _resources.Values) Native.kengine_resource_script_unregister(_world.Document, resource.Layout.Name);
         foreach (var resource in _resources.Values) resource.Free();
         _resources.Clear();
+        foreach (var pass in _passes.Values) Native.kengine_pass_script_unregister(_world.Document, pass.Layout.Name);
+        foreach (var pass in _passes.Values) pass.Free();
+        _passes.Clear();
         UnregisterConditions();
 
         var failed = new List<string>();
@@ -160,6 +166,17 @@ public sealed unsafe class ScriptHost : IDisposable
             }
         foreach (var (type, layout) in layouts)
         {
+            // One that says what a pass does is a ScriptPass node's to run, and no component.
+            if (type.IsSubclassOf(typeof(PassScript)))
+            {
+                var pass = new RegisteredPass(_world, type, layout);
+                string? why;
+                try { why = pass.Register() ? null : Native.LastError(); }
+                catch (TargetInvocationException e) { why = $"making one threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"; }
+                if (why is null) _passes[layout.Name] = pass;
+                else { failed.Add($"{layout.Name}: {why}"); pass.Free(); }
+                continue;
+            }
             // One that makes resources is a Script node's to run, and no component.
             if (type.IsSubclassOf(typeof(ResourceScript)))
             {
@@ -182,7 +199,7 @@ public sealed unsafe class ScriptHost : IDisposable
         Errors = failed;
         if (previous is not null) Unload(previous);
         foreach (var error in failed) Log.Error($"[scripts] {error}");
-        Log.Info($"[scripts] loaded: {(_registered.Count + _resources.Count == 0 ? "none" : string.Join(", ", _registered.Keys.Concat(_resources.Keys).Order()))}"
+        Log.Info($"[scripts] loaded: {(_registered.Count + _resources.Count + _passes.Count == 0 ? "none" : string.Join(", ", _registered.Keys.Concat(_resources.Keys).Concat(_passes.Keys).Order()))}"
                  + (gone.Count > 0 ? $" (gone: {string.Join(", ", gone)})" : ""));
         return true;
     }
@@ -201,6 +218,12 @@ public sealed unsafe class ScriptHost : IDisposable
             resource.Free();
         }
         _resources.Clear();
+        foreach (var pass in _passes.Values)
+        {
+            Native.kengine_pass_script_unregister(_world.Document, pass.Layout.Name);
+            pass.Free();
+        }
+        _passes.Clear();
         UnregisterConditions();
         if (_context is not null) Unload(_context);
         _context = null;
@@ -669,6 +692,122 @@ public sealed unsafe class ScriptHost : IDisposable
             GCHandle.FromIntPtr(user).Target is RegisteredResource registered ? registered.Fill(contents, count, settings, size) : null;
     }
 
+    // ---- one script that says what a pass does, registered ---------------------------------------------------
+
+    /// <summary>
+    /// A PassScript class as the engine has it: one object of it, made as it is registered, given each ScriptPass node's
+    /// settings each frame before it says what that node's pass does.
+    /// </summary>
+    private sealed unsafe class RegisteredPass
+    {
+        public ScriptLayout Layout { get; }
+        private readonly PassScript _script;
+        private readonly List<(string Name, PassScript.Use Use)> _uses;
+        private GCHandle _self;
+        private IntPtr _error;          // why the last record could not be: the engine reads it before the next
+        private string _complained = "";
+
+        public RegisteredPass(World world, Type type, ScriptLayout layout)
+        {
+            Layout = layout;
+            _script = (PassScript)Activator.CreateInstance(type)!;
+            _script.World = world;
+            _uses = [];
+            var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance).Where(f => typeof(PassScript.Use).IsAssignableFrom(f.FieldType)).OrderBy(f => f.MetadataToken);
+            foreach (var field in fields)
+            {
+                if (field.GetValue(_script) is not PassScript.Use use)
+                {
+                    use = (PassScript.Use)Activator.CreateInstance(field.FieldType, field.FieldType.GetConstructors()[0].GetParameters().Select(p => p.DefaultValue).ToArray())!;
+                    field.SetValue(_script, use);
+                }
+                use.Name = field.Name;
+                use.Index = _uses.Count;
+                _uses.Add((field.Name, use));
+            }
+            _world = world;
+        }
+        private readonly World _world;
+
+        public bool Register()
+        {
+            _self = GCHandle.Alloc(this);
+            var callbacks = new KenginePassScriptCallbacks { User = GCHandle.ToIntPtr(_self), Record = &OnRecord };
+            var names = new List<IntPtr>();
+            IntPtr Utf8(string text) { var at = Marshal.StringToCoTaskMemUTF8(text); names.Add(at); return at; }
+            try
+            {
+                var fields = stackalloc KecsField[Math.Max(Layout.Fields.Count, 1)];
+                for (var i = 0; i < Layout.Fields.Count; ++i)
+                {
+                    var field = Layout.Fields[i];
+                    fields[i] = new KecsField { Name = (byte*)Utf8(field.Info.Name), Type = (byte*)Utf8(field.Type), Offset = (uint)field.Offset, Size = (uint)field.Size };
+                }
+                var uses = stackalloc KenginePassUse[Math.Max(_uses.Count, 1)];
+                for (var i = 0; i < _uses.Count; ++i)
+                {
+                    var use = _uses[i].Use;
+                    uses[i] = new KenginePassUse
+                    {
+                        Name = (byte*)Utf8(_uses[i].Name), Kind = (byte*)Utf8(use.Makes ?? use.Kind), Writes = PassScript.WritesOf(use) ? (byte)1 : (byte)0,
+                        Made = use.Makes is null ? (byte)0 : (byte)1, Settings = use.Makes is null ? null : (byte*)Utf8(SettingsJson(use)),
+                    };
+                }
+                return Native.kengine_pass_script_register(_world.Document, Layout.Name, (nuint)Layout.Size, fields, (nuint)Layout.Fields.Count, uses, (nuint)_uses.Count, &callbacks);
+            }
+            finally
+            {
+                foreach (var name in names) Marshal.FreeCoTaskMem(name);
+            }
+        }
+
+        public void Free()
+        {
+            if (_self.IsAllocated) _self.Free();
+            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+        }
+
+        /// <summary>What one made is made with, as JSON: flags given as <c>"eSampled | eStorage"</c> a list of them.</summary>
+        private static string SettingsJson(PassScript.Use use)
+        {
+            static string Text(string text) => System.Text.Json.JsonSerializer.Serialize(text);
+            var parts = use.Settings.Select(s => $"{Text(s.Input)}: {s.Value switch
+            {
+                string text when text.Contains('|') => $"[{string.Join(", ", text.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(Text))}]",
+                string text => Text(text),
+                bool on => on ? "true" : "false",
+                IFormattable number => number.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+                var other => Text(other.ToString() ?? ""),
+            }}");
+            return "{" + string.Join(", ", parts) + "}";
+        }
+
+        private byte* Record(IntPtr commands, byte* settings, nuint size, bool made)
+        {
+            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+            try
+            {
+                if ((int)size >= Layout.Size) Layout.Load(_script, (IntPtr)settings);
+                _script.RecordCore(new PassScript.Pass(commands, made));
+                _complained = "";
+                return null;
+            }
+            catch (Exception e)
+            {
+                var thrown = e is TargetInvocationException { InnerException: not null } ? e.InnerException! : e;
+                var why = $"it threw {thrown.GetType().Name}: {thrown.Message}";
+                // Said once while it goes on throwing the same: it is called every frame.
+                if (why != _complained) { _complained = why; Log.Error($"[scripts] {Layout.Name}.Record threw: {thrown}"); }
+                _error = Marshal.StringToCoTaskMemUTF8(why);
+                return (byte*)_error;
+            }
+        }
+
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static byte* OnRecord(IntPtr user, IntPtr commands, byte* settings, nuint size, byte made) =>
+            GCHandle.FromIntPtr(user).Target is RegisteredPass registered ? registered.Record(commands, settings, size, made != 0) : null;
+    }
+
     // ---- building ----------------------------------------------------------------------------------------------
 
     private sealed class ScriptBuildException(IReadOnlyList<string> errors) : Exception("the scripts did not compile")
@@ -755,7 +894,7 @@ public sealed unsafe class ScriptHost : IDisposable
         pdb.Position = 0;
         var assembly = context.LoadFromStream(pe, pdb);
         var types = assembly.GetExportedTypes()
-            .Where(t => t.IsClass && !t.IsAbstract && (((t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
+            .Where(t => t.IsClass && !t.IsAbstract && (((t.IsSubclassOf(typeof(Setup)) || t.IsSubclassOf(typeof(ResourceScript)) || t.IsSubclassOf(typeof(PassScript))) && t.GetConstructor(Type.EmptyTypes) is not null)
                                                        || t.IsSubclassOf(typeof(Conditions))))
             .OrderBy(t => t.FullName, StringComparer.Ordinal)
             .ToList();

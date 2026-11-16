@@ -1257,7 +1257,7 @@ namespace kgraph
                 has.name = "HasAttributes";
                 has.components = { "Mesh" };
                 Port required { "required", PortKind::eValue, "struct KoralVertexLayout", false,
-                                "What the mesh's vertices must have: a vertex layout (a pipeline's, a VertexLayout's, a Primitive's `layout`) whose every "
+                                "What the mesh's vertices must have: a vertex layout (a pipeline's `layout`, a VertexLayout's, a Primitive's `layout`) whose every "
                                 "attribute's semantic the mesh has too — or a list of semantics, [\"POSITION\", \"NORMAL\", \"UV\"].", nullptr };
                 required.initial = Value(Value::List { "POSITION" });
                 required.editor = "names";      // set here, the semantics one after another; wired, a layout
@@ -2690,6 +2690,8 @@ namespace kgraph
             const bool fields = IsMapped(node.type) || node.type == "Bundle";     // a Bundle has its members'
             // A Script node has its script's: its fields, and what each of its resources is made with — its to say.
             const bool script = node.type == "Script";
+            // A ScriptPass has its script's: its fields, and what it uses, each by its name — its to say.
+            const bool scriptPass = node.type == "ScriptPass";
             // A Draw or a Dispatch has its pipeline's besides, which it says once it is built: and what it took before, to say where that went.
             const bool draws = node.type == "Draw" || node.type == "Dispatch" || node.type == "TraceRays";
             // A lens took a view and an extent before: what became of them is its to say.
@@ -2703,7 +2705,7 @@ namespace kgraph
                 });
             };
             const auto own = [&](const std::string& name) {
-                return tested(name) || (draws && (name.starts_with("param.") || name.starts_with("push.") || name == "with" || name == "without"))
+                return scriptPass || tested(name) || (draws && (name.starts_with("param.") || name.starts_with("push.") || name == "with" || name == "without"))
                     || (lens && (name == "view" || name == "extent")) || (node.type == "ForEach" && (name == "select" || name == "which" || name == "entity"));
             };
             for (const auto& name : inputs | std::views::keys)
@@ -2727,7 +2729,8 @@ namespace kgraph
                 rest.erase("async");
                 rest.erase("views");
                 auto built = BuildPass(node, rest, out);
-                if (built && onAsync && out.pass) {
+                if (built && onAsync && out.pass && out.pass->draws) out.status.note = "async: it draws, so it stays on the graphics queue, in order";
+                else if (built && onAsync && out.pass) {
                     out.pass->async = true;
                     if (!kor::Context::SupportsAsyncCompute()) out.status.note = "async: this device has no second queue, so it runs on the graphics queue, in order";
                     else if (out.pass->readsScreen || out.pass->writesScreen) out.status.note = "async: it uses the screen, so it stays on the graphics queue";
@@ -2759,6 +2762,21 @@ namespace kgraph
                 out.outputs["aspect"].value = static_cast<double>(size.x) / static_cast<double>(size.y);
                 out.outputs["format"].value = screenFormat;
                 out.outputs["scale"].value = static_cast<double>(screenScale);
+                return {};
+            }
+            if (node.type == "ScreenFramebuffer") {
+                // The window's own framebuffer — its picture, which is the screen, and its depth — for a Draw to draw straight
+                // into the window. The window keeps it, and resizes it where it is: borrowed, good as long as the window is, and
+                // not made again when the window is resized — nor is a pipeline made for it. How big it is, a Screen says.
+                const auto windows = frameGraph.ScreenFramebuffer();
+                if (!windows.Get()) return Fail("there is no window to draw into: a graph runs in a scene");
+                auto framebuffer = std::make_shared<Resource>();
+                framebuffer->kind = "Framebuffer";
+                framebuffer->node = node.id;
+                framebuffer->handle = kor::capi::BorrowFramebuffer(windows);
+                framebuffer->ofScreen = true;
+                if (!framebuffer->handle) return Fail("the window's framebuffer could not be reached");
+                out.outputs["out"].resource = std::move(framebuffer);
                 return {};
             }
             if (ReadsTheWorld(node.type)) return BuildLive(node, inputs, out);

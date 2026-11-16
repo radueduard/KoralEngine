@@ -8,6 +8,9 @@
 #include <bit>
 #include <cctype>
 #include <format>
+#include <unordered_map>
+#include <cstring>
+#include <cstdlib>
 #include <fstream>
 #include <optional>
 #include <sstream>
@@ -136,12 +139,14 @@ namespace kasset
         }
         kor::Vec3 lower(1e30f), upper(-1e30f);
         model.meshNames.resize(scene.meshes.size());
+        std::vector<std::vector<kmdl::Importer::Mesh::Bone>> bonesOf(scene.meshes.size());   // each mesh's, kept past it
         for (std::size_t i = 0; i < scene.meshes.size(); ++i) {
             auto& from = scene.meshes[i];
             model.meshNames[i] = from.name;
             for (const auto& position : from.positions) { lower = kor::Min(lower, position); upper = kor::Max(upper, position); }
             VertexData data = VertexDataOf(from, import, &model.attributes);
             const std::string called = from.name;
+            bonesOf[i] = std::move(from.bones);
             from = {};
             if (data.vertexCount == 0 || data.indices.empty()) continue;
             read.meshes.push_back({ static_cast<int>(i), called, std::move(data) });
@@ -162,12 +167,52 @@ namespace kasset
                 node.parent = parent;
                 for (int axis = 0; axis < 3; ++axis) { node.position[axis] = from.position[axis]; node.rotation[axis] = from.rotation[axis]; node.scale[axis] = from.scale[axis]; }
                 for (std::size_t part = 0; part < from.meshIndices.size(); ++part)
-                    node.parts.push_back({ std::format("#{}", from.meshIndices[part]), part < from.materialIndices.size() ? static_cast<int>(from.materialIndices[part]) : -1 });
+                    node.parts.push_back({ std::format("#{}", from.meshIndices[part]), part < from.materialIndices.size() ? static_cast<int>(from.materialIndices[part]) : -1, -1 });
                 const int self = static_cast<int>(model.nodes.size());
                 nodeOf[index] = self;
                 model.nodes.push_back(std::move(node));
                 for (const kor::u32 child : from.childIndices) next.emplace_back(child, self);
             }
+        }
+        // A node by its name: the first so called. Bones and channels name theirs.
+        std::unordered_map<std::string, int> named;
+        for (std::size_t i = 0; i < model.nodes.size(); ++i) named.try_emplace(model.nodes[i].name, static_cast<int>(i));
+        const auto byName = [&](const std::string& name) { const auto found = named.find(name); return found == named.end() ? -1 : found->second; };
+        // What bends each skinned mesh: a skin of its own, its joints in its bones' order, as its vertices' BONE_IDS count them.
+        std::vector<int> skinOf(scene.meshes.size(), -1);
+        for (std::size_t i = 0; i < bonesOf.size(); ++i) {
+            if (bonesOf[i].empty()) continue;
+            ModelSkin skin;
+            for (const auto& bone : bonesOf[i]) {
+                auto& joint = skin.joints.emplace_back();
+                joint.node = byName(bone.name);
+                std::memcpy(joint.inverseBind, &bone.offset, sizeof joint.inverseBind);
+            }
+            skinOf[i] = static_cast<int>(model.skins.size());
+            model.skins.push_back(std::move(skin));
+        }
+        for (auto& node : model.nodes)
+            for (auto& part : node.parts) {
+                const std::size_t mesh = std::strtoul(part.mesh.c_str() + 1, nullptr, 10);
+                if (mesh < skinOf.size()) part.skin = skinOf[mesh];
+            }
+        for (const auto& from : scene.animations) {
+            ModelAnimation animation;
+            animation.name = from.name;
+            animation.duration = from.duration;
+            for (const auto& channel : from.channels) {
+                const int node = byName(channel.node);
+                if (node < 0) continue;
+                auto& to = animation.channels.emplace_back();
+                to.node = node;
+                to.positionTimes = channel.positionTimes;
+                to.rotationTimes = channel.rotationTimes;
+                to.scaleTimes = channel.scaleTimes;
+                for (const auto& v : channel.positions) to.positions.insert(to.positions.end(), { v.x, v.y, v.z });
+                for (const auto& v : channel.rotations) to.rotations.insert(to.rotations.end(), { v.x, v.y, v.z, v.w });
+                for (const auto& v : channel.scales) to.scales.insert(to.scales.end(), { v.x, v.y, v.z });
+            }
+            model.animations.push_back(std::move(animation));
         }
         static constexpr float Degrees = 180.f / 3.14159265358979323846f;
         for (const auto& from : scene.lights) {

@@ -419,6 +419,47 @@ class $NAME : ResourceScript() {
     }
 }
 )kt";
+
+        constexpr const char* KotlinPassScript = R"kt(// $NAME: says what a pass does, each frame. A ScriptPass node names it; what it uses — each Pipeline, Buffer and
+// Image below — is an input of the node, by its name, to wire: a ComputePipeline with its parameters wired on it, a buffer,
+// an image. What is wrong in a frame is said on the node, and the pass does nothing that frame.
+import koral.engine.PassScript
+
+class $NAME : PassScript() {
+    var rounds = 4                          // a var is the ScriptPass node's input, given there or wired
+
+    val step = Pipeline()                   // a ComputePipeline it dispatches
+    val counts = Buffer(writes = true)      // a buffer it writes, not only reads
+
+    override fun record(pass: Pass) {
+        pass.write(counts, IntArray(4))     // zeros, before the dispatches: 64 KiB at most, a multiple of 4 bytes
+        repeat(rounds) { round ->
+            // As many groups each way as it likes, and its push constants by their names in the shader.
+            pass.dispatch(step, 64, 1, 1, "round" to round)
+        }
+    }
+}
+)kt";
+
+        constexpr const char* CSharpPassScript = R"cs(// $NAME: says what a pass does, each frame. A ScriptPass node names it; what it uses — each Pipeline, Buffer and
+// Image below — is an input of the node, by its name, to wire: a ComputePipeline with its parameters wired on it, a buffer,
+// an image. What is wrong in a frame is said on the node, and the pass does nothing that frame.
+public sealed class $NAME : PassScript
+{
+    public int Rounds = 4;                          // a field is the ScriptPass node's input, given there or wired
+
+    public Pipeline Step = new();                   // a ComputePipeline it dispatches
+    public Buffer Counts = new(writes: true);       // a buffer it writes, not only reads
+
+    protected override void Record(Pass pass)
+    {
+        pass.Write(Counts, new int[4]);             // zeros, before the dispatches: 64 KiB at most, a multiple of 4 bytes
+        for (var round = 0; round < Rounds; ++round)
+            // As many groups each way as it likes, and its push constants by their names in the shader.
+            pass.Dispatch(Step, 64, 1, 1, ("round", round));
+    }
+}
+)cs";
     
         /** The input of a shader's slot: `vertex.module`; a ComputePass's own, `module`. */
         inline std::string SlotInput(const std::string& slot, const char* part) { return slot.empty() ? std::string(part) : std::format("{}.{}", slot, part); }

@@ -4,6 +4,7 @@
 
 #include "runtime.h"
 
+#include <clocale>
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -175,6 +176,10 @@ namespace khost
                     error = std::format("the JVM in {} could not be started ({}): it must be Java 25 or later", home.string(), made);
                     return nullptr;
                 }
+                // A JVM sets the C locale from the environment as it starts: a number written with a point is then no
+                // number to strtod and printf, in a locale whose decimals are commas. The rest of the program reads and
+                // writes numbers as source and files do.
+                std::setlocale(LC_NUMERIC, "C");
             }
             JNIEnv* env = runtime->env;
             const jclass found = env->FindClass("koral/engine/Embedded");

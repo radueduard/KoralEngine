@@ -353,7 +353,7 @@ TEST_F(RuntimeTest, TheSameParametersShareAMesh) {
     EXPECT_EQ(tuned->node, "$sphere?rings=10&segments=20") << "saved by what it is";
     EXPECT_EQ(runtime.ResourceOf("$sphere?segments=20&rings=10"), tuned) << "however it is written";
     EXPECT_NE(runtime.ResourceOf("$sphere?rings=11&segments=20"), tuned);
-    EXPECT_EQ(runtime.ResourceOf("$sphere?rings=40"), runtime.ResourceOf("$sphere")) << "the numbers it starts with are the mesh it starts as";
+    EXPECT_EQ(runtime.ResourceOf("$sphere?rings=16"), runtime.ResourceOf("$sphere")) << "the numbers it starts with are the mesh it starts as";
     EXPECT_EQ(runtime.ReadMesh("$sphere?rings=10&segments=20")->indices.size(), 10u * 20u * 6u);
     EXPECT_FALSE(runtime.ResourceOf("$blob?rings=10"));
 
@@ -1519,6 +1519,132 @@ TEST_F(RuntimeTest, AReferenceOnASetupPageIsWhatSetupMadeBeforeIt) {
     const auto peek = runtime.Watched("in then");
     ASSERT_TRUE(peek && !peek->bytes.empty()) << runtime.WatchProblem("in then");
     EXPECT_NEAR(static_cast<int>(peek->bytes[0]), 255, 1) << "as setup left it before 'then', not as the frames since left it";
+}
+
+// A script says what a pass does, each frame: a ScriptPass node names it, and what it uses — a pipeline, the buffers
+// it writes — are the node's inputs, wired. In order: a buffer written, a pipeline dispatched round after round with its
+// push constants, then again as many groups as a buffer the same pass wrote says, then a buffer copied. What is needed
+// between them is put there. Until something runs the script, the pass does nothing, and the node says why; a frame the
+// script says something wrong, the node says what, and the pass does nothing.
+TEST_F(RuntimeTest, AScriptSaysWhatAPassDoesEachFrame) {
+    auto& runtime = *scene->runtime;
+    using kgraph::Value;
+    constexpr std::uint32_t n = 64;
+    kgraph::PassScript script;
+    script.name = "Accumulate";
+    script.fields = { { .name = "rounds", .type = "i32", .offset = 0, .size = 4 } };
+    script.uses = { { "add", "Pipeline", false }, { "sums", "Buffer", true }, { "args", "Buffer", true }, { "out", "Buffer", true } };
+    runtime.SetPassScript(script);
+
+    kgraph::Graph graph;
+    const Value usage = Value::List { "eStorage", "eTransferSrc", "eTransferDst", "eIndirect" };
+    graph.Add("sums", "Buffer").Set("instanceCount", n * 4).Set("usage", usage);
+    graph.Add("args", "Buffer").Set("instanceCount", 16).Set("usage", usage);
+    graph.Add("out", "Buffer").Set("instanceCount", n * 4).Set("usage", usage);
+    graph.Add("adding", "ComputePipeline").Set("compute.module", "accumulate").Set("compute.entry", "computeMain").Wire("param.sums", "sums");
+    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Set("field.rounds", 4)
+        .Wire("add", "adding").Wire("sums", "sums").Wire("args", "args").Wire("out", "out");
+    runtime.Set(graph);
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
+    EXPECT_NE(runtime.Status("pass")->note.find("nothing runs it yet"), std::string::npos) << runtime.Status("pass")->note;
+    const auto ports = runtime.PortsOf("pass");
+    for (const char* name : { "add", "sums", "args", "out", "field.rounds" })
+        EXPECT_TRUE(std::ranges::contains(ports, std::string(name), &kgraph::Port::name)) << name << ": what it uses, and its fields, are the node's inputs";
+
+    // Run: each frame, the sums start at 1, are doubled and added to four rounds — 0, 1, 2, 3 — and once more, round 10,
+    // as many groups as 'args' says; then copied out.
+    std::vector<std::int32_t> given;
+    script.record = [&](const std::span<const std::byte> settings, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
+        std::int32_t rounds = 0;
+        std::memcpy(&rounds, settings.data(), 4);
+        given.push_back(rounds);
+        const auto write = [&](const std::uint32_t use, const std::vector<std::uint32_t>& words) {
+            kgraph::PassCommand c;
+            c.op = kgraph::PassCommand::Op::eWrite;
+            c.use = use;
+            c.bytes.resize(words.size() * 4);
+            std::memcpy(c.bytes.data(), words.data(), c.bytes.size());
+            commands.push_back(std::move(c));
+        };
+        write(1, std::vector<std::uint32_t>(n, 1));
+        write(2, { 1, 1, 1 });
+        for (std::int32_t round = 0; round < rounds; ++round) {
+            kgraph::PassCommand c;
+            c.op = kgraph::PassCommand::Op::eDispatch;
+            c.use = 0;
+            c.push = { { "round", Value(round) }, { "count", Value(n) } };
+            commands.push_back(std::move(c));
+        }
+        kgraph::PassCommand indirect;
+        indirect.op = kgraph::PassCommand::Op::eDispatchIndirect;
+        indirect.use = 0;
+        indirect.other = 2;
+        indirect.push = { { "round", Value(10) }, { "count", Value(n) } };
+        commands.push_back(std::move(indirect));
+        kgraph::PassCommand copy;
+        copy.op = kgraph::PassCommand::Op::eCopy;
+        copy.use = 1;
+        copy.other = 3;
+        commands.push_back(std::move(copy));
+        return {};
+    };
+    runtime.SetPassScript(script);
+    runtime.Watch("out");
+    for (int i = 0; i < 4; ++i) Frame();
+    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    ASSERT_FALSE(given.empty());
+    EXPECT_EQ(given.back(), 4) << "its field, as the node gives it";
+    const auto peek = runtime.Watched("out");
+    ASSERT_TRUE(peek && peek->bytes.size() >= n * 4) << runtime.WatchProblem("out");
+    std::vector<std::uint32_t> sums(n);
+    std::memcpy(sums.data(), peek->bytes.data(), n * 4);
+    // 1 → 2 → 5 → 12 → 27 (rounds 0 to 3), then 27 * 2 + 10.
+    EXPECT_EQ(sums, std::vector<std::uint32_t>(n, 64u)) << "each command in order, each seeing what the one before wrote";
+
+    // Something wrong this frame: said on the node, and nothing done.
+    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
+        kgraph::PassCommand c;
+        c.op = kgraph::PassCommand::Op::eDispatch;
+        c.use = 0;
+        c.push = { { "radius", Value(2) } };
+        commands.push_back(std::move(c));
+        return {};
+    };
+    runtime.SetPassScript(script);
+    Frame();
+    Frame();
+    EXPECT_TRUE(runtime.Status("pass")->ok) << "it is built; it is this frame that is wrong";
+    EXPECT_NE(runtime.Status("pass")->note.find("'add' has no push constant 'radius': it has round, count"), std::string::npos) << runtime.Status("pass")->note;
+    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
+        kgraph::PassCommand c;
+        c.op = kgraph::PassCommand::Op::eWrite;
+        c.use = 0;
+        c.bytes.resize(4);
+        commands.push_back(std::move(c));
+        return {};
+    };
+    runtime.SetPassScript(script);
+    Frame();
+    Frame();
+    EXPECT_NE(runtime.Status("pass")->note.find("command 0 takes a Buffer, and 'add' is a Pipeline"), std::string::npos) << runtime.Status("pass")->note;
+    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool) -> std::string { return "it has nothing to do"; };
+    runtime.SetPassScript(script);
+    Frame();
+    Frame();
+    EXPECT_NE(runtime.Status("pass")->note.find("Accumulate did nothing this frame: it has nothing to do"), std::string::npos) << runtime.Status("pass")->note;
+
+    // What it uses, wired wrong, and a use it has not: the node fails, and says why.
+    graph.nodes.erase(std::ranges::find(graph.nodes, std::string("pass"), &kgraph::Node::id));
+    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Wire("add", "sums").Wire("sums", "sums").Wire("args", "args").Wire("out", "out");
+    runtime.Set(graph);
+    EXPECT_FALSE(runtime.Status("pass")->ok);
+    EXPECT_NE(runtime.Status("pass")->error.find("'add' takes a ComputePipeline, and was given a Buffer"), std::string::npos) << runtime.Status("pass")->error;
+    graph.nodes.erase(std::ranges::find(graph.nodes, std::string("pass"), &kgraph::Node::id));
+    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Wire("add", "adding").Wire("sums", "sums").Wire("args", "args").Wire("out", "out").Wire("more", "out");
+    runtime.Set(graph);
+    EXPECT_NE(runtime.Status("pass")->error.find("Accumulate uses no 'more': it uses add, sums, args, out"), std::string::npos) << runtime.Status("pass")->error;
 }
 
 // A script makes resources and fills them on the CPU: a Script node names it, gives it its fields, and gives what it

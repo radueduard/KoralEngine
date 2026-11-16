@@ -3,6 +3,9 @@
 
 #include <gtest/gtest.h>
 
+#include <clocale>
+#include <fstream>
+
 #include <algorithm>
 #include <format>
 
@@ -361,6 +364,98 @@ TEST(Declarations, DataIsFieldsItsBasesFirstAndAbstractDataIsAKind) {
     EXPECT_FALSE(error.empty());
 }
 
+// A PassScript is read as one: what it uses — a Pipeline, a Buffer or an Image, and whether it writes it — and its
+// other fields as settings. No component.
+TEST(Declarations, APassScriptUsesWhatItDeclares) {
+    using Settings = std::vector<std::pair<std::string, std::string>>;
+    const auto kotlin = kscript::Declare(R"(
+        import koral.engine.PassScript
+        class Spread : PassScript() {
+            var rounds = 4
+            val step = Pipeline()
+            val counts = Buffer(writes = true)
+            val seen = PassScript.Image()
+            override fun record(pass: Pass) {}
+        }
+    )", true);
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(kotlin.types.size(), 1u);
+    const auto& spread = kotlin.types[0];
+    EXPECT_TRUE(spread.recordsPass);
+    EXPECT_FALSE(spread.makesResources);
+    ASSERT_EQ(spread.fields.size(), 1u) << "its settings, and none of what it uses";
+    EXPECT_EQ(spread.fields[0].name, "rounds");
+    ASSERT_EQ(spread.resources.size(), 3u);
+    EXPECT_EQ(spread.resources[0].name, "step");
+    EXPECT_EQ(spread.resources[0].kind, "Pipeline");
+    EXPECT_EQ(spread.resources[1].kind, "Buffer");
+    EXPECT_EQ(spread.resources[1].settings, (Settings { { "writes", "true" } }));
+    EXPECT_EQ(spread.resources[2].kind, "Image");
+    EXPECT_TRUE(spread.resources[2].settings.empty()) << "read, not written";
+
+    const auto csharp = kscript::Declare(R"(
+        public sealed class Spread : PassScript
+        {
+            public int Rounds = 4;
+            public Pipeline Step = new();
+            public Buffer Counts = new(writes: true);
+            protected override void Record(Pass pass) { }
+        }
+    )", false);
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(csharp.types.size(), 1u);
+    EXPECT_TRUE(csharp.types[0].recordsPass);
+    ASSERT_EQ(csharp.types[0].fields.size(), 1u);
+    ASSERT_EQ(csharp.types[0].resources.size(), 2u);
+    EXPECT_EQ(csharp.types[0].resources[1].settings, (Settings { { "writes", "true" } }));
+}
+
+// What a PassScript makes is read as made: its kind the node type, its arguments that node type's inputs — a stage's
+// module, a framebuffer's colour, an image's width — and a name of another of the script's as it is written.
+TEST(Declarations, APassScriptMakesWhatItDeclares) {
+    using Settings = std::vector<std::pair<std::string, std::string>>;
+    const auto kotlin = kscript::Declare(R"(
+        import koral.engine.PassScript
+        class Painter : PassScript() {
+            val canvas = Make.Image(format = "eRGBA8_UNORM", width = 256, height = 128, usage = "eColorAttachment | eSampled")
+            val canvasView = Make.ImageView(image = ::canvas.name)
+            val target = Make.Framebuffer(color = ::canvasView.name)
+            val shade = Make.GraphicsPipeline(vertexModule = "shade", fragmentModule = "shade", framebuffer = ::target.name)
+            val blur = Make.ComputePipeline(module = "blur")
+            val counts = Buffer(writes = true)
+            override fun record(pass: Pass) {}
+        }
+    )", true);
+    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(kotlin.types.size(), 1u);
+    const auto& made = kotlin.types[0].resources;
+    ASSERT_EQ(made.size(), 6u);
+    EXPECT_TRUE(made[0].made);
+    EXPECT_EQ(made[0].kind, "Image");
+    EXPECT_EQ(made[0].settings, (Settings { { "format", "\"eRGBA8_UNORM\"" }, { "extent.x", "256" }, { "extent.y", "128" }, { "usage", "[\"eColorAttachment\", \"eSampled\"]" } }));
+    EXPECT_EQ(made[1].settings, (Settings { { "image", "\"canvas\"" } }));
+    EXPECT_EQ(made[2].kind, "Framebuffer");
+    EXPECT_EQ(made[2].settings, (Settings { { "color[0].view", "\"canvasView\"" } }));
+    EXPECT_EQ(made[3].settings, (Settings { { "vertex.module", "\"shade\"" }, { "fragment.module", "\"shade\"" }, { "framebuffer", "\"target\"" } }));
+    EXPECT_EQ(made[4].settings, (Settings { { "compute.module", "\"blur\"" } }));
+    EXPECT_FALSE(made[5].made) << "what it is wired: a use";
+
+    const auto csharp = kscript::Declare(R"(
+        public sealed class Painter : PassScript
+        {
+            public Make.Buffer Counts = new(instanceCount: 64, usage: "eStorage");
+            public Make.ComputePipeline Blur = new(module: "blur", entry: "main");
+            protected override void Record(Pass pass) { }
+        }
+    )", false);
+    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(csharp.types.size(), 1u);
+    ASSERT_EQ(csharp.types[0].resources.size(), 2u);
+    EXPECT_TRUE(csharp.types[0].resources[0].made);
+    EXPECT_EQ(csharp.types[0].resources[0].kind, "Buffer");
+    EXPECT_EQ(csharp.types[0].resources[1].settings, (Settings { { "compute.module", "\"blur\"" }, { "compute.entry", "\"main\"" } }));
+}
+
 // A ResourceScript is read as one: what it makes — each field of a resource type, with what its initialiser makes it
 // with — and its other fields as settings. No component.
 TEST(Declarations, AResourceScriptMakesWhatItDeclares) {
@@ -645,4 +740,64 @@ TEST(Declarations, ASetupWithItsPiecesIsAScript) {
     EXPECT_EQ(kotlin.types[0].fields.size(), 2u);
     EXPECT_FLOAT_EQ(FloatAt(kotlin.types[0], "speed"), 2.f);
     EXPECT_EQ(kotlin.types[0].pieces, std::vector<std::string> { "PerFrame" });
+}
+
+// A Kotlin property initialised to text is text, whatever the text: an address has dots in it, which a number has, and
+// an empty string has nothing to go by. Read as a number, the first was a Double; the second was no type at all.
+TEST(Declarations, AKotlinPropertyOfTextIsText) {
+    const auto folder = std::filesystem::temp_directory_path() / "koral-declarations-text";
+    std::filesystem::remove_all(folder);
+    std::filesystem::create_directories(folder);
+    std::ofstream(folder / "Connection.kt") << R"(import koral.engine.Setup
+import koral.engine.PerFrame
+
+class Connection : Setup(), PerFrame {
+    var address = "127.0.0.1"
+    var nothing = ""        // nothing yet: `this` and "that" in a comment are no matter
+    var port = 27015
+    private val handlers = HashMap<String, MutableList<(Int, ByteArray) -> Unit>>()
+    val ready: Boolean get() = port != 0
+    override fun update(delta: Float) {}
+    fun listen(topic: String, handler: (from: Int, message: ByteArray) -> Unit) { handlers.getOrPut(topic) { mutableListOf() }.add(handler) }
+}
+)";
+    const auto declared = kscript::DeclareFiles(folder);
+    for (const auto& problem : declared.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(declared.types.size(), 1u);
+    std::string fields;
+    for (const auto& field : declared.types[0].fields) fields += field.name + ":" + field.type + " ";
+    EXPECT_EQ(fields, "address:string nothing:string port:i32 ");
+    EXPECT_EQ(declared.types[0].texts.at("address"), "127.0.0.1");
+    EXPECT_FALSE(declared.types[0].texts.contains("nothing")) << "it starts empty, as text not said does";
+}
+
+// What a field starts as is read as its source writes it, whatever the C locale says a number is. A JVM, started for a
+// Kotlin project's scripts, sets it from the environment: in one whose decimals are commas, 0.25f read as 0 — every
+// collider of the physics module a point, every damping none — and everything fell through the floor.
+TEST(Declarations, AStartingNumberIsReadTheSameInAnyLocale) {
+    const std::string was = std::setlocale(LC_NUMERIC, nullptr);
+    bool commas = false;
+    for (const char* locale : { "ro_RO.utf8", "ro_RO.UTF-8", "de_DE.utf8", "de_DE.UTF-8", "fr_FR.utf8", "fr_FR.UTF-8" })
+        if (std::setlocale(LC_NUMERIC, locale)) { commas = true; break; }
+    if (!commas) GTEST_SKIP() << "no locale here writes its decimals with a comma";
+    const auto folder = std::filesystem::temp_directory_path() / "koral-declarations-locale";
+    std::filesystem::remove_all(folder);
+    std::filesystem::create_directories(folder);
+    std::ofstream(folder / "Collider.kt") << "import koral.Vec3\nimport koral.engine.Data\n\nclass Collider : Data() {\n    var radius = 0.25f\n"
+                                              "    var damping = 0.01\n    var halfExtents = Vec3(0.5f, 1.5f, 2.5f)\n}\n";
+    const auto declared = kscript::DeclareFiles(folder);
+    std::setlocale(LC_NUMERIC, was.c_str());
+    for (const auto& problem : declared.problems) ADD_FAILURE() << problem;
+    ASSERT_EQ(declared.types.size(), 1u);
+    const auto& type = declared.types[0];
+    const auto at = [&](const std::string_view name) -> const kecs::FieldDescription& { return *std::ranges::find(type.fields, name, &kecs::FieldDescription::name); };
+    float radius = 0.f, half[3] {};
+    double damping = 0.0;
+    std::memcpy(&radius, type.initial.data() + at("radius").offset, sizeof radius);
+    std::memcpy(&damping, type.initial.data() + at("damping").offset, sizeof damping);
+    std::memcpy(half, type.initial.data() + at("halfExtents").offset, sizeof half);
+    EXPECT_FLOAT_EQ(radius, 0.25f);
+    EXPECT_DOUBLE_EQ(damping, 0.01);
+    EXPECT_FLOAT_EQ(half[0], 0.5f);
+    EXPECT_FLOAT_EQ(half[2], 2.5f);
 }

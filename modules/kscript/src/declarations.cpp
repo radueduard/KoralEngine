@@ -5,6 +5,8 @@
 
 #include <kscript/declarations.h>
 
+#include <charconv>
+
 #ifdef _WIN32
 extern "C" __declspec(dllimport) unsigned long __stdcall GetModuleFileNameW(void* module, wchar_t* path, unsigned long size);
 #endif
@@ -189,7 +191,15 @@ namespace kscript
             std::smatch found;
             if (value == "true") return std::vector { 1.0 };
             if (value == "false") return std::vector { 0.0 };
-            if (std::regex_match(value, found, number)) return std::vector { std::strtod(found[1].str().c_str(), nullptr) };
+            if (std::regex_match(value, found, number)) {
+                // Read as the source writes it, whatever the C locale says a number is: under a JVM's — "de_DE", "ro_RO" —
+                // strtod stops at the point, and 0.25 is 0.
+                const std::string text = found[1].str();
+                const char* first = text.c_str() + (text.front() == '+' ? 1 : 0);
+                double read = 0.0;
+                std::from_chars(first, text.c_str() + text.size(), read);
+                return std::vector { read };
+            }
             if (!std::regex_match(value, found, made)) return std::nullopt;
             std::vector<double> numbers;
             std::stringstream parts(found[1].str());
@@ -205,6 +215,8 @@ namespace kscript
         /** What a Kotlin property is when its type is not written: what it is initialised to says. */
         std::string Inferred(const std::string& value)
         {
+            // Text, before anything a number would be taken for: "127.0.0.1" has dots in it, and "" nothing at all.
+            if (const std::string text = Trim(value); text.size() >= 2 && text.front() == '"' && text.back() == '"') return "String";
             static const std::regex call(R"(^\s*([\w.]+)\s*\()");
             std::smatch found;
             if (std::regex_search(value, found, call)) return found[1].str();
@@ -225,9 +237,11 @@ namespace kscript
             text = Trim(text);
             while (!text.empty() && (text.back() == 'f' || text.back() == 'F' || text.back() == 'd' || text.back() == 'D' || text.back() == 'L')) text.pop_back();
             if (text.empty()) return std::nullopt;
-            char* end = nullptr;
-            const float value = std::strtof(text.c_str(), &end);
-            return end == text.c_str() + text.size() ? std::optional(value) : std::nullopt;
+            // Whatever the C locale says a number is (from_chars, not strtof): see Numbers.
+            const char* first = text.c_str() + (text.front() == '+' ? 1 : 0);
+            float value = 0.f;
+            const auto [end, failed] = std::from_chars(first, text.c_str() + text.size(), value);
+            return failed == std::errc {} && end == text.c_str() + text.size() ? std::optional(value) : std::nullopt;
         }
 
         /**
@@ -263,6 +277,23 @@ namespace kscript
         {
             const std::string bare = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
             return bare == "Image" || bare == "Buffer" || bare == "ImageView" || bare == "BufferView" || bare == "Sampler";
+        }
+
+        /** What a PassScript makes: `Make.Image(...)`, a node of its ScriptPass's own, of that type. */
+        bool IsMadeKind(const std::string& written)
+        {
+            const auto dot = written.rfind('.');
+            if (dot == std::string::npos || !written.substr(0, dot).ends_with("Make")) return false;
+            const std::string bare = written.substr(dot + 1);
+            return bare == "Image" || bare == "Buffer" || bare == "ImageView" || bare == "BufferView" || bare == "Sampler" || bare == "Framebuffer"
+                || bare == "ComputePipeline" || bare == "GraphicsPipeline";
+        }
+
+        /** What a PassScript uses: a pipeline it dispatches, a buffer or an image it reads or writes. */
+        bool IsPassKind(const std::string& written)
+        {
+            const std::string bare = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
+            return bare == "Pipeline" || bare == "GraphicsPipeline" || bare == "Framebuffer" || bare == "Mesh" || bare == "Buffer" || bare == "Image";
         }
 
         /** What is between brackets, apart at the commas that are not in brackets or strings of their own. */
@@ -375,7 +406,14 @@ namespace kscript
                     continue;
                 }
                 std::string input = part[1].str();
-                if (input == "width") input = "extent.x";
+                // As a node of its kind has it: what an argument cannot be called — `extent.x`, `vertex.module` — by a name it can.
+                static const std::regex stage(R"(^(vertex|fragment|mesh|task|compute)(Module|Entry|Layout)$)");
+                std::smatch staged;
+                if (resource.kind == "Framebuffer" && input == "color") input = "color[0].view";
+                else if (resource.kind == "Framebuffer" && input == "depth") input = "depthStencil.view";
+                else if (resource.kind == "ComputePipeline" && (input == "module" || input == "entry")) input = "compute." + input;
+                else if (std::regex_match(input, staged, stage)) input = staged[1].str() + "." + static_cast<char>(std::tolower(staged[2].str()[0])) + staged[2].str().substr(1);
+                else if (input == "width") input = "extent.x";
                 else if (input == "height") input = "extent.y";
                 else if (input == "depth") input = "extent.z";
                 if (const auto json = SettingJson(part[2].str())) resource.settings.emplace_back(std::move(input), *json);
@@ -397,7 +435,7 @@ namespace kscript
 
     namespace {
         /** What a script's class derives from at the root: what it is. */
-        const std::vector<std::string_view> Roots { "Setup", "Script", "GraphicsScript", "ResourceScript", "Material", "Data" };
+        const std::vector<std::string_view> Roots { "Setup", "Script", "GraphicsScript", "ResourceScript", "PassScript", "Material", "Data" };
 
         /** A class as its source says it: what it derives from, and the statements at the top of its body — not yet fields. */
         struct Class {
@@ -499,6 +537,7 @@ namespace kscript
                 type.name = declared.component;
                 type.file = declared.path;
                 type.makesResources = root == "ResourceScript";
+                type.recordsPass = root == "PassScript";
                 type.material = root == "Material";
                 type.data = data;
                 type.abstract = declared.isAbstract;
@@ -533,7 +572,15 @@ namespace kscript
                             if (std::regex_search(modifiers, std::regex(R"(\b(?:private|protected|internal)\b)"))) continue;
                             if (written.empty()) written = Inferred(value);
                             // A resource it makes is one, kept as it is made: a val.
-                            if (type.makesResources && IsResourceKind(written)) { type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems)); continue; }
+                            if (type.recordsPass && IsMadeKind(written)) {
+                                type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
+                                type.resources.back().made = true;
+                                continue;
+                            }
+                            if ((type.makesResources && IsResourceKind(written)) || (type.recordsPass && IsPassKind(written))) {
+                                type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
+                                continue;
+                            }
                             if (field[2].str() == "val") continue;
                         } else {
                             if (!std::regex_match(statement, field, csharpField)) continue;
@@ -542,8 +589,10 @@ namespace kscript
                             name = field[3].str();
                             value = Trim(field[4].str());
                             if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))) continue;
-                            if (type.makesResources && IsResourceKind(written) && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
+                            if (((type.makesResources && IsResourceKind(written)) || (type.recordsPass && (IsPassKind(written) || IsMadeKind(written))))
+                                && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
                                 type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
+                                type.resources.back().made = type.recordsPass && IsMadeKind(written);
                                 continue;
                             }
                             if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;
@@ -714,7 +763,7 @@ namespace kscript
         found.problems.insert(found.problems.begin(), unread.begin(), unread.end());
         std::ranges::sort(found.types, {}, &ScriptType::name);
         for (auto& type : found.types) {
-            if (type.makesResources) continue;      // a script that makes resources is no component
+            if (type.makesResources || type.recordsPass) continue;      // a script that makes resources, or says what a pass does, is no component
             if (type.material) { if (materials) materials->push_back(std::move(type)); continue; }
             std::string error;
             const std::string name = type.name;

@@ -295,6 +295,24 @@ foreach (var child in World.ChildrenOf(car)) { ... }     // in order; World.Root
 var found = World.Find("Wheel");
 ```
 
+A model is put in the scene from a script as the editor puts one there: the entity for the whole at once, and what the
+file holds under it once it is read, a frame or more later (`world.placeModel("characters/hero.glb")`,
+`World.PlaceModel(...)`, from the project's assets; a parent may be given). A model with clips has an `Animator` on that
+entity; what it plays is its fields:
+
+```kotlin
+val hero = world.placeModel("characters/hero.glb")
+// ... once world.has(hero, "Animator"):
+world.set(hero, "Animator", "clip", "Run")              // faded into over its `fade` seconds
+world.set(hero, "Animator", "speed", 1.5f)
+val done = world.fieldJson(hero, "Animator", "time").toFloat() >= world.fieldJson(hero, "Animator", "length").toFloat()
+```
+
+A skinned part's joints are entities under the whole, which the Animator moves each frame: `world.jointsOf(part)`
+(`World.JointsOf`) lists them in the skin's order. A script that turns some of them over the clip — an arm reaching for
+something — does it in its `lateUpdate`, after the Animator; one that poses all of them itself (a ragdoll's) switches
+the Animator off first (`world.setEnabled(hero, "Animator", false)`).
+
 ### Many entities, one script
 
 A script on each of thousands of entities is a call into the script's language each, every frame: fine for a few
@@ -335,6 +353,19 @@ and `setInts` for whole numbers and true or false (1 and 0); `world.fieldWidth` 
 entity (1 for a Float, 3 for a Vec3, 16 for a Mat4). C#: `FieldFloats`, `SetFieldFloats`, `FieldInts`, `SetFieldInts`
 and `FieldWidth`; from C, `kecs_field_floats` and the rest. One without the component reads as zeros and is not set,
 and what is set is marked changed — a Filter grouped by it sees it.
+
+`worldMatricesOf` is where many are in the world, sixteen floats an entity, column by column (C#: `WorldMatricesOf`, a
+span of `Mat4`; from C, `kecs_world_matrices`).
+
+What an entity has, as a whole: `world.componentsOf(entity)` its components by name, `world.fieldsOf("PointLight")` a
+type's fields, and `world.entityJson(entity, skip)` the entity as JSON — `{ "name": ..., "components": { "<component>":
+{ "<field>": value } } }`, each field as `fieldJson` reads it, but the components in `skip`. `world.setEntityJson(entity,
+json)` makes another entity so: its name, the components it lacks added, every field set; a type this world has not is
+passed over. What changed since: `world.currentTick` goes up each frame, and `world.changedTicksOf(entities, ignoring)` is
+the newest tick any of each entity's components was written at, but those in `ignoring`. C#: `ComponentsOf`, `FieldsOf`,
+`EntityJson`, `SetEntityJson`, `CurrentTick`, `ChangedTicksOf`; from C, `kecs_components_of`, `kengine_entity_json`,
+`kengine_entity_set_json`, `kecs_current_tick`, `kecs_changed_ticks`. A server's entities are sent so, and made again on its
+clients (the Network module).
 
 A script that is only data — fields, and no function of its own — is called for nothing and looked at by nothing each
 frame: such a component on thousands of entities costs nothing until something reads it.
@@ -454,6 +485,34 @@ because a node that is built again makes another.
 Koral's matrices are stored a column after another and Slang reads a row after another, so a shader given
 one multiplies with the vector first: `mul(float4(position, 1.0), light.viewProjection)`.
 
+## An interface over the game
+
+A script shows an interface — a HUD, a menu — over the game with `world.setContent { }`, in Compose (`koral.compose`:
+`Box`, `Row`, `Column`, `Text`, `Button`, modifiers): drawn wherever the game is seen — the player's window, the
+editor's Game panel, not the editor's own view of the scene — over everything the scene draws, laid out in that
+place's size, and given its keys and mouse. While the pointer is over it, `world.input.interfaceWantsMouse` says so, and
+a script that steers by the mouse leaves it be. What it shows is built again from the state it reads, as Compose does:
+keep what changes in `mutableStateOf` and set it from `update`.
+
+```kotlin
+class Hud : Setup(), PerFrame {
+    private val health = mutableStateOf(100f)
+    private var shown: GameInterface? = null
+    override fun update(delta: Float) {
+        if (shown == null) shown = world.setContent { Text("Health %.0f".format(health.value)) }
+        health.value = world.fieldJson(player, "Player", "health").toFloat()
+    }
+    override fun onDestroyed() { shown?.close() }      // taken away with the script
+}
+```
+
+Scripts are compiled with Compose's compiler plugin, so a script's `@Composable` functions are its own; the Gradle
+build the editor writes for a code editor applies it too. From C, `kengine_interface_show(document, ui, compose, user)`
+shows a koral-ui `KuiUi*` (a `kui::Ui`), `compose(user)` called first each frame, and `kengine_interface_hide` takes it
+away before it goes. C# has none yet.
+
+`koral-play --frames N --screenshot <file.ppm>` writes the window as it was shown last, interface and all.
+
 ## Scripts that make resources
 
 A `ResourceScript` makes resources and fills them on the CPU as they are made: a noise, a table a shader looks up, the
@@ -516,6 +575,136 @@ It runs when what it makes is made, and again whenever it is made again: a size 
 the script was edited and loaded. A script that throws leaves the node failed, saying what was thrown. From C:
 `kengine_resource_script_register`, with what it makes as `KengineScriptResource`s, and
 `kengine_resource_script_unregister`.
+
+## Scripts that say what a pass does
+
+A **PassScript** (C# `PassScript`, Kotlin `PassScript()`) is a pass whose commands its script says, a frame at a time:
+the dispatches of its pipelines — as many as it likes, each with its push constants — draws, buffers written and copied,
+an indirect dispatch or draw from a buffer the pass wrote itself, images cleared. A **ScriptPass** node of the graph names it, and
+runs it each frame, before the frame is recorded (see [kgraph](kgraph.md)). It is no component: no entity has it.
+
+What it uses is its fields of `Pipeline`, `GraphicsPipeline`, `Framebuffer`, `Mesh`, `Buffer` and `Image`: each an input
+of the ScriptPass node, by the field's name, to wire — a ComputePipeline or a GraphicsPipeline, its parameters wired on
+its node; a Framebuffer it draws into; a mesh it draws; a Buffer; an Image. One it writes says so,
+`Buffer(writes = true)`: what it only reads is not written. Its other public fields are its settings — the node's
+inputs, `field.<name>`, given there or wired — read into it each frame before `Record` (Kotlin `record`) is called.
+
+```kotlin
+import koral.engine.PassScript
+
+class Spread : PassScript() {
+    var rounds = 4
+    val step = Pipeline()                   // a ComputePipeline: its shader's parameters wired on its node
+    val counts = Buffer(writes = true)
+    val args = Buffer(writes = true)
+
+    override fun record(pass: Pass) {
+        pass.write(counts, IntArray(64))                            // zeros, carried in the frame's commands
+        pass.write(args, intArrayOf(1, 1, 1))
+        repeat(rounds) { pass.dispatch(step, 64, 1, 1, "round" to it) }   // push constants by their names in the shader
+        pass.dispatchIndirect(step, args, 0, "round" to 10)         // as many groups as 'args' says
+        pass.copy(counts, args, size = 12)
+    }
+}
+```
+
+```csharp
+public sealed class Spread : PassScript
+{
+    public int Rounds = 4;
+    public Pipeline Step = new();
+    public Buffer Counts = new(writes: true);
+    protected override void Record(Pass pass)
+    {
+        pass.Write(Counts, new int[64]);
+        for (var i = 0; i < Rounds; ++i) pass.Dispatch(Step, 64, 1, 1, ("round", i));
+    }
+}
+```
+
+**What it makes.** Besides what it is wired, a PassScript can make what it uses, and give it on: its fields of `Make.Image`,
+`Make.Buffer`, `Make.ImageView`, `Make.BufferView`, `Make.Sampler`, `Make.Framebuffer`, `Make.ComputePipeline` and
+`Make.GraphicsPipeline`, each made as its arguments say — the node type's inputs, by name — and an output of the
+ScriptPass node by the field's name, for what comes after to use: a Blit of its picture to the screen, a Draw of its
+buffer, another ScriptPass. A whole renderer can be one node.
+
+```kotlin
+class Painter : PassScript() {
+    val canvas = Make.Image(format = "eRGBA8_UNORM", width = 256, height = 256, usage = "eColorAttachment | eSampled | eTransferSrc")
+    val canvasView = Make.ImageView(image = ::canvas.name)                   // made of another: by its name
+    val target = Make.Framebuffer(color = ::canvasView.name)
+    val shade = Make.GraphicsPipeline(vertexModule = "shade", fragmentModule = "shade", framebuffer = ::target.name)
+    val particles = Make.Buffer(instanceCount = 65536, usage = "eStorage")
+    val simulate = Make.ComputePipeline(module = "particles")                // its `particles` parameter: the buffer above
+
+    override fun record(pass: Pass) {
+        if (pass.made) pass.write(particles, FloatArray(1024))              // new, and empty: filled once
+        pass.dispatch(simulate, 256)
+        pass.render(shade) { draw(shade, 6, instances = 65536) }
+    }
+}
+```
+
+Each is a node of the ScriptPass's own, `<pass>/<field>`, made as the source says. The node can say otherwise of any
+of it, `<field>.<input>` — `canvas.extent` wired from the Screen's, to follow the window — and is offered each as an
+input. A setting that names another of the script's resources, or what it is wired (`::target.name`, C#
+`nameof(Target)`), is made of it. A pipeline it makes has each shader parameter of the same name as one of the script's
+buffers, images, views and samplers — the name, or with its first letter small, for C#'s `Sums` — wired to it, unless
+the node wires it otherwise (`<pipeline>.param.<name>`). A stage given a module and no entry has `computeMain`,
+`vertexMain`, `fragmentMain`, `meshMain` or `taskMain`. What it makes it writes. `pass.made` (C# `Made`) is true the first
+frame after the pass was built — what it made may be new, and empty — for what is to be filled once. One that could not
+be made fails the node, saying why. Copies between buffers and images, image to image, blits and mipmaps are commands too:
+`copy(buffer, image)`, `copy(image, buffer)`, `copy(from, to)`, `blit(from, to)`, `generateMipmaps(image)`.
+
+**Drawing** is in a rendering: `render(into, clear, depth, load) { … }` (C#: `using (pass.Render(into, clear)) { … }`),
+into a GraphicsPipeline's framebuffer — the one its node was made with, the window's for a ScreenFramebuffer — or a
+Framebuffer, cleared first unless it `load`s. In it are draws and what they are drawn with, and nothing else; a dispatch
+or a copy goes before or after.
+
+```kotlin
+class Painter : PassScript() {
+    val shade = GraphicsPipeline()          // its framebuffer: what it draws into
+    val cube = Mesh()                       // a Primitive's, a model's
+    val args = Buffer(writes = true)
+
+    override fun record(pass: Pass) {
+        pass.write(args, intArrayOf(6, 1, 0, 0))                     // what an indirect draw reads, written first
+        pass.render(shade, clear = Vec4(0f, 0f, 0f, 1f)) {
+            draw(shade, 3)                                          // vertices the shader makes: no mesh
+            viewport(0, 0, 256, 256)                                // what follows, in a corner
+            drawMesh(shade, cube, instances = 4, "tint" to Vec4(1f, 0f, 0f, 1f))
+            drawIndirect(shade, args)                               // as many as 'args' says
+        }
+    }
+}
+```
+
+`draw` is so many vertices, read by the shader as it likes; `drawMesh` all of a mesh, through its indices when it has
+them; `drawIndexed` a range of them; `drawIndirect` and `drawIndexedIndirect` as many draws as a buffer says;
+`drawMeshTasks` and `drawMeshTasksIndirect` a mesh shader's tasks. A mesh is drawn with the pipeline made for its layout
+(as a Draw node's is), and `vertices(binding, buffer)` binds a buffer as vertices for what the mesh does not. `viewport`
+and `scissor` are all of the framebuffer as a rendering begins. A pipeline draws into a framebuffer of the formats its
+node's has, and one that draws stays on the graphics queue.
+
+What is needed between the commands — one writes what the next reads — is put there, and the pass is ordered among
+the graph's by what it uses: its pipelines' parameters, and its buffers and images. A push constant not given is its
+default in the shader. A buffer it uses is made able to be copied from and dispatched from, and one it writes able to
+be written; an image it writes, able to be cleared. A write is a few kilobytes at most (64 KiB), at a multiple of 4 bytes:
+more is `World.buffer(...).write`, outside the pass.
+
+What is wrong in a frame — a push constant the shader has not, a buffer written that it only reads, an offset past the
+end, a draw with no rendering begun, a mesh the pipeline cannot draw, a throw — is said on the node (its note), and the pass does nothing that frame; a throw is logged once while it
+goes on throwing the same. Its pipelines' parameters are all wired on their nodes: a ScriptPass gives its dispatches
+nothing of their own. The editor offers a ScriptPass node of each PassScript among the nodes to add, and makes one from
+File, New script. From C: `kengine_pass_script_register`, with what it uses as `KenginePassUse`s, and in its `record`
+callback `kengine_pass_dispatch`, `_dispatch_indirect`, `_push`, `_write`, `_copy` and `_clear`; and to draw,
+`kengine_pass_begin_rendering`, `_end_rendering`, `_viewport`, `_scissor`, `_vertex_buffer`, `_draw`, `_draw_mesh`,
+`_draw_indexed`, `_draw_indirect`, `_draw_mesh_tasks` and `_draw_mesh_tasks_indirect`; and `_copy_buffer_to_image`,
+`_copy_image_to_buffer`, `_copy_image`, `_blit` and `_generate_mipmaps`. What it makes is a `KenginePassUse` with
+`made`, its kind the node type, and its `settings` JSON; `record` is told `made`.
+
+One object of the class runs it, made as it is loaded: what it keeps besides its settings is that object's, whichever
+ScriptPass node runs it.
 
 ## Conditions
 
@@ -621,6 +810,10 @@ pointers. `modules/kengine/tests/test_capi.cpp` uses nothing else.
 
 - **Lists and resources as fields.** A script reaches a resource through `World`, by node id. Text is a field (`string`,
   `String`): the engine's own text where the field is, read into the script before each call and written back after.
+- **A PassScript draws with its pipelines as their nodes made them.** What a Draw node sets for its draws — depth
+  test, culling, blending constants, stencil — is the pipeline node's to say for a PassScript's; a rendering clears or
+  loads its colour and depth alike, and stores both. On a page of the fixed step, what it says once a frame is recorded
+  for each step.
 - **A ResourceScript runs only with its project's scripts**, as every script does: until they are compiled, or
   where they cannot be run, what it makes is made with nothing in it, and its node says so.
 - **Scripts run only while the scene plays** in the editor (Play, in the Scene panel): nothing is created, enabled

@@ -64,6 +64,8 @@ namespace kgraph
         bool transient = false;
         std::string label;                  ///< What a person calls it, when it has such a name: a model's mesh, as its file names it.
         std::shared_ptr<Resource> source;   ///< For a view: what it is a view of.
+        /// A framebuffer: the window's own, which is the window's to keep — its picture the screen, and its depth.
+        bool ofScreen = false;
         /// What its node made in its place, when the node was built again: whoever holds this one is after that one.
         std::shared_ptr<Resource> replacedBy;
         /// A mesh's: the box it is in, least corner then greatest — when it is known (one made of numbers: a default
@@ -171,6 +173,95 @@ namespace kgraph
         /// lays them out. Empty when it did, or why it could not. Null for a script declared, that nothing runs: what it
         /// makes is made as it is, empty, and the node says so.
         std::function<std::string(std::span<Contents> contents, std::span<const std::byte> settings)> fill;
+    };
+
+    /**
+     * @brief Something a PassScript's pass uses, as its source declares it: an input of the ScriptPass node that runs
+     *        it, by its name, wired a resource.
+     */
+    struct PassScriptUse {
+        std::string name;               ///< Its field: the ScriptPass node's input.
+        /// Wired: "Pipeline" (a ComputePipeline), "GraphicsPipeline" (drawn with, into its framebuffer), "Framebuffer"
+        /// (drawn into), "Mesh" (drawn), "Buffer", "Image", "ImageView", "BufferView" or "Sampler". Made: the node type it
+        /// is made as — "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "ComputePipeline",
+        /// "GraphicsPipeline".
+        std::string kind;
+        bool writes = false;            ///< A Buffer or an Image it writes — by `write`, `copy` or `clear` — not only reads.
+        /**
+         * Made by the script's ScriptPass node, not wired in: a node of its own, `<pass>/<name>`, of `kind`, made with
+         * `settings` — what the node says otherwise, `<name>.<input>`, before them — and given as the node's output
+         * `name`, for what comes after to use. A setting that names another of the script's resources or uses, by its
+         * name, is wired to it; a pipeline's parameters named as one of them are wired to it, unless said otherwise.
+         * What it makes, it writes.
+         */
+        bool made = false;
+        std::vector<std::pair<std::string, Value>> settings;
+    };
+
+    /**
+     * @brief One command a PassScript records in a frame: what its ScriptPass node's pass does then, in order. Each names
+     *        what it is of by its place among the script's `uses`. The frame graph puts what each needs between them.
+     */
+    struct PassCommand {
+        enum class Op : std::uint8_t {
+            eDispatch,          ///< `use`, a Pipeline, run `groups` many groups each way.
+            eDispatchIndirect,  ///< `use`, a Pipeline, run as many groups as the three numbers at `offset` of `other`, a Buffer, say.
+            eWrite,             ///< `bytes` written into `use`, a Buffer, at `offset`: a few kilobytes at most, carried in the frame's commands.
+            eCopy,              ///< `size` bytes of `use`, a Buffer, from `offset`, into `other`, a Buffer, at `otherOffset`. 0: as many as fit.
+            eClear,             ///< `use`, an Image, every texel of it `color`.
+            // Drawing: between a begin and an end, and nothing else between them.
+            eBeginRendering,    ///< Draws into `use` from here: a GraphicsPipeline's framebuffer, or a Framebuffer. Cleared to `color` and `depth`, unless `load`.
+            eEndRendering,      ///< Drawn into.
+            eViewport,          ///< Where what follows is drawn: `box`, x, y, width, height, in pixels. The whole framebuffer, as a rendering begins.
+            eScissor,           ///< What of it what follows may draw over: `box`, likewise.
+            eVertexBuffer,      ///< `use`, a Buffer, bound at vertex binding `first`, from `offset`: for the draws after it, until a mesh takes the binding back.
+            eDraw,              ///< `use`, a GraphicsPipeline, `size` vertices — `instances` of them — from `first`, the first instance `firstInstance`.
+            eDrawMesh,          ///< `use`, a GraphicsPipeline, all of `mesh`, a Mesh: through its indices when it has them. `instances`, from `firstInstance`.
+            eDrawIndexed,       ///< `use`, a GraphicsPipeline, `size` of `mesh`'s indices from `first` (0: all, or its part's), `vertexOffset` added to each.
+            eDrawIndirect,      ///< `use`, a GraphicsPipeline, `count` draws as `other`, a Buffer, says from `offset`, `stride` apart; of `mesh`'s vertices when given.
+            eDrawIndexedIndirect,       ///< The same, through `mesh`'s indices.
+            eDrawMeshTasks,     ///< `use`, a GraphicsPipeline with a mesh shader, `groups` task groups.
+            eDrawMeshTasksIndirect,     ///< The same, `count` of them as `other` says from `offset`, `stride` apart.
+            // Images: copied, blitted, their levels made.
+            eCopyBufferToImage, ///< `use`, a Buffer, from `offset`, into `other`, an Image: its first level, every layer, a texel after another.
+            eCopyImageToBuffer, ///< `use`, an Image's first level, into `other`, a Buffer, at `offset`.
+            eCopyImage,         ///< `use`, an Image, into `other`, an Image of its size and format.
+            eBlit,              ///< `use`, an Image, into `other`, scaled and filtered to fit it.
+            eGenerateMipmaps,   ///< `use`, an Image, its smaller levels made from its largest.
+        };
+        static constexpr std::uint32_t None = ~0u;      ///< No mesh.
+        Op op = Op::eDispatch;
+        std::uint32_t use = 0, other = 0;
+        std::uint32_t groups[3] { 1, 1, 1 };
+        std::uint64_t offset = 0, otherOffset = 0, size = 0;
+        std::vector<std::byte> bytes;
+        float color[4] { 0.f, 0.f, 0.f, 0.f };
+        float depth = 1.f;
+        bool load = false;
+        std::uint32_t mesh = None;
+        std::uint32_t first = 0, instances = 1, firstInstance = 0, count = 1, stride = 0;
+        std::int32_t vertexOffset = 0;
+        std::uint32_t box[4] { 0, 0, 0, 0 };
+        /// A dispatch's or a draw's push constants, by name: what the pipeline's shaders declare. One not given is its default there.
+        std::vector<std::pair<std::string, Value>> push;
+    };
+
+    /**
+     * @brief A script that says what a pass does, a frame at a time: the dispatches it runs, the buffers it writes and
+     *        copies, the images it clears. A ScriptPass node names one; what it uses — `uses` — are the node's inputs,
+     *        wired. @see Runtime::SetPassScript
+     */
+    struct PassScript {
+        std::string name;                               ///< Its class: what a ScriptPass node names it by.
+        std::vector<PassScriptUse> uses;                ///< What its pass uses, in the order it declares them.
+        std::vector<kecs::FieldDescription> fields;     ///< Its settings: a `field.<name>` input of the node each.
+        std::vector<std::byte> initial;                 ///< What its settings are when a node gives none, as its source says. Empty: zeros.
+        std::size_t size = 0;                           ///< Of its settings' bytes.
+        /// Says what the pass does this frame, into @p commands (empty to begin with), given @p settings: its fields'
+        /// bytes; @p made: whether this is the first frame since the pass was built — what it makes may be new, and
+        /// empty. Called each frame on the scene's thread, before the frame is recorded. Empty when it did, or why it
+        /// could not — the pass then does nothing this frame. Null for a script declared that nothing runs.
+        std::function<std::string(std::span<const std::byte> settings, std::vector<PassCommand>& commands, bool made)> record;
     };
 
     /** @brief What a pass that runs for each entity did, the last frame it was readied for. */
@@ -654,6 +745,15 @@ namespace kgraph
         void RemoveResourceScript(std::string_view name);
         /** @brief The resource scripts a Script node can name, by name: of the runtime it follows, for one that follows another. */
         [[nodiscard]] std::vector<ResourceScript> ResourceScripts() const;
+        /**
+         * @brief Makes @p script one a ScriptPass node can name, or puts it in the place of the one so named: what its
+         *        source declares, then what runs it. Each node that names it is built again.
+         */
+        void SetPassScript(PassScript script);
+        /** @brief Forgets a pass script: a ScriptPass node that names it says there is none. */
+        void RemovePassScript(std::string_view name);
+        /** @brief The pass scripts a ScriptPass node can name: of the runtime it follows, for one that follows another. */
+        [[nodiscard]] std::vector<PassScript> PassScripts() const;
 
         /**
          * @brief Makes @p condition one a ForEach's or a Filter's `conditions` can name, or puts it in the place of the one so

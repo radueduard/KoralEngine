@@ -39,13 +39,16 @@ class InProcessKotlinCompiler(
 
     // One for every compiler of the same jars: what one loaded — and the JVM made fast of it — the next has.
     private val loader = loaderOf(compilerJars)
+    private val composePlugin = compilerJars.firstOrNull { it.fileName.toString().contains("compose-compiler-plugin") }
 
     override fun compile(into: Path): List<String>? {
         val roots = sources.filter { Files.isDirectory(it) }.map { it.toString() }
         if (roots.isEmpty()) return null
         // Its functions' arguments by their names: what a condition's inputs are called on the node.
+        // With Compose's compiler plugin, where it is beside the compiler: a script's @Composable interface is compiled as Compose needs.
+        val plugins = composePlugin?.let { listOf("-Xplugin=$it") } ?: emptyList()
         val arguments = listOf("-d", into.toString(), "-classpath", classpath, "-no-stdlib", "-no-reflect", "-jvm-target", jvmTarget,
-                               "-java-parameters", "-module-name", "scripts", "-nowarn") + roots
+                               "-java-parameters", "-module-name", "scripts", "-nowarn") + plugins + roots
         val said = ByteArrayOutputStream()
         val thread = Thread.currentThread()
         val before = thread.contextClassLoader

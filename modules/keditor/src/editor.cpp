@@ -1343,7 +1343,7 @@ namespace keditor
                         if (panel == "viewer") _session->StopViewing();     // closed, what it copied out and drew stops
                         SaveLayout();
                     }))),
-                    kui::StatusBar(std::format("{}      {} {}{}", _session->Status(), Doc().World().EntityCount(), Doc().World().EntityCount() == 1 ? "entity" : "entities",
+                    kui::StatusBar(std::format("{}{}      {} {}{}", _session->ReadOnly() ? std::format("Read-only: {} changes this scene.      ", _session->SceneHolder()) : std::string(), _session->Status(), Doc().World().EntityCount(), Doc().World().EntityCount() == 1 ? "entity" : "entities",
                                                Doc().Reading() == 0 ? std::string() : std::format("      reading {} {}...", Doc().Reading(), Doc().Reading() == 1 ? "file" : "files")),
                                    _session->Failed() ? kui::StatusLevel::eError : kui::StatusLevel::eInfo),
                 }, kui::FlexOptions {}.SetCrossAxisAlignment(kui::CrossAxisAlignment::eStretch).SetMainAxisSize(kui::MainAxisSize::eMax));
@@ -2095,6 +2095,10 @@ namespace keditor
                 std::vector<kui::MenuItem> scenes;
                 for (const auto& scene : _session->CurrentProject().scenes)
                     scenes.push_back({ .label = ticked(scene == _session->SceneName(), scene.c_str()), .onSelected = [this, scene] { _session->OpenScene(scene); SetState(); } });
+                // The project's scenes, each to open in another editor: a server's in one, its clients' in others.
+                std::vector<kui::MenuItem> others;
+                for (const auto& scene : _session->CurrentProject().scenes)
+                    others.push_back({ .label = scene, .onSelected = [this, scene] { _session->OpenAnotherEditor(scene); SetState(); } });
                 // Six menus: the project and its scenes; what is done to what is picked; what there is to make; how it is
                 // seen; the project's files; the graph. Playing is the title bar's, in its middle (and Ctrl+P).
                 std::vector<kui::MenuItem> make {
@@ -2121,6 +2125,7 @@ namespace keditor
                         { "Revert to saved", Asking("Putting the saved scene back", [this] { _session->Revert(); }), _session->HasProject() && !playMode },
                         { .separator = true },
                         { "Run the game   Ctrl+R", needsProject([this] { _session->Run(); }) },
+                        { .label = "Open another editor", .enabled = !others.empty(), .items = std::move(others) },
                         { "Export the game...", needsProject([this] {
                             SetState([&] { _dialog = Dialog::eExportGame; _newId = (_session->CurrentProject().directory / "build" / _session->CurrentProject().name).generic_string(); });
                         }) },
@@ -4397,6 +4402,13 @@ namespace keditor
                     names.insert(names.end(), unticked.begin(), unticked.end());
                     return Ticks(std::move(names), ticked, set);
                 }
+                if (port.editor == "passScript") {
+                    // The project's scripts that say what a pass does: what this node can run.
+                    std::vector<std::string> names;
+                    for (const auto& script : Doc().PassScripts()) names.push_back(script.name);
+                    std::ranges::sort(names);
+                    return Choice(std::move(names), value, set, "a PassScript");
+                }
                 if (port.editor == "script") {
                     // The project's scripts that fill a resource: what this node can run.
                     std::vector<std::string> names;
@@ -4640,6 +4652,16 @@ namespace keditor
                                 for (const auto& resource : script.resources) makes += std::format("{}{} ({})", makes.empty() ? "" : ", ", resource.name, resource.kind);
                                 rows.push_back(kgui::Muted(std::format("{} makes {}{}", script.name, makes.empty() ? std::string("nothing") : makes,
                                                                        script.fill ? "." : ". Nothing runs it now: it fills them when the project runs with its scripts."), 11.f));
+                            }
+                // What the script it runs uses, and whether anything runs it.
+                if (node.type == "ScriptPass")
+                    if (const auto named = node.inputs.find("script"); named != node.inputs.end() && named->second.value.String())
+                        for (const auto& script : Doc().PassScripts())
+                            if (script.name == *named->second.value.String()) {
+                                std::string uses;
+                                for (const auto& use : script.uses) uses += std::format("{}{} ({}{})", uses.empty() ? "" : ", ", use.name, use.kind, use.writes ? ", written" : "");
+                                rows.push_back(kgui::Muted(std::format("{} uses {}{}", script.name, uses.empty() ? std::string("nothing") : uses,
+                                                                       script.record ? "." : ". Nothing runs it now: it records once the project runs with its scripts."), 11.f));
                             }
                 if (const auto* report = runtime.ReportOf(id)) {
                     rows.push_back(kgui::Muted(std::format("Runs for {} {}.", report->ran + report->culled, report->ran + report->culled == 1 ? "entity" : "entities")));
@@ -6987,6 +7009,13 @@ namespace keditor
 
     void EditorScene::Update()
     {
+        // Which this is, in its title: one of several editors on a project — a server's scene, a client's — is told
+        // apart by it, and by whether its scene is another's to change.
+        if (_session) {
+            const std::string title = !_session->HasProject() ? std::string("Koral Engine")
+                : std::format("{} — {}{} — Koral Engine", _session->CurrentProject().name, _session->SceneName(), _session->ReadOnly() ? " (read-only)" : "");
+            if (title != SceneWindow().Title()) SceneWindow().SetTitle(title);
+        }
         // Gone to another window: what was held is let go, as the letting go will not be heard. Looking round, above all.
         if (const bool focused = SceneWindow().IsFocused(); focused != _focused) {
             if (std::exchange(_focused, focused)) SceneInput().ReleaseAll();

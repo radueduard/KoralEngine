@@ -92,6 +92,26 @@ public sealed unsafe class World
     private Meshes? _meshes;
 
     public Entity Create(string name = "Entity") => Native.kengine_entity_create(Document, name);
+    /// <summary>The entities a skinned entity's joints are (its Skin's), in the skin's order: none for one without a Skin, or whose model is not read yet.</summary>
+    public unsafe Entity[] JointsOf(Entity entity)
+    {
+        var count = Native.kengine_skin_joints(Document, entity, null, 0);
+        var found = new Entity[count];
+        if (count == 0) return found;
+        fixed (Entity* into = found) Native.kengine_skin_joints(Document, entity, into, count);
+        return found;
+    }
+    /// <summary>
+    /// A model file's things, as the editor puts it in a scene: the entity over them all, under <paramref name="parent"/> (none: at the top),
+    /// at once — and what the file holds made under it once it is read: its clips played by an Animator on it, a skinned
+    /// mesh bent by its joints. <paramref name="file"/> is from the project's assets, or whole. Throws when there is no such file.
+    /// </summary>
+    public Entity PlaceModel(string file, Entity? parent = null)
+    {
+        var placed = Native.kengine_model_place(Document, file, parent ?? Entity.Null);
+        if (placed.IsNull) throw new EngineException(Native.LastError());
+        return placed;
+    }
     /// <summary>Destroys an entity, and everything under it. False when it was not alive.</summary>
     public bool Destroy(Entity entity) => Native.kecs_destroy(Handle, entity);
     public bool Alive(Entity entity) => Native.kecs_alive(Handle, entity);
@@ -156,6 +176,12 @@ public sealed unsafe class World
     }
     /// <summary>Their quaternions; one not alive reads as the identity.</summary>
     public unsafe int OrientationsOf(ReadOnlySpan<Entity> entities, Span<Quat> into) => Fours(entities, into, &Native.kecs_orientations);
+    /// <summary>Their matrices in the world; one not alive reads as zeros.</summary>
+    public unsafe int WorldMatricesOf(ReadOnlySpan<Entity> entities, Span<Mat4> into)
+    {
+        if (into.Length < entities.Length) throw new ArgumentException($"a value an entity: {entities.Length} of them, not {into.Length}");
+        fixed (Entity* e = entities) fixed (Mat4* v = into) return (int)Native.kecs_world_matrices(Handle, e, (nuint)entities.Length, v);
+    }
     public unsafe int SetOrientations(ReadOnlySpan<Entity> entities, ReadOnlySpan<Quat> values) => Fours(entities, MemoryMarshal.CreateSpan(ref MemoryMarshal.GetReference(values), values.Length), &Native.kecs_set_orientations);
     // A field of a component, of many at once: its numbers, FieldWidth of them an entity — 1 for a float, 3 for a Vec3,
     // 16 for a Mat4 — one entity's after another. Floats for a field of them, ints for one of whole numbers or a bool
@@ -242,6 +268,52 @@ public sealed unsafe class World
         fixed (Entity* into = found)
             Native.kecs_query(Handle, allIds, (nuint)all.Count, noneIds, (nuint)none.Count, includeDisabled, into, count);
         return found;
+    }
+
+    // ---- what an entity has, and what changed ----------------------------------------------------------------
+
+    /// <summary>The components an entity has, by name.</summary>
+    public unsafe IReadOnlyList<string> ComponentsOf(Entity entity)
+    {
+        var count = Native.kecs_components_of(Handle, entity, null, 0);
+        if (count == 0) return Array.Empty<string>();
+        var ids = new uint[count];
+        fixed (uint* at = ids) Native.kecs_components_of(Handle, entity, at, count);
+        return ids.Select(id => Native.Text(Native.kecs_component_name(Handle, id))).ToArray();
+    }
+    /// <summary>A component type's fields, by name, in order; none for a type there is not.</summary>
+    public unsafe IReadOnlyList<string> FieldsOf(string component)
+    {
+        var id = Native.kecs_component_find(Handle, component);
+        if (id == Native.NoComponent) return Array.Empty<string>();
+        var names = new List<string>();
+        var count = Native.kecs_component_field_count(Handle, id);
+        for (uint i = 0; i < count; ++i) {
+            KecsField field;
+            if (Native.kecs_component_field(Handle, id, i, &field)) names.Add(Native.Text(field.Name));
+        }
+        return names;
+    }
+    /// <summary>The world's tick: what a change is stamped with. It goes up each frame.</summary>
+    public uint CurrentTick => Native.kecs_current_tick(Handle);
+    /// <summary>
+    /// Of many at once: the newest tick any of each entity's components was added or written at, but those in
+    /// <paramref name="ignoring"/>. 0 for one with none. How many were alive.
+    /// </summary>
+    public unsafe int ChangedTicksOf(ReadOnlySpan<Entity> entities, Span<uint> into, IEnumerable<string>? ignoring = null)
+    {
+        if (into.Length < entities.Length) throw new ArgumentException($"a value an entity: {entities.Length} of them, not {into.Length}");
+        var ids = (ignoring ?? Array.Empty<string>()).Select(name => Native.kecs_component_find(Handle, name)).Where(id => id != Native.NoComponent).ToArray();
+        fixed (Entity* e = entities) fixed (uint* t = into) fixed (uint* i = ids)
+            return (int)Native.kecs_changed_ticks(Handle, e, (nuint)entities.Length, i, (nuint)ids.Length, t);
+    }
+    /// <summary>An entity as JSON, but the components in <paramref name="skip"/>: what <see cref="SetEntityJson"/> makes a copy of.</summary>
+    public string EntityJson(Entity entity, IEnumerable<string>? skip = null) =>
+        Native.Text(Native.kengine_entity_json(Document, entity, string.Join(",", skip ?? Array.Empty<string>())));
+    /// <summary>Makes an entity as <see cref="EntityJson"/>'s text says: its name, the components it lacks, every field.</summary>
+    public void SetEntityJson(Entity entity, string json)
+    {
+        if (!Native.kengine_entity_set_json(Document, entity, json)) throw new EngineException(Native.LastError());
     }
 
     // ---- a component's fields -------------------------------------------------------------------------------

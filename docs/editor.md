@@ -28,6 +28,11 @@ the display's rate, and `--frames N` to stop after so many. `koral-editor <proje
 project's scene in order — Arrange every page — saves it and exits: a graph a script wrote, laid out as the editor
 would (its window is open while it does).
 
+A scene with no Screen and no ScreenFramebuffer — in its graph, or in a function it calls — shows nothing, and
+`koral-play` runs it with no window and no display at all: offscreen, `--rate N` frames a second (60) until it is
+stopped. That is a server's scene; see [networking](networking.md). The same page says how one project is open in
+several editors at once, each scene changed by one of them.
+
 ## The panels
 
 | Panel | |
@@ -586,6 +591,11 @@ assets. The meshes and pictures stay in their files, and are found by them again
 opened. A scene saved before materials were their own — a pipeline's component holding `albedo` and its pictures — has
 each such entity given a PbrMaterial of those values when it is opened. All of it is read off the frame: the entity named for the file is there at once, its things are made
 under it when the file is read, and their pictures come in after.
+
+**A model that moves.** A part bent by joints is given a `Skin`, its joints the model's own nodes under the entity for
+the whole; a file with clips gives that entity an `Animator`, playing the first of them while the scene plays. Its
+`clip` is any of the file's by name (`#2` by number); another is faded into. A graph draws a skinned part with a shader
+that reads its joints — see [Skinned meshes, and clips](kgraph.md#skinned-meshes-and-clips).
 
 **Before it is put in the scene, it is asked about.** Whichever way it is put there — *Import into the
 scene...* in the model's inspector or its menu; dropped on the scene or the scene tree — a dialog lists what its

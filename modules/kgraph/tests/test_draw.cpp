@@ -4,6 +4,8 @@
 #include <log.h>
 
 #include <algorithm>
+#include <array>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -94,6 +96,31 @@ TEST_F(DrawTest, ATriangleIsDrawnWithoutAMesh) {
     EXPECT_NE(scene->runtime->Status("draw")->error.find("a ForEach's now"), std::string::npos) << scene->runtime->Status("draw")->error;
 }
 
+// A ScreenFramebuffer is the window's own: what is drawn into it is on the screen, with nothing copied to show it.
+TEST_F(DrawTest, AScreenFramebufferDrawsIntoTheWindow) {
+    kgraph::Graph graph;
+    graph.Add("target", "ScreenFramebuffer");
+    Triangles(graph);
+    graph.Add("draw", "Draw").Wire("pipeline", "triangles");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 3)) << "the triangle, on the screen";
+    EXPECT_FALSE(Green(28, 28)) << "what the window clears to";
+
+    // A second draw over the first, which it loads; the first clears to what it says.
+    graph.Find("draw")->Set("clearColor", Value::List { 0, 0, 1, 1 });
+    graph.Add("over", "Draw").Wire("pipeline", "triangles").Set("vertexCount", 3).Set("firstVertex", 3).Set("colorLoad", "eLoad")
+        .Set("scissor", Value::List { 16, 0, 16, 32 });
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_TRUE(Green(3, 3)) << "the first draw's, kept";
+    EXPECT_TRUE(Green(28, 28)) << "the second's, over it";
+    EXPECT_FALSE(Green(3, 28)) << "outside the second's scissor, the colour the first cleared to";
+    EXPECT_GT(scene->Pixel(3, 28).x + scene->Pixel(3, 28).z, 247);
+
+    EXPECT_TRUE(std::ranges::contains(scene->Schedule(), "draw")) << "it writes the screen: kept, though nothing reads what it draws";
+}
+
 // A setting given in part has the rest as its inputs start: a depth attachment given only its view is cleared to 1,
 // the farthest, so that what is drawn with a depth test passes it — not to the builder's zero, which nothing passes.
 TEST_F(DrawTest, ADepthAttachmentGivenOnlyItsViewClearsToTheFarthest) {
@@ -176,6 +203,34 @@ TEST_F(DrawTest, AMeshWiredInIsDrawnOnce) {
     scene->runtime->Set(graph);
     ASSERT_FALSE(scene->runtime->Status("draw")->ok);
     EXPECT_NE(scene->runtime->Status("draw")->error.find("wire it a 'mesh'"), std::string::npos) << scene->runtime->Status("draw")->error;
+}
+
+// A pipeline given no vertex layout works one out of what its vertex shader reads, and gives it: a mesh that has more
+// is drawn all the same, with the pipeline made again for it, and the layout says which meshes those are.
+TEST_F(DrawTest, APipelinesVertexLayoutIsWorkedOutOfItsShader) {
+    kgraph::Graph graph = Canvas();
+    graph.Add("square", "Primitive").Set("shape", "eQuad");
+    graph.Add("flat", "GraphicsPipeline").Set("vertex.module", "flat").Set("vertex.entry", "vertexMain")
+        .Set("fragment.module", "flat").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("draw", "Draw").Wire("pipeline", "flat").Wire("mesh", "square");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_GT(scene->Pixel(16, 16).x, 247) << "the square, in the middle";
+    EXPECT_TRUE(Black(1, 1));
+    const Value layout = scene->runtime->ValueOf("flat", "layout");
+    const Value* attributes = layout.Find("attributes");
+    ASSERT_TRUE(attributes && attributes->Items());
+    ASSERT_EQ(attributes->Items()->size(), 1u) << "what the shader reads: a position";
+    EXPECT_EQ(*attributes->Items()->front().Find("semantic"), Value("POSITION"));
+    EXPECT_EQ(*attributes->Items()->front().Find("channelCount"), Value(3));
+
+    // Given one, that is its layout.
+    graph.Find("flat")->Wire("vertex.layout", "square", "layout");
+    Run(graph);
+    ASSERT_TRUE(scene->runtime->Ok());
+    EXPECT_EQ(scene->runtime->ValueOf("flat", "layout"), scene->runtime->ValueOf("square", "layout"));
+    EXPECT_GT(scene->Pixel(16, 16).x, 247);
 }
 
 // What to draw, and how many groups to run, read from a buffer a compute shader wrote.
@@ -468,6 +523,233 @@ TEST_F(DrawTest, MeshShadersAreDrawnAsTasks) {
     graph.Find("draw")->Set("command", "eDrawMeshTasks").Set("tasks", Value::List { 1, 1, 1 });
     scene->runtime->Set(graph);
     EXPECT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
+}
+
+// A PassScript draws: into a pipeline's framebuffer, cleared as it says, a triangle and then both; in a scissor; as many
+// as a buffer the pass wrote says; a mesh, with the pipeline made for its layout; into the window's own framebuffer. What
+// is said out of turn — a draw with no rendering begun, a dispatch in one — is said on the node, and nothing is drawn.
+TEST_F(DrawTest, APassScriptDraws) {
+    using Op = kgraph::PassCommand::Op;
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Canvas();
+    Triangles(graph);
+    graph.Add("square", "Primitive").Set("shape", "eQuad");
+    graph.Add("flat", "GraphicsPipeline").Set("vertex.module", "flat").Set("vertex.entry", "vertexMain")
+        .Set("fragment.module", "flat").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("args", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eIndirect", "eTransferDst" });
+    graph.Add("pass", "ScriptPass").Set("script", "Painter").Wire("triangles", "triangles").Wire("flat", "flat").Wire("square", "square").Wire("args", "args");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+
+    kgraph::PassScript script;
+    script.name = "Painter";
+    script.uses = { { "triangles", "GraphicsPipeline", false }, { "flat", "GraphicsPipeline", false }, { "square", "Mesh", false }, { "args", "Buffer", true } };
+    std::vector<kgraph::PassCommand> said;
+    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string { commands = said; return {}; };
+    runtime.SetPassScript(script);
+    const auto command = [](const Op op, const std::uint32_t use = 0) { kgraph::PassCommand c; c.op = op; c.use = use; return c; };
+    const auto begin = [&](const std::uint32_t into, std::array<float, 4> color, const bool load = false) {
+        auto c = command(Op::eBeginRendering, into);
+        std::ranges::copy(color, c.color);
+        c.load = load;
+        return c;
+    };
+    const auto draw = [&](const std::uint32_t vertices, const std::uint32_t first = 0) { auto c = command(Op::eDraw, 0); c.size = vertices; c.first = first; return c; };
+    const auto blue = [&](const kor::u32 x, const kor::u32 y) { const auto p = scene->Pixel(x, y); return p.x < 8 && p.y < 8 && p.z > 247; };
+
+    // A triangle, the framebuffer cleared to blue round it.
+    said = { begin(0, { 0, 0, 1, 1 }), draw(3), command(Op::eEndRendering) };
+    Run(graph);
+    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(3, 3)) << "the triangle";
+    EXPECT_TRUE(blue(28, 28)) << "what it cleared to";
+
+    // Both, but only in the right half: the scissor's. A rendering left open is ended.
+    auto scissor = command(Op::eScissor);
+    std::ranges::copy(std::array<std::uint32_t, 4> { Size / 2, 0, Size / 2, Size }, scissor.box);
+    said = { begin(0, { 0, 0, 1, 1 }), scissor, draw(6) };
+    Run(graph);
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(28, 28)) << "the second triangle, in the scissor";
+    EXPECT_TRUE(Green(28, 3)) << "the first, in it too";
+    EXPECT_TRUE(blue(3, 28)) << "outside it, only cleared";
+
+    // As many as 'args' says, written by the pass before it draws: six vertices, one instance.
+    auto write = command(Op::eWrite, 3);
+    const std::uint32_t words[4] { 6, 1, 0, 0 };
+    write.bytes.resize(sizeof words);
+    std::memcpy(write.bytes.data(), words, sizeof words);
+    auto indirect = command(Op::eDrawIndirect, 0);
+    indirect.other = 3;
+    indirect.mesh = kgraph::PassCommand::None;
+    said = { write, begin(0, { 0, 0, 0, 1 }), indirect, command(Op::eEndRendering) };
+    Run(graph);
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(3, 3));
+    EXPECT_TRUE(Green(28, 28)) << "both triangles, as the buffer said";
+
+    // A mesh, with the pipeline made for its layout: 'flat' was given none.
+    auto quad = command(Op::eDrawMesh, 1);
+    quad.mesh = 2;
+    said = { begin(1, { 0, 0, 0, 1 }), quad, command(Op::eEndRendering) };
+    Run(graph);
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_GT(scene->Pixel(16, 16).x, 247) << "the square, in the middle";
+    EXPECT_TRUE(Black(1, 1));
+
+    // Out of turn: said, and nothing drawn.
+    said = { draw(3) };
+    Run(graph);
+    EXPECT_NE(runtime.Status("pass")->note.find("command 0 draws, and no rendering is begun"), std::string::npos) << runtime.Status("pass")->note;
+    said = { begin(0, { 0, 0, 0, 1 }), write };
+    Run(graph);
+    EXPECT_NE(runtime.Status("pass")->note.find("command 1 is no draw, and a rendering into 'triangles' is begun"), std::string::npos) << runtime.Status("pass")->note;
+    said = { begin(0, { 0, 0, 0, 1 }), command(Op::eDrawMesh, 0) };
+    Run(graph);
+    EXPECT_NE(runtime.Status("pass")->note.find("draws a mesh, and is given none"), std::string::npos) << runtime.Status("pass")->note;
+    auto tasks = command(Op::eDrawMeshTasks, 0);
+    said = { begin(0, { 0, 0, 0, 1 }), tasks };
+    Run(graph);
+    EXPECT_NE(runtime.Status("pass")->note.find("'triangles' draws mesh tasks, and has no mesh shader"), std::string::npos) << runtime.Status("pass")->note;
+
+    // Into the window's own framebuffer: on the screen, with nothing copied to show it.
+    kgraph::Graph windowed;
+    windowed.Add("target", "ScreenFramebuffer");
+    Triangles(windowed);
+    windowed.Add("pass", "ScriptPass").Set("script", "Window").Wire("triangles", "triangles");
+    kgraph::PassScript window;
+    window.name = "Window";
+    window.uses = { { "triangles", "GraphicsPipeline", false } };
+    window.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
+        commands = { begin(0, { 0, 0, 1, 1 }), draw(3), command(Op::eEndRendering) };
+        return {};
+    };
+    runtime.SetPassScript(window);
+    Run(windowed);
+    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(3, 3)) << "the triangle, on the screen";
+    EXPECT_TRUE(blue(28, 28));
+    EXPECT_TRUE(std::ranges::contains(scene->Schedule(), "pass")) << "it writes the screen: kept, though nothing reads what it draws";
+}
+
+// A PassScript draws a mesh shader's tasks.
+TEST_F(DrawTest, APassScriptDrawsMeshTasks) {
+    using Op = kgraph::PassCommand::Op;
+    auto& runtime = *scene->runtime;
+    kgraph::Graph graph = Canvas();
+    graph.Add("meshlets", "GraphicsPipeline").Set("stages", "eMesh").Set("mesh.module", "meshlet").Set("mesh.entry", "meshMain")
+        .Set("fragment.module", "meshlet").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
+    graph.Add("pass", "ScriptPass").Set("script", "Tasks").Wire("meshlets", "meshlets");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
+    kgraph::PassScript script;
+    script.name = "Tasks";
+    script.uses = { { "meshlets", "GraphicsPipeline", false } };
+    script.record = [](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
+        kgraph::PassCommand begin, tasks, end;
+        begin.op = Op::eBeginRendering;
+        begin.color[3] = 1;
+        tasks.op = Op::eDrawMeshTasks;
+        end.op = Op::eEndRendering;
+        commands = { begin, tasks, end };
+        return {};
+    };
+    runtime.SetPassScript(script);
+    runtime.Set(graph);
+    if (const auto* status = runtime.Status("meshlets"); !status->ok) GTEST_SKIP() << "no mesh shaders here: " << status->error;
+    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
+    Frame();
+    Frame();
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(3, 3));
+    EXPECT_TRUE(Black(28, 28));
+}
+
+// A PassScript makes what it uses: an image, a view of it, a framebuffer of that, a pipeline that draws into it, a
+// buffer, a pipeline that adds into it — its parameter wired to it by its name. Each is a node of the ScriptPass's own,
+// made as the script says or as the node says otherwise, and an output of it: a copy and a Blit after it use them.
+TEST_F(DrawTest, APassScriptMakesWhatItUsesAndGivesItOn) {
+    using Op = kgraph::PassCommand::Op;
+    auto& runtime = *scene->runtime;
+    kgraph::PassScript script;
+    script.name = "Maker";
+    const auto made = [](std::string name, std::string kind, std::vector<std::pair<std::string, Value>> settings) {
+        kgraph::PassScriptUse use { std::move(name), std::move(kind), false };
+        use.made = true;
+        use.settings = std::move(settings);
+        return use;
+    };
+    script.uses = {
+        made("canvas", "Image", { { "format", "eRGBA8_UNORM" }, { "extent", Value::List { Size, Size } },
+                                  { "usage", Value::List { "eColorAttachment", "eTransferSrc", "eTransferDst", "eSampled" } } }),
+        made("canvasView", "ImageView", { { "image", "canvas" } }),
+        made("target", "Framebuffer", { { "color[0].view", "canvasView" } }),
+        made("triangles", "GraphicsPipeline", { { "vertex.module", "triangle" }, { "fragment.module", "triangle" }, { "framebuffer", "target" } }),
+        made("sums", "Buffer", { { "instanceCount", 256 }, { "usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" } } }),
+        made("adding", "ComputePipeline", { { "compute.module", "accumulate" } }),
+    };
+    std::vector<bool> fresh;
+    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, const bool first) -> std::string {
+        fresh.push_back(first);
+        kgraph::PassCommand write;
+        write.op = Op::eWrite;
+        write.use = 4;
+        write.bytes.resize(64 * 4);
+        const std::vector<std::uint32_t> ones(64, 1);
+        std::memcpy(write.bytes.data(), ones.data(), write.bytes.size());
+        kgraph::PassCommand add;
+        add.op = Op::eDispatch;
+        add.use = 5;
+        add.push = { { "round", Value(3) }, { "count", Value(64) } };
+        kgraph::PassCommand begin, draw, end;
+        begin.op = Op::eBeginRendering;
+        begin.use = 3;
+        begin.color[2] = begin.color[3] = 1;
+        draw.op = Op::eDraw;
+        draw.use = 3;
+        draw.size = 3;
+        end.op = Op::eEndRendering;
+        commands = { write, add, begin, draw, end };
+        return {};
+    };
+    runtime.SetPassScript(script);
+
+    kgraph::Graph graph;
+    graph.Add("pass", "ScriptPass").Set("script", "Maker");
+    graph.Add("out", "Buffer").Set("instanceCount", 256).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
+    graph.Add("copy", "CopyBuffer").Wire("source", "pass", "sums").Wire("destination", "out");
+    graph.Add("screen", "Screen");
+    graph.Add("show", "Blit").Wire("source", "pass", "canvas").Wire("destination", "screen");
+    Run(graph);
+    runtime.Watch("out");
+    for (int i = 0; i < 4; ++i) Frame();
+    for (const char* each : { "pass/canvas", "pass/canvasView", "pass/target", "pass/triangles", "pass/sums", "pass/adding" })
+        if (const auto* status = runtime.Status(each); status && !status->ok) ADD_FAILURE() << each << ": " << status->error;
+    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
+    EXPECT_TRUE(Green(3, 3)) << "drawn into the image it made, and shown by what comes after";
+    EXPECT_GT(scene->Pixel(28, 28).z, 247) << "what it cleared it to";
+    const auto peek = runtime.Watched("out");
+    ASSERT_TRUE(peek && peek->bytes.size() >= 64 * 4) << runtime.WatchProblem("out");
+    std::uint32_t first = 0;
+    std::memcpy(&first, peek->bytes.data(), 4);
+    EXPECT_EQ(first, 5u) << "1 * 2 + 3: written, then added to by the pipeline it made, its 'sums' the buffer it made";
+    ASSERT_GE(fresh.size(), 2u);
+    EXPECT_TRUE(fresh.front()) << "its first frame: what it made is new";
+    EXPECT_FALSE(fresh.back()) << "and not since";
+
+    std::vector<std::string> outputs;
+    for (const auto& output : runtime.OutputsOf("pass")) if (output.kind == kgraph::PortKind::eResource) outputs.push_back(output.name + ":" + output.type);
+    for (const char* each : { "canvas:Image", "canvasView:ImageView", "target:Framebuffer", "triangles:GraphicsPipeline", "sums:Buffer", "adding:ComputePipeline" })
+        EXPECT_TRUE(std::ranges::contains(outputs, std::string(each))) << each << ": what it makes, given on";
+    const auto ports = runtime.PortsOf("pass");
+    EXPECT_TRUE(std::ranges::contains(ports, std::string("canvas.format"), &kgraph::Port::name)) << "what each is made with, the node's to say otherwise";
+
+    // Said otherwise on the node: made so.
+    graph.Find("pass")->Set("canvas.format", "eNotAFormat");
+    scene->runtime->Set(graph);
+    EXPECT_FALSE(runtime.Status("pass")->ok);
+    EXPECT_NE(runtime.Status("pass")->error.find("'canvas' could not be made"), std::string::npos) << runtime.Status("pass")->error;
 }
 
 // The catalog says all of it, for an editor to offer.

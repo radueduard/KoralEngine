@@ -1,8 +1,10 @@
 package koral.engine
 
 import java.lang.foreign.Arena
+import java.lang.foreign.MemoryLayout
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.SegmentAllocator
+import java.lang.foreign.ValueLayout.ADDRESS
 import java.lang.foreign.ValueLayout.JAVA_FLOAT
 import java.lang.foreign.ValueLayout.JAVA_INT
 import koral.Buffer
@@ -138,6 +140,28 @@ class World internal constructor(internal val document: MemorySegment) {
     fun create(name: String = "Entity"): Entity = native { a ->
         Native.entity(Native.kengine_entity_create.invokeExact(a as SegmentAllocator, document, a.allocateFrom(name)) as MemorySegment)
     }
+    /**
+     * A model file's things, as the editor puts it in a scene: the entity over them all, under [parent], at once — and
+     * what the file holds made under it once it is read (a frame or more later): its clips played by an Animator on it
+     * (`world.set(placed, "Animator", "clip", "Run")`), a skinned mesh bent by its joints. [file] is from the project's
+     * assets (`characters/hero.glb`), or whole. Throws when there is no such file.
+     */
+    fun placeModel(file: String, parent: Entity = Entity.Null): Entity = native { a ->
+        val placed = Native.entity(Native.kengine_model_place.invokeExact(a as SegmentAllocator, document, a.allocateFrom(file), Native.entity(a, parent)) as MemorySegment)
+        if (placed.isNull) throw EngineException(Native.lastError)
+        placed
+    }
+    /**
+     * The entities a skinned entity's joints are (its Skin's), in the skin's order: none for one without a Skin, or
+     * whose model is not read yet. Each is an entity of the model's under the whole, which an Animator moves.
+     */
+    fun jointsOf(entity: Entity): List<Entity> = native { a ->
+        val count = Native.kengine_skin_joints.invokeExact(document, Native.entity(a, entity), MemorySegment.NULL, 0L) as Long
+        if (count == 0L) return@native emptyList()
+        val found = a.allocate(Native.ENTITY, count)
+        Native.kengine_skin_joints.invokeExact(document, Native.entity(a, entity), found, count) as Long
+        List(count.toInt()) { Native.entity(found.asSlice(it * 8L, 8)) }
+    }
     /** Destroys an entity, and everything under it. False when it was not alive. */
     fun destroy(entity: Entity): Boolean = native { a -> Native.kecs_destroy.invokeExact(handle, Native.entity(a, entity)) as Boolean }
     fun alive(entity: Entity): Boolean = native { a -> Native.kecs_alive.invokeExact(handle, Native.entity(a, entity)) as Boolean }
@@ -227,6 +251,8 @@ class World internal constructor(internal val document: MemorySegment) {
         return (write.invokeExact(handle, entities.segment, entities.size.toLong(), room) as Long).toInt()
     }
     fun positionsOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_positions, entities, into)
+    /** Their matrices in the world: sixteen floats an entity, column by column. One not alive reads as zeros. */
+    fun worldMatricesOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_world_matrices, entities, into, 16)
     fun rotationsOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_rotations, entities, into)
     fun scalesOf(entities: Entities, into: FloatArray? = null): FloatArray = threes(Native.kecs_scales, entities, into)
     /** How many were alive, and so set. */
@@ -323,6 +349,56 @@ class World internal constructor(internal val document: MemorySegment) {
         val found = a.allocate(Native.ENTITY, count)
         Native.kecs_query.invokeExact(handle, allIds, all.size.toLong(), noneIds, none.size.toLong(), includeDisabled, found, count) as Long
         List(count.toInt()) { Native.entity(found.asSlice(it * 8L, 8)) }
+    }
+
+    // ---- what an entity has, and what changed ----------------------------------------------------------------
+
+    /** The components an entity has, by name. */
+    fun componentsOf(entity: Entity): List<String> = native { a ->
+        val count = Native.kecs_components_of.invokeExact(handle, Native.entity(a, entity), MemorySegment.NULL, 0) as Int
+        if (count == 0) return@native emptyList()
+        val ids = a.allocate(JAVA_INT, count.toLong())
+        Native.kecs_components_of.invokeExact(handle, Native.entity(a, entity), ids, count) as Int
+        List(count) { Native.text(Native.kecs_component_name.invokeExact(handle, ids.getAtIndex(JAVA_INT, it.toLong())) as MemorySegment) }
+    }
+    /** A component type's fields, by name, in order; none for a type there is not. */
+    fun fieldsOf(component: String): List<String> = native { a ->
+        val id = id(a, component)
+        if (id == Native.NO_COMPONENT) return@native emptyList()
+        val count = Native.kecs_component_field_count.invokeExact(handle, id) as Int
+        val field = a.allocate(Native.FIELD)
+        (0 until count).mapNotNull { i ->
+            if (!(Native.kecs_component_field.invokeExact(handle, id, i, field) as Boolean)) null
+            else Native.text(field.get(ADDRESS, Native.FIELD.byteOffset(MemoryLayout.PathElement.groupElement("name"))))
+        }
+    }
+    /** The world's tick: what a change is stamped with. It goes up each frame. */
+    val currentTick: Int get() = Native.kecs_current_tick.invokeExact(handle) as Int
+    /**
+     * Of many at once: the newest tick any of each entity's components was added or written at — later than one kept,
+     * and it changed since — but those in [ignoring]. 0 for one with none. Pass the array back in each frame.
+     */
+    fun changedTicksOf(entities: Entities, ignoring: Collection<String> = emptyList(), into: IntArray? = null): IntArray = native { a ->
+        val out = if (into != null && into.size >= entities.size) into else IntArray(entities.size)
+        val ids = ignoring.map { id(a, it) }.filter { it != Native.NO_COMPONENT }
+        val ignored = a.allocate(JAVA_INT, maxOf(ids.size, 1).toLong())
+        ids.forEachIndexed { i, id -> ignored.setAtIndex(JAVA_INT, i.toLong(), id) }
+        val room = entities.room(entities.size.toLong())
+        Native.kecs_changed_ticks.invokeExact(handle, entities.segment, entities.size.toLong(), ignored, ids.size.toLong(), room) as Long
+        MemorySegment.copy(room, JAVA_INT, 0L, out, 0, entities.size)
+        out
+    }
+
+    /**
+     * An entity as JSON — `{ "name": ..., "components": { "<component>": { "<field>": value } } }`, each field as
+     * [fieldJson] reads it — but the components in [skip]. What another world makes a copy of with [setEntityJson].
+     */
+    fun entityJson(entity: Entity, skip: Collection<String> = emptyList()): String = native { a ->
+        Native.text(Native.kengine_entity_json.invokeExact(document, Native.entity(a, entity), a.allocateFrom(skip.joinToString(","))) as MemorySegment)
+    }
+    /** Makes an entity as [entityJson]'s text says: its name, the components it lacks, every field. Types this world has not are passed over. */
+    fun setEntityJson(entity: Entity, json: String) = native { a ->
+        if (!(Native.kengine_entity_set_json.invokeExact(document, Native.entity(a, entity), a.allocateFrom(json)) as Boolean)) throw EngineException(Native.lastError)
     }
 
     // ---- a component's fields -------------------------------------------------------------------------------

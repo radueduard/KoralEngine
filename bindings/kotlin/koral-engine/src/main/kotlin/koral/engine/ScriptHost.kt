@@ -3,6 +3,7 @@ package koral.engine
 import java.lang.foreign.Arena
 import java.lang.foreign.MemorySegment
 import java.lang.foreign.ValueLayout.ADDRESS
+import java.lang.foreign.ValueLayout.JAVA_BOOLEAN
 import java.lang.foreign.ValueLayout.JAVA_INT
 import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.lang.invoke.MethodHandles
@@ -50,6 +51,7 @@ class ScriptHost(
     private class Built(val into: Path, val sources: String, val errors: List<String>?)
     private val registered = LinkedHashMap<String, Registered>()
     private val resources = LinkedHashMap<String, RegisteredResource>()
+    private val passes = LinkedHashMap<String, RegisteredPass>()
     private val conditions = LinkedHashMap<String, RegisteredCondition>()
 
     /** The conditions the scripts declare, by the name a node's `conditions` gives them: `<Class>.<function>`. */
@@ -185,7 +187,8 @@ class ScriptHost(
         val types = try {
             classNames().mapNotNull { name ->
                 val type = next.loadClass(name)
-                if (((Setup::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type)) && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
+                if (((Setup::class.java.isAssignableFrom(type) || ResourceScript::class.java.isAssignableFrom(type) || PassScript::class.java.isAssignableFrom(type))
+                     && !java.lang.reflect.Modifier.isAbstract(type.modifiers)
                     && type.constructors.any { it.parameterCount == 0 }) || (Conditions::class.java.isAssignableFrom(type) && type != Conditions::class.java)) type else null
             }.sortedBy { it.name }
         } catch (e: LinkageError) {
@@ -202,11 +205,13 @@ class ScriptHost(
         }
 
         // The code that is going stops being called before it goes. Its data stays where it is.
-        val gone = (registered.keys + resources.keys) - layouts.map { it.second.name }.toSet()
+        val gone = (registered.keys + resources.keys + passes.keys) - layouts.map { it.second.name }.toSet()
         registered.values.forEach { it.unregister() }
         registered.clear()
         resources.values.forEach { it.unregister() }
         resources.clear()
+        passes.values.forEach { it.unregister() }
+        passes.clear()
         conditions.values.forEach { it.unregister() }
         conditions.clear()
 
@@ -226,6 +231,17 @@ class ScriptHost(
                 }
             }
         for ((type, layout) in layouts) {
+            // One that says what a pass does is a ScriptPass node's to run, and no component.
+            if (PassScript::class.java.isAssignableFrom(type)) {
+                val pass = RegisteredPass(world, type, layout)
+                val why = try {
+                    if (pass.register()) null else Native.lastError
+                } catch (e: java.lang.reflect.InvocationTargetException) {
+                    "making one threw ${e.targetException.javaClass.simpleName}: ${e.targetException.message}"
+                }
+                if (why == null) passes[layout.name] = pass else failed += "${layout.name}: $why"
+                continue
+            }
             // One that makes resources is a Script node's to run, and no component.
             if (ResourceScript::class.java.isAssignableFrom(type)) {
                 val resource = RegisteredResource(world, type, layout)
@@ -246,7 +262,7 @@ class ScriptHost(
         ++generation
         errors = failed
         failed.forEach { Log.error("[scripts] $it") }
-        Log.info("[scripts] loaded: " + (if (registered.isEmpty() && resources.isEmpty()) "none" else (registered.keys + resources.keys).sorted().joinToString(", "))
+        Log.info("[scripts] loaded: " + (if (registered.isEmpty() && resources.isEmpty() && passes.isEmpty()) "none" else (registered.keys + resources.keys + passes.keys).sorted().joinToString(", "))
                  + (if (gone.isNotEmpty()) " (gone: ${gone.joinToString(", ")})" else ""))
         return true
     }
@@ -265,6 +281,8 @@ class ScriptHost(
         registered.clear()
         resources.values.forEach { it.unregister() }
         resources.clear()
+        passes.values.forEach { it.unregister() }
+        passes.clear()
         conditions.values.forEach { it.unregister() }
         conditions.clear()
         loader?.let { ScriptLayout.forget(it); it.close() }
@@ -589,6 +607,113 @@ class ScriptHost(
         }
     }
 
+    // ---- one script that says what a pass does, registered -----------------------------------------------------
+
+    /**
+     * A PassScript class as the engine has it: one object of it, made as it is registered, given each ScriptPass node's
+     * settings each frame before it says what that node's pass does.
+     */
+    internal class RegisteredPass(private val world: World, private val type: Class<*>, val layout: ScriptLayout) {
+        private val key = nextKey++
+        private var said: Arena? = null     // why the last record could not be: the engine reads it before the next
+        private var complained = ""
+
+        /** The fields of what it uses, in the order they are written: each a use, by its place. */
+        private val uses: List<java.lang.reflect.Field> = generateSequence<Class<*>>(type) { it.superclass }.takeWhile { it != PassScript::class.java }
+            .toList().reversed().flatMap { c -> c.declaredFields.filter { PassScript.Use::class.java.isAssignableFrom(it.type) && !java.lang.reflect.Modifier.isStatic(it.modifiers) } }
+            .onEach { it.isAccessible = true }
+
+        private val script: PassScript = (type.getDeclaredConstructor().newInstance() as PassScript).also { made ->
+            made.world = world
+            uses.forEachIndexed { i, field ->
+                val use = field.get(made) as PassScript.Use
+                use.name = field.name
+                use.index = i
+            }
+        }
+
+        fun register(): Boolean = Arena.ofConfined().use { a ->
+            val callbacks = a.allocate(Native.PASS_CALLBACKS)
+            callbacks.setAtIndex(ADDRESS, 0, MemorySegment.ofAddress(key))
+            callbacks.setAtIndex(ADDRESS, 1, recordStub)
+            val fields = a.allocate(Native.FIELD, maxOf(layout.properties.size, 1).toLong())
+            layout.properties.forEachIndexed { i, p ->
+                val at = i * Native.FIELD.byteSize()
+                fields.set(ADDRESS, at, a.allocateFrom(p.field.name))
+                fields.set(ADDRESS, at + 8, a.allocateFrom(p.type))
+                fields.set(JAVA_INT, at + 16, p.offset)
+                fields.set(JAVA_INT, at + 20, p.size)
+            }
+            val declared = a.allocate(Native.PASS_USE, maxOf(uses.size, 1).toLong())
+            uses.forEachIndexed { i, field ->
+                val use = field.get(script) as PassScript.Use
+                val at = i * Native.PASS_USE.byteSize()
+                val made = use.makes
+                declared.set(ADDRESS, at, a.allocateFrom(field.name))
+                declared.set(ADDRESS, at + 8, a.allocateFrom(made ?: use.kind))
+                declared.set(JAVA_BOOLEAN, at + 16, use.writes)
+                declared.set(JAVA_BOOLEAN, at + 17, made != null)
+                declared.set(ADDRESS, at + 24, if (made != null) a.allocateFrom(settingsJson(use.settings)) else MemorySegment.NULL)
+            }
+            passesLive[key] = this
+            val ok = Native.kengine_pass_script_register.invokeExact(world.document, a.allocateFrom(layout.name), layout.size.toLong(),
+                                                                     fields, layout.properties.size.toLong(), declared, uses.size.toLong(), callbacks) as Boolean
+            if (!ok) passesLive.remove(key)
+            ok
+        }
+
+        fun unregister() {
+            Arena.ofConfined().use { a ->
+                Native.kengine_pass_script_unregister.invokeExact(world.document, a.allocateFrom(layout.name))
+                Unit
+            }
+            passesLive.remove(key)
+            said?.close()
+            said = null
+        }
+
+        /** What one made is made with, as JSON: flags given as `"eSampled | eStorage"` a list of them. */
+        private fun settingsJson(settings: List<Pair<String, Any>>): String {
+            fun text(t: String) = "\"" + t.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+            return settings.joinToString(", ", "{", "}") { (input, value) ->
+                "${text(input)}: " + when (value) {
+                    is String -> if ('|' in value) value.split('|').map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ", "[", "]") { text(it) } else text(value)
+                    is Boolean, is Number -> value.toString()
+                    else -> text(value.toString())
+                }
+            }
+        }
+
+        fun record(commands: MemorySegment, settings: MemorySegment, size: Long, made: Boolean): MemorySegment {
+            said?.close()
+            said = null
+            return try {
+                if (size >= layout.size) layout.load(script, settings.reinterpret(maxOf(layout.size, 1).toLong()))
+                Arena.ofConfined().use { arena -> script.record(PassScript.Pass(commands, arena, made)) }
+                complained = ""
+                MemorySegment.NULL
+            } catch (e: Throwable) {
+                val thrown = (e as? java.lang.reflect.InvocationTargetException)?.targetException ?: e
+                val why = "it threw ${thrown.javaClass.simpleName}: ${thrown.message}"
+                // Said once while it goes on throwing the same: it is called every frame.
+                if (why != complained) { complained = why; Log.error("[scripts] ${layout.name}.record threw: ${thrown.stackTraceToString()}") }
+                val arena = Arena.ofShared().also { said = it }
+                arena.allocateFrom(why)
+            }
+        }
+    }
+
+    internal object PassUpcalls {
+        @JvmStatic fun record(user: MemorySegment, commands: MemorySegment, settings: MemorySegment, size: Long, made: Boolean): MemorySegment =
+            // Must not throw: the caller is C.
+            try {
+                passesLive[user.address()]?.record(commands, settings, size, made) ?: MemorySegment.NULL
+            } catch (e: Throwable) {
+                runCatching { Log.error("[scripts] a pass's record failed: ${e.stackTraceToString()}") }
+                MemorySegment.NULL
+            }
+    }
+
     /** What the engine calls to fill what a script makes: one function for every such script, told apart by the number each registered with. */
     /** A Conditions class's @Condition function, as the graph runs it: its components and inputs from JSON. */
     internal class RegisteredCondition(private val world: World, val name: String, private val method: java.lang.reflect.Method, private val components: Int) {
@@ -734,6 +859,10 @@ class ScriptHost(
         }
         val live = HashMap<Long, Registered>()
         val resourcesLive = HashMap<Long, RegisteredResource>()
+        val passesLive = HashMap<Long, RegisteredPass>()
+        val recordStub: MemorySegment by lazy {
+            Koral.linker.upcallStub(MethodHandles.lookup().findStatic(PassUpcalls::class.java, "record", Native.RECORD.toMethodType()), Native.RECORD, Arena.global())
+        }
         val conditionsLive = HashMap<Long, RegisteredCondition>()
         val testStub: MemorySegment by lazy {
             Koral.linker.upcallStub(MethodHandles.lookup().findStatic(ConditionUpcalls::class.java, "test", Native.TEST.toMethodType()), Native.TEST, Arena.global())

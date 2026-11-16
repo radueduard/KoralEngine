@@ -1,4 +1,7 @@
-plugins { kotlin("jvm") }
+plugins {
+    kotlin("jvm")
+    kotlin("plugin.compose")        // World.setContent takes a composable
+}
 
 // The engine from Kotlin: a scene's entities and graph, scripts as classes, and the host that loads them again.
 dependencies {
@@ -14,6 +17,8 @@ dependencies {
 val kotlinCompiler by configurations.creating
 dependencies {
     kotlinCompiler("org.jetbrains.kotlin:kotlin-compiler-embeddable:${org.jetbrains.kotlin.gradle.plugin.getKotlinPluginVersion(logger)}")
+    // Compose's compiler plugin, which a script's @Composable functions need: given to the compiler as it compiles them.
+    kotlinCompiler("org.jetbrains.kotlin:kotlin-compose-compiler-plugin-embeddable:${org.jetbrains.kotlin.gradle.plugin.getKotlinPluginVersion(logger)}")
 }
 tasks.register("hostLayout") {
     dependsOn(tasks.jar)

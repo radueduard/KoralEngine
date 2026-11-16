@@ -173,7 +173,11 @@ namespace keditor
             for (const auto& module : Doc().Modules()) roots.push_back(module);
             for (const auto& root : roots)
             if (const auto folder = root / "assets"; std::filesystem::is_directory(folder, ignored))
-                for (const auto& entry : std::filesystem::recursive_directory_iterator(folder, std::filesystem::directory_options::skip_permission_denied, ignored)) {
+                for (auto it = std::filesystem::recursive_directory_iterator(folder, std::filesystem::directory_options::skip_permission_denied | std::filesystem::directory_options::follow_directory_symlink, ignored);
+                     it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
+                    const auto& entry = *it;
+                    // A folder linked in is listed as if it were there, but not gone round and round.
+                    if (entry.is_directory(ignored)) { if (entry.is_symlink(ignored) && it.depth() > 16) it.disable_recursion_pending(); continue; }
                     if (!entry.is_regular_file(ignored)) continue;
                     const std::string kind = ending(entry.path());
                     const bool material = kind == ".kmat";      // a project's own Material asset
@@ -228,7 +232,7 @@ namespace keditor
                 asset.id = "script:" + type.name;
                 asset.label = type.name;
                 asset.file = type.file;
-                asset.group = type.makesResources ? "resources" : type.material ? "material" : type.abstract ? "kind" : type.data ? "data" : "script";
+                asset.group = type.makesResources ? "resources" : type.recordsPass ? "pass" : type.material ? "material" : type.abstract ? "kind" : type.data ? "data" : "script";
                 if (listed.insert(asset.id).second) assets.push_back(std::move(asset));
             }
             // And its classes of conditions: no component, but what a ForEach or a Filter keeps an entity by.
@@ -368,9 +372,10 @@ namespace keditor
             static const std::set<std::string> skipped { "bin", "obj", "build", "node_modules", "out" };
             std::error_code ignored;
             const auto walk = [&](const std::filesystem::path& top, const std::string& under) {
-                for (auto it = std::filesystem::recursive_directory_iterator(top, std::filesystem::directory_options::skip_permission_denied, ignored);
+                for (auto it = std::filesystem::recursive_directory_iterator(top, std::filesystem::directory_options::skip_permission_denied | std::filesystem::directory_options::follow_directory_symlink, ignored);
                      it != std::filesystem::recursive_directory_iterator(); it.increment(ignored)) {
                     if (!it->is_directory(ignored)) continue;
+                    if (it->is_symlink(ignored) && it.depth() > 16) { it.disable_recursion_pending(); continue; }
                     const std::string name = it->path().filename().string();
                     // Nor the textures compressed into its cache: each the machine's own copy of a file shown elsewhere.
                     const bool cache = name == "cache" && it.depth() == 0;
@@ -701,8 +706,8 @@ namespace keditor
         if (_prefab) ClosePrefab(true);
         if (InPlayMode()) Stop();
         if (name == _scene) return true;
-        // What was done to the one open is kept: saved before it is let go of.
-        if (Doc().Dirty() && !Save()) return false;
+        // What was done to the one open is kept: saved before it is let go of — when it is this editor's to save.
+        if (!ReadOnly() && Doc().Dirty() && !Save()) return false;
         std::string error;
         if (!_play.Open(_project.ScenePath(name), error)) {
             Say(error, true);
@@ -711,6 +716,7 @@ namespace keditor
             return false;
         }
         _scene = name;
+        OwnScene();
         selectedNode.clear();
         selectedEntity = kecs::NullEntity;
         _snapshot.clear();
@@ -745,8 +751,8 @@ namespace keditor
         if (!_hasProject) { Say("A game is exported from a project: File, New project.", true); return false; }
         if (InPlayMode()) Stop();
         if (_prefab) ClosePrefab(true);
-        // What is open is what is exported: saved first.
-        if (Doc().Dirty() && !Save()) return false;
+        // What is open is what is exported: saved first, when it is this editor's to save.
+        if (!ReadOnly() && Doc().Dirty() && !Save()) return false;
         kasset::Database* assets = AssetDatabase();
         if (!assets) { Say("The project's assets could not be found.", true); return false; }
         std::error_code ec;

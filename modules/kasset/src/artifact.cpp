@@ -10,7 +10,7 @@ namespace kasset
         constexpr char Magic[4] { 'K', 'M', 'D', 'L' };
         constexpr char MeshMagic[4] { 'K', 'M', 'S', 'H' };
         /// Goes up whenever what is written changes: one of another version is not read, and is made again.
-        constexpr std::uint32_t Version = 2;
+        constexpr std::uint32_t Version = 3;
 
         struct Writer {
             std::vector<std::byte> out;
@@ -78,6 +78,20 @@ namespace kasset
             io.Text(c.name); io.Raw(c.position); io.Raw(c.direction); io.Raw(c.up); io.Raw(c.orthographic); io.Raw(c.fieldOfView);
             io.Raw(c.height); io.Raw(c.aspect); io.Raw(c.zNear); io.Raw(c.zFar); io.Raw(c.node); io.Raw(c.atNode);
         }
+        template <typename IO, typename T> void Skin(IO& io, T& s) { io.List(s.joints); }
+        template <typename IO, typename T> void Animation(IO& io, T& a)
+        {
+            io.Text(a.name); io.Raw(a.duration);
+            if constexpr (std::is_const_v<T>) {
+                io.Raw(static_cast<std::uint32_t>(a.channels.size()));
+                for (const auto& c : a.channels) { io.Raw(c.node); io.List(c.positionTimes); io.List(c.positions); io.List(c.rotationTimes); io.List(c.rotations); io.List(c.scaleTimes); io.List(c.scales); }
+            } else {
+                for (std::uint32_t i = 0, n = io.Count(); i < n && !io.failed; ++i) {
+                    auto& c = a.channels.emplace_back();
+                    io.Raw(c.node); io.List(c.positionTimes); io.List(c.positions); io.List(c.rotationTimes); io.List(c.rotations); io.List(c.scaleTimes); io.List(c.scales);
+                }
+            }
+        }
         template <typename IO, typename T> void Attribute(IO& io, T& a) { io.Text(a.semantic); io.Text(a.type); io.Raw(a.count); io.Raw(a.read); }
         template <typename IO, typename T> void Data(IO& io, T& d)
         {
@@ -109,7 +123,7 @@ namespace kasset
         for (const auto& node : model.nodes) {
             w.Text(node.name); w.Raw(node.parent); w.Raw(node.position); w.Raw(node.rotation); w.Raw(node.scale);
             w.Raw(static_cast<std::uint32_t>(node.parts.size()));
-            for (const auto& part : node.parts) { w.Text(part.mesh); w.Raw(part.material); }
+            for (const auto& part : node.parts) { w.Text(part.mesh); w.Raw(part.material); w.Raw(part.skin); }
         }
         w.Raw(static_cast<std::uint32_t>(model.materials.size()));
         for (const auto& material : model.materials) Material(w, material);
@@ -117,6 +131,10 @@ namespace kasset
         for (const auto& light : model.lights) Light(w, light);
         w.Raw(static_cast<std::uint32_t>(model.cameras.size()));
         for (const auto& camera : model.cameras) Camera(w, camera);
+        w.Raw(static_cast<std::uint32_t>(model.skins.size()));
+        for (const auto& skin : model.skins) Skin(w, skin);
+        w.Raw(static_cast<std::uint32_t>(model.animations.size()));
+        for (const auto& animation : model.animations) Animation(w, animation);
         w.Texts(model.meshNames);
         w.Raw(model.boundsMin); w.Raw(model.boundsMax);
         w.Raw(static_cast<std::uint32_t>(model.attributes.size()));
@@ -140,11 +158,13 @@ namespace kasset
         for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) {
             ModelNode& node = model.nodes.emplace_back();
             r.Text(node.name); r.Raw(node.parent); r.Raw(node.position); r.Raw(node.rotation); r.Raw(node.scale);
-            for (std::uint32_t p = 0, parts = r.Count(); p < parts && !r.failed; ++p) { auto& part = node.parts.emplace_back(); r.Text(part.mesh); r.Raw(part.material); }
+            for (std::uint32_t p = 0, parts = r.Count(); p < parts && !r.failed; ++p) { auto& part = node.parts.emplace_back(); r.Text(part.mesh); r.Raw(part.material); r.Raw(part.skin); }
         }
         for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Material(r, model.materials.emplace_back());
         for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Light(r, model.lights.emplace_back());
         for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Camera(r, model.cameras.emplace_back());
+        for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Skin(r, model.skins.emplace_back());
+        for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Animation(r, model.animations.emplace_back());
         r.Texts(model.meshNames);
         r.Raw(model.boundsMin); r.Raw(model.boundsMax);
         for (std::uint32_t i = 0, n = r.Count(); i < n && !r.failed; ++i) Attribute(r, model.attributes.emplace_back());

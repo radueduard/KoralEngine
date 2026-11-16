@@ -5,6 +5,7 @@
 #include "expand.h"
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <cmath>
 #include <deque>
@@ -1095,7 +1096,76 @@ namespace kgraph
         }
     }
 
-    Expansion Expand(const Graph& given, const ElementOf& elementOf, const FieldsOf& fieldsOf, const std::map<std::string, int, std::less<>>& counts)
+    /**
+     * A ScriptPass whose script makes resources: each a node of its own, `<pass>/<name>`, before it — made with what the
+     * source says, then what the node says (`<name>.<input>`, moved onto it) — and wired to the pass's input of its name.
+     * A setting that names another of the script's resources is a wire to it, and one that names what the script uses, a
+     * wire to what that is wired to; a pipeline it makes has each parameter named as one of them wired to it, unless the
+     * node says otherwise (`maybe.param.<name>`, taken only where its shaders have it).
+     */
+    static void WriteScriptPasses(Graph& graph, const MadeOf& madeOf)
+    {
+        if (!madeOf) return;
+        std::vector<std::pair<std::string, Node>> made;
+        for (Node& node : graph.nodes) {
+            if (node.type != "ScriptPass") continue;
+            const auto script = node.inputs.find("script");
+            if (script == node.inputs.end() || !script->second.value.String()) continue;
+            const auto makes = madeOf(*script->second.value.String());
+            if (!makes || makes->made.empty()) continue;
+            const auto idOf = [&](const std::string& name) { return node.id + "/" + name; };
+            const auto isMade = [&](const std::string& name) { return std::ranges::contains(makes->made, name, &ScriptMakes::Made::name); };
+            // What a name of the script's stands for, as an input: what it makes, or what its use is wired to.
+            const auto named = [&](const std::string& name) -> std::optional<Input> {
+                if (isMade(name)) return Input { {}, Link { idOf(name), "out" } };
+                if (std::ranges::contains(makes->uses, name))
+                    if (const auto wired = node.inputs.find(name); wired != node.inputs.end()) return wired->second;
+                return std::nullopt;
+            };
+            for (const auto& each : makes->made) {
+                Node resource;
+                resource.id = idOf(each.name);
+                resource.type = each.kind;
+                resource.pass = node.pass;
+                for (const auto& [setting, value] : each.settings) {
+                    const std::optional<Input> wire = value.String() ? named(*value.String()) : std::nullopt;
+                    resource.inputs[setting] = wire ? *wire : Input { value, std::nullopt };
+                }
+                // What the node says of it, its own.
+                const std::string prefix = each.name + ".";
+                for (auto it = node.inputs.begin(); it != node.inputs.end();) {
+                    if (it->first.starts_with(prefix)) {
+                        resource.inputs[it->first.substr(prefix.size())] = it->second;
+                        it = node.inputs.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                // Each stage's entry point, given its module and not it: `<stage>Main`.
+                for (const char* stage : { "compute", "vertex", "fragment", "mesh", "task" })
+                    if (resource.inputs.contains(std::string(stage) + ".module") && !resource.inputs.contains(std::string(stage) + ".entry"))
+                        resource.inputs[std::string(stage) + ".entry"] = Input { Value(std::string(stage) + "Main"), std::nullopt };
+                if (each.kind == "ComputePipeline" || each.kind == "GraphicsPipeline") {
+                    for (const auto& name : makes->bindable) {
+                        if (name == each.name) continue;
+                        const auto wire = named(name);
+                        if (!wire) continue;
+                        // By its name, or — a C# field's, `Sums` — with its first letter small, as a shader's parameter is.
+                        std::string small = name;
+                        small[0] = static_cast<char>(std::tolower(static_cast<unsigned char>(small[0])));
+                        for (const std::string& as : { name, small })
+                            if (!resource.inputs.contains("param." + as)) resource.inputs["maybe.param." + as] = *wire;
+                    }
+                }
+                node.inputs[each.name] = Input { {}, Link { resource.id, "out" } };
+                made.emplace_back(node.id, std::move(resource));
+            }
+        }
+        for (auto& [before, resource] : made)
+            graph.nodes.insert(std::ranges::find(graph.nodes, before, &Node::id), std::move(resource));
+    }
+
+    Expansion Expand(const Graph& given, const ElementOf& elementOf, const FieldsOf& fieldsOf, const std::map<std::string, int, std::less<>>& counts, const MadeOf& madeOf)
     {
         Expansion out;
         // The calls first: what a function holds may be a loop, and a call may be in one. Then the Bundles, which a
@@ -1104,6 +1174,7 @@ namespace kgraph
         WriteBundles(written, out, elementOf);
         WriteComponentBuffers(written, out, fieldsOf);
         WriteShorthands(written, out);
+        WriteScriptPasses(written, madeOf);
         WriteLoopMeshes(written, out);
         out.graph.passes = written.passes;
         out.graph.setup = written.setup;

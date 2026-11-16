@@ -50,6 +50,8 @@ namespace kscript
         /// What it is made with, by its node type's inputs — `format`, `extent.x`, `usage`, `image` — each as JSON:
         /// `"eR32_SFLOAT"`, `256`, `["eSampled", "eStorage"]`, `"height"` (another of the script's resources).
         std::vector<std::pair<std::string, std::string>> settings;
+        /// A PassScript's that it makes (`Make.Image(...)`), not one wired in: `kind` the node type it is made as.
+        bool made = false;
     };
 
     /** @brief A script type: the component it is, and what is called on it. */
@@ -69,7 +71,11 @@ namespace kscript
         std::vector<std::string> pieces;
         /// A ResourceScript: no component, but what a Script node of the graph runs — it makes resources and fills them.
         bool makesResources = false;
-        std::vector<DeclaredResource> resources;    ///< A ResourceScript's, in the order it declares them.
+        /// A PassScript: no component, but what a ScriptPass node of the graph runs — it says what a pass does, each frame.
+        bool recordsPass = false;
+        /// A ResourceScript's, in the order it declares them; a PassScript's uses — "Pipeline", "Buffer" or "Image", each
+        /// with `writes` among its settings when it says so — likewise.
+        std::vector<DeclaredResource> resources;
         /// A Material: a kind of what a drawn thing is made of, data and nothing else. No component of the Scripts': its
         /// pictures are shared references, which what keeps them makes it with (kgraph::Runtime::DeclareMaterialKind).
         bool material = false;

@@ -5,7 +5,10 @@
 #include <cstring>
 #include <format>
 #include <optional>
+#include <algorithm>
+#include <ranges>
 #include <set>
+#include <span>
 #include <new>
 #include <string>
 #include <type_traits>
@@ -16,6 +19,7 @@
 #include <kecs/json.h>
 #include <keditor/document.h>
 #include <keditor/play.h>
+#include <kgraph/animation.h>
 #include <kgraph/meshes.h>
 #include <kscript/declarations.h>
 
@@ -383,6 +387,20 @@ size_t kecs_set_orientations(KecsWorld* world, const KecsEntity* entities, const
 }
 bool kecs_local_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::LocalMatrix); }
 bool kecs_world_matrix(KecsWorld* world, const KecsEntity entity, float out[16]) { return Sixteen(world, entity, out, &kecs::World::WorldMatrix); }
+size_t kecs_world_matrices(KecsWorld* world, const KecsEntity* entities, const size_t count, float* out)
+{
+    return Guarded([&] {
+        if (count && (!entities || !out)) return std::size_t { 0 };
+        kecs::World& w = World(world);
+        std::size_t alive = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const kecs::Entity entity = Of(entities[i]);
+            const kecs::Mat4 m = w.Alive(entity) ? (++alive, w.WorldMatrix(entity)) : kecs::Mat4 {};
+            std::copy(m.m.begin(), m.m.end(), out + i * 16);
+        }
+        return alive;
+    }, std::size_t { 0 });
+}
 bool kecs_set_world_matrix(KecsWorld* world, const KecsEntity entity, const float matrix[16])
 {
     return Guarded([&] {
@@ -405,6 +423,32 @@ bool kengine_entity_set_name(KengineDocument* document, const KecsEntity entity,
 {
     return Guarded([&] { return Doc(document).Rename(Of(entity), Text(name)); }, false);
 }
+size_t kengine_skin_joints(KengineDocument* document, const KecsEntity entity, KecsEntity* out, const size_t capacity)
+{
+    return Guarded([&]() -> size_t {
+        keditor::Document& doc = Doc(document);
+        const kgraph::Skin* skin = doc.World().Get<kgraph::Skin>(Of(entity));
+        if (!skin) return 0;
+        const auto model = doc.Runtime().ModelOf(skin->model.starts_with('@') ? skin->model.substr(1) : skin->model);
+        if (!model || skin->skin < 0 || static_cast<std::size_t>(skin->skin) >= model->skins.size()) return 0;
+        skin->found = kgraph::FindNodes(doc.World(), skin->root, *model, skin->found);
+        const auto& joints = model->skins[static_cast<std::size_t>(skin->skin)].joints;
+        for (std::size_t i = 0; i < joints.size() && i < capacity && out; ++i) {
+            const int node = joints[i].node;
+            out[i] = Of(node >= 0 && static_cast<std::size_t>(node) < skin->found->nodes.size() ? skin->found->nodes[static_cast<std::size_t>(node)] : kecs::NullEntity);
+        }
+        return joints.size();
+    }, size_t { 0 });
+}
+KecsEntity kengine_model_place(KengineDocument* document, const char* file, const KecsEntity parent)
+{
+    return Guarded([&] {
+        std::string error;
+        const kecs::Entity placed = Doc(document).ImportModel(Text(file), &error, Of(parent));
+        if (placed.IsNull()) throw std::runtime_error(error);
+        return Of(placed);
+    }, KecsEntity { KECS_NULL_INDEX, 0 });
+}
 
 // ---- components --------------------------------------------------------------------------------------------------
 
@@ -426,6 +470,37 @@ const char* kecs_component_name(KecsWorld* world, const uint32_t component)
 size_t kecs_component_size(KecsWorld* world, const uint32_t component)
 {
     return Guarded([&] { const auto* type = Describe(world, component); return type ? type->size : size_t { 0 }; }, size_t { 0 });
+}
+uint32_t kecs_components_of(KecsWorld* world, const KecsEntity entity, uint32_t* out, const uint32_t capacity)
+{
+    return Guarded([&] {
+        const kecs::World& w = World(world);
+        if (!w.Alive(Of(entity))) return 0u;
+        const auto ids = w.ComponentsOf(Of(entity));
+        for (std::size_t i = 0; out && i < ids.size() && i < capacity; ++i) out[i] = static_cast<uint32_t>(ids[i]);
+        return static_cast<uint32_t>(ids.size());
+    }, 0u);
+}
+uint32_t kecs_current_tick(KecsWorld* world) { return Guarded([&] { return static_cast<uint32_t>(World(world).CurrentTick()); }, 0u); }
+size_t kecs_changed_ticks(KecsWorld* world, const KecsEntity* entities, const size_t count, const uint32_t* ignore, const size_t ignoreCount, uint32_t* out)
+{
+    return Guarded([&] {
+        if (count && (!entities || !out)) return std::size_t { 0 };
+        const kecs::World& w = World(world);
+        const std::span<const uint32_t> ignored(ignore, ignore ? ignoreCount : 0);
+        std::size_t alive = 0;
+        for (std::size_t i = 0; i < count; ++i) {
+            const kecs::Entity entity = Of(entities[i]);
+            kecs::Tick newest = 0;
+            if (w.Alive(entity)) {
+                ++alive;
+                for (const kecs::ComponentId id : w.ComponentsOf(entity))
+                    if (!std::ranges::contains(ignored, static_cast<uint32_t>(id))) newest = std::max(newest, w.ChangedTickOf(entity, id));
+            }
+            out[i] = static_cast<uint32_t>(newest);
+        }
+        return alive;
+    }, std::size_t { 0 });
 }
 uint32_t kecs_component_field_count(KecsWorld* world, const uint32_t component)
 {
@@ -610,6 +685,43 @@ bool kengine_field_set_json(KengineDocument* document, const KecsEntity entity, 
     }, false);
 }
 
+const char* kengine_entity_json(KengineDocument* document, const KecsEntity entity, const char* skip)
+{
+    return Guarded([&] {
+        std::set<std::string, std::less<>> skipped;
+        const std::string_view list = skip ? std::string_view(skip) : std::string_view();
+        for (std::size_t at = 0; at <= list.size();) {
+            const std::size_t end = std::min(list.find(',', at), list.size());
+            std::string_view name = list.substr(at, end - at);
+            while (!name.empty() && name.front() == ' ') name.remove_prefix(1);
+            while (!name.empty() && name.back() == ' ') name.remove_suffix(1);
+            if (!name.empty()) skipped.emplace(name);
+            at = end + 1;
+        }
+        return Keep(Doc(document).EntityJson(Of(entity), skipped));
+    }, static_cast<const char*>(nullptr));
+}
+
+bool kengine_entity_set_json(KengineDocument* document, const KecsEntity entity, const char* json)
+{
+    return Guarded([&] {
+        std::string error;
+        if (Doc(document).SetEntityJson(Of(entity), Text(json), &error)) return true;
+        Fail(error);
+        return false;
+    }, false);
+}
+
+void kengine_interface_show(KengineDocument* document, void* ui, void (*compose)(void* user), void* user)
+{
+    Guarded([&] { Doc(document).ShowInterface({ static_cast<kui::Ui*>(ui), compose, user }); return true; }, false);
+}
+
+void kengine_interface_hide(KengineDocument* document, void* ui)
+{
+    Guarded([&] { Doc(document).HideInterface(static_cast<const kui::Ui*>(ui)); return true; }, false);
+}
+
 // ---- scripts -----------------------------------------------------------------------------------------------------
 
 namespace {
@@ -675,6 +787,290 @@ void kengine_text_set(void* at, const char* utf8, const size_t length)
 {
     if (!at) return;
     *std::launder(static_cast<std::string*>(at)) = utf8 ? std::string(utf8, length) : std::string();
+}
+
+bool kengine_pass_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,
+                                  const KenginePassUse* uses, const size_t use_count, const KenginePassScriptCallbacks* callbacks)
+{
+    return Guarded([&] {
+        if (!name || !*name) { Fail("a script needs a name"); return false; }
+        kscript::ScriptType type;
+        type.name = name;
+        type.recordsPass = true;
+        type.size = size;
+        for (size_t i = 0; i < field_count; ++i) {
+            if (fields[i].offset + fields[i].size > size) { Fail(std::format("field '{}' is past the end of the script's data", Text(fields[i].name))); return false; }
+            type.fields.push_back({ Text(fields[i].name), Text(fields[i].type), fields[i].offset, fields[i].size, nullptr });
+        }
+        for (size_t i = 0; i < use_count; ++i) {
+            const KenginePassUse& given = uses[i];
+            const std::string kind = Text(given.kind);
+            if (!given.name || !*given.name) { Fail(std::format("a use of '{}' needs a name", name)); return false; }
+            if (!given.made && kind != "Pipeline" && kind != "GraphicsPipeline" && kind != "Framebuffer" && kind != "Mesh" && kind != "Buffer" && kind != "Image"
+                && kind != "ImageView" && kind != "BufferView" && kind != "Sampler") {
+                Fail(std::format("{}.{} is a '{}': a pass script uses a Pipeline, a GraphicsPipeline, a Framebuffer, a Mesh, a Buffer or an Image", name, given.name, kind));
+                return false;
+            }
+            kscript::DeclaredResource use { given.name, kind, {} };
+            use.made = given.made;
+            if (given.made) {
+                static const std::set<std::string, std::less<>> makes { "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "ComputePipeline", "GraphicsPipeline" };
+                if (!makes.contains(kind)) { Fail(std::format("{}.{} is made as a '{}': a pass script makes an Image, a Buffer, a view, a Sampler, a Framebuffer or a pipeline", name, given.name, kind)); return false; }
+                if (given.settings && *given.settings) {
+                    kgraph::Value settings;
+                    if (!Parse(given.settings, settings)) return false;
+                    if (!settings.Named()) { Fail(std::format("{}.{}'s settings are an object of its inputs: {{\"format\": \"eR32_SFLOAT\"}}", name, given.name)); return false; }
+                    for (const auto& [input, value] : *settings.Named()) use.settings.emplace_back(input, value.ToJson());
+                }
+            } else if (given.writes) {
+                use.settings.emplace_back("writes", "true");
+            }
+            type.resources.push_back(std::move(use));
+        }
+        std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record;
+        if (callbacks && callbacks->record)
+            record = [user = callbacks->user, call = callbacks->record](const std::span<const std::byte> settings, std::vector<kgraph::PassCommand>& commands, const bool made) -> std::string {
+                const char* why = call(user, reinterpret_cast<KenginePassCommands*>(&commands), settings.data(), settings.size(), made);
+                return why ? std::string(why) : std::string();
+            };
+        Doc(document).RegisterPassScript(std::move(type), std::move(record));
+        return true;
+    }, false);
+}
+
+void kengine_pass_script_unregister(KengineDocument* document, const char* name)
+{
+    Guarded([&] { Doc(document).UnregisterPassScript(Text(name)); return 0; }, 0);
+}
+
+namespace {
+    std::vector<kgraph::PassCommand>& Commands(KenginePassCommands* commands) { return *reinterpret_cast<std::vector<kgraph::PassCommand>*>(commands); }
+}
+
+void kengine_pass_dispatch(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t x, const uint32_t y, const uint32_t z)
+{
+    if (!commands) return;
+    kgraph::PassCommand command;
+    command.op = kgraph::PassCommand::Op::eDispatch;
+    command.use = pipeline;
+    command.groups[0] = x;
+    command.groups[1] = y;
+    command.groups[2] = z;
+    Commands(commands).push_back(std::move(command));
+}
+
+void kengine_pass_dispatch_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t buffer, const uint64_t offset)
+{
+    if (!commands) return;
+    kgraph::PassCommand command;
+    command.op = kgraph::PassCommand::Op::eDispatchIndirect;
+    command.use = pipeline;
+    command.other = buffer;
+    command.offset = offset;
+    Commands(commands).push_back(std::move(command));
+}
+
+void kengine_pass_push(KenginePassCommands* commands, const char* name, const double* values, const size_t count)
+{
+    if (!commands || !name || (count && !values)) return;
+    auto& all = Commands(commands);
+    // Of the last dispatch or draw: given before any, it is of nothing, and the pass says so.
+    using Op = kgraph::PassCommand::Op;
+    const auto pushed = [](const Op op) {
+        return op == Op::eDispatch || op == Op::eDispatchIndirect || op == Op::eDraw || op == Op::eDrawMesh || op == Op::eDrawIndexed || op == Op::eDrawIndirect
+            || op == Op::eDrawIndexedIndirect || op == Op::eDrawMeshTasks || op == Op::eDrawMeshTasksIndirect;
+    };
+    if (all.empty() || !pushed(all.back().op)) {
+        kgraph::PassCommand wrong;
+        wrong.op = kgraph::PassCommand::Op::eDispatch;
+        wrong.use = ~0u;        // names no use: the pass says which command is wrong
+        all.push_back(std::move(wrong));
+        return;
+    }
+    kgraph::Value value;
+    if (count == 1) value = kgraph::Value(values[0]);
+    else {
+        kgraph::Value::List list;
+        for (size_t i = 0; i < count; ++i) list.emplace_back(values[i]);
+        value = kgraph::Value(std::move(list));
+    }
+    all.back().push.emplace_back(name, std::move(value));
+}
+
+void kengine_pass_write(KenginePassCommands* commands, const uint32_t buffer, const uint64_t offset, const void* bytes, const size_t size)
+{
+    if (!commands || (size && !bytes)) return;
+    kgraph::PassCommand command;
+    command.op = kgraph::PassCommand::Op::eWrite;
+    command.use = buffer;
+    command.offset = offset;
+    command.bytes.resize(size);
+    if (size) std::memcpy(command.bytes.data(), bytes, size);
+    Commands(commands).push_back(std::move(command));
+}
+
+void kengine_pass_copy(KenginePassCommands* commands, const uint32_t from, const uint32_t to, const uint64_t size, const uint64_t from_offset, const uint64_t to_offset)
+{
+    if (!commands) return;
+    kgraph::PassCommand command;
+    command.op = kgraph::PassCommand::Op::eCopy;
+    command.use = from;
+    command.other = to;
+    command.size = size;
+    command.offset = from_offset;
+    command.otherOffset = to_offset;
+    Commands(commands).push_back(std::move(command));
+}
+
+void kengine_pass_clear(KenginePassCommands* commands, const uint32_t image, const float red, const float green, const float blue, const float alpha)
+{
+    if (!commands) return;
+    kgraph::PassCommand command;
+    command.op = kgraph::PassCommand::Op::eClear;
+    command.use = image;
+    command.color[0] = red;
+    command.color[1] = green;
+    command.color[2] = blue;
+    command.color[3] = alpha;
+    Commands(commands).push_back(std::move(command));
+}
+
+namespace {
+    kgraph::PassCommand& Add(KenginePassCommands* commands, const kgraph::PassCommand::Op op, const uint32_t use)
+    {
+        kgraph::PassCommand command;
+        command.op = op;
+        command.use = use;
+        return Commands(commands).emplace_back(std::move(command));
+    }
+}
+
+void kengine_pass_copy_buffer_to_image(KenginePassCommands* commands, const uint32_t buffer, const uint32_t image, const uint64_t offset)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eCopyBufferToImage, buffer);
+    c.other = image;
+    c.offset = offset;
+}
+
+void kengine_pass_copy_image_to_buffer(KenginePassCommands* commands, const uint32_t image, const uint32_t buffer, const uint64_t offset)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eCopyImageToBuffer, image);
+    c.other = buffer;
+    c.offset = offset;
+}
+
+void kengine_pass_copy_image(KenginePassCommands* commands, const uint32_t from, const uint32_t to)
+{
+    if (commands) Add(commands, kgraph::PassCommand::Op::eCopyImage, from).other = to;
+}
+
+void kengine_pass_blit(KenginePassCommands* commands, const uint32_t from, const uint32_t to)
+{
+    if (commands) Add(commands, kgraph::PassCommand::Op::eBlit, from).other = to;
+}
+
+void kengine_pass_generate_mipmaps(KenginePassCommands* commands, const uint32_t image)
+{
+    if (commands) Add(commands, kgraph::PassCommand::Op::eGenerateMipmaps, image);
+}
+
+void kengine_pass_begin_rendering(KenginePassCommands* commands, const uint32_t target, const bool load, const float red, const float green, const float blue, const float alpha, const float depth)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eBeginRendering, target);
+    c.load = load;
+    c.color[0] = red; c.color[1] = green; c.color[2] = blue; c.color[3] = alpha;
+    c.depth = depth;
+}
+
+void kengine_pass_end_rendering(KenginePassCommands* commands)
+{
+    if (commands) Add(commands, kgraph::PassCommand::Op::eEndRendering, 0);
+}
+
+void kengine_pass_viewport(KenginePassCommands* commands, const uint32_t x, const uint32_t y, const uint32_t width, const uint32_t height)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eViewport, 0);
+    c.box[0] = x; c.box[1] = y; c.box[2] = width; c.box[3] = height;
+}
+
+void kengine_pass_scissor(KenginePassCommands* commands, const uint32_t x, const uint32_t y, const uint32_t width, const uint32_t height)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eScissor, 0);
+    c.box[0] = x; c.box[1] = y; c.box[2] = width; c.box[3] = height;
+}
+
+void kengine_pass_vertex_buffer(KenginePassCommands* commands, const uint32_t binding, const uint32_t buffer, const uint64_t offset)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eVertexBuffer, buffer);
+    c.first = binding;
+    c.offset = offset;
+}
+
+void kengine_pass_draw(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t vertex_count, const uint32_t instances, const uint32_t first_vertex, const uint32_t first_instance)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eDraw, pipeline);
+    c.size = vertex_count;
+    c.instances = instances;
+    c.first = first_vertex;
+    c.firstInstance = first_instance;
+}
+
+void kengine_pass_draw_mesh(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const uint32_t instances, const uint32_t first_instance)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMesh, pipeline);
+    c.mesh = mesh;
+    c.instances = instances;
+    c.firstInstance = first_instance;
+}
+
+void kengine_pass_draw_indexed(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const uint32_t index_count, const uint32_t instances,
+                               const uint32_t first_index, const int32_t vertex_offset, const uint32_t first_instance)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawIndexed, pipeline);
+    c.mesh = mesh;
+    c.size = index_count;
+    c.instances = instances;
+    c.first = first_index;
+    c.vertexOffset = vertex_offset;
+    c.firstInstance = first_instance;
+}
+
+void kengine_pass_draw_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const bool indexed, const uint32_t buffer, const uint64_t offset,
+                                const uint32_t count, const uint32_t stride)
+{
+    if (!commands) return;
+    auto& c = Add(commands, indexed ? kgraph::PassCommand::Op::eDrawIndexedIndirect : kgraph::PassCommand::Op::eDrawIndirect, pipeline);
+    c.mesh = mesh;
+    c.other = buffer;
+    c.offset = offset;
+    c.count = count;
+    c.stride = stride;
+}
+
+void kengine_pass_draw_mesh_tasks(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t x, const uint32_t y, const uint32_t z)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMeshTasks, pipeline);
+    c.groups[0] = x; c.groups[1] = y; c.groups[2] = z;
+}
+
+void kengine_pass_draw_mesh_tasks_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t buffer, const uint64_t offset, const uint32_t count, const uint32_t stride)
+{
+    if (!commands) return;
+    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMeshTasksIndirect, pipeline);
+    c.other = buffer;
+    c.offset = offset;
+    c.count = count;
+    c.stride = stride;
 }
 
 bool kengine_resource_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,

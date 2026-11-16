@@ -102,7 +102,7 @@ TEST(Catalog, HasANodeForEveryBuilderAndTheEnginesOwn) {
         return std::ranges::find(type.inputs, input, &kgraph::Port::name) != type.inputs.end();
     };
     for (const char* name : { "Image", "ImageView", "Sampler", "Buffer", "BufferView", "Shader", "Framebuffer", "ComputePipeline", "GraphicsPipeline",
-                              "RayTracingPipeline", "Double", "Vec3", "Add", "Ceil", "ImageExtent", "Screen", "Reference", "Clear", "Blit", "Dispatch" })
+                              "RayTracingPipeline", "Double", "Vec3", "Add", "Ceil", "ImageExtent", "Screen", "ScreenFramebuffer", "Reference", "Clear", "Blit", "Dispatch" })
         EXPECT_NE(kgraph::FindType(name), nullptr) << name;
     EXPECT_EQ(kgraph::FindType("DescriptorSet"), nullptr);
 
@@ -280,20 +280,20 @@ TEST(Meshes, EveryDefaultMeshFacesOutAndIsTheSizeItSays) {
     within("capsule", 0.25f, 0.5f, 0.25f);
     within("torus", 0.5f, 0.15f, 0.5f);
     EXPECT_EQ(kgraph::ShapeData("cube")->vertices.size(), 24u);
-    EXPECT_EQ(kgraph::ShapeData("sphere")->indices.size(), 40u * 80u * 6u);
+    EXPECT_EQ(kgraph::ShapeData("sphere")->indices.size(), 16u * 32u * 6u);
     EXPECT_FALSE(kgraph::ShapeData("blob").has_value());
     EXPECT_EQ(kgraph::DefaultMeshId("cube"), "$cube");
 }
 
 // A shape as it starts is the same numbers it always was; tuned, one set of numbers has one name, whatever was written.
 TEST(DefaultMeshes, AreMadeFromTheirParameters) {
-    EXPECT_EQ(kgraph::ShapeData("sphere?rings=40&segments=80")->indices.size(), kgraph::ShapeData("sphere")->indices.size());
+    EXPECT_EQ(kgraph::ShapeData("sphere?rings=16&segments=32")->indices.size(), kgraph::ShapeData("sphere")->indices.size());
     EXPECT_EQ(kgraph::ShapeData("sphere?rings=10&segments=20")->indices.size(), 10u * 20u * 6u);
 
     const auto values = kgraph::ShapeValues("sphere?segments=20&radius=0.8&nonsense=3");
     ASSERT_EQ(values.size(), 3u);
     EXPECT_FLOAT_EQ(values[0], 0.8f);
-    EXPECT_FLOAT_EQ(values[1], 40.f);
+    EXPECT_FLOAT_EQ(values[1], 16.f);
     EXPECT_FLOAT_EQ(values[2], 20.f);
     EXPECT_EQ(kgraph::ShapeName("sphere", values), "sphere?radius=0.8&segments=20") << "in their order, the initial left out";
     EXPECT_EQ(kgraph::ShapeName("sphere", kgraph::ShapeValues("sphere")), "sphere");

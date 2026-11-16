@@ -30,6 +30,7 @@
 #include <kscript/scripts.h>
 
 #include "document.h"
+#include "scene_lock.h"
 #include "look.h"
 #include "play.h"
 #include "project.h"
@@ -99,6 +100,14 @@ namespace keditor
         /** @brief Every asset of the project, by ID: null with no project open. */
         [[nodiscard]] kasset::Database* AssetDatabase();
         [[nodiscard]] const std::string& SceneName() const { return _scene; }
+        /**
+         * @brief Whether the scene open is another editor's to change: the project is open in more than one, and that
+         *        one opened the scene first (SceneLock). It is looked at and played here, and read again as it is saved;
+         *        what is done to it here is undone, and it is not saved. Taken over once that editor lets go of it.
+         */
+        [[nodiscard]] bool ReadOnly() const { return _hasProject && !_ownsScene; }
+        /** @brief Who changes the scene open, when this editor does not (ReadOnly): `koral-editor 1234 on host`. */
+        [[nodiscard]] const std::string& SceneHolder() const { return _lock.Holder(); }
 
         /**
          * @brief Makes a project in @p directory and saves the scene being worked on as its first. Its scripts are
@@ -127,6 +136,14 @@ namespace keditor
          *        as this editor does. Empty without a project.
          */
         [[nodiscard]] std::string RunCommand() const;
+        /**
+         * @brief Opens another editor — this program again, a window of its own — on this project, with @p scene open:
+         *        a server's scene in one and its clients' in others, each played there. The scene this one holds is
+         *        looked at there (ReadOnly), and changed here. False without a project, or when it could not be started.
+         */
+        bool OpenAnotherEditor(const std::string& scene);
+        /** @brief What OpenAnotherEditor runs: this program, on the project, `--scene` @p scene. Empty without a project. */
+        [[nodiscard]] std::string AnotherEditorCommand(const std::string& scene) const;
         /**
          * @brief The project's scripts that nothing is running: files in its `scripts` folder whose class is no
          *        component with its functions in place — not compiled yet, or not compiling, or nothing in this
@@ -1095,6 +1112,17 @@ namespace keditor
         GameScene* _second = nullptr;
         Project _project;
         bool _hasProject = false;
+        // Which editor changes the scene open: this one when it holds the scene's lock (ReadOnly).
+        SceneLock _lock;
+        bool _ownsScene = false;
+        std::filesystem::file_time_type _sceneWritten {};   ///< When the scene's file was written, as last read or saved.
+        float _lockAgain = 0.f;                             ///< Seconds until a read-only scene is looked at again.
+        /** Takes the lock of the scene open when it is another's than the one held; whether this editor changes it. */
+        bool OwnScene();
+        /** Each frame: a scene another editor changes, read again when it is saved, and taken once it is let go of. */
+        void KeepScene(float seconds);
+        /** The scene open, read again from its file: what is done here put aside. */
+        void ReadSceneAgain(const std::string& said, bool failed = false);
         std::uint64_t _usersIndexed = ~std::uint64_t(0);    ///< The Version the asset database's index was last read at.
         /** The project's assets as the document found them, with the editor's own materials. False, having said what was wrong, when anything was. */
         bool ScanAssets();

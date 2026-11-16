@@ -16,6 +16,9 @@
 //     NORMAL_MATRIX   float4x4   what turns its normals: the inverse of that, transposed
 //     POSITION        float3     where it is in the world
 //     ID              uint       which entity it is: one more than its index (0 is none)
+//     JOINTS          uint       a skinned entity's (a Skin's): where its joints start among a buffer marked
+//                                [entity("JOINT_MATRICES")] (StructuredBuffer<float4x4>), which the engine binds to every
+//                                skinned entity's, worked out each frame; ~0 for one not skinned
 //     TEXTURE         uint       a picture the entity holds, by its bindless index (kor_Texture2D[...]): ~0 for none
 //     STORAGE         uint       an image the entity holds that the shader writes, by its bindless storage index
 //                                (kor_RWTexture2D[...]): ~0 for none

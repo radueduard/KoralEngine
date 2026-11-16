@@ -235,7 +235,7 @@ namespace kgraph
         }
 
         /** A sphere half a unit in radius, its poles on Y: bands of latitude and of longitude. */
-        MeshData Sphere(const float radius = 0.5f, const int rings = 40, const int segments = 80)
+        MeshData Sphere(const float radius = 0.5f, const int rings = 16, const int segments = 32)
         {
             Maker make;
             const auto rowSize = static_cast<std::uint32_t>(segments + 1);   // the seam's column is repeated, so each row closes on itself
@@ -243,7 +243,9 @@ namespace kgraph
                 const float theta = static_cast<float>(r) / static_cast<float>(rings) * Pi;   // 0 at the top pole, Pi at the bottom
                 for (int s = 0; s <= segments; ++s) {
                     const float phi = static_cast<float>(s) / static_cast<float>(segments) * 2.f * Pi;
-                    const V3 n { std::sin(theta) * std::cos(phi), std::cos(theta), std::sin(theta) * std::sin(phi) };
+                    // A pole is a point: the sine of pi is not quite nothing, and would leave slivers round the bottom one.
+                    const float out = r == 0 || r == rings ? 0.f : std::sin(theta);
+                    const V3 n { out * std::cos(phi), std::cos(theta), out * std::sin(phi) };
                     make.Vertex({ n.x * radius, n.y * radius, n.z * radius }, n, static_cast<float>(s) / static_cast<float>(segments), static_cast<float>(r) / static_cast<float>(rings));
                 }
             }
@@ -257,7 +259,7 @@ namespace kgraph
         }
 
         /** A cylinder about Y, closed at both ends. */
-        MeshData Cylinder(const float radius = 0.5f, const float height = 1.f, const int segments = 48)
+        MeshData Cylinder(const float radius = 0.5f, const float height = 1.f, const int segments = 32)
         {
             Maker make;
             const float h = height / 2.f;
@@ -268,7 +270,7 @@ namespace kgraph
         }
 
         /** A cone about Y, its point up, closed at its base. */
-        MeshData Cone(const float radius = 0.5f, const float height = 1.f, const int segments = 48)
+        MeshData Cone(const float radius = 0.5f, const float height = 1.f, const int segments = 32)
         {
             Maker make;
             const float h = height / 2.f;
@@ -286,7 +288,7 @@ namespace kgraph
         }
 
         /** A capsule about Y: a cylinder a unit tall overall, its ends half spheres. */
-        MeshData Capsule(const float radius = 0.25f, const float height = 1.f, const int rings = 12, const int segments = 48)
+        MeshData Capsule(const float radius = 0.25f, const float height = 1.f, const int rings = 6, const int segments = 24)
         {
             Maker make;
             const float middle = std::max(height / 2.f - radius, 0.f);
@@ -299,7 +301,7 @@ namespace kgraph
         }
 
         /** A ring about Y: a tube round a circle. */
-        MeshData Torus(const float radius = 0.35f, const float tube = 0.15f, const int rings = 32, const int segments = 64)
+        MeshData Torus(const float radius = 0.35f, const float tube = 0.15f, const int rings = 16, const int segments = 32)
         {
             Maker make;
             // Round the tube the way that keeps its outside on the outside: as the profile goes, its normal is on its left.
@@ -497,7 +499,7 @@ namespace kgraph
         }
 
         /** Half a sphere half a unit in radius, closed by its flat side down: a dome, from -0.25 to 0.25 high. */
-        MeshData Hemisphere(const float radius = 0.5f, const int rings = 20, const int segments = 80)
+        MeshData Hemisphere(const float radius = 0.5f, const int rings = 8, const int segments = 32)
         {
             Maker make;
             const float base = -radius / 2.f;
@@ -509,7 +511,7 @@ namespace kgraph
         }
 
         /** A tube: a cylinder with a hole down it, its wall @p wall thick. */
-        MeshData Pipe(const float outer = 0.5f, const float height = 1.f, const float wall = 0.15f, const int segments = 48)
+        MeshData Pipe(const float outer = 0.5f, const float height = 1.f, const float wall = 0.15f, const int segments = 32)
         {
             Maker make;
             const float inner = std::max(outer - wall, 0.001f), h = height / 2.f;
@@ -725,12 +727,12 @@ namespace kgraph
         }
         std::vector<MeshParameter> Bands()
         {
-            return { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 40.f, 3.f, 256.f, "How many bands it is cut in from pole to pole."),
-                     Count("segments", 80.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
+            return { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 16.f, 3.f, 256.f, "How many bands it is cut in from pole to pole."),
+                     Count("segments", 32.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
         }
         std::vector<MeshParameter> Turned()
         {
-            return { Length("radius", 0.5f, "How far out its base reaches."), Length("height", 1.f, "How tall it is, along Y."), Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
+            return { Length("radius", 0.5f, "How far out its base reaches."), Length("height", 1.f, "How tall it is, along Y."), Count("segments", 32.f, 3.f, 512.f, "How many pieces it is cut in going round it.") };
         }
 
         const std::vector<Shape>& Shapes()
@@ -743,10 +745,10 @@ namespace kgraph
                 { "cylinder", Turned(), [](const Values v) { return Cylinder(v[0], v[1], Whole(v[2])); } },
                 { "cone", Turned(), [](const Values v) { return Cone(v[0], v[1], Whole(v[2])); } },
                 { "capsule", { Length("radius", 0.25f, "How far from its axis its surface is, and how round its ends."), Length("height", 1.f, "How tall it is overall, its ends included."),
-                               Count("rings", 12.f, 1.f, 128.f, "How many bands each round end is cut in."), Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                               Count("rings", 6.f, 1.f, 128.f, "How many bands each round end is cut in."), Count("segments", 24.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
                   [](const Values v) { return Capsule(v[0], v[1], Whole(v[2]), Whole(v[3])); } },
                 { "torus", { Length("radius", 0.35f, "How far the middle of its tube is from its centre."), Length("tube", 0.15f, "How far from the middle of its tube its surface is."),
-                             Count("rings", 32.f, 3.f, 256.f, "How many pieces it is cut in going round its tube."), Count("segments", 64.f, 3.f, 512.f, "How many pieces it is cut in going round its centre.") },
+                             Count("rings", 16.f, 3.f, 256.f, "How many pieces it is cut in going round its tube."), Count("segments", 32.f, 3.f, 512.f, "How many pieces it is cut in going round its centre.") },
                   [](const Values v) { return Torus(v[0], v[1], Whole(v[2]), Whole(v[3])); } },
                 { "quad", { Length("width", 1.f, "How far across it is, along X."), Length("height", 1.f, "How tall it is, along Y.") }, [](const Values v) { return Stretched(Quad(), v[0], v[1], 1.f); } },
                 { "triangle", { Length("width", 1.f, "How far across its base is, along X."), Length("height", 1.f, "How tall it is, along Y.") }, [](const Values v) { return Stretched(OneTriangle(), v[0], v[1], 1.f); } },
@@ -760,11 +762,11 @@ namespace kgraph
                   [](const Values v) { return RoundedBox(v[0], Whole(v[1])); } },
                 { "wedge", Sides(), [](const Values v) { return Stretched(Wedge(), v[0], v[1], v[2]); } },
                 { "pyramid", Sides(), [](const Values v) { return Stretched(Pyramid(), v[0], v[1], v[2]); } },
-                { "hemisphere", { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 20.f, 2.f, 128.f, "How many bands it is cut in from its top to its rim."),
-                                  Count("segments", 80.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                { "hemisphere", { Length("radius", 0.5f, "How far from its centre its surface is."), Count("rings", 8.f, 2.f, 128.f, "How many bands it is cut in from its top to its rim."),
+                                  Count("segments", 32.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
                   [](const Values v) { return Hemisphere(v[0], Whole(v[1]), Whole(v[2])); } },
                 { "pipe", { Length("radius", 0.5f, "How far out its outside is."), Length("height", 1.f, "How tall it is, along Y."), Length("wall", 0.15f, "How thick its wall is."),
-                            Count("segments", 48.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
+                            Count("segments", 32.f, 3.f, 512.f, "How many pieces it is cut in going round it.") },
                   [](const Values v) { return Pipe(v[0], v[1], v[2], Whole(v[3])); } },
                 { "arch", [] { auto all = Sides(1.f, 1.f, 0.5f); all.push_back(Count("segments", 24.f, 3.f, 128.f, "How many pieces its round is cut in.")); return all; }(),
                   [](const Values v) { return Stretched(Arch(Whole(v[3])), v[0], v[1], v[2] / 0.5f); } },

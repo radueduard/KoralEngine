@@ -7,12 +7,17 @@
 #include <map>
 #include <set>
 #include <ranges>
+#include <chrono>
+#include <functional>
+#include <thread>
 
 #include <kecs/json.h>
+#include <kgraph/animation.h>
 #include <kgraph/entities.h>
 #include <kgraph/meshes.h>
 #include <keditor/editor.h>
 #include <keditor/play.h>
+#include <kui/widgets.h>
 #include <log.h>
 
 #include "scene.h"
@@ -1427,3 +1432,157 @@ TEST_F(DocumentTest, WhatAMaterialIsImportedAsIsAChoice) {
     doc.SetImportKind(Model::eClassic, "", "models/old.obj");
     EXPECT_EQ(doc.ImportKind(Model::eClassic, "models/old.obj"), "BlinnPhongMaterial");
 }
+
+// An entity as JSON, made again in another document from it: its name, its components and every field — but those
+// it is told to leave out. What a server's entity is made of on its clients (the Network module).
+TEST_F(DocumentTest, AnEntityIsMadeAgainInAnotherDocumentFromItsJson) {
+    using kgraph::Value;
+    Running from, to;
+    keditor::Document& one = from.scene->Doc();
+    keditor::Document& other = to.scene->Doc();
+    const kecs::Entity ball = one.CreateEntity("Ball");
+    ASSERT_TRUE(one.AddComponent(ball, "FlyCamera"));
+    ASSERT_TRUE(one.SetField(ball, "FlyCamera", "speed", Value(7.5)));
+    ASSERT_TRUE(one.AddComponent(ball, "PointLight"));
+    ASSERT_TRUE(one.SetField(ball, "PointLight", "range", Value(3.0)));
+    const std::string json = one.EntityJson(ball);
+    EXPECT_NE(json.find("\"FlyCamera\""), std::string::npos) << json;
+
+    const kecs::Entity made = other.CreateEntity("Copy");
+    std::string error;
+    ASSERT_TRUE(other.SetEntityJson(made, json, &error)) << error;
+    EXPECT_EQ(other.World().NameOf(made), "Ball");
+    EXPECT_EQ(other.Field(made, "FlyCamera", "speed"), Value(7.5));
+    EXPECT_EQ(other.Field(made, "PointLight", "range"), Value(3.0));
+
+    // Told to leave one out, it is not in the text, and the copy does not have it.
+    const std::string without = one.EntityJson(ball, { "FlyCamera" });
+    EXPECT_EQ(without.find("FlyCamera"), std::string::npos) << without;
+    const kecs::Entity second = other.CreateEntity("Second");
+    ASSERT_TRUE(other.SetEntityJson(second, without, &error)) << error;
+    EXPECT_FALSE(other.World().Has(second, other.World().Find("FlyCamera")));
+    EXPECT_TRUE(other.World().Has(second, other.World().Find("PointLight")));
+
+    // A type it has not is passed over; text that is not JSON is said to be.
+    EXPECT_TRUE(other.SetEntityJson(second, R"({ "name": "Second", "components": { "NoSuchThing": { "x": 1 } } })", &error)) << error;
+    EXPECT_FALSE(other.SetEntityJson(second, "{ not json", &error));
+}
+
+// What a script shows over the game is drawn over the game's picture, on its screen — the player's window here — and is
+// gone once it is hidden. Shown with nothing else to build it, it is laid out and drawn as it is.
+TEST_F(DocumentTest, AnInterfaceShownOverTheGameIsDrawnOverItsPicture) {
+    Running play;
+    keditor::Document& document = play.scene->Doc();
+    // The game's picture: the screen cleared to black, each frame, as a game draws its own.
+    kgraph::Graph graph;
+    graph.Add("screen", "Screen");
+    graph.Add("clear", "Clear").Wire("image", "screen").Set("color", kgraph::Value::List { 0, 0, 0, 1 });
+    document.SetGraph(std::move(graph));
+    kui::Ui ui { kui::Container(kui::ContainerOptions {}.SetSize(4096.f, 4096.f).SetDecoration({ .color = kui::Color { 1.f, 0.f, 1.f, 1.f } })) };
+    int composed = 0;
+    document.ShowInterface({ &ui, [](void* user) { ++*static_cast<int*>(user); }, &composed });
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto shown = play.Quarter(0);
+    EXPECT_GT(shown.x, 240) << "the interface, over the picture";
+    EXPECT_LT(shown.y, 16);
+    EXPECT_GT(shown.z, 240);
+    EXPECT_GT(composed, 0) << "built again from what changed, each frame, before it is drawn";
+
+    document.HideInterface(&ui);
+    for (int i = 0; i < 4; ++i) Frame();
+    const auto hidden = play.Quarter(0);
+    EXPECT_FALSE(hidden.x > 240 && hidden.y < 16 && hidden.z > 240) << "hidden, it is drawn no more";
+}
+
+
+namespace {
+    /**
+     * A triangle bent by two joints — a root, and a tip a metre above it, the third corner the tip's — and a clip of a
+     * second, "bend", that turns the tip a quarter about z.
+     */
+    void WriteBentModel(const std::filesystem::path& file)
+    {
+        std::vector<std::byte> bytes;
+        const auto put = [&](const auto& value) { const auto* at = reinterpret_cast<const std::byte*>(&value); bytes.insert(bytes.end(), at, at + sizeof value); };
+        for (const float v : { 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f }) put(v);
+        for (const std::uint16_t j : { 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0 }) put(j);
+        for (const float w : { 1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f }) put(w);
+        for (const std::uint16_t i : { 0, 1, 2, 0 }) put(i);
+        for (const float m : { 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f,
+                               1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, -1.f, 0.f, 1.f }) put(m);
+        for (const float t : { 0.f, 1.f }) put(t);
+        for (const float q : { 0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.70710678f, 0.70710678f }) put(q);
+        static constexpr char Digits[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string base64;
+        for (std::size_t i = 0; i < bytes.size(); i += 3) {
+            std::uint32_t n = 0;
+            for (std::size_t k = 0; k < 3; ++k) n = n << 8 | (i + k < bytes.size() ? static_cast<std::uint32_t>(bytes[i + k]) : 0u);
+            for (std::size_t k = 0; k < 4; ++k) base64 += i + k <= bytes.size() ? Digits[n >> (18 - 6 * k) & 63] : '=';
+        }
+        std::ofstream(file) << std::format(R"({{
+          "asset": {{ "version": "2.0" }}, "scene": 0, "scenes": [ {{ "nodes": [ 0, 1 ] }} ],
+          "nodes": [ {{ "name": "body", "mesh": 0, "skin": 0 }}, {{ "name": "root", "children": [ 2 ] }}, {{ "name": "tip", "translation": [ 0, 1, 0 ] }} ],
+          "meshes": [ {{ "primitives": [ {{ "attributes": {{ "POSITION": 0, "JOINTS_0": 1, "WEIGHTS_0": 2 }}, "indices": 3 }} ] }} ],
+          "skins": [ {{ "joints": [ 1, 2 ], "inverseBindMatrices": 4 }} ],
+          "animations": [ {{ "name": "bend", "samplers": [ {{ "input": 5, "output": 6 }} ], "channels": [ {{ "sampler": 0, "target": {{ "node": 2, "path": "rotation" }} }} ] }} ],
+          "buffers": [ {{ "byteLength": {}, "uri": "data:application/octet-stream;base64,{}" }} ],
+          "bufferViews": [ {{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }}, {{ "buffer": 0, "byteOffset": 36, "byteLength": 24 }},
+                           {{ "buffer": 0, "byteOffset": 60, "byteLength": 48 }}, {{ "buffer": 0, "byteOffset": 108, "byteLength": 6 }},
+                           {{ "buffer": 0, "byteOffset": 116, "byteLength": 128 }}, {{ "buffer": 0, "byteOffset": 244, "byteLength": 8 }},
+                           {{ "buffer": 0, "byteOffset": 252, "byteLength": 32 }} ],
+          "accessors": [ {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [ 0, 0, 0 ], "max": [ 1, 1, 0 ] }},
+                         {{ "bufferView": 1, "componentType": 5123, "count": 3, "type": "VEC4" }},
+                         {{ "bufferView": 2, "componentType": 5126, "count": 3, "type": "VEC4" }},
+                         {{ "bufferView": 3, "componentType": 5123, "count": 3, "type": "SCALAR" }},
+                         {{ "bufferView": 4, "componentType": 5126, "count": 2, "type": "MAT4" }},
+                         {{ "bufferView": 5, "componentType": 5126, "count": 2, "type": "SCALAR", "min": [ 0 ], "max": [ 1 ] }},
+                         {{ "bufferView": 6, "componentType": 5126, "count": 2, "type": "VEC4" }} ]
+        }})", bytes.size(), base64);
+    }
+}
+
+// A model with clips is put in the scene with an Animator on the whole, playing the first; its skinned part with a Skin
+// whose joints are its nodes under the whole — kept so through a save, as a prefab's part.
+TEST_F(DocumentTest, AModelsClipsArePlayedOnItsNodesAndItsSkinIsKept) {
+    const auto project = scene::MakeProject("animated");
+    Running editing;
+    keditor::Document& doc = editing.scene->Doc();
+    const auto models = project.directory / "assets" / "models";
+    std::filesystem::create_directories(models);
+    WriteBentModel(models / "bent.gltf");
+    doc.SetAssetDirectory(project.directory / "assets");
+    const kecs::Entity root = doc.ImportModel(models / "bent.gltf");
+    ASSERT_FALSE(root.IsNull());
+    for (int i = 0; i < 400 && (i < 2 || doc.Reading() > 0); ++i) Frame();
+
+    EXPECT_EQ(doc.Field(root, "Animator", "model"), kgraph::Value("@models/bent.gltf"));
+    kecs::Entity body, tip;
+    for (const kecs::Entity entity : doc.World().All()) {
+        if (doc.NameOf(entity) == "body") body = entity;
+        if (doc.NameOf(entity) == "tip") tip = entity;
+    }
+    ASSERT_FALSE(body.IsNull());
+    ASSERT_FALSE(tip.IsNull());
+    EXPECT_EQ(doc.Field(body, "Skin", "model"), kgraph::Value("@models/bent.gltf"));
+    ASSERT_NE(doc.World().Get<kgraph::Skin>(body), nullptr);
+    EXPECT_EQ(doc.World().Get<kgraph::Skin>(body)->root, root);
+
+    // Played: half of its one second, the tip half of a quarter turn.
+    doc.Animate(0.5f);
+    EXPECT_NEAR(doc.World().RotationOf(tip).z, 45.f, 0.01f);
+    EXPECT_FLOAT_EQ(doc.World().Get<kgraph::Animator>(root)->length, 1.f);
+
+    // Saved and read again: the skin's root is the whole still.
+    std::string error;
+    const auto path = project.ScenePath("main");
+    ASSERT_TRUE(doc.Save(path, error)) << error;
+    ASSERT_TRUE(doc.Load(path, error)) << error;
+    for (int i = 0; i < 10; ++i) Frame();
+    kecs::Entity whole, skinned;
+    doc.World().Query<const kgraph::Animator>().Each([&](const kecs::Entity entity, const kgraph::Animator&) { whole = entity; });
+    doc.World().Query<const kgraph::Skin>().Each([&](const kecs::Entity entity, const kgraph::Skin&) { skinned = entity; });
+    ASSERT_FALSE(whole.IsNull());
+    ASSERT_FALSE(skinned.IsNull());
+    EXPECT_EQ(doc.World().Get<kgraph::Skin>(skinned)->root, whole);
+}
+

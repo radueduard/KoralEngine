@@ -431,7 +431,20 @@ namespace kgraph
                 if (const std::string_view type = LayoutTypeOf(field.type); !type.empty()) fields.emplace_back(field.name, type);
             return fields;
         };
-        Expansion expansion = Expand(_graph, elementOf, fieldsOf, _impl->loopCounts);
+        // What each PassScript makes, written out as nodes of its ScriptPass's own.
+        const MadeOf madeOf = [this](const std::string_view name) -> std::optional<ScriptMakes> {
+            const Impl::PassScripted* found = _impl->PassScriptNamed(name);
+            if (!found) return std::nullopt;
+            ScriptMakes makes;
+            for (const auto& use : found->script.uses) {
+                if (use.made) makes.made.push_back({ use.name, use.kind, use.settings });
+                else makes.uses.push_back(use.name);
+                if (use.kind == "Buffer" || use.kind == "Image" || use.kind == "ImageView" || use.kind == "BufferView" || use.kind == "Sampler")
+                    makes.bindable.push_back(use.name);
+            }
+            return makes;
+        };
+        Expansion expansion = Expand(_graph, elementOf, fieldsOf, _impl->loopCounts, madeOf);
         _impl->before.clear();
         // What is watched is copied out by two nodes more, sized by what the node made when last it was built.
         for (auto& [id, watching] : _impl->watched) {
@@ -941,6 +954,14 @@ namespace kgraph
                                                                           : std::format("What {} makes, filled by it: {}.", script.name, makes),
                                 { { "script", Value(script.name) } } });
         }
+        // A ScriptPass node of each of its PassScripts: what it uses, to be wired.
+        for (const auto& script : PassScripts()) {
+            std::string uses;
+            for (const auto& use : script.uses) uses += std::format("{}{} ({}{})", uses.empty() ? "" : ", ", use.name, use.kind, use.writes ? ", written" : "");
+            presets.push_back({ script.name, "ScriptPass", {}, uses.empty() ? std::format("{}: a PassScript that uses nothing yet.", script.name)
+                                                                            : std::format("The pass {} records each frame, of {}.", script.name, uses),
+                                { { "script", Value(script.name) } } });
+        }
         const kecs::World* world = _impl->world;
         if (!world) { std::ranges::sort(presets, {}, &Preset::name); return presets; }
         // Every component of the world, as a ForEach of it: its buffer is one ComponentBuffer node, told which.
@@ -1208,6 +1229,32 @@ namespace kgraph
             _impl->scripts.erase(it);
             ++_impl->scriptsVersion;
         }
+    }
+
+    void Runtime::SetPassScript(PassScript script)
+    {
+        Impl::PassScripted& at = _impl->passScripts[script.name];
+        if (script.size == 0)
+            for (const auto& field : script.fields) script.size = std::max(script.size, field.offset + field.size);
+        at.script = std::move(script);
+        at.generation = ++_impl->scriptsVersion;    // as a resource script set again: what names it is built again
+    }
+
+    void Runtime::RemovePassScript(const std::string_view name)
+    {
+        if (const auto it = _impl->passScripts.find(name); it != _impl->passScripts.end()) {
+            _impl->passScripts.erase(it);
+            ++_impl->scriptsVersion;
+        }
+    }
+
+    std::vector<PassScript> Runtime::PassScripts() const
+    {
+        std::vector<PassScript> out;
+        const Impl* from = _impl.get();
+        while (from->source) from = from->source;
+        for (const auto& each : from->passScripts | std::views::values) out.push_back(each.script);
+        return out;
     }
 
     std::vector<ResourceScript> Runtime::ResourceScripts() const

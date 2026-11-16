@@ -44,6 +44,11 @@ namespace keditor
         _undoPending = false;
         Was is { Doc().Graph().ToJson(), Doc().WorldJson() };
         if (is.graph == _now.graph && is.world == _now.world) return;
+        // Another editor's to change: what was done here is undone, by reading it again as that one saved it.
+        if (!_prefab && !OwnScene()) {
+            ReadSceneAgain(std::format("{} is changed by {}: what was done here is undone.", _scene, _lock.Holder()), true);
+            return;
+        }
         _undo.push_back(std::move(_now));
         if (_undo.size() > 64) _undo.erase(_undo.begin());
         _redo.clear();
@@ -818,6 +823,7 @@ namespace keditor
         case Asset::Kind::eScript: {
             const std::string& component = asset->label;   // the component itself, not its file: a file may declare several
             if (asset->group == "kind") { Say(std::format("{} is a kind: nothing has one itself. Give {} one of what derives from it.", component, name), true); return false; }
+            if (asset->group == "pass") { Say(std::format("{} says what a ScriptPass node's pass does: it is no component an entity has.", component), true); return false; }
             if (asset->group == "resources") { Say(std::format("{} makes resources for a Script node of it: it is no component an entity has.", component), true); return false; }
             if (asset->group == "conditions") { Say(std::format("{} holds conditions a ForEach or a Filter keeps entities by: it is no component an entity has.", component), true); return false; }
             if (std::ranges::contains(doc.ComponentsOf(entity), component)) { Say(std::format("{} has {} already.", name, component)); return true; }

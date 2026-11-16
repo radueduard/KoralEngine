@@ -72,6 +72,38 @@ TEST_F(Project, AnIdStaysAcrossScans)
     EXPECT_EQ(again.FindFile("assets/wall.png")->meta.id, id);
 }
 
+TEST_F(Project, AFolderLinkedInIsTheProjectsByItsName)
+{
+    // assets/sponza -> a folder outside the project, as a big download kept once and linked into each project.
+    const fs::path elsewhere = root.string() + "-elsewhere";
+    fs::create_directories(elsewhere / "textures");
+    std::ofstream(elsewhere / "Sponza.gltf", std::ios::binary) << "x";
+    std::ofstream(elsewhere / "textures/wall.png", std::ios::binary) << "x";
+    fs::create_directories(root / "assets");
+    fs::create_directory_symlink(elsewhere, root / "assets/sponza");
+    fs::create_directory_symlink(root / "assets", root / "assets/sponza/loop");      // round and round: gone into once
+
+    Id id;
+    {
+        Database database(root);
+        EXPECT_TRUE(database.Scan().empty());
+        const Entry* wall = database.FindFile("assets/sponza/textures/wall.png");
+        ASSERT_TRUE(wall);
+        EXPECT_EQ(wall->file.generic_string(), "assets/sponza/textures/wall.png");
+        EXPECT_TRUE(database.FindFile("assets/sponza/Sponza.gltf"));
+        EXPECT_TRUE(fs::exists(root / ".koral/meta/assets/sponza/textures/wall.png.meta"));
+        id = wall->meta.id;
+    }
+    // Its metas are the project's, and nothing is written beside the folder linked to, nor above the project.
+    EXPECT_FALSE(fs::exists(elsewhere / "textures/wall.png.meta"));
+    EXPECT_FALSE(fs::exists(root.parent_path() / fs::path(elsewhere).filename() / "textures/wall.png.meta"));
+    Database again(root);
+    again.Scan();
+    ASSERT_TRUE(again.FindFile("assets/sponza/textures/wall.png"));
+    EXPECT_EQ(again.FindFile("assets/sponza/textures/wall.png")->meta.id, id);
+    fs::remove_all(elsewhere);
+}
+
 TEST_F(Project, AFileMovedWithItsMetaKeepsItsId)
 {
     File("assets/wall.png");

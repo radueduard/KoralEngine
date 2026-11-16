@@ -15,6 +15,7 @@
 #include <kgraph/runtime.h>
 
 #include "document.h"
+#include "interfaces.h"
 #include "overlay.h"
 
 namespace keditor
@@ -83,6 +84,7 @@ namespace keditor
     private:
         std::filesystem::path _file;
         std::unique_ptr<Document> _document;
+        InterfaceHost _interfaces;              // what the scripts show over the game: here, when this is the game's window
         std::unique_ptr<Document> _replaced;    // the one before, until the frame it was drawn in is done
         std::string _error;
         bool _playing = true;
@@ -128,6 +130,7 @@ namespace keditor
 
     private:
         PlayScene& _play;
+        InterfaceHost _interfaces;              // what the scripts show over the game: here, in the Game panel
         const Document* _following = nullptr;
         std::unique_ptr<kgraph::Runtime> _runtime, _before;     // (the one before, until the frame it was drawn in is done)
         std::uint64_t _seen = 0, _restarts = 0;

@@ -10,6 +10,7 @@
 
 #include <kgraph/runtime.h>
 #include <kgraph/random.h>
+#include <kgraph/animation.h>
 
 #include <atomic>
 #include <thread>
@@ -191,7 +192,7 @@ namespace kgraph
          */
         struct Instancing {
             struct Field {
-                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId, eTexture, eStorage, eMaterial, eMaterialTexture };
+                enum class From { eComponent, eMatrix, eNormalMatrix, ePosition, eId, eTexture, eStorage, eMaterial, eMaterialTexture, eJoints };
                 /** Whether it names an image the entity holds, by an index: TEXTURE, STORAGE, or a material's picture. */
                 [[nodiscard]] bool Pictured() const { return from == From::eTexture || from == From::eStorage || from == From::eMaterialTexture; }
                 /** Whether it is of a material of the entity's: a field of it, or a picture. */
@@ -521,8 +522,41 @@ namespace kgraph
          * frame. Shared by every Draw that would write the same into it — of the same Filter, an element laid out alike,
          * and the same component for the fields that are the entity's own: a shadow pass's turns, a pass and its prepass.
          */
+        /**
+         * Every skinned entity's joints, as matrices one after another: what a shader's `[entity("JOINT_MATRICES")]` buffer
+         * is, and an instance's `[entity("JOINTS")]` where its own start. Worked out once a frame, by whichever Draw asks
+         * first; written into the copy the frame reads as it begins, as a buffer of instances is.
+         */
+        struct Skinning {
+            static constexpr std::size_t Capacity = 16384;     // matrices: past that, a skin is drawn as it is bound
+            kor::ResourceRef<kor::Buffer> buffer;
+            Held held;
+            std::vector<kecs::Mat4> staged;
+            std::unordered_map<std::uint64_t, std::uint32_t> first;    // by entity (KeyOf): where its joints start
+            std::uint64_t layout = 0;           // goes up when an entity's joints start elsewhere, or it has none any more
+            std::uint64_t version = 0;          // goes up each time the matrices are worked out
+            std::uint64_t computed = ~0ull;     // the frame they were last worked out in
+            std::vector<std::uint64_t> synced;  // the version each copy holds
+            bool full = false;                  // said once
+        };
+
+        inline void WriteSkinning(Skinning& skinning)
+        {
+            if (skinning.staged.empty() || !skinning.buffer.Get()) return;
+            const std::size_t copies = std::max<std::size_t>(skinning.buffer->CopyCount(), 1);
+            if (skinning.synced.size() != copies) skinning.synced.assign(copies, 0);
+            const std::size_t copy = copies > 1 ? kor::Context::Scheduler().CurrentImageIndex() % copies : 0;
+            if (skinning.synced[copy] == skinning.version) return;
+            const std::size_t bytes = std::min(skinning.staged.size(), Skinning::Capacity) * sizeof(kecs::Mat4);
+            auto mapping = skinning.buffer->Map<std::byte>(bytes, 0);
+            std::memcpy(mapping.AsSpan().data(), skinning.staged.data(), bytes);
+            skinning.synced[copy] = skinning.version;
+        }
+
         struct Instances {
             std::shared_ptr<const Instancing> instancing;
+            std::shared_ptr<Skinning> skinning;     // when an element has JOINTS: where they are
+            std::uint64_t seenSkinLayout = 0;
             std::string source;                     // the Filter whose entities they are
             std::vector<std::string> draws;         // the Draws that draw with it: built again when there are more than there is room for
             kecs::ComponentId component = kecs::NoComponent;    // the pipeline's: where each entity's own fields are
@@ -701,6 +735,7 @@ namespace kgraph
         struct PassPlan {
             std::vector<Use> uses;
             bool readsScreen = false, writesScreen = false;
+            bool drawsScreen = false;               // a Draw's into the window's framebuffer: the screen written as what is drawn into
             std::shared_ptr<EntityRun> entities;    // when it runs for each entity
             std::function<void(kor::CommandBuffer&, const PassContext&)> record;
             std::function<void()> prepare;      // each frame, on the scene's thread, before it is recorded
@@ -710,6 +745,7 @@ namespace kgraph
             /// Set: idle, as its node's `idle` says this frame (a pass's other than a Draw's, whose run says).
             std::shared_ptr<std::atomic<bool>> idle;
             bool async = false;     // run on the async compute queue (its node's `async`)
+            bool draws = false;     // it draws: it stays on the graphics queue, whatever its node's `async`
         };
 
         /**
@@ -771,7 +807,7 @@ namespace kgraph
                     else builder.Read(use.name);
                 }
                 if (plan->readsScreen) builder.Read(kor::FrameGraph::Screen, kor::Image::Usage::eTransferSrc);
-                if (plan->writesScreen) builder.Write(kor::FrameGraph::Screen, kor::Image::Usage::eTransferDst);
+                if (plan->writesScreen) builder.Write(kor::FrameGraph::Screen, plan->drawsScreen ? kor::Image::Usage::eColorAttachment : kor::Image::Usage::eTransferDst);
                 if (!writes) builder.SideEffect();   // it only reads: kept all the same, since it was asked for
                 if (plan->async) builder.AsyncCompute();
             }
@@ -803,7 +839,10 @@ namespace kgraph
             void Prepare() override
             {
                 if (plan->entities)
-                    for (const auto& instances : plan->entities->instances) WriteStaged(*instances);
+                    for (const auto& instances : plan->entities->instances) {
+                        WriteStaged(*instances);
+                        if (instances->skinning) WriteSkinning(*instances->skinning);
+                    }
             }
             void Record(kor::CommandBuffer& commands) const override
             {
@@ -897,6 +936,7 @@ namespace kgraph
             kor::DescriptorType type {};
             kor::Shader::AccessKind access {};
             std::shared_ptr<Instancing> instancing {};     // marked `[entity("PER_INSTANCE")]`
+            bool joints = false;                           // marked `[entity("JOINT_MATRICES")]`: the runtime's joints, bound for it
             std::string problem {};                        // what is wrong with how it is marked
             [[nodiscard]] bool Writes() const
             {
@@ -960,6 +1000,12 @@ namespace kgraph
         {
             const std::string& name = parameter.name;
             if (descriptor.semanticNamespace != "entity") return;   // another module's to fill
+            if (descriptor.semantic == "JOINT_MATRICES") {
+                if (descriptor.type != kor::DescriptorType::eStorageBuffer || (descriptor.elementStride != 0 && descriptor.elementStride != 64))
+                    parameter.problem = std::format("'{}' is marked entity(\"JOINT_MATRICES\"), and so is a StructuredBuffer<float4x4>: a matrix a joint", name);
+                else parameter.joints = true;
+                return;
+            }
             if (descriptor.semantic != "PER_INSTANCE") { parameter.problem = std::format("'{}' is marked entity(\"{}\"): a buffer is entity(\"PER_INSTANCE\")", name, descriptor.semantic); return; }
             if (descriptor.type != kor::DescriptorType::eStorageBuffer || descriptor.elementMembers.empty() || descriptor.elementStride == 0) {
                 parameter.problem = std::format("'{}' is each instance's, and so a StructuredBuffer of a struct: an element for each", name);
@@ -1023,6 +1069,10 @@ namespace kgraph
                 } else if (member.semantic == "ID") {
                     if ((member.scalar != 1 && member.scalar != 2) || member.rows != 1 || member.columns != 1) return wrong("a uint: 0 for none, and one more than its index for an entity");
                     field.from = Instancing::Field::From::eId;
+                } else if (member.semantic == "JOINTS") {
+                    if ((member.scalar != 1 && member.scalar != 2) || member.rows != 1 || member.columns != 1)
+                        return wrong("a uint: where the entity's first joint is among the JOINT_MATRICES — ~0 for one not skinned");
+                    field.from = Instancing::Field::From::eJoints;
                 } else if (member.semantic == "TEXTURE") {
                     if ((member.scalar != 1 && member.scalar != 2) || member.rows != 1 || member.columns != 1)
                         return wrong("a uint: the bindless index of the picture the entity holds there, for kor::texture2D — ~0 for none");
@@ -1032,7 +1082,7 @@ namespace kgraph
                         return wrong("a uint: the bindless storage index of the image the entity holds there, for kor_RWTexture2D — ~0 for none");
                     field.from = Instancing::Field::From::eStorage;
                 } else {
-                    parameter.problem = std::format("'{}.{}' is marked entity(\"{}\"): an instance's field is MATRIX, NORMAL_MATRIX, POSITION, ID, TEXTURE or STORAGE", name, member.name, member.semantic);
+                    parameter.problem = std::format("'{}.{}' is marked entity(\"{}\"): an instance's field is MATRIX, NORMAL_MATRIX, POSITION, ID, JOINTS, TEXTURE or STORAGE", name, member.name, member.semantic);
                     return;
                 }
                 instancing->fields.push_back(std::move(field));
@@ -1235,7 +1285,7 @@ namespace kgraph
                     if (!input.linked && value.IsNull()) return kb::Value {};   // not given: null, where a builder takes that
                     return Fail(std::format("a {} is wired in, from the node that makes it", type.name));
                 }
-                if (input.resource->screen) return Fail("the screen is written by a pass, and cannot be given here");
+                if (input.resource->screen) return Fail("the screen is written by a pass, and cannot be given here: to draw into it, a ScreenFramebuffer is its framebuffer");
                 if (type.name != "Resource" && input.resource->kind != type.name)
                     return Fail(std::format("takes a {}, and was given a {}", type.name, input.resource->kind));
                 return kb::Value::Of(input.resource->handle);
@@ -1615,6 +1665,13 @@ namespace kgraph
             std::uint64_t generation = 0;
         };
         std::map<std::string, Scripted, std::less<>> scripts;
+        // The scripts that say what a ScriptPass node's pass does each frame, by name: as the resource scripts are kept.
+        struct PassScripted {
+            PassScript script;
+            std::uint64_t generation = 0;
+        };
+        std::map<std::string, PassScripted, std::less<>> passScripts;
+        [[nodiscard]] const PassScripted* PassScriptNamed(std::string_view name) const;
         std::map<std::string, Condition, std::less<>> conditions;     // those set: a script's, in place of the engine's of a name
         std::uint64_t conditionsVersion = 0;
         /** The condition so named: one set here, else the runtime's it follows, else the engine's. Null when there is none. */
@@ -1674,7 +1731,7 @@ namespace kgraph
 
         Impl(kor::FrameGraph& graph, kecs::World* entities) : frameGraph(graph), world(entities)
         {
-            if (world) world->Id<Mesh>();      // what a ForEach of meshes is of, before anything has one
+            if (world) { world->Id<Mesh>(); world->Id<Skin>(); world->Id<Animator>(); }     // what a ForEach of them is of, before anything has one
         }
 
         void Unwatch(Built& node);
@@ -1793,6 +1850,8 @@ namespace kgraph
         Expected<void> Register(const std::string& name, PipelineInfo& info, Built& out);
 
         Expected<void> BuildPass(const Node& node, const Inputs& inputs, Built& out);
+        /** A ScriptPass: what its script uses, wired, and each frame what it says to do, replayed as the pass is recorded. */
+        Expected<void> BuildScriptPass(const Node& node, const Inputs& inputs, Built& out, PassPlan& plan);
 
         /** A matrix of four by four from its sixteen numbers, column after column. */
         static Expected<kor::Mat4> MatrixOf(const Value& value, const char* name);
@@ -2069,6 +2128,13 @@ namespace kgraph
         void Watch();
 
         void WantModel(const std::filesystem::path& file);
+        /** What the model file @p name names holds, once read: what Runtime::ModelOf gives. */
+        std::shared_ptr<const Model> ModelNamed(const std::string& name);
+        std::shared_ptr<Skinning> skinning;     // made when a pipeline first asks for joints: the source's, for a runtime that follows one
+        /** The joints' buffer, made the first time it is asked for. Null when it could not be. */
+        std::shared_ptr<Skinning> Skinned();
+        /** Works out every skinned entity's joints, once a frame (@p frame). */
+        void ComputeSkinning(Skinning& skinning, std::uint64_t frame);
 
         /**
          * What the default meshes are to have of their surface's directions, as the graph says: changed, those made are

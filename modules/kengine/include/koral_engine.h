@@ -146,6 +146,8 @@ KENGINE_API bool kecs_set_scale(KecsWorld* world, KecsEntity entity, const float
 KENGINE_API bool kecs_local_matrix(KecsWorld* world, KecsEntity entity, float out[16]);
 /** Where it is in the world: what it is under, and its own. */
 KENGINE_API bool kecs_world_matrix(KecsWorld* world, KecsEntity entity, float out[16]);
+/** Of many at once: sixteen floats an entity, column by column, in the order of `entities`; one not alive reads as the identity. How many were alive. */
+KENGINE_API size_t kecs_world_matrices(KecsWorld* world, const KecsEntity* entities, size_t count, float* out);
 /** Places it in the world, by changing its own transform. */
 KENGINE_API bool kecs_set_world_matrix(KecsWorld* world, KecsEntity entity, const float matrix[16]);
 
@@ -173,6 +175,19 @@ KENGINE_API size_t kecs_set_orientations(KecsWorld* world, const KecsEntity* ent
 KENGINE_API KecsEntity kengine_entity_create(KengineDocument* document, const char* name);
 KENGINE_API const char* kengine_entity_name(KengineDocument* document, KecsEntity entity);
 KENGINE_API bool kengine_entity_set_name(KengineDocument* document, KecsEntity entity, const char* name);
+/**
+ * A model file's things, as the editor puts it in a scene: the entity over them all now, under `parent` (a null entity:
+ * at the top), and what the file holds made under it once it is read — its clips played by an Animator on it, a skinned
+ * mesh bent by its joints. `file` is from the project's assets (`characters/hero.glb`), or whole. A null entity, and
+ * kengine_last_error says why, when there is no such file.
+ */
+KENGINE_API KecsEntity kengine_model_place(KengineDocument* document, const char* file, KecsEntity parent);
+/**
+ * The entities a skinned entity's joints are — its Skin's: the model's nodes under the Skin's root — in the skin's order,
+ * as its vertices' BONE_IDS count them. How many there are; at most `capacity` written to `out` (null to count them). 0
+ * for one without a Skin, or whose model is not read yet; a joint not found is a null entity.
+ */
+KENGINE_API size_t kengine_skin_joints(KengineDocument* document, KecsEntity entity, KecsEntity* out, size_t capacity);
 
 /* ---- components ---------------------------------------------------------------------------------------------- */
 
@@ -190,6 +205,15 @@ KENGINE_API const char* kecs_component_name(KecsWorld* world, uint32_t component
 KENGINE_API size_t kecs_component_size(KecsWorld* world, uint32_t component);
 KENGINE_API uint32_t kecs_component_field_count(KecsWorld* world, uint32_t component);
 KENGINE_API bool kecs_component_field(KecsWorld* world, uint32_t component, uint32_t index, KecsField* out);
+/** The component types an entity has, into @p out (as many as @p capacity holds); how many it has. Called with none, it only counts. */
+KENGINE_API uint32_t kecs_components_of(KecsWorld* world, KecsEntity entity, uint32_t* out, uint32_t capacity);
+/** The world's tick: what a change is stamped with (it goes up each frame). */
+KENGINE_API uint32_t kecs_current_tick(KecsWorld* world);
+/**
+ * Of many at once: the newest tick any of each entity's components was added or written at, but those in @p ignore —
+ * what a copy elsewhere has no need of. 0 for one with none, or not alive. How many were alive.
+ */
+KENGINE_API size_t kecs_changed_ticks(KecsWorld* world, const KecsEntity* entities, size_t count, const uint32_t* ignore, size_t ignoreCount, uint32_t* out);
 /** A tag: a component with nothing in it. The one so named, when there is one. */
 KENGINE_API uint32_t kecs_register_tag(KecsWorld* world, const char* name);
 
@@ -230,6 +254,25 @@ KENGINE_API size_t kecs_query(KecsWorld* world, const uint32_t* all, size_t all_
  */
 KENGINE_API const char* kengine_field_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field);
 KENGINE_API bool kengine_field_set_json(KengineDocument* document, KecsEntity entity, const char* component, const char* field, const char* json);
+/**
+ * An entity as JSON: `{ "name": ..., "components": { "<component>": { "<field>": value } } }`, each field as
+ * kengine_field_json reads it, but the components named in @p skip (separated by commas; null for none).
+ */
+KENGINE_API const char* kengine_entity_json(KengineDocument* document, KecsEntity entity, const char* skip);
+/** Makes an entity as kengine_entity_json's text says: its name, the components it lacks, every field. Types it has not are passed over. */
+KENGINE_API bool kengine_entity_set_json(KengineDocument* document, KecsEntity entity, const char* json);
+
+/* ---- what scripts show over the game -------------------------------------------------------------------------- */
+
+/**
+ * Shows @p ui — a koral-ui interface, a KuiUi* — over the game, wherever it is seen: a player's window, an editor's Game
+ * panel. Each frame @p compose is called with @p user first (what builds it again from what changed), then it is given
+ * that place's input and size, and drawn over the game's picture. A script reads `interface wants the mouse` while the
+ * pointer is over it. Again with the same @p ui, it is replaced.
+ */
+KENGINE_API void kengine_interface_show(KengineDocument* document, void* ui, void (*compose)(void* user), void* user);
+/** Shows it no more: call before the interface goes. */
+KENGINE_API void kengine_interface_hide(KengineDocument* document, void* ui);
 
 /* ---- pictures ----------------------------------------------------------------------------------------------- */
 
@@ -372,6 +415,102 @@ KENGINE_API bool kengine_resource_script_register(KengineDocument* document, con
                                                   const KengineScriptResource* resources, size_t resource_count, const KengineResourceScriptCallbacks* callbacks);
 /** Stops running a resource script: its code is about to go. A Script node still names it, and what it made is made empty. */
 KENGINE_API void kengine_resource_script_unregister(KengineDocument* document, const char* name);
+
+/* ---- scripts that say what a pass does --------------------------------------------------------------------------- */
+
+/** Something a pass script uses: an input of the ScriptPass node that runs it, by its name, wired a resource — or one it makes. */
+typedef struct KenginePassUse {
+    const char* name;           /* the field it is */
+    /* Wired: "Pipeline" (a ComputePipeline), "GraphicsPipeline", "Framebuffer", "Mesh", "Buffer", "Image", "ImageView",
+     * "BufferView" or "Sampler". Made: the node type it is made as, "Image" ... "ComputePipeline", "GraphicsPipeline". */
+    const char* kind;
+    bool writes;                /* a buffer or an image it writes — by kengine_pass_write, _copy or _clear — not only reads */
+    bool made;                  /* made by its ScriptPass node, and given as its output by its name */
+    /* What one made is made with, as a JSON object of its node type's inputs — {"format": "eR32_SFLOAT", "extent.x": 256},
+     * {"image": "canvas"} for one made of another of the script's, by name — or null: as its node type starts. */
+    const char* settings;
+} KenginePassUse;
+
+/** What a pass script's record says its pass does this frame: written by the kengine_pass_ functions below, in order. */
+typedef struct KenginePassCommands KenginePassCommands;
+
+typedef struct KenginePassScriptCallbacks {
+    void* user;
+    /* Says what the pass does this frame, into @p commands, given @p settings: the script's fields, as it registered
+     * them; @p made: the first frame since the pass was built — what it makes may be new, and empty. Called each frame,
+     * on the thread the scene is run on, before the frame is recorded. Returns null when it did, or why it could not —
+     * the caller's, good until it is called again; the pass then does nothing this frame. */
+    const char* (*record)(void* user, KenginePassCommands* commands, const void* settings, size_t settings_size, bool made);
+} KenginePassScriptCallbacks;
+
+/**
+ * Makes a script that says what a pass does — of @p uses, each an input of a ScriptPass node that names it — one the
+ * graph's ScriptPass nodes can name, with these fields as the node's inputs, and runs it: each frame it says what the
+ * pass does. Given no uses, it uses what its source declares. With one so named already, it takes its place. False when
+ * it cannot be.
+ */
+KENGINE_API bool kengine_pass_script_register(KengineDocument* document, const char* name, size_t size, const KecsField* fields, size_t field_count,
+                                              const KenginePassUse* uses, size_t use_count, const KenginePassScriptCallbacks* callbacks);
+/** Stops running a pass script: its code is about to go. A ScriptPass node still names it, and does nothing. */
+KENGINE_API void kengine_pass_script_unregister(KengineDocument* document, const char* name);
+
+/* What a pass does, said in its record: each names what it is of by its place among the script's uses. What is needed
+ * between them — one writes what the next reads — is put there. What is wrong is said on the node, and the pass does
+ * nothing that frame. */
+
+/** Runs @p pipeline, a Pipeline, @p x by @p y by @p z groups. */
+KENGINE_API void kengine_pass_dispatch(KenginePassCommands* commands, uint32_t pipeline, uint32_t x, uint32_t y, uint32_t z);
+/** Runs @p pipeline as many groups as the three numbers of 32 bits at @p offset of @p buffer, a Buffer, say. */
+KENGINE_API void kengine_pass_dispatch_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t buffer, uint64_t offset);
+/** One of the last dispatch's or draw's push constants, by its name in the shader: @p count numbers — a vector's, a matrix's columns. */
+KENGINE_API void kengine_pass_push(KenginePassCommands* commands, const char* name, const double* values, size_t count);
+/** Writes @p size bytes into @p buffer, a Buffer it writes, at @p offset: both multiples of 4, 64 KiB at most. */
+KENGINE_API void kengine_pass_write(KenginePassCommands* commands, uint32_t buffer, uint64_t offset, const void* bytes, size_t size);
+/** Copies @p size bytes of @p from, a Buffer, at @p from_offset, into @p to, a Buffer it writes, at @p to_offset. 0: as many as fit. */
+KENGINE_API void kengine_pass_copy(KenginePassCommands* commands, uint32_t from, uint32_t to, uint64_t size, uint64_t from_offset, uint64_t to_offset);
+/** Makes every texel of @p image, an Image it writes, @p color: red, green, blue, alpha, in the format's own range. */
+KENGINE_API void kengine_pass_clear(KenginePassCommands* commands, uint32_t image, float red, float green, float blue, float alpha);
+/** Copies @p buffer, from @p offset, into @p image, an Image it writes: its first level, every layer, a texel after another. */
+KENGINE_API void kengine_pass_copy_buffer_to_image(KenginePassCommands* commands, uint32_t buffer, uint32_t image, uint64_t offset);
+/** Copies @p image's first level, every layer, into @p buffer, a Buffer it writes, at @p offset. */
+KENGINE_API void kengine_pass_copy_image_to_buffer(KenginePassCommands* commands, uint32_t image, uint32_t buffer, uint64_t offset);
+/** Copies @p from, an Image, into @p to, an Image it writes of its size and format. */
+KENGINE_API void kengine_pass_copy_image(KenginePassCommands* commands, uint32_t from, uint32_t to);
+/** Copies @p from, an Image, into @p to, an Image it writes, scaled and filtered to fit it. */
+KENGINE_API void kengine_pass_blit(KenginePassCommands* commands, uint32_t from, uint32_t to);
+/** Makes @p image's smaller levels from its largest. */
+KENGINE_API void kengine_pass_generate_mipmaps(KenginePassCommands* commands, uint32_t image);
+
+/* Drawing: between kengine_pass_begin_rendering and kengine_pass_end_rendering, draws and what they are drawn with, and
+ * nothing else. A pipeline draws into a framebuffer of the formats its node's has. */
+
+/** No mesh: kengine_pass_draw_indirect's, when the draws read no mesh's vertices. */
+#define KENGINE_PASS_NO_MESH 0xFFFFFFFFu
+/** Draws into @p target from here — a GraphicsPipeline's framebuffer, or a Framebuffer — cleared to the colour and
+ * @p depth, or, @p load, as it was. The viewport and the scissor are all of it. */
+KENGINE_API void kengine_pass_begin_rendering(KenginePassCommands* commands, uint32_t target, bool load, float red, float green, float blue, float alpha, float depth);
+/** Drawn into. One left begun is ended after the last command. */
+KENGINE_API void kengine_pass_end_rendering(KenginePassCommands* commands);
+/** Where what follows is drawn, in pixels. */
+KENGINE_API void kengine_pass_viewport(KenginePassCommands* commands, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+/** What of the framebuffer what follows may draw over, in pixels. */
+KENGINE_API void kengine_pass_scissor(KenginePassCommands* commands, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+/** Binds @p buffer, a Buffer, at vertex binding @p binding, from @p offset: for the draws after it — a mesh drawn takes its own bindings back. */
+KENGINE_API void kengine_pass_vertex_buffer(KenginePassCommands* commands, uint32_t binding, uint32_t buffer, uint64_t offset);
+/** Draws with @p pipeline, a GraphicsPipeline, @p vertex_count vertices from @p first_vertex, @p instances of them from @p first_instance. */
+KENGINE_API void kengine_pass_draw(KenginePassCommands* commands, uint32_t pipeline, uint32_t vertex_count, uint32_t instances, uint32_t first_vertex, uint32_t first_instance);
+/** Draws all of @p mesh, a Mesh — through its indices when it has them — with @p pipeline, made for its layout. */
+KENGINE_API void kengine_pass_draw_mesh(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, uint32_t instances, uint32_t first_instance);
+/** Draws @p index_count of @p mesh's indices from @p first_index (0: all of them, or its part's), @p vertex_offset added to each. */
+KENGINE_API void kengine_pass_draw_indexed(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, uint32_t index_count, uint32_t instances,
+                                           uint32_t first_index, int32_t vertex_offset, uint32_t first_instance);
+/** @p count draws as @p buffer says from @p offset, @p stride apart (0: one after another): of @p mesh's vertices — through its
+ * indices, @p indexed — or of none (KENGINE_PASS_NO_MESH). */
+KENGINE_API void kengine_pass_draw_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, bool indexed, uint32_t buffer, uint64_t offset, uint32_t count, uint32_t stride);
+/** Draws @p pipeline's mesh shader, @p x by @p y by @p z task groups. */
+KENGINE_API void kengine_pass_draw_mesh_tasks(KenginePassCommands* commands, uint32_t pipeline, uint32_t x, uint32_t y, uint32_t z);
+/** The same, @p count of them as @p buffer says from @p offset, @p stride apart. */
+KENGINE_API void kengine_pass_draw_mesh_tasks_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t buffer, uint64_t offset, uint32_t count, uint32_t stride);
 
 /* ---- conditions: what a ForEach or a Filter keeps an entity by --------------------------------------------------- */
 

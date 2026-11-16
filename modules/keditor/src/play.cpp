@@ -133,6 +133,8 @@ namespace keditor
         if (_onFrame) _onFrame();
         if (!_document || !_playing) return;
         _document->Scripts().Update(static_cast<float>(Time::FrameTime()));
+        // The clips, after what the scripts chose of them: their late updates see the pose of this frame.
+        _document->Animate(static_cast<float>(Time::FrameTime()));
     }
     void PlayScene::LateUpdate()
     {
@@ -148,6 +150,9 @@ namespace keditor
         _document->Runtime().SetDebugDraw(_overlay ? nullptr : &SceneDebug());
         _document->Update();
         if (_overlay) _overlay->Update(SceneWindow().Extent(), &SceneDebug());
+        // What the scripts show over the game: here, when this is the game's own window — not an editor's view of it,
+        // which shows it in its Game panel (GameScene).
+        if (!_edited) _interfaces.Show(Graph(), *_document, SceneInput(), SceneWindow().Extent(), static_cast<float>(Time::FrameTime()));
     }
 
     void PlayScene::EditAs()
@@ -157,6 +162,7 @@ namespace keditor
     }
     void PlayScene::Shutdown()
     {
+        _interfaces.Clear(Graph());
         if (_document) Scenes().erase(_document.get());
         _overlayBefore.reset();
         _overlay.reset();
@@ -169,6 +175,7 @@ namespace keditor
         // The old one is kept until this scene's next update: started over from an interface, in the middle of a
         // frame, this frame has drawn with what it holds and is not finished with it. Its passes come out of the
         // graph when it goes, which is before anything is recorded again.
+        _interfaces.Clear(Graph());     // what the document's scripts showed goes with it
         if (_document) { Scenes().erase(_document.get()); _replaced = std::move(_document); _overlayBefore = std::move(_overlay); }
         _document = std::make_unique<Document>(Graph());
         if (_edited) _overlay = std::make_unique<keditor::Overlay>(Graph(), _document->World());
@@ -190,10 +197,11 @@ namespace keditor
             _enabled = _shown;
             for (kor::RenderPass* pass : Graph().Passes()) pass->SetEnabled(_enabled);
         }
-        if (!_shown) return;
+        if (!_shown) { _interfaces.Clear(Graph()); return; }
         // A scene started over is another document: the runtime that followed the one before goes, a frame later.
         Document& document = _play.Doc();
         if (&document != _following || !_runtime) {
+            _interfaces.Clear(Graph());
             _before = std::move(_runtime);
             _runtime = std::make_unique<kgraph::Runtime>(Graph(), &document.World(), document.Runtime());
             _following = &document;
@@ -214,10 +222,15 @@ namespace keditor
         _runtime->SetScreenExtent(SceneWindow().Extent());
         _runtime->SetScreenLook(ScreenFormat(SceneWindow()), SceneWindow().PixelRatio());
         _runtime->Update();
+        // What the scripts show over the game, in the Game panel: its size, its keys and mouse — what the scripts read. Not
+        // in a view of the editor's own (a second view, split beside the first): there is one game, seen from its camera.
+        if (_view) _interfaces.Clear(Graph());
+        else _interfaces.Show(Graph(), document, SceneInput(), SceneWindow().Extent(), static_cast<float>(Time::FrameTime()));
     }
 
     void GameScene::Shutdown()
     {
+        _interfaces.Clear(Graph());
         _runtime.reset();
         _before.reset();
         _following = nullptr;

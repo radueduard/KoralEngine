@@ -29,6 +29,7 @@
 #include <kscript/scripts.h>
 
 namespace kor { class FrameGraph; }
+namespace kui { class Ui; }
 
 namespace keditor
 {
@@ -87,6 +88,17 @@ namespace keditor
         std::vector<std::string> tags;  ///< More words it is found by: "blur", "prefix sum".
     };
 
+    /**
+     * @brief An interface a script shows over the game — a HUD, a menu — as koral-ui builds it: shown wherever the game
+     *        is, over its picture, and given its input (InterfaceHost). @p compose is called first each frame, with
+     *        @p user: what builds the interface again from what changed, before it is given the input and drawn.
+     */
+    struct ScriptInterface {
+        kui::Ui* ui = nullptr;
+        void (*compose)(void* user) = nullptr;
+        void* user = nullptr;
+    };
+
     class Document {
     public:
         /** @brief An empty scene, whose passes run in @p frameGraph. It must outlive the document. */
@@ -112,6 +124,11 @@ namespace keditor
 
         /** @brief Each frame, before the frame graph runs. */
         void Update();
+        /**
+         * @brief Plays every Animator's clip on by @p delta seconds, its nodes put where the clip has them
+         *        (kgraph::Animate): each frame of the scene playing, after its scripts' updates.
+         */
+        void Animate(float delta);
         /** @brief Goes up with every change: what an interface built from the document watches. */
         [[nodiscard]] std::uint64_t Revision() const { return _revision; }
         /**
@@ -381,6 +398,18 @@ namespace keditor
                                const std::function<std::shared_ptr<kgraph::Resource>(const std::string&)>& resolve,
                                const std::function<void(std::shared_ptr<kgraph::Resource>)>& retire, std::string* error = nullptr);
         bool SetField(kecs::Entity entity, std::string_view component, std::string_view field, const kgraph::Value& value, std::string* error = nullptr);
+        /**
+         * @brief An entity as JSON: `{ "name": ..., "components": { "<component>": { "<field>": value } } }`, every field
+         *        as Field reads it (a mesh as its id), but the components named in @p skip. What another document makes a
+         *        copy of with SetEntityJson: a server's entity, on its clients.
+         */
+        [[nodiscard]] std::string EntityJson(kecs::Entity entity, const std::set<std::string, std::less<>>& skip = {}) const;
+        /**
+         * @brief Makes @p entity as @p json says (EntityJson): its name, the components it lacks added, and every field
+         *        set. A component of a type this world does not have, or a field it does not have, is passed over. False,
+         *        with @p error, when the text is not one.
+         */
+        bool SetEntityJson(kecs::Entity entity, std::string_view json, std::string* error = nullptr);
         /** @brief The nodes whose output a resource field of type @p fieldType can hold, by id. */
         [[nodiscard]] std::vector<std::string> NodesFor(std::string_view fieldType) const;
 
@@ -417,6 +446,13 @@ namespace keditor
          *        of the engine's opened and changed is saved as the project's own.
          */
         [[nodiscard]] static std::filesystem::path EngineFunctionsDirectory();
+        /**
+         * @brief Whether the scene in @p file shows anything: a Screen or a ScreenFramebuffer in its graph, or in a
+         *        function it calls, however deep. One that does not needs no window — a server's, stepping what clients
+         *        draw — and is run offscreen, with no display at all. True when the file cannot be read: a window, to
+         *        say why in.
+         */
+        [[nodiscard]] static bool ShowsAnything(const std::filesystem::path& file);
         /** @brief The functions there are to call, by name: the project's, its modules', and the engine's. */
         [[nodiscard]] std::vector<std::string> Functions() const;
         /** @brief What function @p name says it is for (its file's `purpose`, `description` and `tags`): the project's, or the engine's. */
@@ -557,9 +593,12 @@ namespace keditor
          *        behind it — glass, a decal — the tag `Blended`.
          *        The file is read off the frame: the entity over them all is there at once, and the rest is made
          *        under it when the file is read (Reading() counts down to it).
+         *        Its clips are played by an Animator on the entity over them all, and a skinned mesh is bent by its
+         *        joints (a Skin): see kgraph/animation.h.
+         * @param parent What it is put under: NullEntity, at the top.
          * @return The entity over them all; NullEntity, with @p error saying why, when there is no such file.
          */
-        kecs::Entity ImportModel(const std::filesystem::path& file, std::string* error = nullptr);
+        kecs::Entity ImportModel(const std::filesystem::path& file, std::string* error = nullptr, kecs::Entity parent = kecs::NullEntity);
         /**
          * @brief How many files are still being read: models whose entities are yet to be made, and the meshes and
          *        pictures entities already name. All of it is read off the frame; the scene runs meanwhile, and what
@@ -600,6 +639,11 @@ namespace keditor
          *        and what they start as. One a host runs already stays as the host made it.
          */
         void DeclareResourceScript(kscript::ScriptType type);
+        /**
+         * @brief Makes a PassScript one a ScriptPass node can name, as its source declares it: what it uses and its
+         *        fields — nothing runs it yet. One a host runs already is left as it is.
+         */
+        void DeclarePassScript(kscript::ScriptType type);
         /**
          * @brief Makes a Material's script a material kind of the scene: a component whose pictures start as it says,
          *        and a Slang module of it for shaders to import. DeclareScripts does it for each it finds.
@@ -683,9 +727,26 @@ namespace keditor
         void UnregisterResourceScript(std::string_view name);
         /** @brief The scripts that fill resources, running or declared: what a Script node can name. */
         [[nodiscard]] std::vector<kgraph::ResourceScript> ResourceScripts() const;
+        /**
+         * @brief Runs a PassScript: @p record says what each ScriptPass node that names it does each frame, given the
+         *        node's settings. What it uses is @p type's, or its source's when the host says none.
+         */
+        void RegisterPassScript(kscript::ScriptType type, std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record);
+        /** @brief Stops running a PassScript: its code is going. It is declared still, as its source says. */
+        void UnregisterPassScript(std::string_view name);
+        /** @brief The PassScripts a ScriptPass node can name. */
+        [[nodiscard]] std::vector<kgraph::PassScript> PassScripts() const;
 
         bool Save(const std::filesystem::path& path, std::string& error);
         bool Load(const std::filesystem::path& path, std::string& error);
+
+        // ---- what scripts show over the game ------------------------------------------------------------------
+
+        /** @brief Shows @p shown over the game, after those shown before: drawn over them. Again with its `ui`, it is replaced. */
+        void ShowInterface(const ScriptInterface& shown);
+        /** @brief Shows it no more. Called before its Ui goes: nothing reaches it after. */
+        void HideInterface(const kui::Ui* ui);
+        [[nodiscard]] const std::vector<ScriptInterface>& Interfaces() const { return _interfaces; }
 
     private:
         void Changed() { ++_revision; }
@@ -745,6 +806,7 @@ namespace keditor
         kecs::Codecs _codecs;
         std::vector<std::string> _tags;
         std::vector<std::string> _notes;
+        std::vector<ScriptInterface> _interfaces;
         // Materials: the assets entities follow, by id; which kind each reported model is imported as, for every file
         // ("") and for one; and whether a field is being set because an asset has it, which makes nothing an override.
         std::map<std::string, MaterialAsset, std::less<>> _materialAssets;

@@ -1,5 +1,6 @@
 plugins {
     kotlin("jvm") version "2.4.20" apply false
+    kotlin("plugin.compose") version "2.4.20" apply false      // scripts' interfaces, written in Compose
 }
 
 subprojects {

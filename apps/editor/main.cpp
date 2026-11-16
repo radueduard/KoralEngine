@@ -29,12 +29,14 @@ int main(const int argc, char** argv)
     // layer is installed. It costs a fifth of a frame and more in a scene of many draws, so it is for whoever asks.
     bool validate = false;
     bool arrange = false;
+    std::string sceneName;  // --scene <name>: the project's scene to open, rather than the one it starts with
     kor::WindowPlatform platform = kor::WindowPlatform::eAuto;     // --platform x11 | wayland
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--frames") == 0 && i + 1 < argc) frames = std::strtol(argv[++i], nullptr, 10);
         else if (std::strcmp(argv[i], "--no-vsync") == 0) vsync = false;
         else if (std::strcmp(argv[i], "--validate") == 0) validate = true;
         else if (std::strcmp(argv[i], "--arrange") == 0) arrange = true;
+        else if (std::strcmp(argv[i], "--scene") == 0 && i + 1 < argc) sceneName = argv[++i];
         else if (std::strcmp(argv[i], "--platform") == 0 && i + 1 < argc) {
             const std::string_view which = argv[++i];
             platform = which == "x11" ? kor::WindowPlatform::eX11 : which == "wayland" ? kor::WindowPlatform::eWayland : kor::WindowPlatform::eAuto;
@@ -61,6 +63,10 @@ int main(const int argc, char** argv)
     const keditor::Session::SavedWindow last = kept ? keditor::Session::LastWindow() : keditor::Session::SavedWindow {};
     kor::Scene* opened = app.Open("Editor", std::move(scene), { .title = "Koral Engine", .extent = last.extent, .vsync = vsync, .position = last.position });
     if (last.maximized) editor->SceneWindow().ToggleMaximize();
+    // Another editor opened from one on the same project (File, Open another editor): its scene, not the one the project starts with.
+    if (!sceneName.empty() && editor->CurrentSession().HasProject() && sceneName != editor->CurrentSession().SceneName()
+        && !editor->CurrentSession().OpenScene(sceneName))
+        std::fprintf(stderr, "koral-editor: %s\n", editor->CurrentSession().Status().c_str());
     if (arrange) {
         // Drawn a few times first, so that each node is as big as it comes out; then each page in turn, then saved.
         for (int i = 0; i < 30; ++i) app.Frame();

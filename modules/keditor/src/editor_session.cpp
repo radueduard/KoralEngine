@@ -130,6 +130,7 @@ namespace keditor
         _project = std::move(project);
         _hasProject = true;
         _scene = _project.start;
+        OwnScene();
         selectedNode.clear();
         selectedEntity = kecs::NullEntity;
         _snapshot.clear();
@@ -141,13 +142,68 @@ namespace keditor
         return true;
     }
 
+    bool Session::OwnScene()
+    {
+        if (!_hasProject) return _ownsScene = true;      // a scene in no project yet is no other editor's
+        const std::filesystem::path scene = _project.ScenePath(_scene);
+        if (_lock.Scene() != scene || !_lock.Held()) {
+            // A lock that could not be made — the project's folder is not one to write in — is no other editor's.
+            _ownsScene = _lock.Take(scene) || _lock.Holder().empty();
+            std::error_code ec;
+            _sceneWritten = std::filesystem::last_write_time(scene, ec);
+            _lockAgain = 1.f;
+            if (!_ownsScene) Say(std::format("{} is changed by {}: here it is looked at and played, and read again as it is saved.", _scene, _lock.Holder()));
+        }
+        return _ownsScene;
+    }
+
+    void Session::ReadSceneAgain(const std::string& said, const bool failed)
+    {
+        // Not saved yet, there is nothing to read: what is here stays (and is not saved, as the scene is another's).
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(_project.ScenePath(_scene), ec)) { Say(said, failed); return; }
+        std::string error;
+        if (!_play.Open(_project.ScenePath(_scene), error)) { Say(error, true); return; }
+        _sceneWritten = std::filesystem::last_write_time(_project.ScenePath(_scene), ec);
+        _undoOf = nullptr;      // its history starts over from what was read
+        selectedNode.clear();
+        selectedEntity = kecs::NullEntity;
+        Say(said, failed);
+    }
+
+    void Session::KeepScene(const float seconds)
+    {
+        if (!_hasProject || _prefab) return;
+        if (_lock.Scene() != _project.ScenePath(_scene)) { OwnScene(); return; }
+        if (_ownsScene || (_lockAgain -= seconds) > 0.f) return;
+        _lockAgain = 1.f;
+        const std::filesystem::path scene = _project.ScenePath(_scene);
+        std::error_code ec;
+        const auto written = std::filesystem::last_write_time(scene, ec);
+        const bool saved = !ec && written != _sceneWritten;
+        const std::string holder = _lock.Holder();
+        // Let go of: this editor changes it from here on — as it is in its file now.
+        if (_lock.Take(scene)) {
+            _ownsScene = true;
+            if (InPlayMode()) Stop();
+            if (saved) ReadSceneAgain(std::format("{} let go of {}: it is changed here now, as it was saved.", holder, _scene));
+            else Say(std::format("{} let go of {}: it is changed here now.", holder, _scene));
+            return;
+        }
+        // Saved by the one that changes it: read again, unless it is playing here — then when it stops.
+        if (saved && !InPlayMode()) ReadSceneAgain(std::format("{} saved {}: read again.", _lock.Holder(), _scene));
+    }
+
     bool Session::Save()
     {
         if (!_hasProject) { Say("There is no project to save it in yet: File, New project.", true); return false; }
         if (_prefab) return SavePrefab();       // what is open is the prefab: it is what is saved
         if (InPlayMode()) { Say("Stop playing to save: what is saved is the scene, not a moment of it.", true); return false; }
+        if (!OwnScene()) { Say(std::format("{} is changed by {}: it is saved there, not here.", _scene, _lock.Holder()), true); return false; }
         std::string error;
         if (!Doc().Save(_project.ScenePath(_scene), error)) { Say(error, true); return false; }
+        std::error_code written;
+        _sceneWritten = std::filesystem::last_write_time(_project.ScenePath(_scene), written);
         Say(std::format("Saved {}.", _project.ScenePath(_scene).filename().string()));
         return true;
     }
@@ -398,6 +454,37 @@ namespace keditor
 #endif
         if (std::system(command.c_str()) != 0) { Say("The player could not be started.", true); return false; }
         Say(std::format("Running {}.", _project.name));
+        return true;
+    }
+
+    std::string Session::AnotherEditorCommand(const std::string& scene) const
+    {
+        if (!_hasProject) return {};
+        // This program, as it is: the editor that was built with it, whichever it is.
+#ifdef _WIN32
+        wchar_t self[4096];
+        const unsigned long length = GetModuleFileNameW(nullptr, self, static_cast<unsigned long>(std::size(self)));
+        const std::filesystem::path editor = length > 0 ? std::filesystem::path(std::wstring(self, length)) : std::filesystem::path("koral-editor.exe");
+#else
+        std::error_code ignored;
+        std::filesystem::path editor = std::filesystem::read_symlink("/proc/self/exe", ignored);
+        if (editor.empty()) editor = "koral-editor";
+#endif
+        return std::format("\"{}\" \"{}\" --scene \"{}\"", editor.string(), _project.directory.string(), scene);
+    }
+
+    bool Session::OpenAnotherEditor(const std::string& scene)
+    {
+        if (!_hasProject) { Say("Another editor opens a project: File, New project.", true); return false; }
+        // What it opens is what is saved: what is done here and not yet saved is not there.
+        if (!ReadOnly() && Doc().Dirty() && !InPlayMode() && !Save()) return false;
+#ifdef _WIN32
+        const std::string command = "start \"\" " + AnotherEditorCommand(scene);
+#else
+        const std::string command = AnotherEditorCommand(scene) + " &";
+#endif
+        if (std::system(command.c_str()) != 0) { Say("Another editor could not be started.", true); return false; }
+        Say(std::format("Opening another editor on {}, with {}.", _project.name, scene));
         return true;
     }
 
@@ -865,6 +952,7 @@ namespace keditor
         kecs::World& world = doc.World();
         kgraph::Runtime& runtime = doc.Runtime();
         kor::DebugDraw& debug = _play.SceneDebug();
+        KeepScene(seconds);
         TrackUndo(seconds, input.IsMouseButtonHeld(kor::MouseButton::eLeft));
 
         // Frames a second, over a quarter of one: steady enough to read.
@@ -1621,6 +1709,8 @@ namespace keditor
             { "Kotlin", "Compiled when the project opens, and again whenever it is saved: it runs in the editor, and in the game." },
             { "C# ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
             { "Kotlin ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
+            { "C# PassScript", "Says what a pass does, each frame: the dispatches of its pipelines, buffers written and copied, images cleared. A ScriptPass node of it runs it." },
+            { "Kotlin PassScript", "Says what a pass does, each frame: the dispatches of its pipelines, buffers written and copied, images cleared. A ScriptPass node of it runs it." },
         };
         return kinds;
     }
@@ -1654,7 +1744,7 @@ namespace keditor
         // Its language, and what it is: a script of entities, or one that makes resources ("Kotlin ResourceScript").
         const std::string language = kind.substr(0, kind.find(' '));
         const std::string what = kind.find(' ') == std::string::npos ? std::string("Script") : kind.substr(kind.find(' ') + 1);
-        if (what != "Script" && what != "ResourceScript") { Say(std::format("'{}' is no kind of script.", what), true); return false; }
+        if (what != "Script" && what != "ResourceScript" && what != "PassScript") { Say(std::format("'{}' is no kind of script.", what), true); return false; }
         const bool kotlin = language == "Kotlin";
         if (!kotlin && language != "C#") { Say(std::format("'{}' is not a language scripts are written in.", language), true); return false; }
         // A project's scripts are all in one language: the first one's, kept in project.json.
@@ -1663,7 +1753,10 @@ namespace keditor
             return false;
         }
         if (Doc().World().Find(name) != kecs::NoComponent) { Say(std::format("There is a component called {} already: a script is one, by its class's name.", name), true); return false; }
-        if (std::ranges::contains(Doc().ResourceScripts(), name, &kgraph::ResourceScript::name)) { Say(std::format("There is a script called {} already.", name), true); return false; }
+        if (std::ranges::contains(Doc().ResourceScripts(), name, &kgraph::ResourceScript::name) || std::ranges::contains(Doc().PassScripts(), name, &kgraph::PassScript::name)) {
+            Say(std::format("There is a script called {} already.", name), true);
+            return false;
+        }
         const auto directory = _project.directory / "scripts";
         std::error_code ignored;
         for (const char* ending : { ".cs", ".kt" })
@@ -1675,12 +1768,15 @@ namespace keditor
             if (!_project.Save(error)) { Say(error, true); return false; }
         }
         const auto path = directory / (name + (kotlin ? ".kt" : ".cs"));
-        const char* source = what == "ResourceScript" ? (kotlin ? KotlinResourceScript : CSharpResourceScript) : (kotlin ? KotlinScript : CSharpScript);
+        const char* source = what == "ResourceScript" ? (kotlin ? KotlinResourceScript : CSharpResourceScript)
+                           : what == "PassScript" ? (kotlin ? KotlinPassScript : CSharpPassScript) : (kotlin ? KotlinScript : CSharpScript);
         { std::ofstream out(path, std::ios::binary); out << Named(source, name); if (!out) { Say(std::format("{} could not be written.", path.string()), true); return false; } }
         WriteEditorSetup(_project.directory, _project.name);
         // Its component is what its source declares, from now: to give entities, and as a node of the graph.
         Doc().DeclareScripts(path);
-        if (what != "Script")
+        if (what == "PassScript")
+            Say(std::format("Made scripts/{}.{}: a ScriptPass node of it — '{}', among the nodes to add — runs it; wire what it uses.", name, kotlin ? "kt" : "cs", name));
+        else if (what != "Script")
             Say(std::format("Made scripts/{}.{}: a Script node of it — '{}', among the nodes to add — gives what it makes.", name, kotlin ? "kt" : "cs", name));
         else
             Say(std::format("Made scripts/{}.{}, a component: it is compiled now, and runs once it is.", name, kotlin ? "kt" : "cs"));
@@ -1694,6 +1790,7 @@ namespace keditor
     {
         if (_prefab) ClosePrefab(true);         // the scene is what changes: the prefab saved, and the scene back, first
         if (!_hasProject) { Say("A new scene's shaders go in a project: File, New project.", true); return false; }
+        if (!OwnScene()) { Say(std::format("{} is changed by {}: a new scene is made in its place there, not here.", _scene, _lock.Holder()), true); return false; }
         if (InPlayMode()) Stop();
         if (lit) WriteLitShaders(_project.ShaderDirectory());
         else WriteStandardShaders(_project.ShaderDirectory());
@@ -1718,8 +1815,8 @@ namespace keditor
         if (name.empty() || name.find_first_of("/\\:*?\"<>|") != std::string::npos) { Say(std::format("'{}' is no scene's name: a file's name, without / \\ : * ? \" < > |", name), true); return false; }
         std::error_code ec;
         if (std::ranges::contains(_project.scenes, name) || std::filesystem::exists(_project.ScenePath(name), ec)) { Say(std::format("The project has a scene called {} already.", name), true); return false; }
-        // What was done to the one open is kept: saved before it is let go of.
-        if (Doc().Dirty() && !Save()) return false;
+        // What was done to the one open is kept: saved before it is let go of — when it is this editor's to save.
+        if (!ReadOnly() && Doc().Dirty() && !Save()) return false;
         const std::string was = _scene;
         _scene = name;
         if (!NewScene(lit) || !Save()) {

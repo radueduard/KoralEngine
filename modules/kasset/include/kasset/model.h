@@ -43,6 +43,7 @@ namespace kasset
         struct Part {
             std::string mesh;                       ///< By the name it is found by: `@model.gltf#3`.
             int material = -1;                      ///< Among Model::materials.
+            int skin = -1;                          ///< Among Model::skins: what bends it; -1 for none.
         };
         std::vector<Part> parts;                    ///< What it is drawn as: a mesh each, of one material.
     };
@@ -69,11 +70,41 @@ namespace kasset
         bool atNode = false;
     };
 
+    /**
+     * @brief What bends a mesh: the nodes it is bent by (its joints), each with the matrix that takes the mesh, as it is
+     *        in the file, into the joint's own space as it was when it was bound. A vertex's JOINTS index this list.
+     */
+    struct ModelSkin {
+        struct Joint {
+            int node = -1;                          ///< Among Model::nodes.
+            float inverseBind[16] {};               ///< Column-major.
+        };
+        std::vector<Joint> joints;
+    };
+
+    /**
+     * @brief A clip: how nodes move over time. Each channel keys one node's position, rotation (a quaternion, xyzw) and
+     *        scale, each at times of its own, in seconds from the clip's start; what a channel keys nothing of is left.
+     */
+    struct ModelAnimation {
+        struct Channel {
+            int node = -1;                          ///< Among Model::nodes.
+            std::vector<float> positionTimes, positions;    ///< Three numbers a key.
+            std::vector<float> rotationTimes, rotations;    ///< Four a key.
+            std::vector<float> scaleTimes, scales;          ///< Three a key.
+        };
+        std::string name;
+        float duration = 0.f;                       ///< In seconds.
+        std::vector<Channel> channels;
+    };
+
     struct Model {
         std::vector<ModelNode> nodes;               ///< Parents before their children.
         std::vector<ModelMaterial> materials;
         std::vector<ModelLight> lights;
         std::vector<ModelCamera> cameras;
+        std::vector<ModelSkin> skins;
+        std::vector<ModelAnimation> animations;
         /// What the file calls each of its meshes, by its index among them: what a mesh is found by again when the file is
         /// read again with its meshes in another order.
         std::vector<std::string> meshNames;
