@@ -222,7 +222,7 @@ That has to be built.
 
 ## What the framework needed
 
-Five things, all built on GFX `v2-development` on 2026-10-08. [plan.md](plan.md) has the detail.
+Five things, all built on GFX `v2-development` on 2026-10-08. [plan.md](https://github.com/radueduard/KoralEngine/blob/main/docs/plan.md) has the detail.
 
 - **Shaders reflect their specialization constants** and every parameter by name.
 - **Pipelines number their shaders' descriptors**: `SetBinding(name, set, binding)` on each pipeline
@@ -233,4 +233,4 @@ Five things, all built on GFX `v2-development` on 2026-10-08. [plan.md](plan.md)
 
 ## Open questions
 
-None at the moment. The plan to build this is [plan.md](plan.md).
+None at the moment. The plan to build this is [plan.md](https://github.com/radueduard/KoralEngine/blob/main/docs/plan.md).

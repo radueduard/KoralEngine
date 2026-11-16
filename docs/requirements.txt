@@ -1,0 +1,2 @@
+# What the wiki is built with: mkdocs.yml at the repository's root, and .github/workflows/wiki.yml.
+mkdocs-material==9.5.39
