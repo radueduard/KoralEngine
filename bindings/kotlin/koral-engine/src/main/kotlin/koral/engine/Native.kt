@@ -208,36 +208,17 @@ internal object Native {
     val FILL: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG)
     val kengine_resource_script_register = call("kengine_resource_script_register", JAVA_BOOLEAN, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
     val kengine_resource_script_unregister = call("kengine_resource_script_unregister", null, ADDRESS, ADDRESS)
-    /** KenginePassUse: name, kind, writes. */
-    val PASS_USE: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("kind"), JAVA_BOOLEAN.withName("writes"),
-        JAVA_BOOLEAN.withName("made"), MemoryLayout.paddingLayout(6), ADDRESS.withName("settings"))
-    /** KenginePassScriptCallbacks: user, then record. */
-    val PASS_CALLBACKS: StructLayout = MemoryLayout.structLayout(ADDRESS, ADDRESS)
-    val RECORD: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, JAVA_BOOLEAN)
+    /** KenginePassPort: name, type, output, writes. */
+    val PASS_PORT: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("type"), JAVA_BOOLEAN.withName("output"),
+        JAVA_BOOLEAN.withName("writes"), MemoryLayout.paddingLayout(6))
+    /** KenginePassScriptCallbacks: user, initialize, prepare, record, release. */
+    val PASS_CALLBACKS: StructLayout = MemoryLayout.structLayout(ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS)
+    val PASS_INITIALIZE: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
+    val PASS_PREPARE: FunctionDescriptor = FunctionDescriptor.ofVoid(ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG)
+    val PASS_RECORD: FunctionDescriptor = FunctionDescriptor.of(ADDRESS, ADDRESS, JAVA_LONG, ADDRESS)
+    val PASS_RELEASE: FunctionDescriptor = FunctionDescriptor.ofVoid(ADDRESS, JAVA_LONG)
     val kengine_pass_script_register = call("kengine_pass_script_register", JAVA_BOOLEAN, ADDRESS, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS, JAVA_LONG, ADDRESS)
     val kengine_pass_script_unregister = call("kengine_pass_script_unregister", null, ADDRESS, ADDRESS)
-    val kengine_pass_dispatch = call("kengine_pass_dispatch", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_dispatch_indirect = call("kengine_pass_dispatch_indirect", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG)
-    val kengine_pass_push = call("kengine_pass_push", null, ADDRESS, ADDRESS, ADDRESS, JAVA_LONG)
-    val kengine_pass_write = call("kengine_pass_write", null, ADDRESS, JAVA_INT, JAVA_LONG, ADDRESS, JAVA_LONG)
-    val kengine_pass_copy = call("kengine_pass_copy", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG, JAVA_LONG)
-    val kengine_pass_clear = call("kengine_pass_clear", null, ADDRESS, JAVA_INT, JAVA_FLOAT, JAVA_FLOAT, JAVA_FLOAT, JAVA_FLOAT)
-    val kengine_pass_copy_buffer_to_image = call("kengine_pass_copy_buffer_to_image", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG)
-    val kengine_pass_copy_image_to_buffer = call("kengine_pass_copy_image_to_buffer", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG)
-    val kengine_pass_copy_image = call("kengine_pass_copy_image", null, ADDRESS, JAVA_INT, JAVA_INT)
-    val kengine_pass_blit = call("kengine_pass_blit", null, ADDRESS, JAVA_INT, JAVA_INT)
-    val kengine_pass_generate_mipmaps = call("kengine_pass_generate_mipmaps", null, ADDRESS, JAVA_INT)
-    val kengine_pass_begin_rendering = call("kengine_pass_begin_rendering", null, ADDRESS, JAVA_INT, JAVA_BOOLEAN, JAVA_FLOAT, JAVA_FLOAT, JAVA_FLOAT, JAVA_FLOAT, JAVA_FLOAT)
-    val kengine_pass_end_rendering = call("kengine_pass_end_rendering", null, ADDRESS)
-    val kengine_pass_viewport = call("kengine_pass_viewport", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_scissor = call("kengine_pass_scissor", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_vertex_buffer = call("kengine_pass_vertex_buffer", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG)
-    val kengine_pass_draw = call("kengine_pass_draw", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_draw_mesh = call("kengine_pass_draw_mesh", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_draw_indexed = call("kengine_pass_draw_indexed", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_draw_indirect = call("kengine_pass_draw_indirect", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_BOOLEAN, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT)
-    val kengine_pass_draw_mesh_tasks = call("kengine_pass_draw_mesh_tasks", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT)
-    val kengine_pass_draw_mesh_tasks_indirect = call("kengine_pass_draw_mesh_tasks_indirect", null, ADDRESS, JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_INT, JAVA_INT)
     /** KengineConditionInput: name, type, initial. */
     val CONDITION_INPUT: StructLayout = MemoryLayout.structLayout(ADDRESS.withName("name"), ADDRESS.withName("type"), ADDRESS.withName("initial"))
     /** KengineConditionCallbacks: user, then test. */

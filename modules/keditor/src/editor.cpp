@@ -4658,10 +4658,12 @@ namespace keditor
                     if (const auto named = node.inputs.find("script"); named != node.inputs.end() && named->second.value.String())
                         for (const auto& script : Doc().PassScripts())
                             if (script.name == *named->second.value.String()) {
-                                std::string uses;
-                                for (const auto& use : script.uses) uses += std::format("{}{} ({}{})", uses.empty() ? "" : ", ", use.name, use.kind, use.writes ? ", written" : "");
-                                rows.push_back(kgui::Muted(std::format("{} uses {}{}", script.name, uses.empty() ? std::string("nothing") : uses,
-                                                                       script.record ? "." : ". Nothing runs it now: it records once the project runs with its scripts."), 11.f));
+                                std::string in, out;
+                                for (const auto& port : script.ports)
+                                    (port.output ? out : in) += std::format("{}{} ({}{})", (port.output ? out : in).empty() ? "" : ", ", port.name, port.type, port.writes ? ", written" : "");
+                                rows.push_back(kgui::Muted(std::format("{} is given {}, and gives {}{}", script.name, in.empty() ? std::string("nothing") : in,
+                                                                       out.empty() ? std::string("nothing") : out,
+                                                                       script.Runs() ? "." : ". Nothing runs it now: it records once the project runs with its scripts."), 11.f));
                             }
                 if (const auto* report = runtime.ReportOf(id)) {
                     rows.push_back(kgui::Muted(std::format("Runs for {} {}.", report->ran + report->culled, report->ran + report->culled == 1 ? "entity" : "entities")));

@@ -46,6 +46,7 @@
 #include "view.h"
 
 struct KoralResource;
+struct KoralCommandBuffer;
 namespace kor { class FrameGraph; class DebugDraw; }
 
 namespace kgraph
@@ -176,92 +177,53 @@ namespace kgraph
     };
 
     /**
-     * @brief Something a PassScript's pass uses, as its source declares it: an input of the ScriptPass node that runs
-     *        it, by its name, wired a resource.
+     * @brief One of a PassScript's ports, as its source marks it: a resource it is wired (`@NodeInput`, an input of its
+     *        ScriptPass node by the member's name) or one it makes and gives (`@NodeOutput`, an output by that name).
+     *        Its values (`@NodeInput` numbers, vectors) are its fields.
      */
-    struct PassScriptUse {
-        std::string name;               ///< Its field: the ScriptPass node's input.
-        /// Wired: "Pipeline" (a ComputePipeline), "GraphicsPipeline" (drawn with, into its framebuffer), "Framebuffer"
-        /// (drawn into), "Mesh" (drawn), "Buffer", "Image", "ImageView", "BufferView" or "Sampler". Made: the node type it
-        /// is made as — "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "ComputePipeline",
-        /// "GraphicsPipeline".
-        std::string kind;
-        bool writes = false;            ///< A Buffer or an Image it writes — by `write`, `copy` or `clear` — not only reads.
-        /**
-         * Made by the script's ScriptPass node, not wired in: a node of its own, `<pass>/<name>`, of `kind`, made with
-         * `settings` — what the node says otherwise, `<name>.<input>`, before them — and given as the node's output
-         * `name`, for what comes after to use. A setting that names another of the script's resources or uses, by its
-         * name, is wired to it; a pipeline's parameters named as one of them are wired to it, unless said otherwise.
-         * What it makes, it writes.
-         */
-        bool made = false;
-        std::vector<std::pair<std::string, Value>> settings;
+    struct PassScriptPort {
+        std::string name;               ///< The member: the node's input or output.
+        /// What it is, as Koral's bindings name it: "Image", "Buffer", "ImageView", "BufferView", "Sampler",
+        /// "Framebuffer", "Mesh", "Shader", "AccelerationStructure", "ComputePipeline", "GraphicsPipeline".
+        std::string type;
+        bool output = false;            ///< A @NodeOutput: made by the script, given on. Else wired in.
+        bool writes = false;            ///< A @NodeInput the script writes, not only reads: `@NodeInput(writes = true)`.
     };
 
     /**
-     * @brief One command a PassScript records in a frame: what its ScriptPass node's pass does then, in order. Each names
-     *        what it is of by its place among the script's `uses`. The frame graph puts what each needs between them.
+     * @brief What runs a PassScript: each of its ScriptPass nodes is an object of it, made when the node is built and
+     *        let go when it is built again or goes. All are null for a script declared that nothing runs.
      */
-    struct PassCommand {
-        enum class Op : std::uint8_t {
-            eDispatch,          ///< `use`, a Pipeline, run `groups` many groups each way.
-            eDispatchIndirect,  ///< `use`, a Pipeline, run as many groups as the three numbers at `offset` of `other`, a Buffer, say.
-            eWrite,             ///< `bytes` written into `use`, a Buffer, at `offset`: a few kilobytes at most, carried in the frame's commands.
-            eCopy,              ///< `size` bytes of `use`, a Buffer, from `offset`, into `other`, a Buffer, at `otherOffset`. 0: as many as fit.
-            eClear,             ///< `use`, an Image, every texel of it `color`.
-            // Drawing: between a begin and an end, and nothing else between them.
-            eBeginRendering,    ///< Draws into `use` from here: a GraphicsPipeline's framebuffer, or a Framebuffer. Cleared to `color` and `depth`, unless `load`.
-            eEndRendering,      ///< Drawn into.
-            eViewport,          ///< Where what follows is drawn: `box`, x, y, width, height, in pixels. The whole framebuffer, as a rendering begins.
-            eScissor,           ///< What of it what follows may draw over: `box`, likewise.
-            eVertexBuffer,      ///< `use`, a Buffer, bound at vertex binding `first`, from `offset`: for the draws after it, until a mesh takes the binding back.
-            eDraw,              ///< `use`, a GraphicsPipeline, `size` vertices — `instances` of them — from `first`, the first instance `firstInstance`.
-            eDrawMesh,          ///< `use`, a GraphicsPipeline, all of `mesh`, a Mesh: through its indices when it has them. `instances`, from `firstInstance`.
-            eDrawIndexed,       ///< `use`, a GraphicsPipeline, `size` of `mesh`'s indices from `first` (0: all, or its part's), `vertexOffset` added to each.
-            eDrawIndirect,      ///< `use`, a GraphicsPipeline, `count` draws as `other`, a Buffer, says from `offset`, `stride` apart; of `mesh`'s vertices when given.
-            eDrawIndexedIndirect,       ///< The same, through `mesh`'s indices.
-            eDrawMeshTasks,     ///< `use`, a GraphicsPipeline with a mesh shader, `groups` task groups.
-            eDrawMeshTasksIndirect,     ///< The same, `count` of them as `other` says from `offset`, `stride` apart.
-            // Images: copied, blitted, their levels made.
-            eCopyBufferToImage, ///< `use`, a Buffer, from `offset`, into `other`, an Image: its first level, every layer, a texel after another.
-            eCopyImageToBuffer, ///< `use`, an Image's first level, into `other`, a Buffer, at `offset`.
-            eCopyImage,         ///< `use`, an Image, into `other`, an Image of its size and format.
-            eBlit,              ///< `use`, an Image, into `other`, scaled and filtered to fit it.
-            eGenerateMipmaps,   ///< `use`, an Image, its smaller levels made from its largest.
-        };
-        static constexpr std::uint32_t None = ~0u;      ///< No mesh.
-        Op op = Op::eDispatch;
-        std::uint32_t use = 0, other = 0;
-        std::uint32_t groups[3] { 1, 1, 1 };
-        std::uint64_t offset = 0, otherOffset = 0, size = 0;
-        std::vector<std::byte> bytes;
-        float color[4] { 0.f, 0.f, 0.f, 0.f };
-        float depth = 1.f;
-        bool load = false;
-        std::uint32_t mesh = None;
-        std::uint32_t first = 0, instances = 1, firstInstance = 0, count = 1, stride = 0;
-        std::int32_t vertexOffset = 0;
-        std::uint32_t box[4] { 0, 0, 0, 0 };
-        /// A dispatch's or a draw's push constants, by name: what the pipeline's shaders declare. One not given is its default there.
-        std::vector<std::pair<std::string, Value>> push;
+    struct PassScriptCalls {
+        /// Makes an object of it, given what each of its inputs is wired to — a borrowed handle each, the script's to let
+        /// go of, null for one wired nothing — in the order its input ports are, and its fields' bytes; runs its
+        /// initialize, which makes what it gives; writes each output's handle (the script's own: the runtime borrows it)
+        /// in the order its output ports are, and the object's number. Empty when it did, or why it could not. On the
+        /// scene's thread, as the node is built.
+        std::function<std::string(std::span<KoralResource* const> inputs, std::span<const std::byte> settings, std::span<KoralResource*> outputs,
+                                  std::uint64_t& object)> initialize;
+        /// Each frame before it is recorded, on the scene's thread: the object's fields, as the node gives them now.
+        std::function<void(std::uint64_t object, std::span<const std::byte> settings)> prepare;
+        /// Records the frame's pass into @p commands (a `kor::CommandBuffer`), on whichever thread the frame graph
+        /// records it on. Empty when it did, or why it could not.
+        std::function<std::string(std::uint64_t object, KoralCommandBuffer* commands)> record;
+        /// Lets the object go: what it made is closed.
+        std::function<void(std::uint64_t object)> release;
     };
 
     /**
-     * @brief A script that says what a pass does, a frame at a time: the dispatches it runs, the buffers it writes and
-     *        copies, the images it clears. A ScriptPass node names one; what it uses — `uses` — are the node's inputs,
-     *        wired. @see Runtime::SetPassScript
+     * @brief A script that is a pass, written as Koral is: its initialize makes its pipelines and resources with Koral's
+     *        builders, and its record records the frame's commands into Koral's command buffer. A ScriptPass node names
+     *        one; its ports are the node's inputs and outputs. @see Runtime::SetPassScript
      */
     struct PassScript {
         std::string name;                               ///< Its class: what a ScriptPass node names it by.
-        std::vector<PassScriptUse> uses;                ///< What its pass uses, in the order it declares them.
-        std::vector<kecs::FieldDescription> fields;     ///< Its settings: a `field.<name>` input of the node each.
-        std::vector<std::byte> initial;                 ///< What its settings are when a node gives none, as its source says. Empty: zeros.
-        std::size_t size = 0;                           ///< Of its settings' bytes.
-        /// Says what the pass does this frame, into @p commands (empty to begin with), given @p settings: its fields'
-        /// bytes; @p made: whether this is the first frame since the pass was built — what it makes may be new, and
-        /// empty. Called each frame on the scene's thread, before the frame is recorded. Empty when it did, or why it
-        /// could not — the pass then does nothing this frame. Null for a script declared that nothing runs.
-        std::function<std::string(std::span<const std::byte> settings, std::vector<PassCommand>& commands, bool made)> record;
+        std::vector<PassScriptPort> ports;              ///< Its resources, wired and made, in the order it declares them.
+        std::vector<kecs::FieldDescription> fields;     ///< Its values: an input of the node each, by the member's name.
+        std::vector<std::byte> initial;                 ///< What its values are when a node gives none, as its source says. Empty: zeros.
+        std::size_t size = 0;                           ///< Of its values' bytes.
+        PassScriptCalls calls;
+        [[nodiscard]] bool Runs() const { return static_cast<bool>(calls.initialize); }
     };
 
     /** @brief What a pass that runs for each entity did, the last frame it was readied for. */

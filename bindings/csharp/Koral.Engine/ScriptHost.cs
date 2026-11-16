@@ -171,7 +171,7 @@ public sealed unsafe class ScriptHost : IDisposable
             {
                 var pass = new RegisteredPass(_world, type, layout);
                 string? why;
-                try { why = pass.Register() ? null : Native.LastError(); }
+                try { why = pass.Problem ?? (pass.Register() ? null : Native.LastError()); }
                 catch (TargetInvocationException e) { why = $"making one threw {e.InnerException?.GetType().Name}: {e.InnerException?.Message}"; }
                 if (why is null) _passes[layout.Name] = pass;
                 else { failed.Add($"{layout.Name}: {why}"); pass.Free(); }
@@ -692,47 +692,56 @@ public sealed unsafe class ScriptHost : IDisposable
             GCHandle.FromIntPtr(user).Target is RegisteredResource registered ? registered.Fill(contents, count, settings, size) : null;
     }
 
-    // ---- one script that says what a pass does, registered ---------------------------------------------------
+    // ---- one script that is a pass, registered -------------------------------------------------------------
 
     /// <summary>
-    /// A PassScript class as the engine has it: one object of it, made as it is registered, given each ScriptPass node's
-    /// settings each frame before it says what that node's pass does.
+    /// A PassScript class as the engine has it: an object of it for each ScriptPass node that names it — made, given its
+    /// inputs and initialized as the node is built, recorded each frame, let go when the node is built again or goes.
     /// </summary>
     private sealed unsafe class RegisteredPass
     {
         public ScriptLayout Layout { get; }
-        private readonly PassScript _script;
-        private readonly List<(string Name, PassScript.Use Use)> _uses;
+        private readonly World _world;
+        private readonly Type _type;
+        private readonly List<(FieldInfo Field, bool Output, bool Writes)> _ports;
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, PassScript> _objects = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, IntPtr> _said = new();
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, string> _complained = new();
+        private ulong _nextObject = 1;
+        private IntPtr _initializeSaid;
         private GCHandle _self;
-        private IntPtr _error;          // why the last record could not be: the engine reads it before the next
-        private string _complained = "";
+
+        private static readonly HashSet<string> PortTypes =
+            ["Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "Mesh", "Shader", "AccelerationStructure", "ComputePipeline", "GraphicsPipeline", "RayTracingPipeline"];
+
+        /// <summary>Why one cannot be: a port of a type Koral's interface does not name, an output that is not a resource.</summary>
+        public string? Problem { get; }
 
         public RegisteredPass(World world, Type type, ScriptLayout layout)
         {
+            _world = world;
+            _type = type;
             Layout = layout;
-            _script = (PassScript)Activator.CreateInstance(type)!;
-            _script.World = world;
-            _uses = [];
-            var fields = type.GetFields(BindingFlags.Public | BindingFlags.Instance).Where(f => typeof(PassScript.Use).IsAssignableFrom(f.FieldType)).OrderBy(f => f.MetadataToken);
+            var fields = new List<FieldInfo>();
+            for (var t = type; t is not null && t != typeof(PassScript); t = t.BaseType)
+                fields.InsertRange(0, t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly).OrderBy(f => f.MetadataToken));
+            _ports = [];
             foreach (var field in fields)
             {
-                if (field.GetValue(_script) is not PassScript.Use use)
-                {
-                    use = (PassScript.Use)Activator.CreateInstance(field.FieldType, field.FieldType.GetConstructors()[0].GetParameters().Select(p => p.DefaultValue).ToArray())!;
-                    field.SetValue(_script, use);
-                }
-                use.Name = field.Name;
-                use.Index = _uses.Count;
-                _uses.Add((field.Name, use));
+                var input = field.GetCustomAttribute<NodeInputAttribute>();
+                var output = field.GetCustomAttribute<NodeOutputAttribute>();
+                if (output is not null && !typeof(Koral.Resource).IsAssignableFrom(field.FieldType))
+                    Problem ??= $"{field.Name} is a [NodeOutput] of {field.FieldType.Name}: what a pass gives is one of Koral's resources";
+                if ((input is null && output is null) || !typeof(Koral.Resource).IsAssignableFrom(field.FieldType)) continue;
+                if (!PortTypes.Contains(field.FieldType.Name)) Problem ??= $"{field.Name} is a {field.FieldType.Name}: a port is one of {string.Join(", ", PortTypes)}";
+                _ports.Add((field, output is not null, input?.Writes == true && output is null));
             }
-            _world = world;
         }
-        private readonly World _world;
 
         public bool Register()
         {
             _self = GCHandle.Alloc(this);
-            var callbacks = new KenginePassScriptCallbacks { User = GCHandle.ToIntPtr(_self), Record = &OnRecord };
+            var callbacks = new KenginePassScriptCallbacks { User = GCHandle.ToIntPtr(_self), Initialize = &OnInitialize, Prepare = &OnPrepare, Record = &OnRecord, Release = &OnRelease };
             var names = new List<IntPtr>();
             IntPtr Utf8(string text) { var at = Marshal.StringToCoTaskMemUTF8(text); names.Add(at); return at; }
             try
@@ -743,17 +752,14 @@ public sealed unsafe class ScriptHost : IDisposable
                     var field = Layout.Fields[i];
                     fields[i] = new KecsField { Name = (byte*)Utf8(field.Info.Name), Type = (byte*)Utf8(field.Type), Offset = (uint)field.Offset, Size = (uint)field.Size };
                 }
-                var uses = stackalloc KenginePassUse[Math.Max(_uses.Count, 1)];
-                for (var i = 0; i < _uses.Count; ++i)
-                {
-                    var use = _uses[i].Use;
-                    uses[i] = new KenginePassUse
+                var ports = stackalloc KenginePassPort[Math.Max(_ports.Count, 1)];
+                for (var i = 0; i < _ports.Count; ++i)
+                    ports[i] = new KenginePassPort
                     {
-                        Name = (byte*)Utf8(_uses[i].Name), Kind = (byte*)Utf8(use.Makes ?? use.Kind), Writes = PassScript.WritesOf(use) ? (byte)1 : (byte)0,
-                        Made = use.Makes is null ? (byte)0 : (byte)1, Settings = use.Makes is null ? null : (byte*)Utf8(SettingsJson(use)),
+                        Name = (byte*)Utf8(_ports[i].Field.Name), Type = (byte*)Utf8(_ports[i].Field.FieldType.Name),
+                        Output = _ports[i].Output ? (byte)1 : (byte)0, Writes = _ports[i].Writes ? (byte)1 : (byte)0,
                     };
-                }
-                return Native.kengine_pass_script_register(_world.Document, Layout.Name, (nuint)Layout.Size, fields, (nuint)Layout.Fields.Count, uses, (nuint)_uses.Count, &callbacks);
+                return Native.kengine_pass_script_register(_world.Document, Layout.Name, (nuint)Layout.Size, fields, (nuint)Layout.Fields.Count, ports, (nuint)_ports.Count, &callbacks);
             }
             finally
             {
@@ -763,49 +769,124 @@ public sealed unsafe class ScriptHost : IDisposable
 
         public void Free()
         {
+            foreach (var id in _objects.Keys.ToList()) Release(id);
             if (_self.IsAllocated) _self.Free();
-            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+            if (_initializeSaid != IntPtr.Zero) { Marshal.FreeCoTaskMem(_initializeSaid); _initializeSaid = IntPtr.Zero; }
         }
 
-        /// <summary>What one made is made with, as JSON: flags given as <c>"eSampled | eStorage"</c> a list of them.</summary>
-        private static string SettingsJson(PassScript.Use use)
+        private static string Why(Exception e) => $"it threw {(e is TargetInvocationException { InnerException: { } inner } ? inner : e).GetType().Name}: " +
+                                                  (e is TargetInvocationException { InnerException: { } i } ? i : e).Message;
+
+        private byte* Say(ulong id, string what, Exception e)
         {
-            static string Text(string text) => System.Text.Json.JsonSerializer.Serialize(text);
-            var parts = use.Settings.Select(s => $"{Text(s.Input)}: {s.Value switch
+            var text = Why(e);
+            if (!_complained.TryGetValue(id, out var was) || was != text)
             {
-                string text when text.Contains('|') => $"[{string.Join(", ", text.Split('|', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).Select(Text))}]",
-                string text => Text(text),
-                bool on => on ? "true" : "false",
-                IFormattable number => number.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
-                var other => Text(other.ToString() ?? ""),
-            }}");
-            return "{" + string.Join(", ", parts) + "}";
+                _complained[id] = text;
+                Log.Error($"[scripts] {Layout.Name}.{what} threw: {(e is TargetInvocationException { InnerException: { } inner } ? inner : e)}");
+            }
+            var said = Marshal.StringToCoTaskMemUTF8(text);
+            if (_said.TryGetValue(id, out var old)) Marshal.FreeCoTaskMem(old);
+            _said[id] = said;
+            return (byte*)said;
         }
 
-        private byte* Record(IntPtr commands, byte* settings, nuint size, bool made)
+        private byte* Initialize(IntPtr* given, nuint count, byte* settings, nuint size, IntPtr* made, nuint madeCount, ulong* objectOut)
         {
-            if (_error != IntPtr.Zero) { Marshal.FreeCoTaskMem(_error); _error = IntPtr.Zero; }
+            if (_initializeSaid != IntPtr.Zero) { Marshal.FreeCoTaskMem(_initializeSaid); _initializeSaid = IntPtr.Zero; }
+            PassScript script;
+            try { script = (PassScript)Activator.CreateInstance(_type)!; }
+            catch (Exception e) { _initializeSaid = Marshal.StringToCoTaskMemUTF8("making one " + Why(e)); return (byte*)_initializeSaid; }
+            script.World = _world;
             try
             {
-                if ((int)size >= Layout.Size) Layout.Load(_script, (IntPtr)settings);
-                _script.RecordCore(new PassScript.Pass(commands, made));
-                _complained = "";
+                var i = 0;
+                foreach (var port in _ports.Where(p => !p.Output))
+                {
+                    var handle = (nuint)i < count ? given[i] : IntPtr.Zero;
+                    ++i;
+                    var resource = handle == IntPtr.Zero ? null : Koral.Resource.Wrap<Koral.Resource>(handle);
+                    if (resource is not null && !port.Field.FieldType.IsInstanceOfType(resource))
+                    {
+                        resource.Dispose();
+                        throw new ArgumentException($"'{port.Field.Name}' is a {port.Field.FieldType.Name}, and is wired a {resource.GetType().Name}");
+                    }
+                    port.Field.SetValue(script, resource);
+                }
+                if ((int)size >= Layout.Size) Layout.Load(script, (IntPtr)settings);
+                script.InitializeCore();
+                var j = 0;
+                foreach (var port in _ports.Where(p => p.Output))
+                {
+                    if ((nuint)j >= madeCount) break;
+                    made[j++] = Koral.Resource.HandleOf(port.Field.GetValue(script) as Koral.Resource);
+                }
+                var id = _nextObject++;
+                _objects[id] = script;
+                *objectOut = id;
                 return null;
             }
             catch (Exception e)
             {
-                var thrown = e is TargetInvocationException { InnerException: not null } ? e.InnerException! : e;
-                var why = $"it threw {thrown.GetType().Name}: {thrown.Message}";
-                // Said once while it goes on throwing the same: it is called every frame.
-                if (why != _complained) { _complained = why; Log.Error($"[scripts] {Layout.Name}.Record threw: {thrown}"); }
-                _error = Marshal.StringToCoTaskMemUTF8(why);
-                return (byte*)_error;
+                LetGo(script);
+                Log.Error($"[scripts] {Layout.Name}.Initialize threw: {(e is TargetInvocationException { InnerException: { } inner } ? inner : e)}");
+                _initializeSaid = Marshal.StringToCoTaskMemUTF8(Why(e));
+                return (byte*)_initializeSaid;
             }
         }
 
+        private void Prepare(ulong id, byte* settings, nuint size)
+        {
+            if (!_objects.TryGetValue(id, out var script)) return;
+            try
+            {
+                if ((int)size >= Layout.Size) Layout.Load(script, (IntPtr)settings);
+                script.PrepareCore();
+            }
+            catch (Exception e) { Say(id, "Prepare", e); }
+        }
+
+        private byte* Record(ulong id, IntPtr commands)
+        {
+            if (!_objects.TryGetValue(id, out var script)) return null;
+            try
+            {
+                script.RecordCore(new CommandBuffer(commands));
+                _complained.TryRemove(id, out _);
+                return null;
+            }
+            catch (Exception e) { return Say(id, "Record", e); }
+        }
+
+        private void Release(ulong id)
+        {
+            if (!_objects.TryRemove(id, out var script)) return;
+            LetGo(script);
+            if (_said.TryRemove(id, out var said)) Marshal.FreeCoTaskMem(said);
+            _complained.TryRemove(id, out _);
+        }
+
+        /// <summary>Its Destroy, then every Koral resource it holds disposed: what it made, and the handles of what it was given.</summary>
+        private void LetGo(PassScript script)
+        {
+            try { script.DestroyCore(); } catch (Exception e) { Log.Error($"[scripts] {Layout.Name}.Destroy threw: {e}"); }
+            for (var t = _type; t is not null && t != typeof(PassScript); t = t.BaseType)
+                foreach (var field in t.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                    if (typeof(Koral.Resource).IsAssignableFrom(field.FieldType))
+                        try { (field.GetValue(script) as Koral.Resource)?.Dispose(); } catch { /* let go of what can be */ }
+        }
+
+        private static RegisteredPass? Of(IntPtr user) => GCHandle.FromIntPtr(user).Target as RegisteredPass;
+
         [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-        private static byte* OnRecord(IntPtr user, IntPtr commands, byte* settings, nuint size, byte made) =>
-            GCHandle.FromIntPtr(user).Target is RegisteredPass registered ? registered.Record(commands, settings, size, made != 0) : null;
+        private static byte* OnInitialize(IntPtr user, IntPtr* inputs, nuint count, byte* settings, nuint size, IntPtr* outputs, nuint outputCount, ulong* objectOut) =>
+            Of(user) is { } pass ? pass.Initialize(inputs, count, settings, size, outputs, outputCount, objectOut) : null;
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static void OnPrepare(IntPtr user, ulong id, byte* settings, nuint size) => Of(user)?.Prepare(id, settings, size);
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static byte* OnRecord(IntPtr user, ulong id, IntPtr commands) => Of(user) is { } pass ? pass.Record(id, commands) : null;
+        [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+        private static void OnRelease(IntPtr user, ulong id) => Of(user)?.Release(id);
     }
 
     // ---- building ----------------------------------------------------------------------------------------------

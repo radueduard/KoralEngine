@@ -342,18 +342,8 @@ namespace keditor
         {
             kgraph::PassScript script;
             script.name = std::move(type.name);
-            for (auto& declared : type.resources) {
-                kgraph::PassScriptUse use { std::move(declared.name), std::move(declared.kind), false };
-                use.made = declared.made;
-                for (auto& [setting, json] : declared.settings) {
-                    if (!use.made) { if (setting == "writes") use.writes = json == "true"; continue; }
-                    // What it is made with, by its kind's inputs.
-                    kecs::json::Value parsed;
-                    std::string ignored;
-                    if (kecs::json::Parse(json, parsed, ignored)) use.settings.emplace_back(std::move(setting), kgraph::Value::FromJson(parsed));
-                }
-                script.uses.push_back(std::move(use));
-            }
+            for (auto& declared : type.resources)
+                script.ports.push_back({ std::move(declared.name), std::move(declared.kind), declared.output, declared.writes });
             script.fields = std::move(type.fields);
             script.initial = std::move(type.initial);
             script.size = type.size;
@@ -364,20 +354,20 @@ namespace keditor
     void Document::DeclarePassScript(kscript::ScriptType type)
     {
         for (const auto& running : _runtime->PassScripts())
-            if (running.name == type.name && running.record) return;
+            if (running.name == type.name && running.Runs()) return;
         _runtime->SetPassScript(PassScriptOf(std::move(type)));
         Changed();
     }
 
-    void Document::RegisterPassScript(kscript::ScriptType type, std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record)
+    void Document::RegisterPassScript(kscript::ScriptType type, kgraph::PassScriptCalls calls)
     {
         kgraph::PassScript script = PassScriptOf(std::move(type));
-        script.record = std::move(record);
-        // As a resource script's: what its fields start as, and their ranges, are its source's; what it uses too, when the host says none.
+        script.calls = std::move(calls);
+        // As a resource script's: what its values start as, and their ranges, are its source's; its ports too, when the host says none.
         for (const auto& declared : _runtime->PassScripts()) {
             if (declared.name != script.name) continue;
             if (script.initial.empty() && declared.size == script.size) script.initial = declared.initial;
-            if (script.uses.empty()) script.uses = declared.uses;
+            if (script.ports.empty()) script.ports = declared.ports;
             for (auto& field : script.fields)
                 if (const auto was = std::ranges::find(declared.fields, field.name, &kecs::FieldDescription::name);
                     was != declared.fields.end() && !std::isfinite(field.min) && !std::isfinite(field.max) && !field.logarithmic && !field.shown) {
@@ -394,8 +384,8 @@ namespace keditor
     void Document::UnregisterPassScript(const std::string_view name)
     {
         for (auto script : _runtime->PassScripts())
-            if (script.name == name && script.record) {
-                script.record = nullptr;
+            if (script.name == name && script.Runs()) {
+                script.calls = {};
                 _runtime->SetPassScript(std::move(script));
                 Changed();
             }

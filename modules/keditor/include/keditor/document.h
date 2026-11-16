@@ -640,8 +640,8 @@ namespace keditor
          */
         void DeclareResourceScript(kscript::ScriptType type);
         /**
-         * @brief Makes a PassScript one a ScriptPass node can name, as its source declares it: what it uses and its
-         *        fields — nothing runs it yet. One a host runs already is left as it is.
+         * @brief Makes a PassScript one a ScriptPass node can name, as its source declares it: its @NodeInput and
+         *        @NodeOutput ports and values — nothing runs it yet. One a host runs already is left as it is.
          */
         void DeclarePassScript(kscript::ScriptType type);
         /**
@@ -728,10 +728,10 @@ namespace keditor
         /** @brief The scripts that fill resources, running or declared: what a Script node can name. */
         [[nodiscard]] std::vector<kgraph::ResourceScript> ResourceScripts() const;
         /**
-         * @brief Runs a PassScript: @p record says what each ScriptPass node that names it does each frame, given the
-         *        node's settings. What it uses is @p type's, or its source's when the host says none.
+         * @brief Runs a PassScript: @p calls make an object of it for each ScriptPass node that names it, and record its
+         *        pass each frame. Its ports are @p type's, or its source's when the host says none.
          */
-        void RegisterPassScript(kscript::ScriptType type, std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record);
+        void RegisterPassScript(kscript::ScriptType type, kgraph::PassScriptCalls calls);
         /** @brief Stops running a PassScript: its code is going. It is declared still, as its source says. */
         void UnregisterPassScript(std::string_view name);
         /** @brief The PassScripts a ScriptPass node can name. */

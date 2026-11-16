@@ -10,6 +10,7 @@ import java.lang.foreign.ValueLayout.JAVA_LONG
 import java.lang.foreign.ValueLayout.JAVA_LONG_UNALIGNED
 import java.lang.reflect.Field
 import java.lang.reflect.Modifier
+import koral.CommandBuffer
 import koral.Mat4
 import koral.Quat
 import koral.Vec2
@@ -205,258 +206,70 @@ abstract class ResourceScript {
 }
 
 /**
- * A script that says what a pass does, a frame at a time: a ScriptPass node of the graph names it, and runs [record] each
- * frame, before the frame is drawn. What it uses — the pipelines it dispatches and draws with, what it draws into and
- * draws, the buffers and images it reads or writes — are its properties of [Pipeline], [GraphicsPipeline], [Framebuffer],
- * [Mesh], [Buffer] and [Image]: each an input of the ScriptPass node, by the property's name, wired a resource. A pipeline's parameters are wired on its node; a Buffer or an Image it writes says so. Its public
- * `var`s are its settings — the node's inputs, given there or wired — and it is no component: no entity has it.
- *
- * In [record] it says what the pass does, in order — dispatches, as many as it likes, each with its push constants by
- * their names in the shader; buffers written and copied; images cleared. What is needed between them is put there. What
- * is wrong is said on the node, and the pass does nothing that frame. Its settings are what the node gives, each frame;
- * anything else it keeps from frame to frame is the one object's, whichever ScriptPass node runs it.
+ * A pass written as Koral is: a ScriptPass node of the graph names it. Its [initialize] makes its pipelines and resources
+ * with Koral's builders — `Image.Builder()`, `ComputePipeline.Builder()`, `DescriptorSet.Builder(...)` — and its [record]
+ * records the frame's commands into Koral's own [CommandBuffer]. What the node is wired is its `@NodeInput` members: a
+ * resource of Koral's (`Image?`, `Buffer?`, a pipeline), set before [initialize], or a value (a number, a vector), set
+ * before [initialize] and again each frame before [prepare]. What it gives is its `@NodeOutput` members: resources its
+ * initialize makes, outputs of the node for what comes after to use.
  *
  * ```kotlin
- * class Spread : PassScript() {
- *     var rounds = 4
- *     val step = Pipeline()
- *     val counts = Buffer(writes = true)
- *     override fun record(pass: Pass) {
- *         pass.write(counts, IntArray(4))
- *         repeat(rounds) { pass.dispatch(step, 64, 1, 1, "round" to it) }
+ * class Blur : PassScript() {
+ *     @NodeInput var source: Image? = null
+ *     @NodeInput var radius = 4
+ *     @NodeOutput lateinit var blurred: Image
+ *     private lateinit var pipeline: ComputePipeline
+ *     private lateinit var set: DescriptorSet
+ *
+ *     override fun initialize() {
+ *         val picture = source ?: return
+ *         blurred = Image.Builder().setFormat(picture.format).setExtent(picture.extent)
+ *             .setUsage(ImageUsage.eStorage, ImageUsage.eSampled).build()
+ *         pipeline = ComputePipeline.Builder().setComputeShader(Shader.Builder().setEntryPoint("blur", "computeMain").getOrBuild()).build()
+ *         set = DescriptorSet.Builder(pipeline, 0).write("source", picture.view()).write("target", blurred.view()).build()
+ *     }
+ *
+ *     override fun record(commands: CommandBuffer) {
+ *         commands.bindComputePipeline(pipeline).bindDescriptorSet(0, set).pushConstant("radius", radius)
+ *             .dispatch((blurred.extent.x + 7) / 8, (blurred.extent.y + 7) / 8)
  *     }
  * }
  * ```
+ *
+ * Each ScriptPass node is an object of it of its own: made, given its inputs and initialized when the node is built —
+ * again when the script is edited, or what it is wired or a value changes — and let go when the node is built again or
+ * goes; then [destroy] is called, and every Koral resource it holds is closed. [record] is called on whichever thread
+ * the frame graph records the pass on, alongside other passes: it should use only what the object holds. [prepare] is
+ * on the scene's thread, each frame before it records: where the world is read.
+ *
+ * What it is wired is said to the frame graph as read — `@NodeInput(writes = true)`, read and written — and what it
+ * gives as written: it is ordered among the graph's passes by them. Within the pass, Koral's command buffer works out
+ * what is needed between its commands.
  */
 abstract class PassScript {
     /** The scene whose graph runs it. */
     lateinit var world: World
         internal set
 
-    /** Says what the pass does this frame, into [pass]. */
-    abstract fun record(pass: Pass)
-
-    /** One of what a pass script uses: an input of its ScriptPass node, by the property's name. */
-    abstract class Use internal constructor(internal val kind: String, internal val writes: Boolean) {
-        /** Made by the ScriptPass node, as this node type: one of [Make]'s. Null: wired in. */
-        internal open val makes: String? get() = null
-        /** What one made is made with, by its node type's inputs. */
-        internal open val settings: List<Pair<String, Any>> get() = emptyList()
-        /** The property it is: the ScriptPass node's input. */
-        var name: String = ""
-            internal set
-        internal var index = -1
-    }
-
-    /** A ComputePipeline it dispatches: its parameters wired on its node. */
-    open class Pipeline : Use("Pipeline", false)
-    /** A GraphicsPipeline it draws with: its parameters wired on its node. It draws into its node's framebuffer, or one like it. */
-    open class GraphicsPipeline : Use("GraphicsPipeline", false)
-    /** A Framebuffer it draws into, other than its pipelines' own: of the same formats. */
-    open class Framebuffer : Use("Framebuffer", false)
-    /** A mesh it draws: a Primitive's, a default one, a model's. */
-    class Mesh : Use("Mesh", false)
-    /** A buffer it reads — copies from, dispatches from — or, [writes], writes and copies into too. */
-    open class Buffer(writes: Boolean = false) : Use("Buffer", writes)
-    /** An image it reads, or, [writes], clears too. */
-    open class Image(writes: Boolean = false) : Use("Image", writes)
-
-    /**
-     * What a pass script makes, rather than is wired: each a node of its ScriptPass's own, made as its arguments say —
-     * each one of the node type's inputs, by name; the node can say otherwise, `<property>.<input>` — and an output of
-     * the node, by the property's name, for what comes after to use. One that names another of the script's resources or
-     * uses, `::canvas.name`, is made of it; a pipeline's shader parameters named as one of them are wired to it. What it
-     * makes it writes, and uses as it uses what is wired: `dispatch(blur, …)`, `render(target) { … }`, `copy(…)`.
-     *
-     * ```kotlin
-     * val canvas = Make.Image(format = "eRGBA8_UNORM", width = 256, height = 256, usage = "eColorAttachment | eSampled")
-     * val canvasView = Make.ImageView(image = ::canvas.name)
-     * val target = Make.Framebuffer(color = ::canvasView.name)
-     * val shade = Make.GraphicsPipeline(vertexModule = "shade", fragmentModule = "shade", framebuffer = ::target.name)
-     * ```
-     */
-    object Make {
-        private fun given(vararg settings: Pair<String, Any?>) = settings.mapNotNull { (input, value) -> value?.let { input to it } }
-
-        class Image(format: String? = null, width: Int? = null, height: Int? = null, depth: Int? = null, mipLevels: Int? = null, arrayLayers: Int? = null,
-                    usage: String? = null, type: String? = null, sampleCount: String? = null) : PassScript.Image(true) {
-            override val makes get() = "Image"
-            override val settings = given("format" to format, "extent.x" to width, "extent.y" to height, "extent.z" to depth, "mipLevels" to mipLevels,
-                                          "arrayLayers" to arrayLayers, "usage" to usage, "type" to type, "sampleCount" to sampleCount)
-        }
-        class Buffer(instanceCount: Int? = null, usage: String? = null, type: String? = null) : PassScript.Buffer(true) {
-            override val makes get() = "Buffer"
-            override val settings = given("instanceCount" to instanceCount, "usage" to usage, "type" to type)
-        }
-        class ImageView(image: String? = null, viewType: String? = null, baseMipLevel: Int? = null, mipLevelCount: Int? = null,
-                        baseArrayLayer: Int? = null, arrayLayerCount: Int? = null) : Use("ImageView", false) {
-            override val makes get() = "ImageView"
-            override val settings = given("image" to image, "viewType" to viewType, "baseMipLevel" to baseMipLevel, "mipLevelCount" to mipLevelCount,
-                                          "baseArrayLayer" to baseArrayLayer, "arrayLayerCount" to arrayLayerCount)
-        }
-        class BufferView(buffer: String? = null, format: String? = null, offset: Long? = null, range: Long? = null) : Use("BufferView", false) {
-            override val makes get() = "BufferView"
-            override val settings = given("buffer" to buffer, "format" to format, "offset" to offset, "range" to range)
-        }
-        class Sampler(minFilter: String? = null, magFilter: String? = null, mipmapMode: String? = null, addressModeU: String? = null,
-                      addressModeV: String? = null, addressModeW: String? = null, maxAnisotropy: Float? = null, anisotropyEnable: Boolean? = null) : Use("Sampler", false) {
-            override val makes get() = "Sampler"
-            override val settings = given("minFilter" to minFilter, "magFilter" to magFilter, "mipmapMode" to mipmapMode, "addressModeU" to addressModeU,
-                                          "addressModeV" to addressModeV, "addressModeW" to addressModeW, "maxAnisotropy" to maxAnisotropy, "anisotropyEnable" to anisotropyEnable)
-        }
-        /** Drawn into: [color], a view of one of the script's images, by name; [depth], another, of a depth image. */
-        class Framebuffer(color: String? = null, depth: String? = null) : PassScript.Framebuffer() {
-            override val makes get() = "Framebuffer"
-            override val settings = given("color[0].view" to color, "depthStencil.view" to depth)
-        }
-        /** Dispatched: [module] the shader module, [entry] its entry point (`computeMain` when not given). */
-        class ComputePipeline(module: String? = null, entry: String? = null) : PassScript.Pipeline() {
-            override val makes get() = "ComputePipeline"
-            override val settings = given("compute.module" to module, "compute.entry" to entry)
-        }
-        /**
-         * Drawn with, into [framebuffer] — one of the script's, or of what it is wired, by name. Each stage's module, its
-         * entry point `vertexMain`, `fragmentMain`, `meshMain`, `taskMain` when not given; [stages] `eMesh` for mesh shaders.
-         */
-        class GraphicsPipeline(vertexModule: String? = null, fragmentModule: String? = null, framebuffer: String? = null, vertexEntry: String? = null,
-                               fragmentEntry: String? = null, stages: String? = null, meshModule: String? = null, meshEntry: String? = null,
-                               taskModule: String? = null, taskEntry: String? = null) : PassScript.GraphicsPipeline() {
-            override val makes get() = "GraphicsPipeline"
-            override val settings = given("vertex.module" to vertexModule, "vertex.entry" to vertexEntry, "fragment.module" to fragmentModule,
-                                          "fragment.entry" to fragmentEntry, "framebuffer" to framebuffer, "stages" to stages, "mesh.module" to meshModule,
-                                          "mesh.entry" to meshEntry, "task.module" to taskModule, "task.entry" to taskEntry)
-        }
-    }
-
-    /** What the pass does this frame, said in order. */
-    class Pass internal constructor(private val commands: MemorySegment, private val arena: Arena,
-                                    /** The first frame since the pass was built: what the script makes may be new, and empty — to fill now. */
-                                    val made: Boolean) {
-        private fun at(use: Use): Int = if (use.index >= 0) use.index else throw IllegalStateException("${use.name.ifEmpty { "a use" }} is not one of the script's own properties")
-
-        /** Runs [pipeline] [x] by [y] by [z] groups, with these push constants: `"radius" to 2f`, a vector, a matrix, a Boolean. */
-        fun dispatch(pipeline: Pipeline, x: Int = 1, y: Int = 1, z: Int = 1, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_dispatch.invokeExact(commands, at(pipeline), x, y, z)
-            push(push)
-        }
-
-        /** Runs [pipeline] as many groups as the three numbers of 32 bits at [offset] of [counts] say — numbers a pass before wrote. */
-        fun dispatchIndirect(pipeline: Pipeline, counts: Buffer, offset: Long = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_dispatch_indirect.invokeExact(commands, at(pipeline), at(counts), offset)
-            push(push)
-        }
-
-        private fun push(push: Array<out Pair<String, Any>>) {
-            for ((name, value) in push) {
-                val numbers = numbersOf(name, value)
-                val values = arena.allocate(java.lang.foreign.ValueLayout.JAVA_DOUBLE, maxOf(numbers.size, 1).toLong())
-                numbers.forEachIndexed { i, n -> values.setAtIndex(java.lang.foreign.ValueLayout.JAVA_DOUBLE, i.toLong(), n) }
-                Native.kengine_pass_push.invokeExact(commands, arena.allocateFrom(name), values, numbers.size.toLong())
-            }
-        }
-
-        private fun numbersOf(name: String, value: Any): DoubleArray = when (value) {
-            is Boolean -> doubleArrayOf(if (value) 1.0 else 0.0)
-            is Number -> doubleArrayOf(value.toDouble())
-            is Vec2 -> doubleArrayOf(value.x.toDouble(), value.y.toDouble())
-            is Vec3 -> doubleArrayOf(value.x.toDouble(), value.y.toDouble(), value.z.toDouble())
-            is Vec4 -> doubleArrayOf(value.x.toDouble(), value.y.toDouble(), value.z.toDouble(), value.w.toDouble())
-            is Mat4 -> DoubleArray(16) { value[it / 4, it % 4].toDouble() }     // a column after another
-            is FloatArray -> DoubleArray(value.size) { value[it].toDouble() }
-            is IntArray -> DoubleArray(value.size) { value[it].toDouble() }
-            is DoubleArray -> value
-            else -> throw IllegalArgumentException("push constant '$name' is a ${value.javaClass.simpleName}: a number, a Boolean, a vector, a Mat4 or an array of numbers")
-        }
-
-        /** Writes [bytes] into [buffer] at [offset]: both multiples of 4, 64 KiB at most. */
-        fun write(buffer: Buffer, bytes: ByteArray, offset: Long = 0) {
-            val data = arena.allocate(maxOf(bytes.size, 1).toLong())
-            MemorySegment.copy(bytes, 0, data, JAVA_BYTE, 0, bytes.size)
-            Native.kengine_pass_write.invokeExact(commands, at(buffer), offset, data, bytes.size.toLong())
-        }
-        /** Writes [values] into [buffer] at [offset], 32 bits each. */
-        fun write(buffer: Buffer, values: IntArray, offset: Long = 0) =
-            write(buffer, java.nio.ByteBuffer.allocate(values.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).also { b -> values.forEach { b.putInt(it) } }.array(), offset)
-        fun write(buffer: Buffer, values: FloatArray, offset: Long = 0) =
-            write(buffer, java.nio.ByteBuffer.allocate(values.size * 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).also { b -> values.forEach { b.putFloat(it) } }.array(), offset)
-
-        /** Copies [size] bytes of [from], at [fromOffset], into [to], at [toOffset]: as many as fit, when 0. */
-        fun copy(from: Buffer, to: Buffer, size: Long = 0, fromOffset: Long = 0, toOffset: Long = 0) {
-            Native.kengine_pass_copy.invokeExact(commands, at(from), at(to), size, fromOffset, toOffset)
-        }
-
-        /** Makes every texel of [image] this colour, in its format's own range. */
-        fun clear(image: Image, red: Float = 0f, green: Float = 0f, blue: Float = 0f, alpha: Float = 0f) {
-            Native.kengine_pass_clear.invokeExact(commands, at(image), red, green, blue, alpha)
-        }
-
-        /** Copies [buffer], from [offset], into [image]: its first level, every layer, a texel after another. */
-        fun copy(buffer: Buffer, image: Image, offset: Long = 0) { Native.kengine_pass_copy_buffer_to_image.invokeExact(commands, at(buffer), at(image), offset) }
-        /** Copies [image]'s first level, every layer, into [buffer] at [offset]. */
-        fun copy(image: Image, buffer: Buffer, offset: Long = 0) { Native.kengine_pass_copy_image_to_buffer.invokeExact(commands, at(image), at(buffer), offset) }
-        /** Copies [from] into [to], an image of its size and format. */
-        fun copy(from: Image, to: Image) { Native.kengine_pass_copy_image.invokeExact(commands, at(from), at(to)) }
-        /** Copies [from] into [to], scaled and filtered to fit it. */
-        fun blit(from: Image, to: Image) { Native.kengine_pass_blit.invokeExact(commands, at(from), at(to)) }
-        /** Makes [image]'s smaller levels from its largest. */
-        fun generateMipmaps(image: Image) { Native.kengine_pass_generate_mipmaps.invokeExact(commands, at(image)) }
-
-        // ---- drawing ----
-
-        /**
-         * Draws into [into] — a [GraphicsPipeline]'s framebuffer, or a [Framebuffer] — what [draws] says: cleared to
-         * [clear] and [depth] first, or, [load], as it was. Only draws, and what they are drawn with, are said in it.
-         */
-        fun render(into: Use, clear: Vec4 = Vec4(0f, 0f, 0f, 1f), depth: Float = 1f, load: Boolean = false, draws: Pass.() -> Unit) {
-            Native.kengine_pass_begin_rendering.invokeExact(commands, at(into), load, clear.x, clear.y, clear.z, clear.w, depth)
-            try { draws() } finally { Native.kengine_pass_end_rendering.invokeExact(commands) }
-        }
-
-        /** Where what follows is drawn, in pixels: all of the framebuffer, as a rendering begins. */
-        fun viewport(x: Int, y: Int, width: Int, height: Int) { Native.kengine_pass_viewport.invokeExact(commands, x, y, width, height) }
-        /** What of the framebuffer what follows may draw over, in pixels. */
-        fun scissor(x: Int, y: Int, width: Int, height: Int) { Native.kengine_pass_scissor.invokeExact(commands, x, y, width, height) }
-        /** Binds [buffer] at vertex [binding], from [offset], for the draws after it: what a mesh drawn does not bind itself. */
-        fun vertices(binding: Int, buffer: Buffer, offset: Long = 0) { Native.kengine_pass_vertex_buffer.invokeExact(commands, binding, at(buffer), offset) }
-
-        /** Draws [vertexCount] vertices with [pipeline], from [firstVertex] — [instances] of them from [firstInstance] — read by its shader as it likes. */
-        fun draw(pipeline: GraphicsPipeline, vertexCount: Int = 3, instances: Int = 1, firstVertex: Int = 0, firstInstance: Int = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw.invokeExact(commands, at(pipeline), vertexCount, instances, firstVertex, firstInstance)
-            push(push)
-        }
-        /** Draws all of [mesh] with [pipeline] — made for its layout — through its indices when it has them. */
-        fun drawMesh(pipeline: GraphicsPipeline, mesh: Mesh, instances: Int = 1, firstInstance: Int = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_mesh.invokeExact(commands, at(pipeline), at(mesh), instances, firstInstance)
-            push(push)
-        }
-        /** Draws [indexCount] of [mesh]'s indices from [firstIndex] — all of them, or its part's, when 0 — [vertexOffset] added to each. */
-        fun drawIndexed(pipeline: GraphicsPipeline, mesh: Mesh, indexCount: Int = 0, instances: Int = 1, firstIndex: Int = 0, vertexOffset: Int = 0,
-                        firstInstance: Int = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_indexed.invokeExact(commands, at(pipeline), at(mesh), indexCount, instances, firstIndex, vertexOffset, firstInstance)
-            push(push)
-        }
-        /** [count] draws as [args] says from [offset], [stride] bytes apart (0: one after another) — of [mesh]'s vertices, or none. */
-        fun drawIndirect(pipeline: GraphicsPipeline, args: Buffer, offset: Long = 0, count: Int = 1, stride: Int = 0, mesh: Mesh? = null, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_indirect.invokeExact(commands, at(pipeline), if (mesh == null) -1 else at(mesh), false, at(args), offset, count, stride)
-            push(push)
-        }
-        /** [count] draws through [mesh]'s indices, as [args] says from [offset], [stride] bytes apart. */
-        fun drawIndexedIndirect(pipeline: GraphicsPipeline, mesh: Mesh, args: Buffer, offset: Long = 0, count: Int = 1, stride: Int = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_indirect.invokeExact(commands, at(pipeline), at(mesh), true, at(args), offset, count, stride)
-            push(push)
-        }
-        /** Draws [pipeline]'s mesh shader, [x] by [y] by [z] task groups. */
-        fun drawMeshTasks(pipeline: GraphicsPipeline, x: Int = 1, y: Int = 1, z: Int = 1, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_mesh_tasks.invokeExact(commands, at(pipeline), x, y, z)
-            push(push)
-        }
-        /** [count] of them, as [args] says from [offset], [stride] bytes apart. */
-        fun drawMeshTasksIndirect(pipeline: GraphicsPipeline, args: Buffer, offset: Long = 0, count: Int = 1, stride: Int = 0, vararg push: Pair<String, Any>) {
-            Native.kengine_pass_draw_mesh_tasks_indirect.invokeExact(commands, at(pipeline), at(args), offset, count, stride)
-            push(push)
-        }
-    }
+    /** Makes what it records with — its pipelines, its resources, and each `@NodeOutput` — given what it is wired. */
+    open fun initialize() {}
+    /** Each frame, on the scene's thread, before it is recorded: its values are as the node gives them now. */
+    open fun prepare() {}
+    /** Records the frame's pass. On a thread of the frame graph's: only what it holds is its to use. */
+    abstract fun record(commands: CommandBuffer)
+    /** Its node is built again, or goes: what else is to be let go of. Its Koral resources are closed after this. */
+    open fun destroy() {}
 }
+
+/** A member of a [PassScript] that is an input of its ScriptPass node: a resource it is wired, or a value. [writes]: a resource it writes, not only reads. */
+@Target(AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class NodeInput(val writes: Boolean = false)
+
+/** A member of a [PassScript] that is an output of its ScriptPass node: a resource of Koral's its initialize makes. */
+@Target(AnnotationTarget.FIELD)
+@Retention(AnnotationRetention.RUNTIME)
+annotation class NodeOutput
 
 /** The least and the most a property's numbers are — each of a vector's — as the editor lets them be set: `@Range(0f, 10f)`. */
 @Target(AnnotationTarget.PROPERTY, AnnotationTarget.FIELD)
@@ -571,7 +384,8 @@ internal class ScriptLayout private constructor(type: Class<*>) {
             for (field in declaring.declaredFields) {
                 if (Modifier.isStatic(field.modifiers) || field.isSynthetic) continue
                 if (ResourceScript.Resource::class.java.isAssignableFrom(field.type)) continue     // what a ResourceScript makes: no setting
-                if (PassScript.Use::class.java.isAssignableFrom(field.type)) continue              // what a PassScript uses: no setting
+                // A pass script's values are what it marks @NodeInput, and no resource: the rest is its own.
+                if (PassScript::class.java.isAssignableFrom(type) && (field.getAnnotation(NodeInput::class.java) == null || koral.Resource::class.java.isAssignableFrom(field.type))) continue
                 // A property the engine keeps is a public var: one with a getter and a setter anyone can call.
                 val suffix = field.name.replaceFirstChar { it.uppercaseChar() }
                 val getter = declaring.methods.any { (it.name == "get$suffix" || it.name == field.name) && it.parameterCount == 0 }

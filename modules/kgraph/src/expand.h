@@ -66,20 +66,6 @@ namespace kgraph
      */
     using FieldsOf = std::function<std::optional<std::vector<std::pair<std::string, std::string>>>(std::string_view component)>;
 
-    /** @brief What a PassScript makes, and what it uses besides, by name: what its ScriptPass node is written out with. */
-    struct ScriptMakes {
-        struct Made {
-            std::string name, kind;                                 ///< Its field, and the node type it is made as.
-            std::vector<std::pair<std::string, Value>> settings;    ///< What its source makes it with, by its kind's inputs.
-        };
-        std::vector<Made> made;
-        std::vector<std::string> uses;                              ///< What it is wired, by name.
-        /// Of those and what it makes, what a shader's parameter can be — a buffer, an image, a view, a sampler — by name:
-        /// what a pipeline it makes has wired to its parameters of the same names.
-        std::vector<std::string> bindable;
-    };
-    /** @brief What the PassScript of a name makes; none for one there is not. The runtime's to say: it knows the scripts. */
-    using MadeOf = std::function<std::optional<ScriptMakes>(std::string_view script)>;
 
     /**
      * @brief Whether a ForEach's (an Entity's...) output @p name is of where the entity is — `matrix`, `worldPosition`,
@@ -121,7 +107,7 @@ namespace kgraph
     /// @p counts: how many turns each Repeat whose count is wired has, by its id as written out (Expansion::wiredCounts), as
     /// the graph last gave it: one, for any not in it.
     [[nodiscard]] Expansion Expand(const Graph& written, const ElementOf& elementOf = {}, const FieldsOf& fieldsOf = {},
-                                   const std::map<std::string, int, std::less<>>& counts = {}, const MadeOf& madeOf = {});
+                                   const std::map<std::string, int, std::less<>>& counts = {});
     /**
      * @brief Why the Draw @p draw of @p graph (a graph as it runs: its calls and Bundles written out) cannot be written out
      *        as one indirect draw of every element — `batched` — or nothing when it can. @p each, when given, is the

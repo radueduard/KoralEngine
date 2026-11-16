@@ -279,21 +279,38 @@ namespace kscript
             return bare == "Image" || bare == "Buffer" || bare == "ImageView" || bare == "BufferView" || bare == "Sampler";
         }
 
-        /** What a PassScript makes: `Make.Image(...)`, a node of its ScriptPass's own, of that type. */
-        bool IsMadeKind(const std::string& written)
+        /** A PassScript's port: a member of one of Koral's resource types — `Image`, `koral.Buffer`, `Image?` — as its name. Empty: none. */
+        std::string PortKind(std::string written)
         {
-            const auto dot = written.rfind('.');
-            if (dot == std::string::npos || !written.substr(0, dot).ends_with("Make")) return false;
-            const std::string bare = written.substr(dot + 1);
-            return bare == "Image" || bare == "Buffer" || bare == "ImageView" || bare == "BufferView" || bare == "Sampler" || bare == "Framebuffer"
-                || bare == "ComputePipeline" || bare == "GraphicsPipeline";
+            if (written.ends_with('?')) written.pop_back();
+            const std::string bare = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
+            static const std::vector<std::string_view> kinds { "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "Mesh", "Shader",
+                                                               "AccelerationStructure", "ComputePipeline", "GraphicsPipeline", "RayTracingPipeline" };
+            return std::ranges::contains(kinds, bare) ? bare : std::string();
         }
 
-        /** What a PassScript uses: a pipeline it dispatches, a buffer or an image it reads or writes. */
-        bool IsPassKind(const std::string& written)
+        enum class PortRead { eNone, ePort, eValue };
+        /**
+         * A pass script's member as it is marked: `@NodeInput` / `[NodeInput]` of a Koral resource type, a port it is
+         * wired (`writes = true`, one it writes); `@NodeOutput`, a port it makes and gives; `@NodeInput` of a value, a
+         * value input (eValue, a field as a script's are). Unmarked, it is the script's own (eNone).
+         */
+        PortRead PassPort(const std::string& name, const std::string& written, const std::string& statement, const std::string& where, ScriptType& type,
+                          std::vector<std::string>& problems)
         {
-            const std::string bare = written.substr(written.rfind('.') == std::string::npos ? 0 : written.rfind('.') + 1);
-            return bare == "Pipeline" || bare == "GraphicsPipeline" || bare == "Framebuffer" || bare == "Mesh" || bare == "Buffer" || bare == "Image";
+            static const std::regex input(R"((?:@|\[\s*)NodeInput\b)"), output(R"((?:@|\[\s*)NodeOutput\b)"), writes(R"(NodeInput\s*\(\s*[Ww]rites\s*[=:]\s*true)");
+            const bool in = std::regex_search(statement, input), out = std::regex_search(statement, output);
+            if (!in && !out) return PortRead::eNone;
+            const std::string kind = PortKind(written);
+            if (kind.empty()) {
+                if (out) { problems.push_back(std::format("{}{} is a @NodeOutput of {}: what a pass gives is one of Koral's resources", where, name, written.empty() ? "no type written" : written)); return PortRead::eNone; }
+                return PortRead::eValue;
+            }
+            DeclaredResource port { name, kind, {} };
+            port.output = out;
+            port.writes = !out && std::regex_search(statement, writes);
+            type.resources.push_back(std::move(port));
+            return PortRead::ePort;
         }
 
         /** What is between brackets, apart at the commas that are not in brackets or strings of their own. */
@@ -406,14 +423,7 @@ namespace kscript
                     continue;
                 }
                 std::string input = part[1].str();
-                // As a node of its kind has it: what an argument cannot be called — `extent.x`, `vertex.module` — by a name it can.
-                static const std::regex stage(R"(^(vertex|fragment|mesh|task|compute)(Module|Entry|Layout)$)");
-                std::smatch staged;
-                if (resource.kind == "Framebuffer" && input == "color") input = "color[0].view";
-                else if (resource.kind == "Framebuffer" && input == "depth") input = "depthStencil.view";
-                else if (resource.kind == "ComputePipeline" && (input == "module" || input == "entry")) input = "compute." + input;
-                else if (std::regex_match(input, staged, stage)) input = staged[1].str() + "." + static_cast<char>(std::tolower(staged[2].str()[0])) + staged[2].str().substr(1);
-                else if (input == "width") input = "extent.x";
+                if (input == "width") input = "extent.x";
                 else if (input == "height") input = "extent.y";
                 else if (input == "depth") input = "extent.z";
                 if (const auto json = SettingJson(part[2].str())) resource.settings.emplace_back(std::move(input), *json);
@@ -499,8 +509,8 @@ namespace kscript
         Declarations Resolve(const std::vector<Class>& classes)
         {
             Declarations out;
-            static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
-            static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+))?\s*(?:=\s*([\s\S]*))?$)");
+            static const std::regex csharpField(R"(^(?:\[[^\]]*\]\s*)*((?:\w+\s+)*)([\w.]+\??)\s+(\w+)\s*(?:=(?!>)\s*([\s\S]*))?$)");
+            static const std::regex kotlinField(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)*((?:\w+\s+)*)(var|val)\s+(\w+)\s*(?::\s*([\w.]+\??))?\s*(?:=\s*([\s\S]*))?$)");
             // A Kotlin annotation on a line of its own is the next property's.
             static const std::regex annotationsOnly(R"(^(?:@[\w.]+(?:\([^)]*\))?\s*)+$)");
             const auto find = [&](const std::string& name, const bool kotlin) -> const Class* {
@@ -571,13 +581,12 @@ namespace kscript
                             value = Trim(field[5].str());
                             if (std::regex_search(modifiers, std::regex(R"(\b(?:private|protected|internal)\b)"))) continue;
                             if (written.empty()) written = Inferred(value);
-                            // A resource it makes is one, kept as it is made: a val.
-                            if (type.recordsPass && IsMadeKind(written)) {
-                                type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
-                                type.resources.back().made = true;
-                                continue;
+                            if (type.recordsPass) {
+                                // A pass script's ports and values are what it marks: the rest is its own.
+                                const auto port = PassPort(name, written, statement, each->where + type.name + ".", type, out.problems);
+                                if (port != PortRead::eValue) continue;
                             }
-                            if ((type.makesResources && IsResourceKind(written)) || (type.recordsPass && IsPassKind(written))) {
+                            if (type.makesResources && IsResourceKind(written)) {
                                 type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
                                 continue;
                             }
@@ -589,10 +598,12 @@ namespace kscript
                             name = field[3].str();
                             value = Trim(field[4].str());
                             if (!std::regex_search(modifiers, std::regex(R"(\bpublic\b)"))) continue;
-                            if (((type.makesResources && IsResourceKind(written)) || (type.recordsPass && (IsPassKind(written) || IsMadeKind(written))))
-                                && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
+                            if (type.recordsPass && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
+                                const auto port = PassPort(name, written, statement, each->where + type.name + ".", type, out.problems);
+                                if (port != PortRead::eValue) continue;
+                            }
+                            if (type.makesResources && IsResourceKind(written) && !std::regex_search(modifiers, std::regex(R"(\b(?:static|const)\b)"))) {
                                 type.resources.push_back(Resource(name, written, value, each->where + type.name + ".", out.problems));
-                                type.resources.back().made = type.recordsPass && IsMadeKind(written);
                                 continue;
                             }
                             if (std::regex_search(modifiers, std::regex(R"(\b(?:static|const|readonly|override|abstract|virtual|event)\b)"))) continue;

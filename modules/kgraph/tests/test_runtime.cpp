@@ -1,6 +1,8 @@
 // A graph running on a device: objects built from nodes, passes ordered by what they use, and only what changed
 // built again. Offscreen, with no windowing system.
 
+#include <cstring>
+#include <map>
 #include <gtest/gtest.h>
 #include <sstream>
 #include <kecs/json.h>
@@ -21,6 +23,7 @@
 #include <scheduler.h>
 #include <shader.h>
 
+#include <capiInterop.h>
 #include <koral_c.h>
 #include <log.h>
 
@@ -1521,130 +1524,81 @@ TEST_F(RuntimeTest, AReferenceOnASetupPageIsWhatSetupMadeBeforeIt) {
     EXPECT_NEAR(static_cast<int>(peek->bytes[0]), 255, 1) << "as setup left it before 'then', not as the frames since left it";
 }
 
-// A script says what a pass does, each frame: a ScriptPass node names it, and what it uses — a pipeline, the buffers
-// it writes — are the node's inputs, wired. In order: a buffer written, a pipeline dispatched round after round with its
-// push constants, then again as many groups as a buffer the same pass wrote says, then a buffer copied. What is needed
-// between them is put there. Until something runs the script, the pass does nothing, and the node says why; a frame the
-// script says something wrong, the node says what, and the pass does nothing.
-TEST_F(RuntimeTest, AScriptSaysWhatAPassDoesEachFrame) {
+// A PassScript is an object of its script for each ScriptPass node: made as the node is built, given a borrowed handle
+// to each resource it is wired and its values, and let go — released — when the node is built again. What it gives is an
+// output of the node. Why its initialize could not make it fails the node; why a frame could not be recorded is said on it.
+TEST_F(RuntimeTest, APassScriptsObjectIsMadeGivenItsInputsAndLetGo) {
     auto& runtime = *scene->runtime;
     using kgraph::Value;
-    constexpr std::uint32_t n = 64;
     kgraph::PassScript script;
-    script.name = "Accumulate";
-    script.fields = { { .name = "rounds", .type = "i32", .offset = 0, .size = 4 } };
-    script.uses = { { "add", "Pipeline", false }, { "sums", "Buffer", true }, { "args", "Buffer", true }, { "out", "Buffer", true } };
+    script.name = "Copier";
+    script.fields = { { .name = "count", .type = "i32", .offset = 0, .size = 4 } };
+    script.ports = { { "data", "Buffer", false, false }, { "copy", "Buffer", true, false } };
+    std::map<std::uint64_t, kor::Resource<kor::Buffer>> made;
+    std::vector<std::int32_t> counts;
+    std::vector<std::uint64_t> released;
+    std::uint64_t next = 1;
+    std::string failure, recording;
+    script.calls.initialize = [&](std::span<KoralResource* const> inputs, std::span<const std::byte> settings, std::span<KoralResource*> outputs,
+                                  std::uint64_t& object) -> std::string {
+        for (KoralResource* handle : inputs) if (handle) { EXPECT_EQ(koral_resource_kind(handle), KORAL_RESOURCE_BUFFER); koral_resource_release(handle); }
+        if (!failure.empty()) return failure;
+        std::int32_t count = 0;
+        std::memcpy(&count, settings.data(), 4);
+        counts.push_back(count);
+        object = next++;
+        made[object] = kor::Buffer::RawBuilder {}.SetRawSize(256).SetUsage(kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferDst).Build();
+        // Its own handle onto what it gives: the runtime takes one of its own.
+        static std::vector<KoralResource*> kept;
+        kept.push_back(kor::capi::BorrowBuffer(made[object]));
+        outputs[0] = kept.back();
+        return {};
+    };
+    script.calls.record = [&](std::uint64_t, KoralCommandBuffer*) -> std::string { return recording; };
+    script.calls.release = [&](const std::uint64_t object) { released.push_back(object); made.erase(object); };
     runtime.SetPassScript(script);
 
     kgraph::Graph graph;
-    const Value usage = Value::List { "eStorage", "eTransferSrc", "eTransferDst", "eIndirect" };
-    graph.Add("sums", "Buffer").Set("instanceCount", n * 4).Set("usage", usage);
-    graph.Add("args", "Buffer").Set("instanceCount", 16).Set("usage", usage);
-    graph.Add("out", "Buffer").Set("instanceCount", n * 4).Set("usage", usage);
-    graph.Add("adding", "ComputePipeline").Set("compute.module", "accumulate").Set("compute.entry", "computeMain").Wire("param.sums", "sums");
-    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Set("field.rounds", 4)
-        .Wire("add", "adding").Wire("sums", "sums").Wire("args", "args").Wire("out", "out");
+    graph.Add("data", "Buffer").Set("instanceCount", 256).Set("usage", Value::List { "eStorage" });
+    graph.Add("pass", "ScriptPass").Set("script", "Copier").Set("count", 5).Wire("data", "data");
     runtime.Set(graph);
     for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
     ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
-    EXPECT_NE(runtime.Status("pass")->note.find("nothing runs it yet"), std::string::npos) << runtime.Status("pass")->note;
+    ASSERT_EQ(counts, std::vector<std::int32_t> { 5 }) << "made once, given the value the node says";
     const auto ports = runtime.PortsOf("pass");
-    for (const char* name : { "add", "sums", "args", "out", "field.rounds" })
-        EXPECT_TRUE(std::ranges::contains(ports, std::string(name), &kgraph::Port::name)) << name << ": what it uses, and its fields, are the node's inputs";
+    EXPECT_TRUE(std::ranges::contains(ports, std::string("count"), &kgraph::Port::name)) << "a value, an input by its name";
+    EXPECT_TRUE(std::ranges::contains(ports, std::string("data"), &kgraph::Port::name)) << "a resource it is wired";
+    ASSERT_NE(runtime.ResourceOf("pass", "copy"), nullptr) << "what it gives, an output";
+    EXPECT_EQ(runtime.ResourceOf("pass", "copy")->kind, "Buffer");
+    Frame();
+    Frame();
 
-    // Run: each frame, the sums start at 1, are doubled and added to four rounds — 0, 1, 2, 3 — and once more, round 10,
-    // as many groups as 'args' says; then copied out.
-    std::vector<std::int32_t> given;
-    script.record = [&](const std::span<const std::byte> settings, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
-        std::int32_t rounds = 0;
-        std::memcpy(&rounds, settings.data(), 4);
-        given.push_back(rounds);
-        const auto write = [&](const std::uint32_t use, const std::vector<std::uint32_t>& words) {
-            kgraph::PassCommand c;
-            c.op = kgraph::PassCommand::Op::eWrite;
-            c.use = use;
-            c.bytes.resize(words.size() * 4);
-            std::memcpy(c.bytes.data(), words.data(), c.bytes.size());
-            commands.push_back(std::move(c));
-        };
-        write(1, std::vector<std::uint32_t>(n, 1));
-        write(2, { 1, 1, 1 });
-        for (std::int32_t round = 0; round < rounds; ++round) {
-            kgraph::PassCommand c;
-            c.op = kgraph::PassCommand::Op::eDispatch;
-            c.use = 0;
-            c.push = { { "round", Value(round) }, { "count", Value(n) } };
-            commands.push_back(std::move(c));
-        }
-        kgraph::PassCommand indirect;
-        indirect.op = kgraph::PassCommand::Op::eDispatchIndirect;
-        indirect.use = 0;
-        indirect.other = 2;
-        indirect.push = { { "round", Value(10) }, { "count", Value(n) } };
-        commands.push_back(std::move(indirect));
-        kgraph::PassCommand copy;
-        copy.op = kgraph::PassCommand::Op::eCopy;
-        copy.use = 1;
-        copy.other = 3;
-        commands.push_back(std::move(copy));
-        return {};
-    };
-    runtime.SetPassScript(script);
-    runtime.Watch("out");
+    // Another value: another object, and the one before let go.
+    graph.Find("pass")->Set("count", 7);
+    runtime.Set(graph);
     for (int i = 0; i < 4; ++i) Frame();
-    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    ASSERT_FALSE(given.empty());
-    EXPECT_EQ(given.back(), 4) << "its field, as the node gives it";
-    const auto peek = runtime.Watched("out");
-    ASSERT_TRUE(peek && peek->bytes.size() >= n * 4) << runtime.WatchProblem("out");
-    std::vector<std::uint32_t> sums(n);
-    std::memcpy(sums.data(), peek->bytes.data(), n * 4);
-    // 1 → 2 → 5 → 12 → 27 (rounds 0 to 3), then 27 * 2 + 10.
-    EXPECT_EQ(sums, std::vector<std::uint32_t>(n, 64u)) << "each command in order, each seeing what the one before wrote";
+    EXPECT_EQ(counts.back(), 7);
+    EXPECT_TRUE(std::ranges::contains(released, std::uint64_t { 1 })) << "the first object, released once nothing records it";
 
-    // Something wrong this frame: said on the node, and nothing done.
-    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
-        kgraph::PassCommand c;
-        c.op = kgraph::PassCommand::Op::eDispatch;
-        c.use = 0;
-        c.push = { { "radius", Value(2) } };
-        commands.push_back(std::move(c));
-        return {};
-    };
-    runtime.SetPassScript(script);
+    // A frame it cannot record: said on the node, which stays built.
+    recording = "nothing to record into";
     Frame();
     Frame();
-    EXPECT_TRUE(runtime.Status("pass")->ok) << "it is built; it is this frame that is wrong";
-    EXPECT_NE(runtime.Status("pass")->note.find("'add' has no push constant 'radius': it has round, count"), std::string::npos) << runtime.Status("pass")->note;
-    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
-        kgraph::PassCommand c;
-        c.op = kgraph::PassCommand::Op::eWrite;
-        c.use = 0;
-        c.bytes.resize(4);
-        commands.push_back(std::move(c));
-        return {};
-    };
-    runtime.SetPassScript(script);
     Frame();
-    Frame();
-    EXPECT_NE(runtime.Status("pass")->note.find("command 0 takes a Buffer, and 'add' is a Pipeline"), std::string::npos) << runtime.Status("pass")->note;
-    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool) -> std::string { return "it has nothing to do"; };
-    runtime.SetPassScript(script);
-    Frame();
-    Frame();
-    EXPECT_NE(runtime.Status("pass")->note.find("Accumulate did nothing this frame: it has nothing to do"), std::string::npos) << runtime.Status("pass")->note;
+    EXPECT_TRUE(runtime.Status("pass")->ok);
+    EXPECT_NE(runtime.Status("pass")->note.find("Copier could not record: nothing to record into"), std::string::npos) << runtime.Status("pass")->note;
+    recording.clear();
 
-    // What it uses, wired wrong, and a use it has not: the node fails, and says why.
-    graph.nodes.erase(std::ranges::find(graph.nodes, std::string("pass"), &kgraph::Node::id));
-    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Wire("add", "sums").Wire("sums", "sums").Wire("args", "args").Wire("out", "out");
+    // What its initialize could not make, and an input it has not: the node fails, saying why.
+    failure = "no shader 'blur'";
+    graph.Find("pass")->Set("count", 8);
     runtime.Set(graph);
     EXPECT_FALSE(runtime.Status("pass")->ok);
-    EXPECT_NE(runtime.Status("pass")->error.find("'add' takes a ComputePipeline, and was given a Buffer"), std::string::npos) << runtime.Status("pass")->error;
-    graph.nodes.erase(std::ranges::find(graph.nodes, std::string("pass"), &kgraph::Node::id));
-    graph.Add("pass", "ScriptPass").Set("script", "Accumulate").Wire("add", "adding").Wire("sums", "sums").Wire("args", "args").Wire("out", "out").Wire("more", "out");
+    EXPECT_NE(runtime.Status("pass")->error.find("Copier: no shader 'blur'"), std::string::npos) << runtime.Status("pass")->error;
+    failure.clear();
+    graph.Find("pass")->Set("radius", 2);
     runtime.Set(graph);
-    EXPECT_NE(runtime.Status("pass")->error.find("Accumulate uses no 'more': it uses add, sums, args, out"), std::string::npos) << runtime.Status("pass")->error;
+    EXPECT_NE(runtime.Status("pass")->error.find("Copier has no input 'radius': it has count, data"), std::string::npos) << runtime.Status("pass")->error;
 }
 
 // A script makes resources and fills them on the CPU: a Script node names it, gives it its fields, and gives what it

@@ -369,23 +369,19 @@ the editor will build its node list and its nodes from.
   nothing makes what it makes empty, and the node's `Status(id)->note` says so. A per-frame resource, or an image of a
   format whose texel is no plain numbers, cannot be filled: it says why. An editor offers a Script node of each script
   among the nodes to add (`Runtime::Presets`).
-- **ScriptPass** runs one of the project's `PassScript`s (see [scripts](scripts.md#scripts-that-say-what-a-pass-does)),
-  by its class, in `script`: a pass whose commands the script says each frame, on the scene's thread before the frame
-  is recorded (`PassPlan::prepare`), and that the pass records as they were said. Its inputs are what the script uses,
-  each by its name — a ComputePipeline or a GraphicsPipeline, its parameters all wired on its node; a Framebuffer; a
-  Mesh; a Buffer; an Image; a view; a Sampler — and its fields, `field.<name>`. What the script makes
-  (`PassScriptUse::made`) is written out as nodes of its own before it (`<pass>/<name>`, of the type it is made as, with
-  its `settings` and then the node's `<name>.<input>`; a setting naming another of the script's is a wire to it; a
-  pipeline's `maybe.param.<name>`, taken where its shaders have that parameter), wired to the input of its name, and given
-  as the node's output of that name. Expand is told what each makes (`MadeOf`). What it uses is what the frame graph is told it reads, and
-  writes where the script says it does — a GraphicsPipeline's framebuffer and a Framebuffer read and written, the screen
-  for a ScreenFramebuffer's; its commands (`PassCommand`: dispatches, writes, copies, clears, and between a begun and an
-  ended rendering, draws — of vertices, of a mesh with the pipeline made for its layout, indexed, indirect, of mesh tasks
-  — viewports, scissors and vertex buffers) are checked as they are said, push constants laid out by the names in the
-  shader, and one wrong makes the frame's pass do nothing, said in the node's
+- **ScriptPass** runs one of the project's `PassScript`s (see [scripts](scripts.md#scripts-that-are-passes)), by its
+  class, in `script`: a pass written against Koral's own interface. Each node is an object of the script, made as the
+  node is built (`PassScriptCalls::initialize`, on the scene's thread, given a borrowed `KoralResource*` for each input
+  and returning one for each output), told its values each frame (`prepare`), and recorded on the frame graph's thread
+  into the frame's command buffer (`record`, a `KoralCommandBuffer*`); it is let go (`release`) when no frame records it
+  any longer. Its inputs are its ports that are not outputs (`PassScriptPort`, each by its name, of Koral's type — an
+  Image, a Buffer, a view, a Sampler, a Framebuffer, a Mesh, a pipeline) and its fields by their names; its outputs are
+  resources the graph holds a handle onto, of the kind the script made. An input must be one the graph made for good —
+  not a transient image, nor the screen's (a ScreenFramebuffer, to draw into the window, is). What it is wired is what the
+  frame graph is told it reads (`writes`: and writes), and what it gives what it writes. A throw in `initialize` fails the
+  node; one in `record`, or a command Koral's command buffer refused, makes the frame's pass do nothing, said in
   `Status(id)->note`. Whoever runs the graph says which scripts there are (`Runtime::SetPassScript`, a `PassScript` with
-  its `uses` and a `record` function); one declared and run by nothing does nothing, and the note says so. One that
-  draws nothing can run on the async compute queue (`async`); it takes an `idle`.
+  its `ports`, `fields` and `calls`); one declared and run by nothing does nothing, and the note says so.
 - **Repeat**, **Previous**, **Element** and **Switch** are what is done more than once, and one of several
   ways. See [Loops and branches](#loops-and-branches).
 - **Passes:** Clear, Blit (scaled, a part or all, and how a picture reaches the screen), Resolve (a

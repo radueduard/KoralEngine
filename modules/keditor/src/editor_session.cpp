@@ -1709,8 +1709,8 @@ namespace keditor
             { "Kotlin", "Compiled when the project opens, and again whenever it is saved: it runs in the editor, and in the game." },
             { "C# ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
             { "Kotlin ResourceScript", "Makes images, buffers, views and samplers, and fills them on the CPU as they are made: a Script node of it gives each." },
-            { "C# PassScript", "Says what a pass does, each frame: the dispatches of its pipelines, buffers written and copied, images cleared. A ScriptPass node of it runs it." },
-            { "Kotlin PassScript", "Says what a pass does, each frame: the dispatches of its pipelines, buffers written and copied, images cleared. A ScriptPass node of it runs it." },
+            { "C# PassScript", "A pass written as Koral is: Initialize makes its pipelines and resources with builders, Record records into a CommandBuffer; [NodeInput] and [NodeOutput] are its ScriptPass node's ports." },
+            { "Kotlin PassScript", "A pass written as Koral is: initialize makes its pipelines and resources with builders, record records into a CommandBuffer; @NodeInput and @NodeOutput are its ScriptPass node's ports." },
         };
         return kinds;
     }

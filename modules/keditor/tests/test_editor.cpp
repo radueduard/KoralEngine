@@ -2069,11 +2069,18 @@ TEST_F(EditorTest, ShadersAndScriptsAreMadeFromTheEditor) {
     EXPECT_FALSE(Session().NewScript("Drifter", "Kotlin"));
     EXPECT_FALSE(std::filesystem::exists(csharp / "build.gradle.kts")) << "and no Kotlin build was made for it";
 
-    // A PassScript: a ScriptPass node of it is offered, what it uses its inputs, as its source declares them.
+    // A PassScript: a ScriptPass node of it is offered, its marked members its ports, as its source declares them.
     ASSERT_TRUE(Session().NewScript("Painter", "C# PassScript")) << Session().Status();
     EXPECT_NE(text(csharp / "scripts", "Painter.cs").find("public sealed class Painter : PassScript"), std::string::npos);
     ASSERT_TRUE(std::ranges::contains(Doc().PassScripts(), std::string("Painter"), &kgraph::PassScript::name)) << "declared from its source at once";
     EXPECT_TRUE(std::ranges::contains(Doc().Runtime().Presets(), std::string("Painter"), &kgraph::Preset::name)) << "a ScriptPass node of it, among the nodes to add";
+    const auto passScripts = Doc().PassScripts();
+    const auto painter = std::ranges::find(passScripts, std::string("Painter"), &kgraph::PassScript::name);
+    ASSERT_NE(painter, passScripts.end());
+    EXPECT_TRUE(std::ranges::contains(painter->fields, std::string("Size"), &kecs::FieldDescription::name)) << "its [NodeInput] value";
+    ASSERT_EQ(painter->ports.size(), 1u);
+    EXPECT_EQ(painter->ports[0].name, "Picture");
+    EXPECT_TRUE(painter->ports[0].output) << "its [NodeOutput]";
 }
 
 // A script's entity is set from the inspector; a script dropped on the inspector is the entity's; and a prefab is made,

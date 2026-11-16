@@ -416,101 +416,48 @@ KENGINE_API bool kengine_resource_script_register(KengineDocument* document, con
 /** Stops running a resource script: its code is about to go. A Script node still names it, and what it made is made empty. */
 KENGINE_API void kengine_resource_script_unregister(KengineDocument* document, const char* name);
 
-/* ---- scripts that say what a pass does --------------------------------------------------------------------------- */
+/* ---- scripts that are passes --------------------------------------------------------------------------------- */
 
-/** Something a pass script uses: an input of the ScriptPass node that runs it, by its name, wired a resource — or one it makes. */
-typedef struct KenginePassUse {
-    const char* name;           /* the field it is */
-    /* Wired: "Pipeline" (a ComputePipeline), "GraphicsPipeline", "Framebuffer", "Mesh", "Buffer", "Image", "ImageView",
-     * "BufferView" or "Sampler". Made: the node type it is made as, "Image" ... "ComputePipeline", "GraphicsPipeline". */
-    const char* kind;
-    bool writes;                /* a buffer or an image it writes — by kengine_pass_write, _copy or _clear — not only reads */
-    bool made;                  /* made by its ScriptPass node, and given as its output by its name */
-    /* What one made is made with, as a JSON object of its node type's inputs — {"format": "eR32_SFLOAT", "extent.x": 256},
-     * {"image": "canvas"} for one made of another of the script's, by name — or null: as its node type starts. */
-    const char* settings;
-} KenginePassUse;
+/** One of a pass script's ports: a resource it is wired (an input of its ScriptPass node), or one it makes and gives (an output). */
+typedef struct KenginePassPort {
+    const char* name;           /* the member it is */
+    /* Koral's name for it: "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "Mesh", "Shader",
+     * "AccelerationStructure", "ComputePipeline", "GraphicsPipeline", "RayTracingPipeline" */
+    const char* type;
+    bool output;                /* made by the script and given on (a @NodeOutput); else wired in (a @NodeInput) */
+    bool writes;                /* an input it writes, not only reads */
+} KenginePassPort;
 
-/** What a pass script's record says its pass does this frame: written by the kengine_pass_ functions below, in order. */
-typedef struct KenginePassCommands KenginePassCommands;
-
+/**
+ * What runs a pass script: each ScriptPass node that names it is an object of it, made as the node is built and let go
+ * when it is built again or goes. Each returns null when it did, or why it could not — the caller's, good until it is
+ * called again.
+ */
 typedef struct KenginePassScriptCallbacks {
     void* user;
-    /* Says what the pass does this frame, into @p commands, given @p settings: the script's fields, as it registered
-     * them; @p made: the first frame since the pass was built — what it makes may be new, and empty. Called each frame,
-     * on the thread the scene is run on, before the frame is recorded. Returns null when it did, or why it could not —
-     * the caller's, good until it is called again; the pass then does nothing this frame. */
-    const char* (*record)(void* user, KenginePassCommands* commands, const void* settings, size_t settings_size, bool made);
+    /* Makes an object, given @p inputs — a borrowed handle for each input port, in their order, the object's to let go
+     * of; null for one wired nothing — and @p settings, its values as it registered them; runs its initialize; writes
+     * each output port's handle (the object's own: the engine takes a handle of its own onto it) into @p outputs, in
+     * their order, and the object's number into @p object. On the scene's thread. */
+    const char* (*initialize)(void* user, KoralResource* const* inputs, size_t input_count, const void* settings, size_t settings_size,
+                              KoralResource** outputs, size_t output_count, uint64_t* object);
+    /* Each frame before it is recorded, on the scene's thread: its values as the node gives them now. */
+    void (*prepare)(void* user, uint64_t object, const void* settings, size_t settings_size);
+    /* Records the frame's pass into @p commands — a kor::CommandBuffer — on whichever thread the frame graph records it on. */
+    const char* (*record)(void* user, uint64_t object, KoralCommandBuffer* commands);
+    /* Lets the object go: what it made is closed. */
+    void (*release)(void* user, uint64_t object);
 } KenginePassScriptCallbacks;
 
 /**
- * Makes a script that says what a pass does — of @p uses, each an input of a ScriptPass node that names it — one the
- * graph's ScriptPass nodes can name, with these fields as the node's inputs, and runs it: each frame it says what the
- * pass does. Given no uses, it uses what its source declares. With one so named already, it takes its place. False when
- * it cannot be.
+ * Makes a pass script — of @p ports, and of these fields as its values — one the graph's ScriptPass nodes can name, and
+ * runs it. Given no ports, it has those its source declares. With one so named already, it takes its place, and each
+ * node that names it is built again. False when it cannot be.
  */
 KENGINE_API bool kengine_pass_script_register(KengineDocument* document, const char* name, size_t size, const KecsField* fields, size_t field_count,
-                                              const KenginePassUse* uses, size_t use_count, const KenginePassScriptCallbacks* callbacks);
+                                              const KenginePassPort* ports, size_t port_count, const KenginePassScriptCallbacks* callbacks);
 /** Stops running a pass script: its code is about to go. A ScriptPass node still names it, and does nothing. */
 KENGINE_API void kengine_pass_script_unregister(KengineDocument* document, const char* name);
-
-/* What a pass does, said in its record: each names what it is of by its place among the script's uses. What is needed
- * between them — one writes what the next reads — is put there. What is wrong is said on the node, and the pass does
- * nothing that frame. */
-
-/** Runs @p pipeline, a Pipeline, @p x by @p y by @p z groups. */
-KENGINE_API void kengine_pass_dispatch(KenginePassCommands* commands, uint32_t pipeline, uint32_t x, uint32_t y, uint32_t z);
-/** Runs @p pipeline as many groups as the three numbers of 32 bits at @p offset of @p buffer, a Buffer, say. */
-KENGINE_API void kengine_pass_dispatch_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t buffer, uint64_t offset);
-/** One of the last dispatch's or draw's push constants, by its name in the shader: @p count numbers — a vector's, a matrix's columns. */
-KENGINE_API void kengine_pass_push(KenginePassCommands* commands, const char* name, const double* values, size_t count);
-/** Writes @p size bytes into @p buffer, a Buffer it writes, at @p offset: both multiples of 4, 64 KiB at most. */
-KENGINE_API void kengine_pass_write(KenginePassCommands* commands, uint32_t buffer, uint64_t offset, const void* bytes, size_t size);
-/** Copies @p size bytes of @p from, a Buffer, at @p from_offset, into @p to, a Buffer it writes, at @p to_offset. 0: as many as fit. */
-KENGINE_API void kengine_pass_copy(KenginePassCommands* commands, uint32_t from, uint32_t to, uint64_t size, uint64_t from_offset, uint64_t to_offset);
-/** Makes every texel of @p image, an Image it writes, @p color: red, green, blue, alpha, in the format's own range. */
-KENGINE_API void kengine_pass_clear(KenginePassCommands* commands, uint32_t image, float red, float green, float blue, float alpha);
-/** Copies @p buffer, from @p offset, into @p image, an Image it writes: its first level, every layer, a texel after another. */
-KENGINE_API void kengine_pass_copy_buffer_to_image(KenginePassCommands* commands, uint32_t buffer, uint32_t image, uint64_t offset);
-/** Copies @p image's first level, every layer, into @p buffer, a Buffer it writes, at @p offset. */
-KENGINE_API void kengine_pass_copy_image_to_buffer(KenginePassCommands* commands, uint32_t image, uint32_t buffer, uint64_t offset);
-/** Copies @p from, an Image, into @p to, an Image it writes of its size and format. */
-KENGINE_API void kengine_pass_copy_image(KenginePassCommands* commands, uint32_t from, uint32_t to);
-/** Copies @p from, an Image, into @p to, an Image it writes, scaled and filtered to fit it. */
-KENGINE_API void kengine_pass_blit(KenginePassCommands* commands, uint32_t from, uint32_t to);
-/** Makes @p image's smaller levels from its largest. */
-KENGINE_API void kengine_pass_generate_mipmaps(KenginePassCommands* commands, uint32_t image);
-
-/* Drawing: between kengine_pass_begin_rendering and kengine_pass_end_rendering, draws and what they are drawn with, and
- * nothing else. A pipeline draws into a framebuffer of the formats its node's has. */
-
-/** No mesh: kengine_pass_draw_indirect's, when the draws read no mesh's vertices. */
-#define KENGINE_PASS_NO_MESH 0xFFFFFFFFu
-/** Draws into @p target from here — a GraphicsPipeline's framebuffer, or a Framebuffer — cleared to the colour and
- * @p depth, or, @p load, as it was. The viewport and the scissor are all of it. */
-KENGINE_API void kengine_pass_begin_rendering(KenginePassCommands* commands, uint32_t target, bool load, float red, float green, float blue, float alpha, float depth);
-/** Drawn into. One left begun is ended after the last command. */
-KENGINE_API void kengine_pass_end_rendering(KenginePassCommands* commands);
-/** Where what follows is drawn, in pixels. */
-KENGINE_API void kengine_pass_viewport(KenginePassCommands* commands, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
-/** What of the framebuffer what follows may draw over, in pixels. */
-KENGINE_API void kengine_pass_scissor(KenginePassCommands* commands, uint32_t x, uint32_t y, uint32_t width, uint32_t height);
-/** Binds @p buffer, a Buffer, at vertex binding @p binding, from @p offset: for the draws after it — a mesh drawn takes its own bindings back. */
-KENGINE_API void kengine_pass_vertex_buffer(KenginePassCommands* commands, uint32_t binding, uint32_t buffer, uint64_t offset);
-/** Draws with @p pipeline, a GraphicsPipeline, @p vertex_count vertices from @p first_vertex, @p instances of them from @p first_instance. */
-KENGINE_API void kengine_pass_draw(KenginePassCommands* commands, uint32_t pipeline, uint32_t vertex_count, uint32_t instances, uint32_t first_vertex, uint32_t first_instance);
-/** Draws all of @p mesh, a Mesh — through its indices when it has them — with @p pipeline, made for its layout. */
-KENGINE_API void kengine_pass_draw_mesh(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, uint32_t instances, uint32_t first_instance);
-/** Draws @p index_count of @p mesh's indices from @p first_index (0: all of them, or its part's), @p vertex_offset added to each. */
-KENGINE_API void kengine_pass_draw_indexed(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, uint32_t index_count, uint32_t instances,
-                                           uint32_t first_index, int32_t vertex_offset, uint32_t first_instance);
-/** @p count draws as @p buffer says from @p offset, @p stride apart (0: one after another): of @p mesh's vertices — through its
- * indices, @p indexed — or of none (KENGINE_PASS_NO_MESH). */
-KENGINE_API void kengine_pass_draw_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t mesh, bool indexed, uint32_t buffer, uint64_t offset, uint32_t count, uint32_t stride);
-/** Draws @p pipeline's mesh shader, @p x by @p y by @p z task groups. */
-KENGINE_API void kengine_pass_draw_mesh_tasks(KenginePassCommands* commands, uint32_t pipeline, uint32_t x, uint32_t y, uint32_t z);
-/** The same, @p count of them as @p buffer says from @p offset, @p stride apart. */
-KENGINE_API void kengine_pass_draw_mesh_tasks_indirect(KenginePassCommands* commands, uint32_t pipeline, uint32_t buffer, uint64_t offset, uint32_t count, uint32_t stride);
 
 /* ---- conditions: what a ForEach or a Filter keeps an entity by --------------------------------------------------- */
 

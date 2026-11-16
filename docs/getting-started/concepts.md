@@ -47,8 +47,8 @@ library. A pipeline node names a module and an entry point, and its shader's par
 
 A **script** is a C# or Kotlin class. One added to entities is a **Setup**: its public fields are a component, and it
 takes the **pieces** of what it does — **PerFrame**, **FixedStep**, **BeforeDraw**. Others are run by the graph:
-a **ResourceScript** makes and fills resources once, a **PassScript** says what a pass does each frame and can make
-what it uses, and a **Conditions** class says which entities a ForEach or a Filter keeps. Scripts are compiled when
+a **ResourceScript** makes and fills resources once, a **PassScript** is a pass written against Koral's own
+interface — builders, and a command buffer — its `@NodeInput` and `@NodeOutput` members its node's ports, and a **Conditions** class says which entities a ForEach or a Filter keeps. Scripts are compiled when
 the project opens and again when one is saved, and run in the editor from Play to Stop.
 
 [Scripts](../scripts.md)

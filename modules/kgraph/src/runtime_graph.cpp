@@ -84,14 +84,7 @@ namespace kgraph
                     if (input.link) {
                         resolved.linked = true;
                         const auto source = built.find(input.link->node);
-                        // What it may be wired, and cannot be: not given (a ScriptPass's pipeline's `maybe.param.<name>`).
-                        if (name.starts_with("maybe.") && (source == built.end() || !source->second.status.ok)) continue;
                         if (!graph.Find(input.link->node) || source == built.end()) { blocked = std::format("'{}' is wired to '{}', which is not in the graph", name, input.link->node); break; }
-                        // What a ScriptPass makes is a node of its own: why that could not be made is why it cannot be.
-                        if (!source->second.status.ok && input.link->node == node->id + "/" + name) {
-                            blocked = std::format("'{}' could not be made: {}", name, source->second.status.error);
-                            break;
-                        }
                         if (!source->second.status.ok) { blocked = std::format("'{}' comes from '{}', which failed", name, input.link->node); break; }
                         const auto output = source->second.outputs.find(input.link->output);
                         if (output == source->second.outputs.end()) { blocked = std::format("'{}' has no output '{}'", input.link->node, input.link->output); break; }

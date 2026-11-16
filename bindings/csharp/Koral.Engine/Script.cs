@@ -140,28 +140,27 @@ public abstract class GraphicsScript : Script, BeforeDraw
 }
 
 /// <summary>
-/// A script that says what a pass does, a frame at a time: a ScriptPass node of the graph names it, and runs
-/// <see cref="Record"/> each frame, before the frame is drawn. What it uses — the pipelines it dispatches, the buffers and
-/// images it reads or writes — are its fields of <see cref="Pipeline"/>, <see cref="Buffer"/> and <see cref="Image"/>: each
-/// an input of the ScriptPass node, by the field's name, wired a resource. A pipeline's parameters are wired on its node; a
-/// Buffer or an Image it writes says so. Its public fields are its settings — the node's inputs — and it is no component.
+/// A pass written as Koral is: a ScriptPass node of the graph names it. Its <see cref="Initialize"/> makes its pipelines
+/// and resources with Koral's builders, and its <see cref="Record"/> records the frame's commands into Koral's own
+/// <see cref="CommandBuffer"/>. What the node is wired is its <c>[NodeInput]</c> fields — a resource of Koral's, set before
+/// Initialize; or a value, set before Initialize and again each frame before <see cref="Prepare"/> — and what it gives is
+/// its <c>[NodeOutput]</c> fields: resources its Initialize makes, outputs of the node.
 /// </summary>
 /// <remarks>
-/// In Record it says what the pass does, in order: dispatches, as many as it likes, each with its push constants by their
-/// names in the shader; buffers written and copied; images cleared. What is needed between them is put there. What is
-/// wrong is said on the node, and the pass does nothing that frame. Its settings are what the node gives, each frame;
-/// anything else it keeps from frame to frame is the one object's, whichever ScriptPass node runs it.
+/// Each ScriptPass node is an object of it: made and initialized when the node is built — again when the script is
+/// edited, or what it is wired or a value changes — and let go when the node is built again or goes; then
+/// <see cref="Destroy"/> is called, and every Koral resource it holds is disposed. Record is called on whichever thread
+/// the frame graph records the pass on: it should use only what the object holds. Prepare is on the scene's thread.
 /// <code>
-/// public sealed class Spread : PassScript
+/// public sealed class Blur : PassScript
 /// {
-///     public int Rounds = 4;
-///     public Pipeline Step = new();
-///     public Buffer Counts = new(writes: true);
-///     protected override void Record(Pass pass)
-///     {
-///         pass.Write(Counts, new int[4]);
-///         for (var i = 0; i &lt; Rounds; ++i) pass.Dispatch(Step, 64, 1, 1, ("round", i));
-///     }
+///     [NodeInput] public Image? Source;
+///     [NodeInput] public int Radius = 4;
+///     [NodeOutput] public Image? Blurred;
+///     private ComputePipeline? _pipeline;
+///
+///     protected override void Initialize() { /* Image.Builder(), ComputePipeline.Builder()... */ }
+///     protected override void Record(CommandBuffer commands) { commands.BindComputePipeline(_pipeline!) /* ... */; }
 /// }
 /// </code>
 /// </remarks>
@@ -169,267 +168,32 @@ public abstract class PassScript
 {
     /// <summary>The scene whose graph runs it.</summary>
     public World World { get; internal set; } = null!;
-    /// <summary>Says what the pass does this frame, into <paramref name="pass"/>.</summary>
-    protected abstract void Record(Pass pass);
-    internal void RecordCore(Pass pass) => Record(pass);
+    /// <summary>Makes what it records with — its pipelines, its resources, and each [NodeOutput] — given what it is wired.</summary>
+    protected virtual void Initialize() { }
+    /// <summary>Each frame, on the scene's thread, before it is recorded: its values are as the node gives them now.</summary>
+    protected virtual void Prepare() { }
+    /// <summary>Records the frame's pass. On a thread of the frame graph's: only what it holds is its to use.</summary>
+    protected abstract void Record(CommandBuffer commands);
+    /// <summary>Its node is built again, or goes: what else is to be let go of. Its Koral resources are disposed after this.</summary>
+    protected virtual void Destroy() { }
 
-    /// <summary>One of what a pass script uses: an input of its ScriptPass node, by the field's name.</summary>
-    public abstract class Use
-    {
-        internal abstract string Kind { get; }
-        /// <summary>The field it is: the ScriptPass node's input.</summary>
-        public string Name { get; internal set; } = "";
-        internal int Index = -1;
-        /// <summary>Made by the ScriptPass node, as this node type: one of <see cref="Make"/>'s. Null: wired in.</summary>
-        internal virtual string? Makes => null;
-        /// <summary>What one made is made with, by its node type's inputs.</summary>
-        internal readonly List<(string Input, object Value)> Settings = [];
-        private protected void Set(string input, object? value) { if (value is not null) Settings.Add((input, value)); }
-    }
-
-    /// <summary>A ComputePipeline it dispatches: its parameters wired on its node.</summary>
-    public class Pipeline : Use { internal override string Kind => "Pipeline"; }
-    /// <summary>A GraphicsPipeline it draws with: its parameters wired on its node. It draws into its node's framebuffer, or one like it.</summary>
-    public class GraphicsPipeline : Use { internal override string Kind => "GraphicsPipeline"; }
-    /// <summary>A Framebuffer it draws into, other than its pipelines' own: of the same formats.</summary>
-    public class Framebuffer : Use { internal override string Kind => "Framebuffer"; }
-    /// <summary>A mesh it draws: a Primitive's, a default one, a model's.</summary>
-    public sealed class Mesh : Use { internal override string Kind => "Mesh"; }
-    /// <summary>A buffer it reads — copies from, dispatches from — or, <paramref name="writes"/>, writes and copies into too.</summary>
-    public class Buffer(bool writes = false) : Use { internal override string Kind => "Buffer"; internal bool WritesIt { get; } = writes; }
-    /// <summary>An image it reads, or, <paramref name="writes"/>, clears too.</summary>
-    public class Image(bool writes = false) : Use { internal override string Kind => "Image"; internal bool WritesIt { get; } = writes; }
-
-    /// <summary>
-    /// What a pass script makes, rather than is wired: each a node of its ScriptPass's own, made as its arguments say —
-    /// each one of the node type's inputs, by name; the node can say otherwise, <c>&lt;field&gt;.&lt;input&gt;</c> — and an
-    /// output of the node, by the field's name, for what comes after to use. One that names another of the script's
-    /// resources or uses, <c>nameof(Canvas)</c>, is made of it; a pipeline's shader parameters named as one of them are
-    /// wired to it. What it makes it writes, and uses as it uses what is wired.
-    /// </summary>
-    public static class Make
-    {
-        public sealed class Image : PassScript.Image
-        {
-            public Image(string? format = null, int? width = null, int? height = null, int? depth = null, int? mipLevels = null, int? arrayLayers = null,
-                         string? usage = null, string? type = null, string? sampleCount = null) : base(true)
-            {
-                Set("format", format); Set("extent.x", width); Set("extent.y", height); Set("extent.z", depth); Set("mipLevels", mipLevels);
-                Set("arrayLayers", arrayLayers); Set("usage", usage); Set("type", type); Set("sampleCount", sampleCount);
-            }
-            internal override string? Makes => "Image";
-        }
-        public sealed class Buffer : PassScript.Buffer
-        {
-            public Buffer(int? instanceCount = null, string? usage = null, string? type = null) : base(true) { Set("instanceCount", instanceCount); Set("usage", usage); Set("type", type); }
-            internal override string? Makes => "Buffer";
-        }
-        public sealed class ImageView : Use
-        {
-            public ImageView(string? image = null, string? viewType = null, int? baseMipLevel = null, int? mipLevelCount = null, int? baseArrayLayer = null, int? arrayLayerCount = null)
-            {
-                Set("image", image); Set("viewType", viewType); Set("baseMipLevel", baseMipLevel); Set("mipLevelCount", mipLevelCount);
-                Set("baseArrayLayer", baseArrayLayer); Set("arrayLayerCount", arrayLayerCount);
-            }
-            internal override string Kind => "ImageView";
-            internal override string? Makes => "ImageView";
-        }
-        public sealed class BufferView : Use
-        {
-            public BufferView(string? buffer = null, string? format = null, long? offset = null, long? range = null) { Set("buffer", buffer); Set("format", format); Set("offset", offset); Set("range", range); }
-            internal override string Kind => "BufferView";
-            internal override string? Makes => "BufferView";
-        }
-        public sealed class Sampler : Use
-        {
-            public Sampler(string? minFilter = null, string? magFilter = null, string? mipmapMode = null, string? addressModeU = null, string? addressModeV = null,
-                           string? addressModeW = null, float? maxAnisotropy = null, bool? anisotropyEnable = null)
-            {
-                Set("minFilter", minFilter); Set("magFilter", magFilter); Set("mipmapMode", mipmapMode); Set("addressModeU", addressModeU);
-                Set("addressModeV", addressModeV); Set("addressModeW", addressModeW); Set("maxAnisotropy", maxAnisotropy); Set("anisotropyEnable", anisotropyEnable);
-            }
-            internal override string Kind => "Sampler";
-            internal override string? Makes => "Sampler";
-        }
-        /// <summary>Drawn into: <c>color</c>, a view of one of the script's images, by name; <c>depth</c>, another, of a depth image.</summary>
-        public sealed class Framebuffer : PassScript.Framebuffer
-        {
-            public Framebuffer(string? color = null, string? depth = null) { Set("color[0].view", color); Set("depthStencil.view", depth); }
-            internal override string? Makes => "Framebuffer";
-        }
-        /// <summary>Dispatched: <c>module</c> the shader module, <c>entry</c> its entry point (<c>computeMain</c> when not given).</summary>
-        public sealed class ComputePipeline : PassScript.Pipeline
-        {
-            public ComputePipeline(string? module = null, string? entry = null) { Set("compute.module", module); Set("compute.entry", entry); }
-            internal override string? Makes => "ComputePipeline";
-        }
-        /// <summary>Drawn with, into <c>framebuffer</c>: each stage's module, its entry point <c>vertexMain</c>, <c>fragmentMain</c>... when not given.</summary>
-        public sealed class GraphicsPipeline : PassScript.GraphicsPipeline
-        {
-            public GraphicsPipeline(string? vertexModule = null, string? fragmentModule = null, string? framebuffer = null, string? vertexEntry = null,
-                                    string? fragmentEntry = null, string? stages = null, string? meshModule = null, string? meshEntry = null,
-                                    string? taskModule = null, string? taskEntry = null)
-            {
-                Set("vertex.module", vertexModule); Set("vertex.entry", vertexEntry); Set("fragment.module", fragmentModule); Set("fragment.entry", fragmentEntry);
-                Set("framebuffer", framebuffer); Set("stages", stages); Set("mesh.module", meshModule); Set("mesh.entry", meshEntry);
-                Set("task.module", taskModule); Set("task.entry", taskEntry);
-            }
-            internal override string? Makes => "GraphicsPipeline";
-        }
-    }
-
-    internal static bool WritesOf(Use use) => use switch { Buffer b => b.WritesIt, Image i => i.WritesIt, _ => false };
-
-    /// <summary>What the pass does this frame, said in order.</summary>
-    public sealed unsafe class Pass
-    {
-        private readonly IntPtr _commands;
-        internal Pass(IntPtr commands, bool made) { _commands = commands; Made = made; }
-        /// <summary>The first frame since the pass was built: what the script makes may be new, and empty — to fill now.</summary>
-        public bool Made { get; }
-
-        private static uint At(Use use) => use.Index >= 0 ? (uint)use.Index : throw new InvalidOperationException($"{(use.Name.Length > 0 ? use.Name : "a use")} is not one of the script's own fields");
-
-        /// <summary>Runs <paramref name="pipeline"/> so many groups each way, with these push constants: <c>("radius", 2f)</c>, a vector, a Mat4, a bool.</summary>
-        public void Dispatch(Pipeline pipeline, uint x = 1, uint y = 1, uint z = 1, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_dispatch(_commands, At(pipeline), x, y, z);
-            Push(push);
-        }
-
-        /// <summary>Runs <paramref name="pipeline"/> as many groups as the three numbers of 32 bits at <paramref name="offset"/> of <paramref name="counts"/> say.</summary>
-        public void DispatchIndirect(Pipeline pipeline, Buffer counts, ulong offset = 0, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_dispatch_indirect(_commands, At(pipeline), At(counts), offset);
-            Push(push);
-        }
-
-        private void Push((string Name, object Value)[] push)
-        {
-            foreach (var (name, value) in push)
-            {
-                var numbers = NumbersOf(name, value);
-                fixed (double* at = numbers) Native.kengine_pass_push(_commands, name, at, (nuint)numbers.Length);
-            }
-        }
-
-        private static double[] NumbersOf(string name, object value) => value switch
-        {
-            bool on => [on ? 1 : 0],
-            Vec2 v => [v.X, v.Y],
-            Vec3 v => [v.X, v.Y, v.Z],
-            Vec4 v => [v.X, v.Y, v.Z, v.W],
-            Mat4 m => Enumerable.Range(0, 16).Select(i => (double)m[i / 4, i % 4]).ToArray(),     // a column after another
-            float[] a => a.Select(f => (double)f).ToArray(),
-            int[] a => a.Select(n => (double)n).ToArray(),
-            uint[] a => a.Select(n => (double)n).ToArray(),
-            double[] a => a,
-            IConvertible number => [number.ToDouble(System.Globalization.CultureInfo.InvariantCulture)],
-            _ => throw new ArgumentException($"push constant '{name}' is a {value.GetType().Name}: a number, a bool, a vector, a Mat4 or an array of numbers"),
-        };
-
-        /// <summary>Writes <paramref name="bytes"/> into <paramref name="buffer"/> at <paramref name="offset"/>: both multiples of 4, 64 KiB at most.</summary>
-        public void Write(Buffer buffer, ReadOnlySpan<byte> bytes, ulong offset = 0)
-        {
-            fixed (byte* at = bytes) Native.kengine_pass_write(_commands, At(buffer), offset, at, (nuint)bytes.Length);
-        }
-        /// <summary>Writes <paramref name="values"/> into <paramref name="buffer"/> at <paramref name="offset"/>: <c>int</c>s, <c>float</c>s, <c>Vec4</c>s.</summary>
-        public void Write<T>(Buffer buffer, ReadOnlySpan<T> values, ulong offset = 0) where T : unmanaged => Write(buffer, MemoryMarshal.AsBytes(values), offset);
-        public void Write<T>(Buffer buffer, T[] values, ulong offset = 0) where T : unmanaged => Write(buffer, MemoryMarshal.AsBytes(values.AsSpan()), offset);
-
-        /// <summary>Copies <paramref name="size"/> bytes of <paramref name="from"/>, at <paramref name="fromOffset"/>, into <paramref name="to"/>, at <paramref name="toOffset"/>: as many as fit, when 0.</summary>
-        public void Copy(Buffer from, Buffer to, ulong size = 0, ulong fromOffset = 0, ulong toOffset = 0) =>
-            Native.kengine_pass_copy(_commands, At(from), At(to), size, fromOffset, toOffset);
-
-        /// <summary>Makes every texel of <paramref name="image"/> this colour, in its format's own range.</summary>
-        public void Clear(Image image, float red = 0, float green = 0, float blue = 0, float alpha = 0) =>
-            Native.kengine_pass_clear(_commands, At(image), red, green, blue, alpha);
-
-        /// <summary>Copies <paramref name="buffer"/>, from <paramref name="offset"/>, into <paramref name="image"/>: its first level, every layer.</summary>
-        public void Copy(Buffer buffer, Image image, ulong offset = 0) => Native.kengine_pass_copy_buffer_to_image(_commands, At(buffer), At(image), offset);
-        /// <summary>Copies <paramref name="image"/>'s first level, every layer, into <paramref name="buffer"/> at <paramref name="offset"/>.</summary>
-        public void Copy(Image image, Buffer buffer, ulong offset = 0) => Native.kengine_pass_copy_image_to_buffer(_commands, At(image), At(buffer), offset);
-        /// <summary>Copies <paramref name="from"/> into <paramref name="to"/>, an image of its size and format.</summary>
-        public void Copy(Image from, Image to) => Native.kengine_pass_copy_image(_commands, At(from), At(to));
-        /// <summary>Copies <paramref name="from"/> into <paramref name="to"/>, scaled and filtered to fit it.</summary>
-        public void Blit(Image from, Image to) => Native.kengine_pass_blit(_commands, At(from), At(to));
-        /// <summary>Makes <paramref name="image"/>'s smaller levels from its largest.</summary>
-        public void GenerateMipmaps(Image image) => Native.kengine_pass_generate_mipmaps(_commands, At(image));
-
-        // ---- drawing ----
-
-        /// <summary>
-        /// Draws into <paramref name="into"/> — a GraphicsPipeline's framebuffer, or a Framebuffer — until the returned
-        /// scope is disposed: cleared to <paramref name="clear"/> and <paramref name="depth"/> first, or, <paramref name="load"/>,
-        /// as it was. Only draws, and what they are drawn with, are said in it: <c>using (pass.Render(Shade)) pass.Draw(Shade);</c>
-        /// </summary>
-        public Rendering Render(Use into, Vec4? clear = null, float depth = 1, bool load = false)
-        {
-            var color = clear ?? new Vec4(0, 0, 0, 1);
-            Native.kengine_pass_begin_rendering(_commands, At(into), load, color.X, color.Y, color.Z, color.W, depth);
-            return new Rendering(_commands);
-        }
-
-        /// <summary>A rendering begun: drawn into once it is disposed.</summary>
-        public readonly struct Rendering : IDisposable
-        {
-            private readonly IntPtr _commands;
-            internal Rendering(IntPtr commands) { _commands = commands; }
-            public void Dispose() => Native.kengine_pass_end_rendering(_commands);
-        }
-
-        /// <summary>Where what follows is drawn, in pixels: all of the framebuffer, as a rendering begins.</summary>
-        public void Viewport(uint x, uint y, uint width, uint height) => Native.kengine_pass_viewport(_commands, x, y, width, height);
-        /// <summary>What of the framebuffer what follows may draw over, in pixels.</summary>
-        public void Scissor(uint x, uint y, uint width, uint height) => Native.kengine_pass_scissor(_commands, x, y, width, height);
-        /// <summary>Binds <paramref name="buffer"/> at vertex <paramref name="binding"/>, for the draws after it: what a mesh drawn does not bind itself.</summary>
-        public void Vertices(uint binding, Buffer buffer, ulong offset = 0) => Native.kengine_pass_vertex_buffer(_commands, binding, At(buffer), offset);
-
-        /// <summary>Draws so many vertices with <paramref name="pipeline"/>, read by its shader as it likes.</summary>
-        public void Draw(GraphicsPipeline pipeline, uint vertexCount = 3, uint instances = 1, uint firstVertex = 0, uint firstInstance = 0, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw(_commands, At(pipeline), vertexCount, instances, firstVertex, firstInstance);
-            Push(push);
-        }
-        /// <summary>Draws all of <paramref name="mesh"/> with <paramref name="pipeline"/> — made for its layout — through its indices when it has them.</summary>
-        public void DrawMesh(GraphicsPipeline pipeline, Mesh mesh, uint instances = 1, uint firstInstance = 0, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_mesh(_commands, At(pipeline), At(mesh), instances, firstInstance);
-            Push(push);
-        }
-        /// <summary>Draws so many of <paramref name="mesh"/>'s indices — all of them, or its part's, when 0.</summary>
-        public void DrawIndexed(GraphicsPipeline pipeline, Mesh mesh, uint indexCount = 0, uint instances = 1, uint firstIndex = 0, int vertexOffset = 0, uint firstInstance = 0,
-                                params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_indexed(_commands, At(pipeline), At(mesh), indexCount, instances, firstIndex, vertexOffset, firstInstance);
-            Push(push);
-        }
-        /// <summary>So many draws as <paramref name="args"/> says — of <paramref name="mesh"/>'s vertices, or none.</summary>
-        public void DrawIndirect(GraphicsPipeline pipeline, Buffer args, ulong offset = 0, uint count = 1, uint stride = 0, Mesh? mesh = null, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_indirect(_commands, At(pipeline), mesh is null ? uint.MaxValue : At(mesh), false, At(args), offset, count, stride);
-            Push(push);
-        }
-        /// <summary>So many draws through <paramref name="mesh"/>'s indices, as <paramref name="args"/> says.</summary>
-        public void DrawIndexedIndirect(GraphicsPipeline pipeline, Mesh mesh, Buffer args, ulong offset = 0, uint count = 1, uint stride = 0, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_indirect(_commands, At(pipeline), At(mesh), true, At(args), offset, count, stride);
-            Push(push);
-        }
-        /// <summary>Draws <paramref name="pipeline"/>'s mesh shader, so many task groups each way.</summary>
-        public void DrawMeshTasks(GraphicsPipeline pipeline, uint x = 1, uint y = 1, uint z = 1, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_mesh_tasks(_commands, At(pipeline), x, y, z);
-            Push(push);
-        }
-        /// <summary>So many of them as <paramref name="args"/> says.</summary>
-        public void DrawMeshTasksIndirect(GraphicsPipeline pipeline, Buffer args, ulong offset = 0, uint count = 1, uint stride = 0, params (string Name, object Value)[] push)
-        {
-            Native.kengine_pass_draw_mesh_tasks_indirect(_commands, At(pipeline), At(args), offset, count, stride);
-            Push(push);
-        }
-    }
+    internal void InitializeCore() => Initialize();
+    internal void PrepareCore() => Prepare();
+    internal void RecordCore(CommandBuffer commands) => Record(commands);
+    internal void DestroyCore() => Destroy();
 }
+
+/// <summary>A field of a <see cref="PassScript"/> that is an input of its ScriptPass node: a resource it is wired, or a value.</summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class NodeInputAttribute : Attribute
+{
+    /// <summary>A resource it writes, not only reads.</summary>
+    public bool Writes { get; init; }
+}
+
+/// <summary>A field of a <see cref="PassScript"/> that is an output of its ScriptPass node: a resource of Koral's its Initialize makes.</summary>
+[AttributeUsage(AttributeTargets.Field)]
+public sealed class NodeOutputAttribute : Attribute { }
 
 /// <summary>
 /// A script that makes resources — Images, Buffers, views of them, Samplers — and fills its images and buffers on the CPU
@@ -744,7 +508,8 @@ internal sealed unsafe class ScriptLayout
             {
                 if (info.IsInitOnly || info.IsLiteral) continue;
                 if (typeof(ResourceScript.Resource).IsAssignableFrom(info.FieldType)) continue;    // what a ResourceScript makes: no setting
-                if (typeof(PassScript.Use).IsAssignableFrom(info.FieldType)) continue;            // what a PassScript uses: no setting
+                // A pass script's values are what it marks [NodeInput], and no resource: the rest is its own.
+                if (type.IsSubclassOf(typeof(PassScript)) && (info.GetCustomAttribute<NodeInputAttribute>() is null || typeof(Koral.Resource).IsAssignableFrom(info.FieldType))) continue;
                 var described = Describe(info.FieldType)
                     ?? throw new EngineException($"{type.Name}.{info.Name} is a {info.FieldType.Name}, which a script cannot keep: its fields are numbers, bool, " +
                                                  "Koral's vectors, Mat4, Quat, Entity and string. Make it private if it is only this run's.");

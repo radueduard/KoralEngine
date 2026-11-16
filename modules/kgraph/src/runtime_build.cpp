@@ -727,17 +727,12 @@ namespace kgraph
     auto Runtime::Impl::BuildPipeline(const Node& node, const kb::Description& description, const Inputs& given, Built& out) -> Expected<void>
     {
             auto info = std::make_shared<PipelineInfo>();
-            // What it may be wired, where its shaders have it: a ScriptPass's pipeline's, each of the script's by its name.
-            Inputs plain, maybe;
-            for (const auto& [name, value] : given) (name.starts_with("maybe.") ? maybe[name.substr(6)] : plain[name]) = value;
-            auto translated = AsTheBuilderTakesThem(node, description, plain, *info, out);
+            auto translated = AsTheBuilderTakesThem(node, description, given, *info, out);
             if (!translated) return Fail(translated.error());
             const Inputs& inputs = *translated;
             info->shaders = ShadersOf(inputs, &info->vertexShader);
             const Interface interface = Reflect(info->shaders, Kinds(), world);
             info->ports = interface.ports;
-            for (auto& [name, value] : maybe)
-                if (interface.Find(name) && !translated->contains(name)) (*translated)[name] = std::move(value);
             info->meshShaders = node.type == "GraphicsPipeline" && StagesOf(node) == "eMesh";
             info->vertexInputs = info->vertexShader.Get() && !info->vertexShader->BlockLayout().inputs.empty();
             out.pipeline = info;    // its inputs are known from here, built or not
@@ -3200,69 +3195,41 @@ namespace kgraph
         }
 
     namespace {
-        /** A ScriptPass's use, bound to what is wired: a pipeline, a framebuffer, a mesh, a buffer or an image. */
-        struct ScriptBound {
-            std::string name, kind;
-            bool writes = false;
-            kor::ResourceRef<const kor::ComputePipeline> pipeline;
-            kor::ResourceRef<const kor::GraphicsPipeline> graphics;
-            std::shared_ptr<const PipelineInfo> info;
-            kor::ResourceRef<const kor::Buffer> buffer;
-            kor::ResourceRef<const kor::Image> image;
-            // What it draws into: a Framebuffer's, or a GraphicsPipeline's own (none when its node has none).
-            Held target;
-            kor::ResourceRef<const kor::Framebuffer> framebuffer;
-            // A Mesh's: the mesh bound, and the part of it that is this one, for a model's.
-            Held held;
-            kor::ResourceRef<const kor::Mesh> mesh;
-            bool part = false;
-            kor::u32 firstIndex = 0, indexCount = 0;
-            kor::i32 vertexOffset = 0;
-        };
+        /** What a Koral handle is, as a node's output is said to be: its kind's name. */
+        std::string KindName(KoralResource* handle)
+        {
+            switch (koral_resource_kind(handle)) {
+            case KORAL_RESOURCE_BUFFER: return "Buffer";
+            case KORAL_RESOURCE_IMAGE: return "Image";
+            case KORAL_RESOURCE_IMAGE_VIEW: return "ImageView";
+            case KORAL_RESOURCE_SAMPLER: return "Sampler";
+            case KORAL_RESOURCE_BUFFER_VIEW: return "BufferView";
+            case KORAL_RESOURCE_SHADER: return "Shader";
+            case KORAL_RESOURCE_GRAPHICS_PIPELINE: return "GraphicsPipeline";
+            case KORAL_RESOURCE_COMPUTE_PIPELINE: return "ComputePipeline";
+            case KORAL_RESOURCE_RAY_TRACING_PIPELINE: return "RayTracingPipeline";
+            case KORAL_RESOURCE_DESCRIPTOR_SET: return "DescriptorSet";
+            case KORAL_RESOURCE_DESCRIPTOR_SET_LAYOUT: return "DescriptorSetLayout";
+            case KORAL_RESOURCE_FRAMEBUFFER: return "Framebuffer";
+            case KORAL_RESOURCE_MESH: return "Mesh";
+            case KORAL_RESOURCE_ACCELERATION_STRUCTURE: return "AccelerationStructure";
+            case KORAL_RESOURCE_DESCRIPTOR_HEAP: return "DescriptorHeap";
+            }
+            return "Resource";
+        }
 
-        /** A command as it is recorded: checked, its push constants laid out, and the pipeline it draws with chosen. */
-        struct ScriptReady {
-            PassCommand::Op op = PassCommand::Op::eDispatch;
-            std::uint32_t use = 0, other = 0;
-            kor::u32 groups[3] { 1, 1, 1 };
-            kor::u64 offset = 0, otherOffset = 0, size = 0;
-            std::vector<std::byte> bytes;       // a write's, or a dispatch's or a draw's push constants
-            kor::Vec4 color { 0.f, 0.f, 0.f, 0.f };
-            float depth = 1.f;
-            bool load = false;
-            kor::ResourceRef<const kor::GraphicsPipeline> graphics;    // made for its mesh's layout, when it has one
-            kor::ResourceRef<const kor::Mesh> mesh;
-            kor::u32 first = 0, instances = 1, firstInstance = 0, count = 1, stride = 0;
-            kor::i32 vertexOffset = 0;
-            kor::u32 box[4] { 0, 0, 0, 0 };
-        };
-
-        /** What a ScriptPass's prepare hands its record: the commands of the frame, whole. */
-        struct ScriptFrame {
+        /**
+         * A ScriptPass's object of its script, while anything holds it: the pass that records with it, the frame still
+         * recording it. Let go of when the last of them is.
+         */
+        struct ScriptObject {
+            std::function<void(std::uint64_t)> release;
+            std::uint64_t id = 0;
             std::mutex mutex;
-            std::shared_ptr<const std::vector<ScriptReady>> ready;
-            std::string said;                   // why the last frame did nothing, as the node was told
-            bool fresh = true;                  // no frame recorded since it was built: what it makes may be new
-            // The pipeline a GraphicsPipeline is drawn with for a mesh's layout, by the use and the mesh: worked out once.
-            std::map<std::pair<std::uint32_t, const kor::Mesh*>, std::pair<kor::ResourceRef<const kor::GraphicsPipeline>, std::string>> fits;
+            std::string said;           // why the last recording could not be, for the next frame to say on the node
+            std::string shown;          // what the node was last told
+            ~ScriptObject() { if (release) release(id); }
         };
-
-        /** Whether a pipeline made to draw into @p made can draw into @p into: the same formats, one for one. */
-        bool SameFormats(const kor::Framebuffer& made, const kor::Framebuffer& into)
-        {
-            if (made.ColorAttachmentCount() != into.ColorAttachmentCount() || made.HasDepthAttachment() != into.HasDepthAttachment()) return false;
-            const auto format = [](const kor::ResourceRef<const kor::ImageView>& view) { return view.Get() && view->SourceImage().Get() ? view->SourceImage()->PixelFormat() : kor::Image::Format {}; };
-            for (kor::u32 i = 0; i < made.ColorAttachmentCount(); ++i)
-                if (format(made.ColorAttachment(i)) != format(into.ColorAttachment(i))) return false;
-            return !made.HasDepthAttachment() || format(made.DepthAttachment()) == format(into.DepthAttachment());
-        }
-
-        bool IsDraw(const PassCommand::Op op)
-        {
-            using Op = PassCommand::Op;
-            return op == Op::eDraw || op == Op::eDrawMesh || op == Op::eDrawIndexed || op == Op::eDrawIndirect || op == Op::eDrawIndexedIndirect
-                || op == Op::eDrawMeshTasks || op == Op::eDrawMeshTasksIndirect;
-        }
     }
 
     auto Runtime::Impl::BuildScriptPass(const Node& node, const Inputs& inputs, Built& out, PassPlan& plan) -> Expected<void>
@@ -3278,14 +3245,14 @@ namespace kgraph
             }
             const PassScript& script = found->script;
 
-            // Its settings: each field an input, `field.<name>`, starting as its source says.
+            // Its values: an input each, by the member's name, starting as its source says.
             std::vector<std::byte> settings(script.size, std::byte { 0 });
             if (script.initial.size() == settings.size()) settings = script.initial;
-            std::string has;
+            std::string known;
             for (const auto& field : script.fields) {
                 const bool matrix = field.type == "mat4";
                 const bool single = !matrix && field.type != "quat" && !field.type.starts_with("vec") && !field.type.starts_with("ivec") && !field.type.starts_with("uvec");
-                Port port { "field." + field.name, PortKind::eValue, field.type == "bool" ? "bool" : single ? "number" : matrix ? "matrix" : "vector", false,
+                Port port { field.name, PortKind::eValue, field.type == "bool" ? "bool" : single ? "number" : matrix ? "matrix" : "vector", false,
                             std::format("{}.{}: a {}.", script.name, field.name, field.type), nullptr };
                 port.optional = true;
                 port.place = matrix ? Placement::eWire : Placement::eNode;
@@ -3295,154 +3262,107 @@ namespace kgraph
                 port.integer = field.type.starts_with("i") || field.type.starts_with("u");
                 if (field.type.starts_with("u")) port.min = std::max(port.min, 0.f);
                 out.ports.push_back(std::move(port));
-                has += std::format("{}{}", has.empty() ? "" : ", ", field.name);
+                known += std::format("{}{}", known.empty() ? "" : ", ", field.name);
             }
-            const auto typeOf = [](const std::string& kind) { return kind == "Pipeline" ? std::string("ComputePipeline") : kind; };
-            // What it makes, as its uses are: a pipeline it dispatches, what it draws with and into, what it writes.
-            const auto useKind = [](const PassScriptUse& use) {
-                if (!use.made) return use.kind;
-                return use.kind == "ComputePipeline" ? std::string("Pipeline") : use.kind;
+            // Its resources: what it is wired, an input each; what it makes, an output each.
+            for (const auto& port : script.ports) {
+                Port made { port.name, PortKind::eResource, port.type, false,
+                            port.output ? std::format("{}.{}: a {} it makes in its initialize, and gives.", script.name, port.name, port.type)
+                                        : std::format("{}.{}: a {} it {}.", script.name, port.name, port.type, port.writes ? "reads and writes" : "is given"), nullptr };
+                if (port.output) { out.gives.push_back(std::move(made)); continue; }
+                made.optional = true;
+                out.ports.push_back(std::move(made));
+                known += std::format("{}{}", known.empty() ? "" : ", ", port.name);
+            }
+            const auto valueNamed = [&](const std::string_view input) -> const kecs::FieldDescription* {
+                for (const auto& each : script.fields) if (each.name == input) return &each;
+                return nullptr;
             };
-            std::string uses;
-            for (const auto& use : script.uses) {
-                if (use.made) {
-                    // Given as an output, for what comes after; and what it is made with, the node's to say otherwise.
-                    const NodeType* kind = FindType(use.kind);
-                    out.gives.push_back({ use.name, PortKind::eResource, use.kind, false, std::format("{}.{}: a {} it makes, and writes.", script.name, use.name, use.kind), nullptr });
-                    if (kind)
-                        for (const auto& each : kind->inputs) {
-                            Port port = each;
-                            port.name = use.name + "." + each.name;
-                            port.optional = true;
-                            port.companion.clear();
-                            port.group = use.name;
-                            port.when = {};
-                            if (const auto it = std::ranges::find(use.settings, each.name, &std::pair<std::string, Value>::first); it != use.settings.end() && !it->second.String())
-                                port.initial = it->second;
-                            out.ports.push_back(std::move(port));
-                        }
-                    uses += std::format("{}{}", uses.empty() ? "" : ", ", use.name);
-                    continue;
-                }
-                const std::string doc = use.kind == "Pipeline" ? std::format("{}.{}: a ComputePipeline it dispatches, its parameters wired on it.", script.name, use.name)
-                    : use.kind == "GraphicsPipeline" ? std::format("{}.{}: a GraphicsPipeline it draws with, its parameters wired on it, into its framebuffer or another.", script.name, use.name)
-                    : use.kind == "Framebuffer" ? std::format("{}.{}: a Framebuffer it draws into.", script.name, use.name)
-                    : use.kind == "Mesh" ? std::format("{}.{}: a mesh it draws: a Primitive's, a default one, a model's.", script.name, use.name)
-                    : std::format("{}.{}: a {} it {}.", script.name, use.name, use.kind, use.writes ? "reads and writes" : "reads");
-                out.ports.push_back({ use.name, PortKind::eResource, typeOf(use.kind), false, doc, nullptr });
-                uses += std::format("{}{}", uses.empty() ? "" : ", ", use.name);
-            }
             for (const auto& [input, given] : inputs) {
                 if (input == "script" || input == "idle") continue;
-                if (input.starts_with("field.")) {
-                    const kecs::FieldDescription* field = nullptr;
-                    for (const auto& each : script.fields) if (each.name == std::string_view(input).substr(6)) field = &each;
-                    if (!field) return Fail(std::format("{} has no field '{}': it has {}", script.name, input.substr(6), has.empty() ? std::string("none") : has));
+                if (const kecs::FieldDescription* field = valueNamed(input)) {
                     if (given.value.IsNull() || field->offset + field->size > settings.size()) continue;
                     if (const std::string why = FieldBytes(*field, given.value, settings.data() + field->offset); !why.empty()) return Fail(std::format("'{}': {}", input, why));
                     continue;
                 }
-                if (!std::ranges::contains(script.uses, input, &PassScriptUse::name))
-                    return Fail(std::format("{} uses no '{}': it uses {}", script.name, input, uses.empty() ? std::string("nothing") : uses));
+                if (!std::ranges::any_of(script.ports, [&](const PassScriptPort& port) { return !port.output && port.name == input; }))
+                    return Fail(std::format("{} has no input '{}': it has {}", script.name, input, known.empty() ? std::string("none") : known));
             }
 
-            // What it uses, as wired: what the frame graph is told the pass reads and writes.
-            const bool drawing = std::ranges::any_of(script.uses, [](const PassScriptUse& use) { return use.kind == "GraphicsPipeline" || use.kind == "Framebuffer"; });
-            const auto drawsInto = [&](const Held& target) {
-                // The window's own: the screen is what it draws into. Else each attachment, read (it may be loaded) and written.
-                if (target->ofScreen) { plan.writesScreen = plan.drawsScreen = true; return; }
-                const auto framebuffer = kor::capi::FramebufferOf(target->handle);
-                for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i)
-                    if (const auto view = framebuffer->ColorAttachment(i); view.Get()) plan.uses.push_back({ MemberOf(view->SourceImage()), true, true });
-                if (framebuffer->HasDepthAttachment())
-                    if (const auto view = framebuffer->DepthAttachment(); view.Get()) plan.uses.push_back({ MemberOf(view->SourceImage()), true, true });
-            };
-            auto bound = std::make_shared<std::vector<ScriptBound>>();
-            for (const auto& declared : script.uses) {
-                PassScriptUse use = declared;
-                use.kind = useKind(declared);
-                use.writes = declared.writes || declared.made;      // what it makes, it writes
-                ScriptBound b;
-                b.name = use.name;
-                b.kind = use.kind;
-                b.writes = use.writes;
-                const auto it = inputs.find(use.name);
+            // What it is wired: each a borrowed handle of its own, and what the frame graph is told the pass uses.
+            std::vector<KoralResource*> wired;
+            const auto letGo = [&] { for (KoralResource* handle : wired) koral_resource_release(handle); wired.clear(); };
+            for (const auto& port : script.ports) {
+                if (port.output) continue;
+                const auto it = inputs.find(port.name);
                 const Held given = it == inputs.end() ? Held() : it->second.resource;
-                if (!given && declared.made) {
-                    const auto failed = built.find(node.id + "/" + use.name);
-                    return Fail(std::format("'{}' could not be made: {}", use.name, failed != built.end() && !failed->second.status.error.empty() ? failed->second.status.error : "nothing was made"));
-                }
-                if (!given) return Fail(std::format("'{}' needs a {} wired in", use.name, typeOf(use.kind)));
-                if (declared.made) out.outputs[use.name].resource = given;      // for what comes after
-                const auto pipelineInfo = [&](const char* kind) -> Expected<std::shared_ptr<const PipelineInfo>> {
-                    if (given->kind != kind) return Fail(std::format("'{}' takes a {}, and was given a {}", use.name, kind, given->kind));
-                    const auto made = built.find(given->node);
-                    if (made == built.end() || !made->second.pipeline) return Fail(std::format("'{}' is not a pipeline node's output", use.name));
-                    std::shared_ptr<const PipelineInfo> info = made->second.pipeline;
-                    if (!info->slots.empty())
-                        return Fail(std::format("'{}': its pipeline leaves 'param.{}' unwired, and a ScriptPass gives its {} nothing of their own: wire it on the pipeline",
-                                                use.name, info->slots.front().field, std::string_view(kind) == "ComputePipeline" ? "dispatches" : "draws"));
-                    return info;
-                };
-                if (use.kind == "Pipeline") {
-                    auto info = pipelineInfo("ComputePipeline");
-                    if (!info) return Fail(info.error());
-                    b.info = *info;
-                    b.pipeline = kor::ResourceRef<const kor::ComputePipeline>(kor::capi::ComputePipelineOf(given->handle));
-                    for (const Use& each : b.info->uses) plan.uses.push_back(each);
-                } else if (use.kind == "GraphicsPipeline") {
-                    auto info = pipelineInfo("GraphicsPipeline");
-                    if (!info) return Fail(info.error());
-                    b.info = *info;
-                    b.graphics = kor::ResourceRef<const kor::GraphicsPipeline>(kor::capi::GraphicsPipelineOf(given->handle));
-                    for (const Use& each : b.info->uses) plan.uses.push_back(each);
-                    if (const Held& own = b.info->framebuffer; own && own->handle && own->kind == "Framebuffer") {
-                        b.target = own;
-                        b.framebuffer = kor::capi::FramebufferOf(own->handle);
-                        drawsInto(own);
+                if (!given) { wired.push_back(nullptr); continue; }
+                // What the frame graph makes as it records — the screen, a transient — is no object a script can be handed now.
+                if (given->screen) { letGo(); return Fail(std::format("'{}' is the screen, which is the frame graph's to give: wire a ScreenFramebuffer, and draw into that", port.name)); }
+                if (given->transient || (given->source && given->source->transient))
+                    { letGo(); return Fail(std::format("'{}' is a transient, made by the frame graph as it records: give it an Image or a Buffer of its own", port.name)); }
+                const Resource* whole = given->part ? given->source.get() : given.get();
+                if (!whole || !whole->handle) { letGo(); return Fail(std::format("'{}' is given a {} that holds nothing yet", port.name, given->kind)); }
+                wired.push_back(koral_resource_borrow(whole->handle));
+                if (given->ofScreen) plan.writesScreen = plan.drawsScreen = true;
+                else if (given->kind == "Framebuffer") {
+                    const auto framebuffer = kor::capi::FramebufferOf(given->handle);
+                    for (kor::u32 i = 0; i < framebuffer->ColorAttachmentCount(); ++i)
+                        if (const auto view = framebuffer->ColorAttachment(i); view.Get()) plan.uses.push_back({ MemberOf(view->SourceImage()), true, true });
+                    if (framebuffer->HasDepthAttachment())
+                        if (const auto view = framebuffer->DepthAttachment(); view.Get()) plan.uses.push_back({ MemberOf(view->SourceImage()), true, true });
+                } else if (const auto pipeline = built.find(given->node); (given->kind == "ComputePipeline" || given->kind == "GraphicsPipeline")
+                                                                          && pipeline != built.end() && pipeline->second.pipeline) {
+                    for (const Use& use : pipeline->second.pipeline->uses) plan.uses.push_back(use);
+                } else if (Member member = MemberOf(given.get()); member.id) {
+                    // Copied from, drawn and dispatched from, bound as vertices or storage — and written, when it says so.
+                    if (BufferRefOf(given.get()).Get()) {
+                        for (const auto usage : { kor::Buffer::Usage::eTransferSrc, kor::Buffer::Usage::eStorage }) (void)MadeWithout(*given, usage);
+                        if (port.writes) (void)MadeWithout(*given, kor::Buffer::Usage::eTransferDst);
+                    } else if (ImageRefOf(given.get()).Get()) {
+                        (void)MadeWithout(*given, kor::Image::Usage::eTransferSrc);
+                        if (port.writes) (void)MadeWithout(*given, kor::Image::Usage::eTransferDst);
                     }
-                } else if (use.kind == "Framebuffer") {
-                    if (given->kind != "Framebuffer" || !given->handle) return Fail(std::format("'{}' takes a Framebuffer, and was given a {}", use.name, given->kind));
-                    b.target = given;
-                    b.framebuffer = kor::capi::FramebufferOf(given->handle);
-                    drawsInto(given);
-                } else if (use.kind == "Mesh") {
-                    // A model's mesh is a part of the one mesh the model is: that is what is bound.
-                    const Resource* whole = given->part ? given->source.get() : given.get();
-                    if (given->kind != "Mesh" || !whole || !whole->handle) return Fail(std::format("'{}' takes a Mesh, and was given {}", use.name, given->kind == "Mesh" ? "one still being read" : "a " + given->kind));
-                    b.held = given;
-                    b.mesh = kor::capi::MeshOf(whole->handle);
-                    b.part = given->part;
-                    b.firstIndex = given->firstIndex;
-                    b.indexCount = given->indexCount;
-                    b.vertexOffset = given->vertexOffset;
-                } else if (use.kind == "Buffer") {
-                    b.buffer = BufferRefOf(given.get());
-                    if (!b.buffer.Get()) return Fail(std::format("'{}' takes a Buffer, and was given a {}", use.name, given->kind));
-                    // Made for what its commands may do with it: copied from, dispatched or drawn by, bound as vertices — and written, when it is.
-                    (void)MadeWithout(*given, kor::Buffer::Usage::eTransferSrc);
-                    (void)MadeWithout(*given, kor::Buffer::Usage::eIndirect);
-                    if (drawing) (void)MadeWithout(*given, kor::Buffer::Usage::eVertex);
-                    if (use.writes) (void)MadeWithout(*given, kor::Buffer::Usage::eTransferDst);
-                    plan.uses.push_back({ MemberOf(given.get()), true, use.writes });
-                } else if (use.kind == "Image") {
-                    if (given->screen) return Fail(std::format("'{}' is the screen, which a ScriptPass does not use as an image: draw into a ScreenFramebuffer, or Blit an image to the screen", use.name));
-                    b.image = ImageRefOf(given.get());
-                    if (!b.image.Get()) return Fail(std::format("'{}' takes an Image, and was given a {}", use.name, given->kind));
-                    (void)MadeWithout(*given, kor::Image::Usage::eTransferSrc);    // copied and blitted from
-                    if (use.writes) (void)MadeWithout(*given, kor::Image::Usage::eTransferDst);
-                    plan.uses.push_back({ MemberOf(given.get()), true, use.writes });
-                } else if (use.kind == "ImageView" || use.kind == "BufferView" || use.kind == "Sampler") {
-                    // What a pipeline or a framebuffer of it is made with: no command of its own.
-                    if (given->kind != use.kind) return Fail(std::format("'{}' takes a {}, and was given a {}", use.name, use.kind, given->kind));
-                } else {
-                    return Fail(std::format("{}.{} is a {}: a PassScript uses a Pipeline, a GraphicsPipeline, a Framebuffer, a Mesh, a Buffer, an Image, a view or a Sampler",
-                                            script.name, use.name, use.kind));
+                    plan.uses.push_back({ std::move(member), true, port.writes });
                 }
-                bound->push_back(std::move(b));
             }
-            plan.draws = drawing;
-            // Each resource once, read and written as all its uses together say.
+            if (!script.Runs()) {
+                letGo();
+                out.status.note = std::format("{} is declared, and nothing runs it yet: the pass does nothing until its script is loaded", script.name);
+                plan.record = [](kor::CommandBuffer&, const PassContext&) {};
+                return {};
+            }
+
+            // Made: its initialize, given what it is wired; what it gives, outputs of the node.
+            std::size_t outputs = 0;
+            for (const auto& port : script.ports) outputs += port.output ? 1 : 0;
+            std::vector<KoralResource*> gives(outputs, nullptr);
+            auto object = std::make_shared<ScriptObject>();
+            std::string why;
+            {
+                const kor::log::Loud loud;      // the script's own: what it says is said
+                try { why = script.calls.initialize(wired, settings, gives, object->id); }
+                catch (const std::exception& e) { why = std::format("its initialize threw: {}", e.what()); }
+            }
+            wired.clear();                      // the script's now, to let go of
+            object->release = script.calls.release;
+            if (!why.empty()) return Fail(std::format("{}: {}", script.name, why));
+            std::size_t at = 0;
+            for (const auto& port : script.ports) {
+                if (!port.output) continue;
+                KoralResource* given = gives[at++];
+                if (!given) return Fail(std::format("{}'s initialize made no '{}': a @NodeOutput is set there", script.name, port.name));
+                auto held = std::make_shared<Resource>();
+                held->handle = koral_resource_borrow(given);
+                held->kind = KindName(given);
+                held->node = node.id;
+                held->label = port.name;
+                if (held->kind != port.type)
+                    return Fail(std::format("{}'s '{}' is a {}, and its initialize made a {}", script.name, port.name, port.type, held->kind));
+                if (Member member = MemberOf(held.get()); member.id) plan.uses.push_back({ std::move(member), false, true });
+                out.outputs[port.name].resource = std::move(held);
+            }
+            // Each resource once, read and written as its uses together say.
             {
                 std::vector<Use> merged;
                 for (const Use& each : plan.uses) {
@@ -3452,362 +3372,42 @@ namespace kgraph
                 }
                 plan.uses = std::move(merged);
             }
-            if (!script.record) {
-                out.status.note = std::format("{} is declared, and nothing runs it yet: the pass does nothing until its script is loaded", script.name);
-                plan.record = [](kor::CommandBuffer&, const PassContext&) {};
-                return {};
-            }
 
-            // Each frame, on the scene's thread: what the script says to do, checked, for the pass to record as it is.
-            auto frame = std::make_shared<ScriptFrame>();
-            plan.prepare = [this, id = node.id, record = script.record, settings = std::move(settings), bound, frame, scriptName = script.name] {
-                using Op = PassCommand::Op;
-                std::vector<PassCommand> commands;
-                std::string why;
-                // The script's own: what it says is said, though the runtime is quiet about what it tries.
-                try { const kor::log::Loud loud; why = record(settings, commands, frame->fresh); }
-                catch (const std::exception& e) { why = std::format("it threw: {}", e.what()); }
-                frame->fresh = false;
-                std::vector<ScriptReady> ready;
-                ready.reserve(commands.size() + 1);
-                const auto fail = [&](std::string text) { if (why.empty()) why = std::move(text); };
-                const auto of = [&](const std::uint32_t index, std::initializer_list<const char*> kinds, const std::size_t at) -> const ScriptBound* {
-                    std::string all;
-                    for (const char* kind : kinds) all += std::format("{}{}", all.empty() ? "" : " or ", kind);
-                    if (index >= bound->size()) { fail(std::format("command {} names use {}, and {} has {}", at, index, scriptName, bound->size())); return nullptr; }
-                    const ScriptBound& b = (*bound)[index];
-                    if (std::ranges::none_of(kinds, [&](const char* kind) { return b.kind == kind; })) { fail(std::format("command {} takes a {}, and '{}' is a {}", at, all, b.name, b.kind)); return nullptr; }
-                    return &b;
-                };
-                // A dispatch's or a draw's push constants: the shaders' defaults, then what the script gives, by name.
-                const auto pushes = [&](const ScriptBound& pipeline, const PassCommand& c, ScriptReady& r) {
-                    const PipelineInfo& info = *pipeline.info;
-                    r.bytes.assign(info.pushSize, std::byte { 0 });
-                    for (const PushMember& member : info.pushes)
-                        if (!member.initial.IsNull() && member.offset + member.size <= r.bytes.size()) PackPush(member, member.initial, r.bytes.data() + member.offset);
-                    for (const auto& [pushed, value] : c.push) {
-                        const auto member = std::ranges::find(info.pushes, pushed, &PushMember::name);
-                        if (member == info.pushes.end()) {
-                            std::string all;
-                            for (const auto& each : info.pushes) all += std::format("{}{}", all.empty() ? "" : ", ", each.name);
-                            fail(std::format("'{}' has no push constant '{}': it has {}", pipeline.name, pushed, all.empty() ? std::string("none") : all));
-                            return;
-                        }
-                        if (member->offset + member->size <= r.bytes.size()) PackPush(*member, value, r.bytes.data() + member->offset);
-                    }
-                };
-                // An indirect buffer: made for it, and holding what is read.
-                const auto indirect = [&](const ScriptBound& buffer, const kor::u64 offset, const kor::u32 count, const kor::u32 stride, const kor::u32 element) {
-                    if (!(buffer.buffer->UsageFlags() & kor::Buffer::Usage::eIndirect)) { fail(std::format("'{}' is drawn or dispatched from, and needs eIndirect among its usage", buffer.name)); return; }
-                    if (offset % 4 != 0 || count == 0 || offset + static_cast<kor::u64>(count - 1) * stride + element > buffer.buffer->size())
-                        fail(std::format("'{}' has not {} command{} of {} bytes, {} apart, from byte {}", buffer.name, count, count == 1 ? "" : "s", element, stride, offset));
-                };
-                int open = -1;                          // the use drawn into, while a rendering is open
-                for (std::size_t at = 0; at < commands.size() && why.empty(); ++at) {
-                    const PassCommand& c = commands[at];
-                    ScriptReady r;
-                    r.op = c.op;
-                    r.use = c.use;
-                    r.other = c.other;
-                    r.offset = c.offset;
-                    r.otherOffset = c.otherOffset;
-                    r.first = c.first;
-                    r.instances = c.instances;
-                    r.firstInstance = c.firstInstance;
-                    r.count = c.count;
-                    r.stride = c.stride;
-                    r.vertexOffset = c.vertexOffset;
-                    std::ranges::copy(c.box, r.box);
-                    const bool drawn = IsDraw(c.op) || c.op == Op::eViewport || c.op == Op::eScissor || c.op == Op::eVertexBuffer || c.op == Op::eEndRendering;
-                    if (open < 0 && drawn) { fail(std::format("command {} draws, and no rendering is begun: begin one, into what it draws into", at)); break; }
-                    if (open >= 0 && !drawn) { fail(std::format("command {} is no draw, and a rendering into '{}' is begun: end it first", at, (*bound)[static_cast<std::size_t>(open)].name)); break; }
-                    switch (c.op) {
-                    case Op::eDispatch:
-                    case Op::eDispatchIndirect: {
-                        const ScriptBound* pipeline = of(c.use, { "Pipeline" }, at);
-                        if (!pipeline) break;
-                        if (c.op == Op::eDispatch) {
-                            if (std::ranges::any_of(c.groups, [](const std::uint32_t n) { return n == 0; })) continue;    // none: nothing to run
-                            if (std::ranges::any_of(c.groups, [](const std::uint32_t n) { return n > 65535; })) { fail(std::format("'{}' is dispatched more than 65535 groups one way", pipeline->name)); break; }
-                            std::ranges::copy(c.groups, r.groups);
-                        } else {
-                            const ScriptBound* counts = of(c.other, { "Buffer" }, at);
-                            if (!counts) break;
-                            indirect(*counts, c.offset, 1, 12, 12);
-                        }
-                        pushes(*pipeline, c, r);
-                        break;
-                    }
-                    case Op::eWrite: {
-                        const ScriptBound* buffer = of(c.use, { "Buffer" }, at);
-                        if (!buffer) break;
-                        if (!buffer->writes) { fail(std::format("'{}' is written, and {} declares it only read: Buffer(writes = true)", buffer->name, scriptName)); break; }
-                        if (!(buffer->buffer->UsageFlags() & kor::Buffer::Usage::eTransferDst)) { fail(std::format("'{}' is written, and needs eTransferDst among its usage", buffer->name)); break; }
-                        if (c.bytes.empty()) continue;
-                        if (c.offset % 4 != 0 || c.bytes.size() % 4 != 0) { fail(std::format("what is written into '{}' starts at a multiple of 4 bytes, and is a multiple of 4 long", buffer->name)); break; }
-                        if (c.bytes.size() > 65536) { fail(std::format("{} bytes are written into '{}' at once: 65536 at most — more is Buffer.write's, outside the pass", c.bytes.size(), buffer->name)); break; }
-                        if (c.offset + c.bytes.size() > buffer->buffer->size()) { fail(std::format("what is written into '{}' runs past its end", buffer->name)); break; }
-                        r.bytes = c.bytes;
-                        r.size = c.bytes.size();
-                        break;
-                    }
-                    case Op::eCopy: {
-                        const ScriptBound* from = of(c.use, { "Buffer" }, at);
-                        const ScriptBound* to = from ? of(c.other, { "Buffer" }, at) : nullptr;
-                        if (!from || !to) break;
-                        if (!to->writes) { fail(std::format("'{}' is copied into, and {} declares it only read: Buffer(writes = true)", to->name, scriptName)); break; }
-                        if (!(from->buffer->UsageFlags() & kor::Buffer::Usage::eTransferSrc)) { fail(std::format("'{}' is copied from, and needs eTransferSrc among its usage", from->name)); break; }
-                        if (!(to->buffer->UsageFlags() & kor::Buffer::Usage::eTransferDst)) { fail(std::format("'{}' is copied into, and needs eTransferDst among its usage", to->name)); break; }
-                        if (c.offset >= from->buffer->size() || c.otherOffset >= to->buffer->size()) { fail("an offset of a copy is past the end of its buffer"); break; }
-                        const kor::u64 most = std::min(from->buffer->size() - c.offset, to->buffer->size() - c.otherOffset);
-                        r.size = c.size == 0 ? most : c.size;
-                        if (r.size > most) { fail(std::format("{} bytes are copied from '{}' into '{}': {} fit", r.size, from->name, to->name, most)); break; }
-                        break;
-                    }
-                    case Op::eClear: {
-                        const ScriptBound* image = of(c.use, { "Image" }, at);
-                        if (!image) break;
-                        if (!image->writes) { fail(std::format("'{}' is cleared, and {} declares it only read: Image(writes = true)", image->name, scriptName)); break; }
-                        if (!(image->image->UsageFlags() & kor::Image::Usage::eTransferDst)) { fail(std::format("'{}' is cleared, and needs eTransferDst among its usage", image->name)); break; }
-                        const std::string format = FormatName(image->image->PixelFormat());
-                        if (format.starts_with("eD") || format.starts_with("eS8")) { fail(std::format("'{}' is a depth image: clear it with a Clear node", image->name)); break; }
-                        r.color = kor::Vec4(c.color[0], c.color[1], c.color[2], c.color[3]);
-                        break;
-                    }
-                    case Op::eCopyBufferToImage:
-                    case Op::eCopyImageToBuffer:
-                    case Op::eCopyImage:
-                    case Op::eBlit:
-                    case Op::eGenerateMipmaps: {
-                        const bool fromBuffer = c.op == Op::eCopyBufferToImage, toBuffer = c.op == Op::eCopyImageToBuffer;
-                        const ScriptBound* from = of(c.use, { fromBuffer ? "Buffer" : "Image" }, at);
-                        if (!from) break;
-                        if (c.op == Op::eGenerateMipmaps) {
-                            if (!from->writes) { fail(std::format("'{}''s levels are made, and {} declares it only read: Image(writes = true)", from->name, scriptName)); break; }
-                            if (from->image->MipLevels() < 2) { fail(std::format("'{}' has one level: there are none smaller to make", from->name)); break; }
-                            break;
-                        }
-                        const ScriptBound* to = of(c.other, { toBuffer ? "Buffer" : "Image" }, at);
-                        if (!to) break;
-                        if (!to->writes) { fail(std::format("'{}' is copied into, and {} declares it only read", to->name, scriptName)); break; }
-                        const bool fromOk = fromBuffer ? static_cast<bool>(from->buffer->UsageFlags() & kor::Buffer::Usage::eTransferSrc)
-                                                       : static_cast<bool>(from->image->UsageFlags() & kor::Image::Usage::eTransferSrc);
-                        const bool toOk = toBuffer ? static_cast<bool>(to->buffer->UsageFlags() & kor::Buffer::Usage::eTransferDst)
-                                                   : static_cast<bool>(to->image->UsageFlags() & kor::Image::Usage::eTransferDst);
-                        if (!fromOk) { fail(std::format("'{}' is copied from, and needs eTransferSrc among its usage", from->name)); break; }
-                        if (!toOk) { fail(std::format("'{}' is copied into, and needs eTransferDst among its usage", to->name)); break; }
-                        if (c.op == Op::eCopyImage && (from->image->Extent() != to->image->Extent() || from->image->PixelFormat() != to->image->PixelFormat())) {
-                            fail(std::format("'{}' is copied into '{}', of another size or format: blit it", from->name, to->name));
-                            break;
-                        }
-                        // A buffer holds the image's first level, every layer: so many bytes from where it starts.
-                        if (fromBuffer || toBuffer) {
-                            const ScriptBound& image = fromBuffer ? *to : *from;
-                            const ScriptBound& buffer = fromBuffer ? *from : *to;
-                            const TexelLayout texel = TexelLayoutOf(FormatName(image.image->PixelFormat()));
-                            const auto extent = image.image->Extent();
-                            const kor::u64 bytes = static_cast<kor::u64>(extent.x) * extent.y * extent.z * std::max<kor::u32>(image.image->ArrayLayers(), 1) * texel.Bytes();
-                            if (texel.channels == 0) { fail(std::format("'{}' is of a format whose texels are no plain numbers: it is not copied to or from a buffer", image.name)); break; }
-                            if (c.offset + bytes > buffer.buffer->size()) { fail(std::format("'{}' holds {} bytes from byte {}, and '{}' is {}", buffer.name, buffer.buffer->size() - std::min(c.offset, buffer.buffer->size()), c.offset, image.name, bytes)); break; }
-                        }
-                        break;
-                    }
-                    case Op::eBeginRendering: {
-                        const ScriptBound* into = of(c.use, { "GraphicsPipeline", "Framebuffer" }, at);
-                        if (!into) break;
-                        if (!into->target) { fail(std::format("'{}' has no framebuffer to draw into: give its node one, or begin the rendering into a Framebuffer", into->name)); break; }
-                        open = static_cast<int>(c.use);
-                        r.color = kor::Vec4(c.color[0], c.color[1], c.color[2], c.color[3]);
-                        r.depth = c.depth;
-                        r.load = c.load;
-                        break;
-                    }
-                    case Op::eEndRendering: open = -1; break;
-                    case Op::eViewport:
-                    case Op::eScissor:
-                        if (c.box[2] == 0 || c.box[3] == 0) { fail(std::format("a {} is at least a pixel wide and high", c.op == Op::eViewport ? "viewport" : "scissor")); break; }
-                        break;
-                    case Op::eVertexBuffer: {
-                        const ScriptBound* buffer = of(c.use, { "Buffer" }, at);
-                        if (!buffer) break;
-                        if (!(buffer->buffer->UsageFlags() & kor::Buffer::Usage::eVertex)) { fail(std::format("'{}' is bound as vertices, and needs eVertex among its usage", buffer->name)); break; }
-                        if (c.offset >= buffer->buffer->size()) { fail(std::format("'{}' is bound from past its end", buffer->name)); break; }
-                        break;
-                    }
-                    default: {     // a draw
-                        const ScriptBound* pipeline = of(c.use, { "GraphicsPipeline" }, at);
-                        if (!pipeline) break;
-                        const ScriptBound& into = (*bound)[static_cast<std::size_t>(open)];
-                        // Made for a framebuffer like the one it draws into.
-                        if (pipeline->framebuffer.Get() && into.framebuffer.Get() && !into.target->ofScreen && !pipeline->target->ofScreen
-                            && !SameFormats(*pipeline->framebuffer, *into.framebuffer)) {
-                            fail(std::format("'{}' draws into a framebuffer of other formats than '{}': a pipeline draws into one like its node's", pipeline->name, into.name));
-                            break;
-                        }
-                        const bool tasks = c.op == Op::eDrawMeshTasks || c.op == Op::eDrawMeshTasksIndirect;
-                        if (tasks && !pipeline->info->meshShaders) { fail(std::format("'{}' draws mesh tasks, and has no mesh shader", pipeline->name)); break; }
-                        if (!tasks && pipeline->info->meshShaders) { fail(std::format("'{}' is drawn with mesh shaders: draw its mesh tasks", pipeline->name)); break; }
-                        // The mesh, and the pipeline made for its layout.
-                        r.graphics = pipeline->graphics;
-                        const bool needsMesh = c.op == Op::eDrawMesh || c.op == Op::eDrawIndexed || c.op == Op::eDrawIndexedIndirect;
-                        if (c.mesh != PassCommand::None) {
-                            const ScriptBound* mesh = of(c.mesh, { "Mesh" }, at);
-                            if (!mesh) break;
-                            if (tasks) { fail("mesh shaders make their own vertices: a draw of mesh tasks is given no mesh"); break; }
-                            auto& fit = frame->fits[{ c.use, mesh->mesh.Get() }];
-                            if (!fit.first.Get() && fit.second.empty()) {
-                                auto made = PipelineFor(*pipeline->info, *mesh->mesh);
-                                fit = made ? std::pair { *made, std::string() } : std::pair { kor::ResourceRef<const kor::GraphicsPipeline>(), made.error() };
-                            }
-                            if (!fit.second.empty()) { fail(std::format("'{}' cannot draw '{}': {}", pipeline->name, mesh->name, fit.second)); break; }
-                            r.graphics = fit.first;
-                            r.mesh = mesh->mesh;
-                            const bool indices = mesh->mesh->IndexCount().has_value();
-                            if ((c.op == Op::eDrawIndexed || c.op == Op::eDrawIndexedIndirect) && !indices) { fail(std::format("'{}' has no indices, and is drawn through them", mesh->name)); break; }
-                            if (c.op == Op::eDrawMesh) {
-                                // All of it: its part, for a model's; through its indices when it has them.
-                                r.op = indices ? Op::eDrawIndexed : Op::eDraw;
-                                r.size = mesh->part ? mesh->indexCount : kor::WholeSize;
-                                r.first = mesh->part ? mesh->firstIndex : 0;
-                                r.vertexOffset = mesh->part ? mesh->vertexOffset : 0;
-                            } else if (c.op == Op::eDrawIndexed) {
-                                r.size = c.size != 0 ? c.size : mesh->part ? mesh->indexCount : kor::WholeSize;
-                                r.first = c.size != 0 ? c.first : mesh->part ? mesh->firstIndex : c.first;
-                                r.vertexOffset = c.vertexOffset + (mesh->part ? mesh->vertexOffset : 0);
-                            }
-                        } else if (needsMesh) {
-                            fail(std::format("command {} draws a mesh, and is given none", at));
-                            break;
-                        } else if (pipeline->info->vertexInputs && !tasks
-                                   && std::ranges::none_of(ready, [](const ScriptReady& was) { return was.op == Op::eVertexBuffer; })) {
-                            fail(std::format("'{}''s vertex shader reads vertices: draw a mesh, or bind vertex buffers first", pipeline->name));
-                            break;
-                        }
-                        if (c.op == Op::eDraw) {
-                            if (c.size == 0 && !r.mesh.Get()) continue;         // none: nothing to draw
-                            r.size = c.size == 0 ? kor::WholeSize : c.size;     // a mesh's every vertex, when it says none
-                        }
-                        if (c.op == Op::eDrawMeshTasks) {
-                            if (std::ranges::any_of(c.groups, [](const std::uint32_t n) { return n == 0; })) continue;
-                            std::ranges::copy(c.groups, r.groups);
-                        }
-                        if (c.op == Op::eDrawIndirect || c.op == Op::eDrawIndexedIndirect || c.op == Op::eDrawMeshTasksIndirect) {
-                            const ScriptBound* args = of(c.other, { "Buffer" }, at);
-                            if (!args) break;
-                            const kor::u32 element = c.op == Op::eDrawIndexedIndirect ? 20 : c.op == Op::eDrawIndirect ? 16 : 12;
-                            r.stride = c.stride == 0 ? element : c.stride;
-                            indirect(*args, c.offset, c.count, r.stride, element);
-                        }
-                        pushes(*pipeline, c, r);
-                        break;
-                    }
-                    }
-                    if (why.empty()) ready.push_back(std::move(r));
+            // Each frame, on the scene's thread: its values as the node gives them now — what is wired, read again — and
+            // what went wrong recording the frame before, said on the node.
+            std::vector<std::pair<const kecs::FieldDescription*, Link>> live;
+            for (const auto& field : script.fields)
+                if (const auto it = node.inputs.find(field.name); it != node.inputs.end() && it->second.link) live.emplace_back(&field, *it->second.link);
+            plan.prepare = [this, id = node.id, prepare = script.calls.prepare, settings = std::move(settings), live = std::move(live), object, scriptName = script.name]() mutable {
+                for (const auto& [field, link] : live) {
+                    const auto source = built.find(link.node);
+                    if (source == built.end()) continue;
+                    const auto output = source->second.outputs.find(link.output);
+                    if (output != source->second.outputs.end() && !output->second.value.IsNull() && field->offset + field->size <= settings.size())
+                        (void)FieldBytes(*field, output->second.value, settings.data() + field->offset);
                 }
-                if (why.empty() && open >= 0) { ScriptReady end; end.op = Op::eEndRendering; ready.push_back(end); }    // a rendering left open is ended
-                if (!why.empty()) ready.clear();       // a frame it cannot do whole, it does none of
-                {
-                    const std::scoped_lock lock(frame->mutex);
-                    frame->ready = std::make_shared<const std::vector<ScriptReady>>(std::move(ready));
+                if (prepare) {
+                    const kor::log::Loud loud;
+                    try { prepare(object->id, settings); } catch (const std::exception&) {}
                 }
-                // Said on the node while it is so, and taken back once it is not.
-                if (why != frame->said) {
-                    if (const auto it = built.find(id); it != built.end()) it->second.status.note = why.empty() ? std::string() : std::format("{} did nothing this frame: {}", scriptName, why);
-                    frame->said = why;
+                std::string said;
+                { const std::scoped_lock lock(object->mutex); said = object->said; }
+                if (said != object->shown) {
+                    if (const auto it = built.find(id); it != built.end()) it->second.status.note = said.empty() ? std::string() : std::format("{} could not record: {}", scriptName, said);
+                    object->shown = said;
                 }
             };
-            plan.record = [frame, bound](kor::CommandBuffer& cb, const PassContext&) {
-                using Op = PassCommand::Op;
-                std::shared_ptr<const std::vector<ScriptReady>> ready;
-                {
-                    const std::scoped_lock lock(frame->mutex);
-                    ready = frame->ready;
-                }
-                if (!ready) return;
-                // While drawing: the box drawn in, and what is bound — set again with a pipeline, which may not keep them.
-                kor::u32 viewport[4] { 0, 0, 1, 1 }, scissor[4] { 0, 0, 1, 1 };
-                const kor::GraphicsPipeline* lastPipeline = nullptr;
-                const kor::Mesh* lastMesh = nullptr;
-                for (const ScriptReady& r : *ready) {
-                    const ScriptBound& use = (*bound)[r.use];
-                    switch (r.op) {
-                    case Op::eDispatch:
-                    case Op::eDispatchIndirect:
-                        cb.BindComputePipeline(use.pipeline);
-                        if (use.info->hasSet) cb.BindDescriptorSet(0, use.info->set);
-                        if (use.info->pushSize) cb.PushConstantBytes({ r.bytes.data(), use.info->pushSize }, use.info->pushFirst);
-                        if (r.op == Op::eDispatch) cb.Dispatch(r.groups[0], r.groups[1], r.groups[2]);
-                        else cb.DispatchIndirect((*bound)[r.other].buffer, r.offset);
-                        break;
-                    case Op::eWrite: cb.FillBuffer(use.buffer, r.bytes.data(), r.offset, r.size); break;
-                    case Op::eCopy: cb.CopyBuffer(use.buffer, (*bound)[r.other].buffer, r.size, r.offset, r.otherOffset); break;
-                    case Op::eClear: cb.ClearColorImage(use.image, r.color); break;
-                    case Op::eBeginRendering: {
-                        kor::RenderInfo render(use.framebuffer);
-                        const kor::LoadOperation load = r.load ? kor::LoadOperation::eLoad : kor::LoadOperation::eClear;
-                        render.SetColorLoadOperation(load).SetDepthLoadOperation(load).SetStencilLoadOperation(load);
-                        render.SetColorStoreOperation(kor::StoreOperation::eStore).SetDepthStoreOperation(kor::StoreOperation::eStore).SetStencilStoreOperation(kor::StoreOperation::eStore);
-                        for (kor::u32 i = 0; i < use.framebuffer->ColorAttachmentCount(); ++i) render.SetClearColor(i, r.color);
-                        render.SetClearDepth(r.depth);
-                        cb.BeginRendering(render);
-                        const auto extent = use.framebuffer->Extent();
-                        const kor::u32 whole[4] { 0, 0, std::max(extent.x, 1u), std::max(extent.y, 1u) };
-                        std::ranges::copy(whole, viewport);
-                        std::ranges::copy(whole, scissor);
-                        lastPipeline = nullptr;
-                        lastMesh = nullptr;
-                        break;
-                    }
-                    case Op::eEndRendering: cb.EndRendering(); break;
-                    case Op::eCopyBufferToImage: {
-                        kor::Copy copy {};
-                        copy.bufferOffset = r.offset;
-                        copy.imageLayerCount = std::max<kor::u32>((*bound)[r.other].image->ArrayLayers(), 1);
-                        cb.CopyBufferToImage(use.buffer, (*bound)[r.other].image, copy);
-                        break;
-                    }
-                    case Op::eCopyImageToBuffer: {
-                        kor::Copy copy {};
-                        copy.bufferOffset = r.offset;
-                        copy.imageLayerCount = std::max<kor::u32>(use.image->ArrayLayers(), 1);
-                        cb.CopyImageToBuffer(use.image, (*bound)[r.other].buffer, copy);
-                        break;
-                    }
-                    case Op::eCopyImage: cb.CopyImage(use.image, (*bound)[r.other].image); break;
-                    case Op::eBlit: cb.Blit(use.image, (*bound)[r.other].image); break;
-                    case Op::eGenerateMipmaps: cb.GenerateMipmaps(use.image); break;
-                    case Op::eViewport:
-                        std::ranges::copy(r.box, viewport);
-                        if (lastPipeline) cb.SetViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-                        break;
-                    case Op::eScissor:
-                        std::ranges::copy(r.box, scissor);
-                        if (lastPipeline) cb.SetScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
-                        break;
-                    case Op::eVertexBuffer: cb.BindVertexBuffer(r.first, use.buffer, r.offset); break;
-                    default: {
-                        if (r.graphics.Get() != lastPipeline) {
-                            cb.BindGraphicsPipeline(r.graphics);
-                            cb.SetViewport(viewport[0], viewport[1], viewport[2], viewport[3]);
-                            cb.SetScissor(scissor[0], scissor[1], scissor[2], scissor[3]);
-                            if (use.info->hasSet) cb.BindDescriptorSet(0, use.info->set);
-                            lastPipeline = r.graphics.Get();
-                        }
-                        if (use.info->pushSize) cb.PushConstantBytes({ r.bytes.data(), use.info->pushSize }, use.info->pushFirst);
-                        if (r.mesh.Get() && r.mesh.Get() != lastMesh) { cb.BindMesh(r.mesh); lastMesh = r.mesh.Get(); }
-                        switch (r.op) {
-                        case Op::eDraw: cb.Draw(r.size, r.instances, r.first, r.firstInstance); break;
-                        case Op::eDrawIndexed: cb.DrawIndexed(r.size, r.instances, r.first, r.vertexOffset, r.firstInstance); break;
-                        case Op::eDrawIndirect: cb.DrawIndirect((*bound)[r.other].buffer, r.offset, r.count, r.stride); break;
-                        case Op::eDrawIndexedIndirect: cb.DrawIndexedIndirect((*bound)[r.other].buffer, r.offset, r.count, r.stride); break;
-                        case Op::eDrawMeshTasks: cb.DrawMeshTasks(r.groups[0], r.groups[1], r.groups[2]); break;
-                        case Op::eDrawMeshTasksIndirect: cb.DrawMeshTasksIndirect((*bound)[r.other].buffer, r.offset, r.count, r.stride); break;
-                        default: break;
-                        }
-                        break;
-                    }
-                    }
-                }
+            // Each frame, as the frame graph records it — on its thread: the script's own commands, into the frame's.
+            plan.record = [object, record = script.calls.record](kor::CommandBuffer& cb, const PassContext&) {
+                std::string why;
+                const std::size_t before = cb.Errors().size();
+                try { why = record(object->id, reinterpret_cast<KoralCommandBuffer*>(&cb)); }
+                catch (const std::exception& e) { why = e.what(); }
+                // A command Koral refused — a push constant of the wrong type, a draw with nothing bound — is why too:
+                // what the script recorded after it is not, and the pass does nothing this frame.
+                if (why.empty() && cb.Errors().size() > before) why = cb.Errors()[before].message;
+                const std::scoped_lock lock(object->mutex);
+                object->said = std::move(why);
             };
             return {};
         }

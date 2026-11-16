@@ -420,44 +420,50 @@ class $NAME : ResourceScript() {
 }
 )kt";
 
-        constexpr const char* KotlinPassScript = R"kt(// $NAME: says what a pass does, each frame. A ScriptPass node names it; what it uses — each Pipeline, Buffer and
-// Image below — is an input of the node, by its name, to wire: a ComputePipeline with its parameters wired on it, a buffer,
-// an image. What is wrong in a frame is said on the node, and the pass does nothing that frame.
+        constexpr const char* KotlinPassScript = R"kt(// $NAME: a pass, written as Koral is. A ScriptPass node runs it: its @NodeInput members are the node's inputs —
+// resources wired to it, or values given there — and its @NodeOutput members what it gives, for what comes after to use.
+// initialize makes its pipelines and resources with Koral's builders, as the node is built; record records the frame's
+// commands into Koral's own command buffer, on the frame graph's thread — so it uses only what it holds.
+import koral.CommandBuffer
+import koral.Image
+import koral.ImageFormat
+import koral.ImageUsage
+import koral.UVec2
+import koral.engine.NodeInput
+import koral.engine.NodeOutput
 import koral.engine.PassScript
 
 class $NAME : PassScript() {
-    var rounds = 4                          // a var is the ScriptPass node's input, given there or wired
+    @NodeInput var size = 256                       // a value: given on the node, or wired
+    @NodeOutput lateinit var picture: Image         // what it makes, and gives
 
-    val step = Pipeline()                   // a ComputePipeline it dispatches
-    val counts = Buffer(writes = true)      // a buffer it writes, not only reads
+    override fun initialize() {
+        picture = Image.Builder().setFormat(ImageFormat.eRGBA8_UNORM).setExtent(UVec2(size.toUInt(), size.toUInt()))
+            .setUsage(ImageUsage.eTransferDst, ImageUsage.eTransferSrc, ImageUsage.eSampled).build()
+    }
 
-    override fun record(pass: Pass) {
-        pass.write(counts, IntArray(4))     // zeros, before the dispatches: 64 KiB at most, a multiple of 4 bytes
-        repeat(rounds) { round ->
-            // As many groups each way as it likes, and its push constants by their names in the shader.
-            pass.dispatch(step, 64, 1, 1, "round" to round)
-        }
+    override fun record(commands: CommandBuffer) {
+        commands.clearColorImage(picture, 0.1f, 0.3f, 0.6f)    // any command Koral's command buffer has
     }
 }
 )kt";
 
-        constexpr const char* CSharpPassScript = R"cs(// $NAME: says what a pass does, each frame. A ScriptPass node names it; what it uses — each Pipeline, Buffer and
-// Image below — is an input of the node, by its name, to wire: a ComputePipeline with its parameters wired on it, a buffer,
-// an image. What is wrong in a frame is said on the node, and the pass does nothing that frame.
+        constexpr const char* CSharpPassScript = R"cs(// $NAME: a pass, written as Koral is. A ScriptPass node runs it: its [NodeInput] fields are the node's inputs —
+// resources wired to it, or values given there — and its [NodeOutput] fields what it gives, for what comes after to use.
+// Initialize makes its pipelines and resources with Koral's builders, as the node is built; Record records the frame's
+// commands into Koral's own command buffer, on the frame graph's thread — so it uses only what it holds.
 public sealed class $NAME : PassScript
 {
-    public int Rounds = 4;                          // a field is the ScriptPass node's input, given there or wired
+    [NodeInput] public int Size = 256;              // a value: given on the node, or wired
+    [NodeOutput] public Image? Picture;             // what it makes, and gives
 
-    public Pipeline Step = new();                   // a ComputePipeline it dispatches
-    public Buffer Counts = new(writes: true);       // a buffer it writes, not only reads
-
-    protected override void Record(Pass pass)
+    protected override void Initialize()
     {
-        pass.Write(Counts, new int[4]);             // zeros, before the dispatches: 64 KiB at most, a multiple of 4 bytes
-        for (var round = 0; round < Rounds; ++round)
-            // As many groups each way as it likes, and its push constants by their names in the shader.
-            pass.Dispatch(Step, 64, 1, 1, ("round", round));
+        Picture = new Image.Builder().SetFormat(Image.Format.eRGBA8_UNORM).SetExtent(new UVec2((uint)Size, (uint)Size))
+            .SetUsage(Image.Usage.eTransferDst | Image.Usage.eTransferSrc | Image.Usage.eSampled).Build();
     }
+
+    protected override void Record(CommandBuffer commands) => commands.ClearColorImage(Picture!, new Vec4(0.1f, 0.3f, 0.6f, 1));
 }
 )cs";
     

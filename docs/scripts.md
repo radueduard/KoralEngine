@@ -576,135 +576,125 @@ the script was edited and loaded. A script that throws leaves the node failed, s
 `kengine_resource_script_register`, with what it makes as `KengineScriptResource`s, and
 `kengine_resource_script_unregister`.
 
-## Scripts that say what a pass does
+## Scripts that are passes
 
-A **PassScript** (C# `PassScript`, Kotlin `PassScript()`) is a pass whose commands its script says, a frame at a time:
-the dispatches of its pipelines — as many as it likes, each with its push constants — draws, buffers written and copied,
-an indirect dispatch or draw from a buffer the pass wrote itself, images cleared. A **ScriptPass** node of the graph names it, and
-runs it each frame, before the frame is recorded (see [kgraph](kgraph.md)). It is no component: no entity has it.
+A **PassScript** (C# `PassScript`, Kotlin `PassScript()`) is a pass written as [Koral](https://radueduard.github.io/Koral/)
+is: it makes its pipelines and resources with Koral's builders, and records its commands into Koral's own
+`CommandBuffer`. Nothing in it is the engine's but what makes it a node. A **ScriptPass** node of the graph names it
+(see [kgraph](kgraph.md)); it is no component, and no entity has it.
 
-What it uses is its fields of `Pipeline`, `GraphicsPipeline`, `Framebuffer`, `Mesh`, `Buffer` and `Image`: each an input
-of the ScriptPass node, by the field's name, to wire — a ComputePipeline or a GraphicsPipeline, its parameters wired on
-its node; a Framebuffer it draws into; a mesh it draws; a Buffer; an Image. One it writes says so,
-`Buffer(writes = true)`: what it only reads is not written. Its other public fields are its settings — the node's
-inputs, `field.<name>`, given there or wired — read into it each frame before `Record` (Kotlin `record`) is called.
+- **`initialize`** (C# `Initialize`) makes what it records with — `Image.Builder()`, `Buffer.Builder()`,
+  `Framebuffer.Builder()`, `Shader.Builder()`, `ComputePipeline.Builder()`, `GraphicsPipeline.Builder()`,
+  `DescriptorSet.Builder(…)` — once its inputs are set.
+- **`record(commands)`** (C# `Record(CommandBuffer)`) records the frame's pass: binds, push constants, dispatches,
+  renderings and draws, fills, copies, clears, blits — any command Koral's command buffer has.
+- **`prepare`** (C# `Prepare`), if it has one, runs each frame on the scene's thread before the pass is recorded:
+  where the `world` is read.
+- **`destroy`** (C# `Destroy`), if it has one, lets go of what else it holds when its node is built again or goes.
+
+Its members are the node's ports by what they are marked:
+
+- **`@NodeInput`** (C# `[NodeInput]`) on a resource of Koral's — `Image`, `Buffer`, `ImageView`, `BufferView`,
+  `Sampler`, `Framebuffer`, `Mesh`, `Shader`, `AccelerationStructure`, `ComputePipeline`, `GraphicsPipeline`,
+  `RayTracingPipeline` — is an input of the node, by the member's name, to wire. It is set before `initialize`, a Koral
+  object of the script's own (a handle onto what the graph made), or null when nothing is wired. One the pass writes
+  says so, `@NodeInput(writes = true)` (C# `[NodeInput(Writes = true)]`): what it only reads is read.
+- **`@NodeInput`** on a value — a number, a bool, a vector, a colour — is a setting of the node, given there or wired.
+  It is set before `initialize`, and again each frame before `prepare`.
+- **`@NodeOutput`** (C# `[NodeOutput]`) on a resource is what the node gives, for what comes after to use: a Blit of its
+  picture, a copy of its buffer, another ScriptPass. Its `initialize` makes it.
+
+What is unmarked is the script's own: its pipelines, its descriptor sets, its counters.
 
 ```kotlin
+import koral.*
+import koral.engine.NodeInput
+import koral.engine.NodeOutput
 import koral.engine.PassScript
 
-class Spread : PassScript() {
-    var rounds = 4
-    val step = Pipeline()                   // a ComputePipeline: its shader's parameters wired on its node
-    val counts = Buffer(writes = true)
-    val args = Buffer(writes = true)
+class Painter : PassScript() {
+    @NodeInput var rounds = 3
+    @NodeOutput lateinit var picture: Image
+    @NodeOutput lateinit var sums: Buffer
 
-    override fun record(pass: Pass) {
-        pass.write(counts, IntArray(64))                            // zeros, carried in the frame's commands
-        pass.write(args, intArrayOf(1, 1, 1))
-        repeat(rounds) { pass.dispatch(step, 64, 1, 1, "round" to it) }   // push constants by their names in the shader
-        pass.dispatchIndirect(step, args, 0, "round" to 10)         // as many groups as 'args' says
-        pass.copy(counts, args, size = 12)
+    private lateinit var target: Framebuffer
+    private lateinit var triangles: GraphicsPipeline
+    private lateinit var adding: ComputePipeline
+
+    override fun initialize() {
+        picture = Image.Builder().setFormat(ImageFormat.eRGBA8_UNORM).setExtent(UVec2(256u, 256u))
+            .setUsage(ImageUsage.eColorAttachment, ImageUsage.eSampled, ImageUsage.eTransferSrc).build()
+        target = Framebuffer.Builder().addColor(Framebuffer.ColorAttachment(view = picture.view(), clear = ClearColor(0f, 0f, 1f, 1f))).build()
+        triangles = GraphicsPipeline.Builder()
+            .setVertexShader(Shader.Builder().setEntryPoint("triangle", "vertexMain").getOrBuild())
+            .setFragmentShader(Shader.Builder().setEntryPoint("triangle", "fragmentMain").getOrBuild())
+            .setFramebuffer(target).build()
+        adding = ComputePipeline.Builder().setComputeShader(Shader.Builder().setEntryPoint("accumulate", "computeMain").getOrBuild()).build()
+        sums = Buffer.Builder().setSize(256).setUsage(BufferUsage.eStorage, BufferUsage.eTransferSrc, BufferUsage.eTransferDst).build()
+    }
+
+    override fun record(commands: CommandBuffer) {
+        commands.fillBuffer(sums, IntArray(64) { 1 })
+        repeat(rounds) {
+            commands.bindComputePipeline(adding).bind("sums", sums)
+                .pushConstant("round", it.toUInt()).pushConstant("count", 64u).dispatch(1)
+        }
+        commands.beginRendering(target).bindGraphicsPipeline(triangles).draw(3).endRendering()
     }
 }
 ```
 
 ```csharp
-public sealed class Spread : PassScript
+public sealed class Painter : PassScript
 {
-    public int Rounds = 4;
-    public Pipeline Step = new();
-    public Buffer Counts = new(writes: true);
-    protected override void Record(Pass pass)
+    [NodeInput] public int Rounds = 3;
+    [NodeOutput] public Buffer? Sums;
+    private ComputePipeline? _adding;
+
+    protected override void Initialize()
     {
-        pass.Write(Counts, new int[64]);
-        for (var i = 0; i < Rounds; ++i) pass.Dispatch(Step, 64, 1, 1, ("round", i));
+        _adding = new ComputePipeline.Builder()
+            .SetComputeShader(new Shader.Builder().SetEntryPoint("accumulate", "computeMain").GetOrBuild()).Build();
+        Sums = new Buffer.Builder<int>().SetInstanceCount(64)
+            .SetUsage(Buffer.Usage.eStorage | Buffer.Usage.eTransferSrc | Buffer.Usage.eTransferDst).Build();
+    }
+
+    protected override void Record(CommandBuffer commands)
+    {
+        var ones = new int[64];
+        System.Array.Fill(ones, 1);
+        commands.FillBuffer<int>(Sums!, ones);
+        for (var round = 0u; round < Rounds; ++round)
+            commands.BindComputePipeline(_adding!).Bind("sums", Sums!).PushConstant("round", round).PushConstant("count", 64u).Dispatch(1);
     }
 }
 ```
 
-**What it makes.** Besides what it is wired, a PassScript can make what it uses, and give it on: its fields of `Make.Image`,
-`Make.Buffer`, `Make.ImageView`, `Make.BufferView`, `Make.Sampler`, `Make.Framebuffer`, `Make.ComputePipeline` and
-`Make.GraphicsPipeline`, each made as its arguments say — the node type's inputs, by name — and an output of the
-ScriptPass node by the field's name, for what comes after to use: a Blit of its picture to the screen, a Draw of its
-buffer, another ScriptPass. A whole renderer can be one node.
+**Its life.** Each ScriptPass node is an object of the class of its own: made, given its inputs and initialized as the
+node is built — again when the script is saved, when what it is wired changes, or when a value does. The object before
+is let go once no frame records it: its `destroy` is called, then every Koral resource it holds is closed (Koral keeps
+what the GPU is still using until it is done). So `initialize` can make what it needs as its inputs are now — an image
+the size of the one it is wired, a pipeline for the framebuffer it is given.
 
-```kotlin
-class Painter : PassScript() {
-    val canvas = Make.Image(format = "eRGBA8_UNORM", width = 256, height = 256, usage = "eColorAttachment | eSampled | eTransferSrc")
-    val canvasView = Make.ImageView(image = ::canvas.name)                   // made of another: by its name
-    val target = Make.Framebuffer(color = ::canvasView.name)
-    val shade = Make.GraphicsPipeline(vertexModule = "shade", fragmentModule = "shade", framebuffer = ::target.name)
-    val particles = Make.Buffer(instanceCount = 65536, usage = "eStorage")
-    val simulate = Make.ComputePipeline(module = "particles")                // its `particles` parameter: the buffer above
+**Its thread.** `record` is called on whichever thread the frame graph records the pass on, alongside other passes. It
+uses only what the object holds; the world is read in `prepare`, which is on the scene's thread.
 
-    override fun record(pass: Pass) {
-        if (pass.made) pass.write(particles, FloatArray(1024))              // new, and empty: filled once
-        pass.dispatch(simulate, 256)
-        pass.render(shade) { draw(shade, 6, instances = 65536) }
-    }
-}
-```
+**Among the graph's passes.** What it is wired is said to the frame graph as read (or read and written), and what it
+gives as written: the pass is ordered among the others by them, as any pass is. Within the pass, Koral's command buffer
+puts what is needed between its own commands — a dispatch that writes what the next one reads, a rendering into an
+image a copy then reads.
 
-Each is a node of the ScriptPass's own, `<pass>/<field>`, made as the source says. The node can say otherwise of any
-of it, `<field>.<input>` — `canvas.extent` wired from the Screen's, to follow the window — and is offered each as an
-input. A setting that names another of the script's resources, or what it is wired (`::target.name`, C#
-`nameof(Target)`), is made of it. A pipeline it makes has each shader parameter of the same name as one of the script's
-buffers, images, views and samplers — the name, or with its first letter small, for C#'s `Sums` — wired to it, unless
-the node wires it otherwise (`<pipeline>.param.<name>`). A stage given a module and no entry has `computeMain`,
-`vertexMain`, `fragmentMain`, `meshMain` or `taskMain`. What it makes it writes. `pass.made` (C# `Made`) is true the first
-frame after the pass was built — what it made may be new, and empty — for what is to be filled once. One that could not
-be made fails the node, saying why. Copies between buffers and images, image to image, blits and mipmaps are commands too:
-`copy(buffer, image)`, `copy(image, buffer)`, `copy(from, to)`, `blit(from, to)`, `generateMipmaps(image)`.
+**What goes wrong.** A throw in `initialize`, or a port of a type that is not one of Koral's resources, fails the node,
+saying why. A throw in `record`, or a command Koral refuses — a push constant of the wrong type, a draw with nothing
+bound — is said on the node (its note) and logged once while it goes on the same; the pass does nothing that frame, and
+the frame goes on. An input a pass reads must be a resource the graph has made for good: an Image, a Buffer, a
+pipeline, a Framebuffer — or a ScreenFramebuffer, to draw into the window — and not one of the frame's own transient
+images.
 
-**Drawing** is in a rendering: `render(into, clear, depth, load) { … }` (C#: `using (pass.Render(into, clear)) { … }`),
-into a GraphicsPipeline's framebuffer — the one its node was made with, the window's for a ScreenFramebuffer — or a
-Framebuffer, cleared first unless it `load`s. In it are draws and what they are drawn with, and nothing else; a dispatch
-or a copy goes before or after.
-
-```kotlin
-class Painter : PassScript() {
-    val shade = GraphicsPipeline()          // its framebuffer: what it draws into
-    val cube = Mesh()                       // a Primitive's, a model's
-    val args = Buffer(writes = true)
-
-    override fun record(pass: Pass) {
-        pass.write(args, intArrayOf(6, 1, 0, 0))                     // what an indirect draw reads, written first
-        pass.render(shade, clear = Vec4(0f, 0f, 0f, 1f)) {
-            draw(shade, 3)                                          // vertices the shader makes: no mesh
-            viewport(0, 0, 256, 256)                                // what follows, in a corner
-            drawMesh(shade, cube, instances = 4, "tint" to Vec4(1f, 0f, 0f, 1f))
-            drawIndirect(shade, args)                               // as many as 'args' says
-        }
-    }
-}
-```
-
-`draw` is so many vertices, read by the shader as it likes; `drawMesh` all of a mesh, through its indices when it has
-them; `drawIndexed` a range of them; `drawIndirect` and `drawIndexedIndirect` as many draws as a buffer says;
-`drawMeshTasks` and `drawMeshTasksIndirect` a mesh shader's tasks. A mesh is drawn with the pipeline made for its layout
-(as a Draw node's is), and `vertices(binding, buffer)` binds a buffer as vertices for what the mesh does not. `viewport`
-and `scissor` are all of the framebuffer as a rendering begins. A pipeline draws into a framebuffer of the formats its
-node's has, and one that draws stays on the graphics queue.
-
-What is needed between the commands — one writes what the next reads — is put there, and the pass is ordered among
-the graph's by what it uses: its pipelines' parameters, and its buffers and images. A push constant not given is its
-default in the shader. A buffer it uses is made able to be copied from and dispatched from, and one it writes able to
-be written; an image it writes, able to be cleared. A write is a few kilobytes at most (64 KiB), at a multiple of 4 bytes:
-more is `World.buffer(...).write`, outside the pass.
-
-What is wrong in a frame — a push constant the shader has not, a buffer written that it only reads, an offset past the
-end, a draw with no rendering begun, a mesh the pipeline cannot draw, a throw — is said on the node (its note), and the pass does nothing that frame; a throw is logged once while it
-goes on throwing the same. Its pipelines' parameters are all wired on their nodes: a ScriptPass gives its dispatches
-nothing of their own. The editor offers a ScriptPass node of each PassScript among the nodes to add, and makes one from
-File, New script. From C: `kengine_pass_script_register`, with what it uses as `KenginePassUse`s, and in its `record`
-callback `kengine_pass_dispatch`, `_dispatch_indirect`, `_push`, `_write`, `_copy` and `_clear`; and to draw,
-`kengine_pass_begin_rendering`, `_end_rendering`, `_viewport`, `_scissor`, `_vertex_buffer`, `_draw`, `_draw_mesh`,
-`_draw_indexed`, `_draw_indirect`, `_draw_mesh_tasks` and `_draw_mesh_tasks_indirect`; and `_copy_buffer_to_image`,
-`_copy_image_to_buffer`, `_copy_image`, `_blit` and `_generate_mipmaps`. What it makes is a `KenginePassUse` with
-`made`, its kind the node type, and its `settings` JSON; `record` is told `made`.
-
-One object of the class runs it, made as it is loaded: what it keeps besides its settings is that object's, whichever
-ScriptPass node runs it.
+The editor offers a ScriptPass node of each PassScript among the nodes to add, and makes one from File, New script.
+From C: `kengine_pass_script_register`, with its ports as `KenginePassPort`s (`name`, Koral's `type`, `output`,
+`writes`) and `KenginePassScriptCallbacks`: `initialize` is given a borrowed `KoralResource*` for each input and
+returns one for each output, `record` a `KoralCommandBuffer*` — the frame's command buffer, for Koral's C interface.
 
 ## Conditions
 

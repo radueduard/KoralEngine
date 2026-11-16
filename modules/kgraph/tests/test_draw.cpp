@@ -5,7 +5,9 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -525,231 +527,100 @@ TEST_F(DrawTest, MeshShadersAreDrawnAsTasks) {
     EXPECT_TRUE(scene->runtime->Status("draw")->ok) << scene->runtime->Status("draw")->error;
 }
 
-// A PassScript draws: into a pipeline's framebuffer, cleared as it says, a triangle and then both; in a scissor; as many
-// as a buffer the pass wrote says; a mesh, with the pipeline made for its layout; into the window's own framebuffer. What
-// is said out of turn — a draw with no rendering begun, a dispatch in one — is said on the node, and nothing is drawn.
-TEST_F(DrawTest, APassScriptDraws) {
-    using Op = kgraph::PassCommand::Op;
+// A PassScript is written as Koral is: its initialize makes a compute pipeline, a graphics pipeline that draws into the
+// framebuffer it is wired, and a buffer it gives; its record fills the buffer, adds to it round after round, and draws a
+// triangle — into the frame's own command buffer, which works out what is needed between them. A copy of what it gave,
+// and a Blit of what it drew into, come after it.
+TEST_F(DrawTest, APassScriptRecordsAsKoralDoes) {
     auto& runtime = *scene->runtime;
-    kgraph::Graph graph = Canvas();
-    Triangles(graph);
-    graph.Add("square", "Primitive").Set("shape", "eQuad");
-    graph.Add("flat", "GraphicsPipeline").Set("vertex.module", "flat").Set("vertex.entry", "vertexMain")
-        .Set("fragment.module", "flat").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
-    graph.Add("args", "Buffer").Set("instanceCount", 16).Set("usage", Value::List { "eIndirect", "eTransferDst" });
-    graph.Add("pass", "ScriptPass").Set("script", "Painter").Wire("triangles", "triangles").Wire("flat", "flat").Wire("square", "square").Wire("args", "args");
-    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
-
+    struct Object {
+        kor::ResourceRef<const kor::Framebuffer> target;
+        KoralResource* targetHandle = nullptr;
+        kor::Resource<kor::ComputePipeline> adding;
+        kor::Resource<kor::GraphicsPipeline> triangles;
+        kor::Resource<kor::Buffer> sums;
+        KoralResource* given = nullptr;
+        std::int32_t rounds = 0;
+    };
+    std::map<std::uint64_t, std::unique_ptr<Object>> objects;
+    std::uint64_t next = 1;
+    std::atomic<bool> refuse = false;
     kgraph::PassScript script;
     script.name = "Painter";
-    script.uses = { { "triangles", "GraphicsPipeline", false }, { "flat", "GraphicsPipeline", false }, { "square", "Mesh", false }, { "args", "Buffer", true } };
-    std::vector<kgraph::PassCommand> said;
-    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string { commands = said; return {}; };
-    runtime.SetPassScript(script);
-    const auto command = [](const Op op, const std::uint32_t use = 0) { kgraph::PassCommand c; c.op = op; c.use = use; return c; };
-    const auto begin = [&](const std::uint32_t into, std::array<float, 4> color, const bool load = false) {
-        auto c = command(Op::eBeginRendering, into);
-        std::ranges::copy(color, c.color);
-        c.load = load;
-        return c;
-    };
-    const auto draw = [&](const std::uint32_t vertices, const std::uint32_t first = 0) { auto c = command(Op::eDraw, 0); c.size = vertices; c.first = first; return c; };
-    const auto blue = [&](const kor::u32 x, const kor::u32 y) { const auto p = scene->Pixel(x, y); return p.x < 8 && p.y < 8 && p.z > 247; };
-
-    // A triangle, the framebuffer cleared to blue round it.
-    said = { begin(0, { 0, 0, 1, 1 }), draw(3), command(Op::eEndRendering) };
-    Run(graph);
-    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(3, 3)) << "the triangle";
-    EXPECT_TRUE(blue(28, 28)) << "what it cleared to";
-
-    // Both, but only in the right half: the scissor's. A rendering left open is ended.
-    auto scissor = command(Op::eScissor);
-    std::ranges::copy(std::array<std::uint32_t, 4> { Size / 2, 0, Size / 2, Size }, scissor.box);
-    said = { begin(0, { 0, 0, 1, 1 }), scissor, draw(6) };
-    Run(graph);
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(28, 28)) << "the second triangle, in the scissor";
-    EXPECT_TRUE(Green(28, 3)) << "the first, in it too";
-    EXPECT_TRUE(blue(3, 28)) << "outside it, only cleared";
-
-    // As many as 'args' says, written by the pass before it draws: six vertices, one instance.
-    auto write = command(Op::eWrite, 3);
-    const std::uint32_t words[4] { 6, 1, 0, 0 };
-    write.bytes.resize(sizeof words);
-    std::memcpy(write.bytes.data(), words, sizeof words);
-    auto indirect = command(Op::eDrawIndirect, 0);
-    indirect.other = 3;
-    indirect.mesh = kgraph::PassCommand::None;
-    said = { write, begin(0, { 0, 0, 0, 1 }), indirect, command(Op::eEndRendering) };
-    Run(graph);
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(3, 3));
-    EXPECT_TRUE(Green(28, 28)) << "both triangles, as the buffer said";
-
-    // A mesh, with the pipeline made for its layout: 'flat' was given none.
-    auto quad = command(Op::eDrawMesh, 1);
-    quad.mesh = 2;
-    said = { begin(1, { 0, 0, 0, 1 }), quad, command(Op::eEndRendering) };
-    Run(graph);
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_GT(scene->Pixel(16, 16).x, 247) << "the square, in the middle";
-    EXPECT_TRUE(Black(1, 1));
-
-    // Out of turn: said, and nothing drawn.
-    said = { draw(3) };
-    Run(graph);
-    EXPECT_NE(runtime.Status("pass")->note.find("command 0 draws, and no rendering is begun"), std::string::npos) << runtime.Status("pass")->note;
-    said = { begin(0, { 0, 0, 0, 1 }), write };
-    Run(graph);
-    EXPECT_NE(runtime.Status("pass")->note.find("command 1 is no draw, and a rendering into 'triangles' is begun"), std::string::npos) << runtime.Status("pass")->note;
-    said = { begin(0, { 0, 0, 0, 1 }), command(Op::eDrawMesh, 0) };
-    Run(graph);
-    EXPECT_NE(runtime.Status("pass")->note.find("draws a mesh, and is given none"), std::string::npos) << runtime.Status("pass")->note;
-    auto tasks = command(Op::eDrawMeshTasks, 0);
-    said = { begin(0, { 0, 0, 0, 1 }), tasks };
-    Run(graph);
-    EXPECT_NE(runtime.Status("pass")->note.find("'triangles' draws mesh tasks, and has no mesh shader"), std::string::npos) << runtime.Status("pass")->note;
-
-    // Into the window's own framebuffer: on the screen, with nothing copied to show it.
-    kgraph::Graph windowed;
-    windowed.Add("target", "ScreenFramebuffer");
-    Triangles(windowed);
-    windowed.Add("pass", "ScriptPass").Set("script", "Window").Wire("triangles", "triangles");
-    kgraph::PassScript window;
-    window.name = "Window";
-    window.uses = { { "triangles", "GraphicsPipeline", false } };
-    window.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
-        commands = { begin(0, { 0, 0, 1, 1 }), draw(3), command(Op::eEndRendering) };
+    script.fields = { { .name = "rounds", .type = "i32", .offset = 0, .size = 4 } };
+    script.ports = { { "target", "Framebuffer", false, false }, { "sums", "Buffer", true, false } };
+    script.calls.initialize = [&](std::span<KoralResource* const> inputs, std::span<const std::byte> settings, std::span<KoralResource*> outputs,
+                                  std::uint64_t& id) -> std::string {
+        auto made = std::make_unique<Object>();
+        made->targetHandle = inputs[0];
+        if (!made->targetHandle) return "it is wired no framebuffer";
+        made->target = kor::capi::FramebufferOf(made->targetHandle);
+        std::memcpy(&made->rounds, settings.data(), 4);
+        made->adding = kor::ComputePipeline::Builder {}.SetComputeShader(kor::Shader::Builder {}.SetEntryPoint("accumulate", "computeMain").GetOrBuild()).Build();
+        made->triangles = kor::GraphicsPipeline::Builder {}
+            .SetVertexShader(kor::Shader::Builder {}.SetEntryPoint("triangle", "vertexMain").GetOrBuild())
+            .SetFragmentShader(kor::Shader::Builder {}.SetEntryPoint("triangle", "fragmentMain").GetOrBuild())
+            .SetFramebuffer(made->target)
+            .Build();
+        made->sums = kor::Buffer::RawBuilder {}.SetRawSize(256).SetUsage(kor::Buffer::Usage::eStorage | kor::Buffer::Usage::eTransferSrc | kor::Buffer::Usage::eTransferDst).Build();
+        if (!made->adding.Valid() || !made->triangles.Valid() || !made->sums.Valid()) return "what it makes could not be made";
+        made->given = kor::capi::BorrowBuffer(made->sums);
+        outputs[0] = made->given;
+        id = next++;
+        objects[id] = std::move(made);
         return {};
     };
-    runtime.SetPassScript(window);
-    Run(windowed);
-    ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(3, 3)) << "the triangle, on the screen";
-    EXPECT_TRUE(blue(28, 28));
-    EXPECT_TRUE(std::ranges::contains(scene->Schedule(), "pass")) << "it writes the screen: kept, though nothing reads what it draws";
-}
-
-// A PassScript draws a mesh shader's tasks.
-TEST_F(DrawTest, APassScriptDrawsMeshTasks) {
-    using Op = kgraph::PassCommand::Op;
-    auto& runtime = *scene->runtime;
-    kgraph::Graph graph = Canvas();
-    graph.Add("meshlets", "GraphicsPipeline").Set("stages", "eMesh").Set("mesh.module", "meshlet").Set("mesh.entry", "meshMain")
-        .Set("fragment.module", "meshlet").Set("fragment.entry", "fragmentMain").Wire("framebuffer", "target");
-    graph.Add("pass", "ScriptPass").Set("script", "Tasks").Wire("meshlets", "meshlets");
-    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
-    kgraph::PassScript script;
-    script.name = "Tasks";
-    script.uses = { { "meshlets", "GraphicsPipeline", false } };
-    script.record = [](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, bool) -> std::string {
-        kgraph::PassCommand begin, tasks, end;
-        begin.op = Op::eBeginRendering;
-        begin.color[3] = 1;
-        tasks.op = Op::eDrawMeshTasks;
-        end.op = Op::eEndRendering;
-        commands = { begin, tasks, end };
-        return {};
-    };
-    runtime.SetPassScript(script);
-    runtime.Set(graph);
-    if (const auto* status = runtime.Status("meshlets"); !status->ok) GTEST_SKIP() << "no mesh shaders here: " << status->error;
-    for (const auto& problem : runtime.Problems()) ADD_FAILURE() << problem;
-    Frame();
-    Frame();
-    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(3, 3));
-    EXPECT_TRUE(Black(28, 28));
-}
-
-// A PassScript makes what it uses: an image, a view of it, a framebuffer of that, a pipeline that draws into it, a
-// buffer, a pipeline that adds into it — its parameter wired to it by its name. Each is a node of the ScriptPass's own,
-// made as the script says or as the node says otherwise, and an output of it: a copy and a Blit after it use them.
-TEST_F(DrawTest, APassScriptMakesWhatItUsesAndGivesItOn) {
-    using Op = kgraph::PassCommand::Op;
-    auto& runtime = *scene->runtime;
-    kgraph::PassScript script;
-    script.name = "Maker";
-    const auto made = [](std::string name, std::string kind, std::vector<std::pair<std::string, Value>> settings) {
-        kgraph::PassScriptUse use { std::move(name), std::move(kind), false };
-        use.made = true;
-        use.settings = std::move(settings);
-        return use;
-    };
-    script.uses = {
-        made("canvas", "Image", { { "format", "eRGBA8_UNORM" }, { "extent", Value::List { Size, Size } },
-                                  { "usage", Value::List { "eColorAttachment", "eTransferSrc", "eTransferDst", "eSampled" } } }),
-        made("canvasView", "ImageView", { { "image", "canvas" } }),
-        made("target", "Framebuffer", { { "color[0].view", "canvasView" } }),
-        made("triangles", "GraphicsPipeline", { { "vertex.module", "triangle" }, { "fragment.module", "triangle" }, { "framebuffer", "target" } }),
-        made("sums", "Buffer", { { "instanceCount", 256 }, { "usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" } } }),
-        made("adding", "ComputePipeline", { { "compute.module", "accumulate" } }),
-    };
-    std::vector<bool> fresh;
-    script.record = [&](std::span<const std::byte>, std::vector<kgraph::PassCommand>& commands, const bool first) -> std::string {
-        fresh.push_back(first);
-        kgraph::PassCommand write;
-        write.op = Op::eWrite;
-        write.use = 4;
-        write.bytes.resize(64 * 4);
+    script.calls.record = [&](const std::uint64_t id, KoralCommandBuffer* handle) -> std::string {
+        Object& o = *objects.at(id);
+        kor::CommandBuffer& cb = *reinterpret_cast<kor::CommandBuffer*>(handle);
         const std::vector<std::uint32_t> ones(64, 1);
-        std::memcpy(write.bytes.data(), ones.data(), write.bytes.size());
-        kgraph::PassCommand add;
-        add.op = Op::eDispatch;
-        add.use = 5;
-        add.push = { { "round", Value(3) }, { "count", Value(64) } };
-        kgraph::PassCommand begin, draw, end;
-        begin.op = Op::eBeginRendering;
-        begin.use = 3;
-        begin.color[2] = begin.color[3] = 1;
-        draw.op = Op::eDraw;
-        draw.use = 3;
-        draw.size = 3;
-        end.op = Op::eEndRendering;
-        commands = { write, add, begin, draw, end };
-        return {};
+        cb.FillBuffer(o.sums, ones.data(), 0, ones.size() * 4);
+        for (std::int32_t round = 0; round < o.rounds; ++round)
+            if (refuse) cb.BindComputePipeline(o.adding).PushConstant("round", 1.5f);     // a float, where the shader has a uint
+            else cb.BindComputePipeline(o.adding).Bind("sums", o.sums).PushConstant("round", static_cast<kor::u32>(round)).PushConstant("count", 64u).Dispatch(1);
+        cb.BeginRendering(o.target).BindGraphicsPipeline(o.triangles).Draw(3).EndRendering();
+        return {};     // what Koral refused, the runtime finds in the command buffer
+    };
+    script.calls.release = [&](const std::uint64_t id) {
+        if (const auto it = objects.find(id); it != objects.end()) {
+            koral_resource_release(it->second->targetHandle);
+            koral_resource_release(it->second->given);
+            objects.erase(it);
+        }
     };
     runtime.SetPassScript(script);
 
-    kgraph::Graph graph;
-    graph.Add("pass", "ScriptPass").Set("script", "Maker");
+    kgraph::Graph graph = Canvas();
+    graph.Add("pass", "ScriptPass").Set("script", "Painter").Set("rounds", 3).Wire("target", "target");
     graph.Add("out", "Buffer").Set("instanceCount", 256).Set("usage", Value::List { "eStorage", "eTransferSrc", "eTransferDst" });
     graph.Add("copy", "CopyBuffer").Wire("source", "pass", "sums").Wire("destination", "out");
-    graph.Add("screen", "Screen");
-    graph.Add("show", "Blit").Wire("source", "pass", "canvas").Wire("destination", "screen");
+    graph.Add("show", "Blit").Wire("source", "canvas").Wire("destination", "screen");
     Run(graph);
     runtime.Watch("out");
     for (int i = 0; i < 4; ++i) Frame();
-    for (const char* each : { "pass/canvas", "pass/canvasView", "pass/target", "pass/triangles", "pass/sums", "pass/adding" })
-        if (const auto* status = runtime.Status(each); status && !status->ok) ADD_FAILURE() << each << ": " << status->error;
     ASSERT_TRUE(runtime.Status("pass")->ok) << runtime.Status("pass")->error;
     EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
-    EXPECT_TRUE(Green(3, 3)) << "drawn into the image it made, and shown by what comes after";
-    EXPECT_GT(scene->Pixel(28, 28).z, 247) << "what it cleared it to";
+    EXPECT_TRUE(Green(3, 3)) << "the triangle, drawn by what its record recorded";
+    EXPECT_TRUE(Black(28, 28)) << "what the framebuffer cleared to";
     const auto peek = runtime.Watched("out");
     ASSERT_TRUE(peek && peek->bytes.size() >= 64 * 4) << runtime.WatchProblem("out");
     std::uint32_t first = 0;
     std::memcpy(&first, peek->bytes.data(), 4);
-    EXPECT_EQ(first, 5u) << "1 * 2 + 3: written, then added to by the pipeline it made, its 'sums' the buffer it made";
-    ASSERT_GE(fresh.size(), 2u);
-    EXPECT_TRUE(fresh.front()) << "its first frame: what it made is new";
-    EXPECT_FALSE(fresh.back()) << "and not since";
+    EXPECT_EQ(first, 12u) << "((1 * 2 + 0) * 2 + 1) * 2 + 2: filled, then added to three rounds, in order — and given on";
 
-    std::vector<std::string> outputs;
-    for (const auto& output : runtime.OutputsOf("pass")) if (output.kind == kgraph::PortKind::eResource) outputs.push_back(output.name + ":" + output.type);
-    for (const char* each : { "canvas:Image", "canvasView:ImageView", "target:Framebuffer", "triangles:GraphicsPipeline", "sums:Buffer", "adding:ComputePipeline" })
-        EXPECT_TRUE(std::ranges::contains(outputs, std::string(each))) << each << ": what it makes, given on";
-    const auto ports = runtime.PortsOf("pass");
-    EXPECT_TRUE(std::ranges::contains(ports, std::string("canvas.format"), &kgraph::Port::name)) << "what each is made with, the node's to say otherwise";
+    // A command Koral refuses is said on the node, and the frame goes on.
+    refuse = true;
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(runtime.Status("pass")->ok);
+    EXPECT_NE(runtime.Status("pass")->note.find("Painter could not record: Push constant 'round'"), std::string::npos) << runtime.Status("pass")->note;
+    refuse = false;
+    for (int i = 0; i < 3; ++i) Frame();
+    EXPECT_TRUE(runtime.Status("pass")->note.empty()) << runtime.Status("pass")->note;
 
-    // Said otherwise on the node: made so.
-    graph.Find("pass")->Set("canvas.format", "eNotAFormat");
-    scene->runtime->Set(graph);
-    EXPECT_FALSE(runtime.Status("pass")->ok);
-    EXPECT_NE(runtime.Status("pass")->error.find("'canvas' could not be made"), std::string::npos) << runtime.Status("pass")->error;
+    runtime.Set(kgraph::Graph {});
+    Frame();
+    Frame();
+    EXPECT_TRUE(objects.empty()) << "its object let go with its node";
 }
 
 // The catalog says all of it, for an editor to offer.

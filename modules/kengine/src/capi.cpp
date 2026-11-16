@@ -790,7 +790,7 @@ void kengine_text_set(void* at, const char* utf8, const size_t length)
 }
 
 bool kengine_pass_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,
-                                  const KenginePassUse* uses, const size_t use_count, const KenginePassScriptCallbacks* callbacks)
+                                  const KenginePassPort* ports, const size_t port_count, const KenginePassScriptCallbacks* callbacks)
 {
     return Guarded([&] {
         if (!name || !*name) { Fail("a script needs a name"); return false; }
@@ -802,38 +802,34 @@ bool kengine_pass_script_register(KengineDocument* document, const char* name, c
             if (fields[i].offset + fields[i].size > size) { Fail(std::format("field '{}' is past the end of the script's data", Text(fields[i].name))); return false; }
             type.fields.push_back({ Text(fields[i].name), Text(fields[i].type), fields[i].offset, fields[i].size, nullptr });
         }
-        for (size_t i = 0; i < use_count; ++i) {
-            const KenginePassUse& given = uses[i];
-            const std::string kind = Text(given.kind);
-            if (!given.name || !*given.name) { Fail(std::format("a use of '{}' needs a name", name)); return false; }
-            if (!given.made && kind != "Pipeline" && kind != "GraphicsPipeline" && kind != "Framebuffer" && kind != "Mesh" && kind != "Buffer" && kind != "Image"
-                && kind != "ImageView" && kind != "BufferView" && kind != "Sampler") {
-                Fail(std::format("{}.{} is a '{}': a pass script uses a Pipeline, a GraphicsPipeline, a Framebuffer, a Mesh, a Buffer or an Image", name, given.name, kind));
-                return false;
-            }
-            kscript::DeclaredResource use { given.name, kind, {} };
-            use.made = given.made;
-            if (given.made) {
-                static const std::set<std::string, std::less<>> makes { "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "ComputePipeline", "GraphicsPipeline" };
-                if (!makes.contains(kind)) { Fail(std::format("{}.{} is made as a '{}': a pass script makes an Image, a Buffer, a view, a Sampler, a Framebuffer or a pipeline", name, given.name, kind)); return false; }
-                if (given.settings && *given.settings) {
-                    kgraph::Value settings;
-                    if (!Parse(given.settings, settings)) return false;
-                    if (!settings.Named()) { Fail(std::format("{}.{}'s settings are an object of its inputs: {{\"format\": \"eR32_SFLOAT\"}}", name, given.name)); return false; }
-                    for (const auto& [input, value] : *settings.Named()) use.settings.emplace_back(input, value.ToJson());
-                }
-            } else if (given.writes) {
-                use.settings.emplace_back("writes", "true");
-            }
-            type.resources.push_back(std::move(use));
+        static const std::set<std::string, std::less<>> kinds { "Image", "Buffer", "ImageView", "BufferView", "Sampler", "Framebuffer", "Mesh", "Shader",
+                                                                "AccelerationStructure", "ComputePipeline", "GraphicsPipeline", "RayTracingPipeline" };
+        for (size_t i = 0; i < port_count; ++i) {
+            const KenginePassPort& given = ports[i];
+            if (!given.name || !*given.name) { Fail(std::format("a port of '{}' needs a name", name)); return false; }
+            if (!kinds.contains(Text(given.type))) { Fail(std::format("{}.{} is a '{}': a pass script's port is one of Koral's resources", name, given.name, Text(given.type))); return false; }
+            kscript::DeclaredResource port { given.name, Text(given.type), {} };
+            port.output = given.output;
+            port.writes = given.writes && !given.output;
+            type.resources.push_back(std::move(port));
         }
-        std::function<std::string(std::span<const std::byte>, std::vector<kgraph::PassCommand>&, bool)> record;
-        if (callbacks && callbacks->record)
-            record = [user = callbacks->user, call = callbacks->record](const std::span<const std::byte> settings, std::vector<kgraph::PassCommand>& commands, const bool made) -> std::string {
-                const char* why = call(user, reinterpret_cast<KenginePassCommands*>(&commands), settings.data(), settings.size(), made);
+        kgraph::PassScriptCalls calls;
+        if (callbacks && callbacks->initialize) {
+            const KenginePassScriptCallbacks c = *callbacks;
+            calls.initialize = [c](const std::span<KoralResource* const> inputs, const std::span<const std::byte> settings, const std::span<KoralResource*> outputs,
+                                   std::uint64_t& object) -> std::string {
+                const char* why = c.initialize(c.user, inputs.data(), inputs.size(), settings.data(), settings.size(), outputs.data(), outputs.size(), &object);
                 return why ? std::string(why) : std::string();
             };
-        Doc(document).RegisterPassScript(std::move(type), std::move(record));
+            if (c.prepare) calls.prepare = [c](const std::uint64_t object, const std::span<const std::byte> settings) { c.prepare(c.user, object, settings.data(), settings.size()); };
+            calls.record = [c](const std::uint64_t object, KoralCommandBuffer* commands) -> std::string {
+                if (!c.record) return {};
+                const char* why = c.record(c.user, object, commands);
+                return why ? std::string(why) : std::string();
+            };
+            if (c.release) calls.release = [c](const std::uint64_t object) { c.release(c.user, object); };
+        }
+        Doc(document).RegisterPassScript(std::move(type), std::move(calls));
         return true;
     }, false);
 }
@@ -841,236 +837,6 @@ bool kengine_pass_script_register(KengineDocument* document, const char* name, c
 void kengine_pass_script_unregister(KengineDocument* document, const char* name)
 {
     Guarded([&] { Doc(document).UnregisterPassScript(Text(name)); return 0; }, 0);
-}
-
-namespace {
-    std::vector<kgraph::PassCommand>& Commands(KenginePassCommands* commands) { return *reinterpret_cast<std::vector<kgraph::PassCommand>*>(commands); }
-}
-
-void kengine_pass_dispatch(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t x, const uint32_t y, const uint32_t z)
-{
-    if (!commands) return;
-    kgraph::PassCommand command;
-    command.op = kgraph::PassCommand::Op::eDispatch;
-    command.use = pipeline;
-    command.groups[0] = x;
-    command.groups[1] = y;
-    command.groups[2] = z;
-    Commands(commands).push_back(std::move(command));
-}
-
-void kengine_pass_dispatch_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t buffer, const uint64_t offset)
-{
-    if (!commands) return;
-    kgraph::PassCommand command;
-    command.op = kgraph::PassCommand::Op::eDispatchIndirect;
-    command.use = pipeline;
-    command.other = buffer;
-    command.offset = offset;
-    Commands(commands).push_back(std::move(command));
-}
-
-void kengine_pass_push(KenginePassCommands* commands, const char* name, const double* values, const size_t count)
-{
-    if (!commands || !name || (count && !values)) return;
-    auto& all = Commands(commands);
-    // Of the last dispatch or draw: given before any, it is of nothing, and the pass says so.
-    using Op = kgraph::PassCommand::Op;
-    const auto pushed = [](const Op op) {
-        return op == Op::eDispatch || op == Op::eDispatchIndirect || op == Op::eDraw || op == Op::eDrawMesh || op == Op::eDrawIndexed || op == Op::eDrawIndirect
-            || op == Op::eDrawIndexedIndirect || op == Op::eDrawMeshTasks || op == Op::eDrawMeshTasksIndirect;
-    };
-    if (all.empty() || !pushed(all.back().op)) {
-        kgraph::PassCommand wrong;
-        wrong.op = kgraph::PassCommand::Op::eDispatch;
-        wrong.use = ~0u;        // names no use: the pass says which command is wrong
-        all.push_back(std::move(wrong));
-        return;
-    }
-    kgraph::Value value;
-    if (count == 1) value = kgraph::Value(values[0]);
-    else {
-        kgraph::Value::List list;
-        for (size_t i = 0; i < count; ++i) list.emplace_back(values[i]);
-        value = kgraph::Value(std::move(list));
-    }
-    all.back().push.emplace_back(name, std::move(value));
-}
-
-void kengine_pass_write(KenginePassCommands* commands, const uint32_t buffer, const uint64_t offset, const void* bytes, const size_t size)
-{
-    if (!commands || (size && !bytes)) return;
-    kgraph::PassCommand command;
-    command.op = kgraph::PassCommand::Op::eWrite;
-    command.use = buffer;
-    command.offset = offset;
-    command.bytes.resize(size);
-    if (size) std::memcpy(command.bytes.data(), bytes, size);
-    Commands(commands).push_back(std::move(command));
-}
-
-void kengine_pass_copy(KenginePassCommands* commands, const uint32_t from, const uint32_t to, const uint64_t size, const uint64_t from_offset, const uint64_t to_offset)
-{
-    if (!commands) return;
-    kgraph::PassCommand command;
-    command.op = kgraph::PassCommand::Op::eCopy;
-    command.use = from;
-    command.other = to;
-    command.size = size;
-    command.offset = from_offset;
-    command.otherOffset = to_offset;
-    Commands(commands).push_back(std::move(command));
-}
-
-void kengine_pass_clear(KenginePassCommands* commands, const uint32_t image, const float red, const float green, const float blue, const float alpha)
-{
-    if (!commands) return;
-    kgraph::PassCommand command;
-    command.op = kgraph::PassCommand::Op::eClear;
-    command.use = image;
-    command.color[0] = red;
-    command.color[1] = green;
-    command.color[2] = blue;
-    command.color[3] = alpha;
-    Commands(commands).push_back(std::move(command));
-}
-
-namespace {
-    kgraph::PassCommand& Add(KenginePassCommands* commands, const kgraph::PassCommand::Op op, const uint32_t use)
-    {
-        kgraph::PassCommand command;
-        command.op = op;
-        command.use = use;
-        return Commands(commands).emplace_back(std::move(command));
-    }
-}
-
-void kengine_pass_copy_buffer_to_image(KenginePassCommands* commands, const uint32_t buffer, const uint32_t image, const uint64_t offset)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eCopyBufferToImage, buffer);
-    c.other = image;
-    c.offset = offset;
-}
-
-void kengine_pass_copy_image_to_buffer(KenginePassCommands* commands, const uint32_t image, const uint32_t buffer, const uint64_t offset)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eCopyImageToBuffer, image);
-    c.other = buffer;
-    c.offset = offset;
-}
-
-void kengine_pass_copy_image(KenginePassCommands* commands, const uint32_t from, const uint32_t to)
-{
-    if (commands) Add(commands, kgraph::PassCommand::Op::eCopyImage, from).other = to;
-}
-
-void kengine_pass_blit(KenginePassCommands* commands, const uint32_t from, const uint32_t to)
-{
-    if (commands) Add(commands, kgraph::PassCommand::Op::eBlit, from).other = to;
-}
-
-void kengine_pass_generate_mipmaps(KenginePassCommands* commands, const uint32_t image)
-{
-    if (commands) Add(commands, kgraph::PassCommand::Op::eGenerateMipmaps, image);
-}
-
-void kengine_pass_begin_rendering(KenginePassCommands* commands, const uint32_t target, const bool load, const float red, const float green, const float blue, const float alpha, const float depth)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eBeginRendering, target);
-    c.load = load;
-    c.color[0] = red; c.color[1] = green; c.color[2] = blue; c.color[3] = alpha;
-    c.depth = depth;
-}
-
-void kengine_pass_end_rendering(KenginePassCommands* commands)
-{
-    if (commands) Add(commands, kgraph::PassCommand::Op::eEndRendering, 0);
-}
-
-void kengine_pass_viewport(KenginePassCommands* commands, const uint32_t x, const uint32_t y, const uint32_t width, const uint32_t height)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eViewport, 0);
-    c.box[0] = x; c.box[1] = y; c.box[2] = width; c.box[3] = height;
-}
-
-void kengine_pass_scissor(KenginePassCommands* commands, const uint32_t x, const uint32_t y, const uint32_t width, const uint32_t height)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eScissor, 0);
-    c.box[0] = x; c.box[1] = y; c.box[2] = width; c.box[3] = height;
-}
-
-void kengine_pass_vertex_buffer(KenginePassCommands* commands, const uint32_t binding, const uint32_t buffer, const uint64_t offset)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eVertexBuffer, buffer);
-    c.first = binding;
-    c.offset = offset;
-}
-
-void kengine_pass_draw(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t vertex_count, const uint32_t instances, const uint32_t first_vertex, const uint32_t first_instance)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eDraw, pipeline);
-    c.size = vertex_count;
-    c.instances = instances;
-    c.first = first_vertex;
-    c.firstInstance = first_instance;
-}
-
-void kengine_pass_draw_mesh(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const uint32_t instances, const uint32_t first_instance)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMesh, pipeline);
-    c.mesh = mesh;
-    c.instances = instances;
-    c.firstInstance = first_instance;
-}
-
-void kengine_pass_draw_indexed(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const uint32_t index_count, const uint32_t instances,
-                               const uint32_t first_index, const int32_t vertex_offset, const uint32_t first_instance)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawIndexed, pipeline);
-    c.mesh = mesh;
-    c.size = index_count;
-    c.instances = instances;
-    c.first = first_index;
-    c.vertexOffset = vertex_offset;
-    c.firstInstance = first_instance;
-}
-
-void kengine_pass_draw_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t mesh, const bool indexed, const uint32_t buffer, const uint64_t offset,
-                                const uint32_t count, const uint32_t stride)
-{
-    if (!commands) return;
-    auto& c = Add(commands, indexed ? kgraph::PassCommand::Op::eDrawIndexedIndirect : kgraph::PassCommand::Op::eDrawIndirect, pipeline);
-    c.mesh = mesh;
-    c.other = buffer;
-    c.offset = offset;
-    c.count = count;
-    c.stride = stride;
-}
-
-void kengine_pass_draw_mesh_tasks(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t x, const uint32_t y, const uint32_t z)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMeshTasks, pipeline);
-    c.groups[0] = x; c.groups[1] = y; c.groups[2] = z;
-}
-
-void kengine_pass_draw_mesh_tasks_indirect(KenginePassCommands* commands, const uint32_t pipeline, const uint32_t buffer, const uint64_t offset, const uint32_t count, const uint32_t stride)
-{
-    if (!commands) return;
-    auto& c = Add(commands, kgraph::PassCommand::Op::eDrawMeshTasksIndirect, pipeline);
-    c.other = buffer;
-    c.offset = offset;
-    c.count = count;
-    c.stride = stride;
 }
 
 bool kengine_resource_script_register(KengineDocument* document, const char* name, const size_t size, const KecsField* fields, const size_t field_count,

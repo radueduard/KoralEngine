@@ -364,96 +364,60 @@ TEST(Declarations, DataIsFieldsItsBasesFirstAndAbstractDataIsAKind) {
     EXPECT_FALSE(error.empty());
 }
 
-// A PassScript is read as one: what it uses — a Pipeline, a Buffer or an Image, and whether it writes it — and its
-// other fields as settings. No component.
-TEST(Declarations, APassScriptUsesWhatItDeclares) {
-    using Settings = std::vector<std::pair<std::string, std::string>>;
+// A PassScript is read as one: its @NodeInput / [NodeInput] members of Koral's resources are inputs of its node, and
+// whether it writes them; its @NodeOutput members outputs; its @NodeInput values its settings. What is unmarked is its
+// own — a pipeline, a descriptor set, a count — and no port. No component.
+TEST(Declarations, APassScriptsMarkedMembersAreItsPorts) {
     const auto kotlin = kscript::Declare(R"(
-        import koral.engine.PassScript
-        class Spread : PassScript() {
-            var rounds = 4
-            val step = Pipeline()
-            val counts = Buffer(writes = true)
-            val seen = PassScript.Image()
-            override fun record(pass: Pass) {}
+        import koral.*
+        import koral.engine.*
+        class Blur : PassScript() {
+            @NodeInput var radius = 4
+            @NodeInput var source: Image? = null
+            @NodeInput(writes = true) var counts: koral.Buffer? = null
+            @NodeOutput lateinit var blurred: Image
+            private lateinit var pipeline: ComputePipeline
+            var frames = 0
+            override fun initialize() {}
+            override fun record(commands: CommandBuffer) {}
         }
     )", true);
     for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
     ASSERT_EQ(kotlin.types.size(), 1u);
-    const auto& spread = kotlin.types[0];
-    EXPECT_TRUE(spread.recordsPass);
-    EXPECT_FALSE(spread.makesResources);
-    ASSERT_EQ(spread.fields.size(), 1u) << "its settings, and none of what it uses";
-    EXPECT_EQ(spread.fields[0].name, "rounds");
-    ASSERT_EQ(spread.resources.size(), 3u);
-    EXPECT_EQ(spread.resources[0].name, "step");
-    EXPECT_EQ(spread.resources[0].kind, "Pipeline");
-    EXPECT_EQ(spread.resources[1].kind, "Buffer");
-    EXPECT_EQ(spread.resources[1].settings, (Settings { { "writes", "true" } }));
-    EXPECT_EQ(spread.resources[2].kind, "Image");
-    EXPECT_TRUE(spread.resources[2].settings.empty()) << "read, not written";
+    const auto& blur = kotlin.types[0];
+    EXPECT_TRUE(blur.recordsPass);
+    EXPECT_FALSE(blur.makesResources);
+    ASSERT_EQ(blur.fields.size(), 1u) << "its marked value; not what is its own";
+    EXPECT_EQ(blur.fields[0].name, "radius");
+    ASSERT_EQ(blur.resources.size(), 3u);
+    EXPECT_EQ(blur.resources[0].name, "source");
+    EXPECT_EQ(blur.resources[0].kind, "Image");
+    EXPECT_FALSE(blur.resources[0].output);
+    EXPECT_FALSE(blur.resources[0].writes);
+    EXPECT_EQ(blur.resources[1].kind, "Buffer") << "named with its package";
+    EXPECT_TRUE(blur.resources[1].writes);
+    EXPECT_EQ(blur.resources[2].name, "blurred");
+    EXPECT_TRUE(blur.resources[2].output);
 
     const auto csharp = kscript::Declare(R"(
-        public sealed class Spread : PassScript
+        public sealed class Blur : PassScript
         {
-            public int Rounds = 4;
-            public Pipeline Step = new();
-            public Buffer Counts = new(writes: true);
-            protected override void Record(Pass pass) { }
+            [NodeInput] public int Radius = 4;
+            [NodeInput(Writes = true)] public Buffer? Counts;
+            [NodeOutput] public Image? Blurred;
+            private ComputePipeline? _pipeline;
+            protected override void Record(CommandBuffer commands) { }
         }
     )", false);
     for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
     ASSERT_EQ(csharp.types.size(), 1u);
     EXPECT_TRUE(csharp.types[0].recordsPass);
     ASSERT_EQ(csharp.types[0].fields.size(), 1u);
+    EXPECT_EQ(csharp.types[0].fields[0].name, "Radius");
     ASSERT_EQ(csharp.types[0].resources.size(), 2u);
-    EXPECT_EQ(csharp.types[0].resources[1].settings, (Settings { { "writes", "true" } }));
-}
-
-// What a PassScript makes is read as made: its kind the node type, its arguments that node type's inputs — a stage's
-// module, a framebuffer's colour, an image's width — and a name of another of the script's as it is written.
-TEST(Declarations, APassScriptMakesWhatItDeclares) {
-    using Settings = std::vector<std::pair<std::string, std::string>>;
-    const auto kotlin = kscript::Declare(R"(
-        import koral.engine.PassScript
-        class Painter : PassScript() {
-            val canvas = Make.Image(format = "eRGBA8_UNORM", width = 256, height = 128, usage = "eColorAttachment | eSampled")
-            val canvasView = Make.ImageView(image = ::canvas.name)
-            val target = Make.Framebuffer(color = ::canvasView.name)
-            val shade = Make.GraphicsPipeline(vertexModule = "shade", fragmentModule = "shade", framebuffer = ::target.name)
-            val blur = Make.ComputePipeline(module = "blur")
-            val counts = Buffer(writes = true)
-            override fun record(pass: Pass) {}
-        }
-    )", true);
-    for (const auto& problem : kotlin.problems) ADD_FAILURE() << problem;
-    ASSERT_EQ(kotlin.types.size(), 1u);
-    const auto& made = kotlin.types[0].resources;
-    ASSERT_EQ(made.size(), 6u);
-    EXPECT_TRUE(made[0].made);
-    EXPECT_EQ(made[0].kind, "Image");
-    EXPECT_EQ(made[0].settings, (Settings { { "format", "\"eRGBA8_UNORM\"" }, { "extent.x", "256" }, { "extent.y", "128" }, { "usage", "[\"eColorAttachment\", \"eSampled\"]" } }));
-    EXPECT_EQ(made[1].settings, (Settings { { "image", "\"canvas\"" } }));
-    EXPECT_EQ(made[2].kind, "Framebuffer");
-    EXPECT_EQ(made[2].settings, (Settings { { "color[0].view", "\"canvasView\"" } }));
-    EXPECT_EQ(made[3].settings, (Settings { { "vertex.module", "\"shade\"" }, { "fragment.module", "\"shade\"" }, { "framebuffer", "\"target\"" } }));
-    EXPECT_EQ(made[4].settings, (Settings { { "compute.module", "\"blur\"" } }));
-    EXPECT_FALSE(made[5].made) << "what it is wired: a use";
-
-    const auto csharp = kscript::Declare(R"(
-        public sealed class Painter : PassScript
-        {
-            public Make.Buffer Counts = new(instanceCount: 64, usage: "eStorage");
-            public Make.ComputePipeline Blur = new(module: "blur", entry: "main");
-            protected override void Record(Pass pass) { }
-        }
-    )", false);
-    for (const auto& problem : csharp.problems) ADD_FAILURE() << problem;
-    ASSERT_EQ(csharp.types.size(), 1u);
-    ASSERT_EQ(csharp.types[0].resources.size(), 2u);
-    EXPECT_TRUE(csharp.types[0].resources[0].made);
-    EXPECT_EQ(csharp.types[0].resources[0].kind, "Buffer");
-    EXPECT_EQ(csharp.types[0].resources[1].settings, (Settings { { "compute.module", "\"blur\"" }, { "compute.entry", "\"main\"" } }));
+    EXPECT_TRUE(csharp.types[0].resources[0].writes);
+    EXPECT_TRUE(csharp.types[0].resources[1].output);
+    EXPECT_EQ(csharp.types[0].resources[1].kind, "Image");
 }
 
 // A ResourceScript is read as one: what it makes — each field of a resource type, with what its initialiser makes it

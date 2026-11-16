@@ -69,7 +69,7 @@ entities, and materials.
 ## A pass of your own
 
 The graph can be changed node by node — right-click a page, or Control+Space, to add one — but a pass can also be a
-script that says what it does each frame, and makes what it uses. Put this shader in `shaders/triangle.slang`:
+script, written against Koral's own interface. Put this shader in `shaders/triangle.slang`:
 
 ```slang
 struct VertexOut {
@@ -98,30 +98,41 @@ float4 fragmentMain(VertexOut input) : SV_Target
 and **Assets, New script** of the kind **Kotlin PassScript**, named `Painter`, with this in it:
 
 ```kotlin
-import koral.Vec4
+import koral.*
+import koral.engine.NodeOutput
 import koral.engine.PassScript
 
 class Painter : PassScript() {
-    val canvas = Make.Image(format = "eRGBA8_UNORM", width = 512, height = 512, usage = "eColorAttachment | eTransferSrc")
-    val canvasView = Make.ImageView(image = ::canvas.name)
-    val target = Make.Framebuffer(color = ::canvasView.name)
-    val triangles = Make.GraphicsPipeline(vertexModule = "triangle", fragmentModule = "triangle", framebuffer = ::target.name)
+    @NodeOutput lateinit var canvas: Image          // an output of its node: what it draws into
 
-    override fun record(pass: Pass) {
-        pass.render(triangles, clear = Vec4(0f, 0f, 0.2f, 1f)) {
-            draw(triangles, 3)
-        }
+    private lateinit var target: Framebuffer
+    private lateinit var triangles: GraphicsPipeline
+
+    override fun initialize() {
+        canvas = Image.Builder().setFormat(ImageFormat.eRGBA8_UNORM).setExtent(UVec2(512u, 512u))
+            .setUsage(ImageUsage.eColorAttachment, ImageUsage.eSampled, ImageUsage.eTransferSrc).build()
+        target = Framebuffer.Builder()
+            .addColor(Framebuffer.ColorAttachment(view = canvas.view(), clear = ClearColor(0f, 0f, 0.2f, 1f))).build()
+        triangles = GraphicsPipeline.Builder()
+            .setVertexShader(Shader.Builder().setEntryPoint("triangle", "vertexMain").getOrBuild())
+            .setFragmentShader(Shader.Builder().setEntryPoint("triangle", "fragmentMain").getOrBuild())
+            .setFramebuffer(target).build()
+    }
+
+    override fun record(commands: CommandBuffer) {
+        commands.beginRendering(target).bindGraphicsPipeline(triangles).draw(3).endRendering()
     }
 }
 ```
 
-A **ScriptPass** node of it — `Painter`, among the nodes to add — makes the image, its view, a framebuffer of it and
-the pipeline, and each frame draws a triangle into the image. Each is an output of the node, by its name. On the
-`Blit` page, wire the node's `canvas` output to the Blit's `source` in place of `color`: the scene now shows the
-triangle.
+It is written as anything is in [Koral](https://radueduard.github.io/Koral/): the image, the framebuffer and the
+pipeline made with builders, and the frame's commands recorded into a command buffer. A **ScriptPass** node of it —
+`Painter`, among the nodes to add — makes them as it is built, and each frame draws a triangle into the image. What is
+marked `@NodeOutput` is an output of the node, by its name. On the `Blit` page, wire the node's `canvas` output to the
+Blit's `source` in place of `color`: the scene now shows the triangle.
 
-A PassScript can dispatch compute pipelines as many times as it likes, copy and clear, draw meshes, and make buffers and
-pipelines of its own; see [Scripts that say what a pass does](../scripts.md#scripts-that-say-what-a-pass-does).
+`@NodeInput` marks what the node is given — a resource wired to it, or a value set on it. A PassScript can record
+anything Koral's command buffer can; see [Scripts that are passes](../scripts.md#scripts-that-are-passes).
 
 ## Running it
 
